@@ -65,9 +65,9 @@ public class HttpShardHandler extends ShardHandler {
   public static String ONLY_NRT_REPLICAS = "distribOnlyRealtime";
 
   private HttpShardHandlerFactory httpShardHandlerFactory;
-  private Map<ShardResponse, Cancellable> responseCancellableMap;
-  private BlockingQueue<ShardResponse> responses;
-  private AtomicInteger pending;
+  Map<ShardResponse, Cancellable> responseCancellableMap;
+  BlockingQueue<ShardResponse> responses;
+  AtomicInteger pending;
   private Map<String, List<String>> shardToURLs;
   private LBHttp2SolrClient lbClient;
 
