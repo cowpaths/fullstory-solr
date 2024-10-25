@@ -46,7 +46,7 @@ public class RequestRateLimiter {
 
   private final AtomicInteger nativeReservations;
 
-  private final RateLimiterConfig rateLimiterConfig;
+  protected final RateLimiterConfig rateLimiterConfig;
   public static final SlotReservation UNLIMITED =
       () -> {
         // no-op
@@ -91,7 +91,7 @@ public class RequestRateLimiter {
    * Handles an incoming request. returns a metadata object representing the metadata for the
    * acquired slot, if acquired. If a slot is not acquired, returns a null metadata object.
    */
-  public SlotReservation handleRequest() throws InterruptedException {
+  public SlotReservation handleRequest(String requestType) throws InterruptedException {
 
     if (!rateLimiterConfig.isEnabled) {
       return UNLIMITED;
