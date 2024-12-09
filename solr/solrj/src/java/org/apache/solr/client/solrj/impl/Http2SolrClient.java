@@ -52,7 +52,9 @@ import org.apache.solr.client.solrj.request.UpdateRequest;
 import org.apache.solr.client.solrj.util.AsyncListener;
 import org.apache.solr.client.solrj.util.Cancellable;
 import org.apache.solr.client.solrj.util.ClientUtils;
+import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.ModifiableSolrParams;
+import org.apache.solr.common.params.ShardParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.params.UpdateParams;
 import org.apache.solr.common.util.ContentStream;
@@ -592,6 +594,19 @@ public class Http2SolrClient extends HttpSolrClientBase {
   }
 
   private void decorateRequest(Request req, SolrRequest<?> solrRequest, boolean isAsync) {
+    SolrRequest.SolrClientContext context = getContext();
+    req.headers(
+        headers -> headers.put(CommonParams.SOLR_REQUEST_CONTEXT_PARAM, context.toString()));
+    if (context == SolrRequest.SolrClientContext.CLIENT
+        || solrRequest.getParams().getBool(ShardParams.SHARDS_TOLERANT, false)) {
+      // automatically set requestType on top-level requests (CLIENT), or if `shards.tolerant=true`.
+      // NOTE: if `shards.tolerant=false`, do _not_ set the `Solr-Request-Type` header, because we
+      // could end up doing a lot of extra work at the cluster level, retrying requests that may
+      // only have failed to obtain a ratelimit permit on a single shard.
+      req.headers(
+          headers ->
+              headers.put(CommonParams.SOLR_REQUEST_TYPE_PARAM, solrRequest.getRequestType()));
+    }
     req.headers(headers -> headers.remove(HttpHeader.ACCEPT_ENCODING));
 
     if (requestTimeoutMillis > 0) {
@@ -898,6 +913,8 @@ public class Http2SolrClient extends HttpSolrClientBase {
 
     private List<HttpListenerFactory> listenerFactory;
 
+    private SolrRequest.SolrClientContext context = SolrRequest.SolrClientContext.CLIENT;
+
     public Builder() {
       super();
     }
@@ -1058,7 +1075,14 @@ public class Http2SolrClient extends HttpSolrClientBase {
         keyStoreReloadIntervalSecs = Long.getLong("solr.jetty.sslContext.reload.scanInterval", 30);
       }
 
-      Http2SolrClient client = new Http2SolrClient(baseSolrUrl, this);
+      final SolrRequest.SolrClientContext context = this.context;
+      Http2SolrClient client =
+          new Http2SolrClient(baseSolrUrl, this) {
+            @Override
+            public SolrRequest.SolrClientContext getContext() {
+              return context;
+            }
+          };
       try {
         httpClientBuilderSetup(client);
       } catch (RuntimeException e) {
@@ -1141,6 +1165,11 @@ public class Http2SolrClient extends HttpSolrClientBase {
      */
     public Builder withCookieStore(CookieStore cookieStore) {
       this.cookieStore = cookieStore;
+      return this;
+    }
+
+    public Builder withContext(SolrRequest.SolrClientContext context) {
+      this.context = context;
       return this;
     }
   }
