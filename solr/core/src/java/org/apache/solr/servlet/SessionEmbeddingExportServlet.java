@@ -99,7 +99,7 @@ public final class SessionEmbeddingExportServlet extends BaseSolrServlet {
     SolrQuery query = new SolrQuery();
     query.set("q", "SessionVectorGroup:*");
     query.set("sort", "SessionStart desc");
-    query.set("fl", "SessionId,SessionVector,SessionVectorGroup,SessionSummary");
+    query.set("fl", "SessionId,SessionVector,SessionVectorGroup,SessionVectorGroupDotProduct,SessionSummary");
     query.set("rows", "10000");
 
     try {
@@ -108,9 +108,9 @@ public final class SessionEmbeddingExportServlet extends BaseSolrServlet {
       response.setContentType("text/csv");
       try (PrintWriter out = response.getWriter()) {
         if (exportType == ExportType.META) {
-          out.println("SessionId\tSessionVectorGroup\tSessionSummary");
+          out.println("SessionId\tSessionVectorGroup(euclidean)\tSessionVectorGroup(dot product)\tSessionSummary");
           results.forEach(doc -> {
-            out.println(doc.getFieldValue("SessionId") + "\t" + doc.getFieldValue("SessionVectorGroup") + "\t" + doc.getFieldValue("SessionSummary"));
+            out.println(doc.getFieldValue("SessionId") + "\t" + doc.getFieldValue("SessionVectorGroup") + "\t" + doc.getFieldValue("SessionVectorDotProductGroup") + "\t" + doc.getFieldValue("SessionSummary"));
           });
           response.setHeader("Content-Disposition", "attachment; filename=\"" + collection + "-session-meta.tsv\"");
         } else if (exportType == ExportType.VECTOR) {
