@@ -59,12 +59,21 @@
     <servlet-name>PrometheusMetrics</servlet-name>
     <servlet-class>org.apache.solr.servlet.PrometheusMetricsServlet</servlet-class>
   </servlet>
+  <servlet>
+    <servlet-name>SessionEmbeddingExport</servlet-name>
+    <servlet-class>org.apache.solr.servlet.SessionEmbeddingExportServlet</servlet-class>
+  </servlet>
   <!-- Fullstory additions -->
 
   <!-- Fullstory additions -->
   <servlet-mapping>
     <servlet-name>PrometheusMetrics</servlet-name>
     <url-pattern>/metrics</url-pattern>
+  </servlet-mapping>
+
+  <servlet-mapping>
+    <servlet-name>SessionEmbeddingExport</servlet-name>
+    <url-pattern>/session-embedding-export</url-pattern>
   </servlet-mapping>
   <!-- Fullstory additions -->
 
