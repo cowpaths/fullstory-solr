@@ -99,13 +99,13 @@ public final class SessionEmbeddingExportServlet extends BaseSolrServlet {
     SolrQuery query = new SolrQuery();
     query.set("q", "SessionVectorGroup:*");
     query.set("sort", "SessionStart desc");
-    query.set("fl", "SessionId,SessionVector,SessionVectorGroup,SessionVectorGroupDotProduct,SessionSummary");
+    query.set("fl", "SessionId,SessionVector,SessionVectorGroup,SessionVectorDotProductGroup,SessionSummary");
     query.set("rows", "10000");
 
     try {
       QueryResponse qRsp = solrClient.query(query);
       SolrDocumentList results = qRsp.getResults();
-      response.setContentType("text/csv");
+      response.setContentType("text/tsv");
       try (PrintWriter out = response.getWriter()) {
         if (exportType == ExportType.META) {
           out.println("SessionId\tSessionVectorGroup(euclidean)\tSessionVectorGroup(dot product)\tSessionSummary");
