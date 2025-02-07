@@ -16,53 +16,30 @@
  */
 package org.apache.solr.servlet;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.solr.client.solrj.SolrClient;
+import org.apache.lucene.document.Field;
 import org.apache.solr.client.solrj.SolrQuery;
-import org.apache.solr.client.solrj.SolrServerException;
-import org.apache.solr.client.solrj.cloud.SolrCloudManager;
-import org.apache.solr.client.solrj.impl.HttpSolrClient;
-import org.apache.solr.client.solrj.response.QueryResponse;
-import org.apache.solr.cloud.ZkController;
-import org.apache.solr.common.SolrDocumentList;
-import org.apache.solr.common.params.CommonParams;
-import org.apache.solr.common.util.NamedList;
+import org.apache.solr.common.SolrDocument;
 import org.apache.solr.core.CoreContainer;
-import org.apache.solr.storage.CompressingDirectory;
+import org.apache.solr.core.SolrCore;
+import org.apache.solr.request.SolrQueryRequest;
+import org.apache.solr.request.SolrQueryRequestBase;
+import org.apache.solr.response.BasicResultContext;
+import org.apache.solr.response.SolrQueryResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.servlet.ServletOutputStream;
 import javax.servlet.UnavailableException;
-import javax.servlet.WriteListener;
-import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletRequestWrapper;
 import javax.servlet.http.HttpServletResponse;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.lang.invoke.MethodHandles;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Enumeration;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
-
-import static org.apache.solr.util.circuitbreaker.CircuitBreakerRegistry.getTimesTrippedMetrics;
 
 /**
  * FullStory: a simple servlet to produce a few prometheus metrics. This servlet exists for
@@ -77,8 +54,7 @@ public final class SessionEmbeddingExportServlet extends BaseSolrServlet {
 
 
   @Override
-  public void doGet(HttpServletRequest request, HttpServletResponse response)
-      throws IOException, UnavailableException {
+  public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException, UnavailableException {
     String collection = request.getParameter("coll");
     if (collection == null) {
       response.sendError(HttpServletResponse.SC_BAD_REQUEST, "coll is a required parameter");
@@ -91,10 +67,19 @@ public final class SessionEmbeddingExportServlet extends BaseSolrServlet {
     }
     ExportType exportType = ExportType.fromString(exportTypeParam);
 
+    SolrDispatchFilter filter = getSolrDispatchFilter(request);
+    CoreContainer cores = filter.getCores();
 
-    String protocol = request.getScheme(); // http or https
-    int port = request.getServerPort(); // port number
-    SolrClient solrClient = new HttpSolrClient.Builder(protocol + "://localhost:" + port + "/solr/" + collection).build();
+    List<String> allCoreNames = cores.getAllCoreNames();//hacky...
+    Optional<String> coreName = allCoreNames.stream().filter(name -> name.startsWith(collection)).findFirst();
+
+    if (!coreName.isPresent()) {
+      response.sendError(HttpServletResponse.SC_BAD_REQUEST, "No core found for collection: " + collection);
+      return;
+    }
+
+    SolrCore core = cores.getCore(coreName.get());
+
 
     SolrQuery query = new SolrQuery();
     query.set("q", "SessionVectorGroup:*");
@@ -102,24 +87,34 @@ public final class SessionEmbeddingExportServlet extends BaseSolrServlet {
     query.set("fl", "UserIdSessionId,SessionVector,SessionVectorGroup,SessionVectorDotProductGroup,SessionSummary");
     query.set("rows", "10000");
 
-    try {
-      QueryResponse qRsp = solrClient.query(query);
-      SolrDocumentList results = qRsp.getResults();
+    SolrQueryResponse selectRsp = new SolrQueryResponse();
+    try (SolrQueryRequest queryReq = new SolrQueryRequestBase(core, query) {}) {
+      core.getRequestHandler("/select").handleRequest(queryReq, selectRsp);
+      Exception cause = selectRsp.getException();
+      if (cause != null) {
+        throw new RuntimeException(cause);
+      }
+
+      BasicResultContext brc = (BasicResultContext) selectRsp.getResponse();
+
+      Iterator<SolrDocument> results = brc.getProcessedDocuments();
+
+
       response.setContentType("text/tsv");
       try (PrintWriter out = response.getWriter()) {
         if (exportType == ExportType.META) {
           out.println("UserIdSessionId\tSessionVectorGroup(euclidean)\tSessionVectorGroup(dot product)\tSessionSummary");
-          results.forEach(doc -> {
+          results.forEachRemaining(doc -> {
             String summary = "(Group " + doc.getFieldValue("SessionVectorGroup") + ")" + doc.getFieldValue("SessionSummary");
             out.println(doc.getFieldValue("UserIdSessionId") + "\t" + doc.getFieldValue("SessionVectorGroup") + "\t" + doc.getFieldValue("SessionVectorDotProductGroup") + "\t" + summary);
           });
           response.setHeader("Content-Disposition", "attachment; filename=\"" + collection + "-session-meta.tsv\"");
         } else if (exportType == ExportType.VECTOR) {
-          results.forEach(doc -> {
+          results.forEachRemaining(doc -> {
             @SuppressWarnings("unchecked")
-            List<Float> sessionVector = (List<Float>) doc.getFieldValue("SessionVector");
+            List<Field> sessionVector = (List<Field>) doc.getFieldValue("SessionVector");
             String vectorString = sessionVector.stream()
-                    .map(String::valueOf)
+                    .map(f -> String.valueOf(f.numericValue()))
                     .collect(Collectors.joining("\t"));
             out.println(vectorString);
           });
@@ -129,8 +124,6 @@ public final class SessionEmbeddingExportServlet extends BaseSolrServlet {
 
 
 
-    } catch (SolrServerException e) {
-      throw new RuntimeException(e);
     }
 
     // Process the response as needed
@@ -146,5 +139,16 @@ public final class SessionEmbeddingExportServlet extends BaseSolrServlet {
       }
       throw new IllegalArgumentException("Unknown export type: " + value);
     }
+  }
+
+
+  static SolrDispatchFilter getSolrDispatchFilter(HttpServletRequest request) throws IOException {
+    Object value = request.getAttribute(HttpSolrCall.class.getName());
+    if (!(value instanceof HttpSolrCall)) {
+      throw new IOException(
+              String.format(
+                      Locale.ROOT, "request attribute %s does not exist.", HttpSolrCall.class.getName()));
+    }
+    return ((HttpSolrCall) value).solrDispatchFilter;
   }
 }
