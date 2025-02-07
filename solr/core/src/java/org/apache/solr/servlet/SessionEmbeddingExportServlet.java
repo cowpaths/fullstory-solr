@@ -17,6 +17,7 @@
 package org.apache.solr.servlet;
 
 import org.apache.lucene.document.Field;
+import org.apache.lucene.index.IndexableField;
 import org.apache.solr.client.solrj.SolrQuery;
 import org.apache.solr.common.SolrDocument;
 import org.apache.solr.core.CoreContainer;
@@ -105,7 +106,7 @@ public final class SessionEmbeddingExportServlet extends BaseSolrServlet {
         if (exportType == ExportType.META) {
           out.println("UserIdSessionId\tSessionVectorGroup(euclidean)\tSessionVectorGroup(dot product)\tSessionSummary");
           results.forEachRemaining(doc -> {
-            String summary = ("(Group " + doc.getFieldValue("SessionVectorGroup") + ")" + doc.getFieldValue("SessionSummary")).replaceAll("\n", " ");
+            String summary = ("(Group " + doc.getFieldValue("SessionVectorGroup") + ")" + ((IndexableField)doc.getFieldValue("SessionSummary")).stringValue()).replaceAll("\n", " ");
             out.println(doc.getFieldValue("UserIdSessionId") + "\t" + doc.getFieldValue("SessionVectorGroup") + "\t" + doc.getFieldValue("SessionVectorDotProductGroup") + "\t" + summary);
           });
           response.setHeader("Content-Disposition", "attachment; filename=\"" + collection + "-session-meta.tsv\"");
