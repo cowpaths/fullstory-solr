@@ -105,7 +105,7 @@ public final class SessionEmbeddingExportServlet extends BaseSolrServlet {
         if (exportType == ExportType.META) {
           out.println("UserIdSessionId\tSessionVectorGroup(euclidean)\tSessionVectorGroup(dot product)\tSessionSummary");
           results.forEachRemaining(doc -> {
-            String summary = "(Group " + doc.getFieldValue("SessionVectorGroup") + ")" + doc.getFieldValue("SessionSummary");
+            String summary = ("(Group " + doc.getFieldValue("SessionVectorGroup") + ")" + doc.getFieldValue("SessionSummary")).replaceAll("\n", " ");
             out.println(doc.getFieldValue("UserIdSessionId") + "\t" + doc.getFieldValue("SessionVectorGroup") + "\t" + doc.getFieldValue("SessionVectorDotProductGroup") + "\t" + summary);
           });
           response.setHeader("Content-Disposition", "attachment; filename=\"" + collection + "-session-meta.tsv\"");
