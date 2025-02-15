@@ -61,7 +61,7 @@ public class HttpShardHandler extends ShardHandler {
 
   private HttpShardHandlerFactory httpShardHandlerFactory;
   private Map<ShardResponse, CompletableFuture<LBSolrClient.Rsp>> responseFutureMap;
-  private BlockingQueue<ShardResponse> responses;
+  protected BlockingQueue<ShardResponse> responses;
   private AtomicInteger pending;
   private Map<String, List<String>> shardToURLs;
   private LBHttp2SolrClient lbClient;
@@ -160,6 +160,8 @@ public class HttpShardHandler extends ShardHandler {
     }
 
     CompletableFuture<LBSolrClient.Rsp> future = this.lbClient.requestAsync(lbReq);
+    final ShardRequestFuture shardRequestFuture = new ShardRequestFuture(sreq, shard, params, future);
+    onRequestSubmit(shardRequestFuture);
     future.whenComplete(
         (rsp, throwable) -> {
           if (rsp != null) {
@@ -177,10 +179,40 @@ public class HttpShardHandler extends ShardHandler {
             }
             responses.add(srsp);
           }
+          onRequestComplete(shardRequestFuture, srsp, ssr.elapsedTime);
         });
 
     responseFutureMap.put(srsp, future);
   }
+
+  /**
+   * Subclasses could override this method to perform some operation on the future submitted
+   * @param future
+   */
+  protected void onRequestSubmit(ShardRequestFuture future) {
+    // by default no-op
+  }
+
+  protected void onRequestComplete(ShardRequestFuture future, ShardResponse response, long elapsedTime) {
+    // by default no-op
+  }
+
+  protected static class ShardRequestFuture {
+    private final ShardRequest sreq;
+    private final String shard;
+    private final ModifiableSolrParams params;
+    private final CompletableFuture<LBSolrClient.Rsp> future;
+
+    protected ShardRequestFuture(ShardRequest sreq, String shard, ModifiableSolrParams params, CompletableFuture<LBSolrClient.Rsp> future) {
+      this.sreq = sreq;
+      this.shard = shard;
+      this.params = params;
+      this.future = future;
+    }
+  }
+
+
+
 
   /** Subclasses could modify the request based on the shard */
   protected QueryRequest makeQueryRequest(
@@ -216,7 +248,7 @@ public class HttpShardHandler extends ShardHandler {
   private ShardResponse take(boolean bailOnError) {
     try {
       while (pending.get() > 0) {
-        ShardResponse rsp = responses.take();
+        ShardResponse rsp = nextShardResponse();
         responseFutureMap.remove(rsp);
 
         pending.decrementAndGet();
@@ -235,6 +267,10 @@ public class HttpShardHandler extends ShardHandler {
       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
     }
     return null;
+  }
+
+  protected ShardResponse nextShardResponse() throws InterruptedException {
+    return responses.take();
   }
 
   @Override
