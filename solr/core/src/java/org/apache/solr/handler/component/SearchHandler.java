@@ -440,7 +440,8 @@ public class SearchHandler extends RequestHandlerBase
     }
 
     // creates a ShardHandler object only if it's needed
-    final ShardHandler shardHandler1 = getAndPrepShardHandler(req, rb);
+    final ShardHandler shardHandler1 =
+        TolerantShardHandlerWrapper.wrap(getAndPrepShardHandler(req, rb), rb.req.getParams());
 
     if (timer == null) {
       // non-debugging prepare phase
