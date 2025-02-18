@@ -7,6 +7,9 @@ import org.slf4j.LoggerFactory;
 
 import java.lang.invoke.MethodHandles;
 import java.time.Duration;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
@@ -14,6 +17,7 @@ public class TimeLimitedHttpShardHandler extends HttpShardHandler {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private final Limiter limiter;
   private final boolean dryRun;
+  private final Set<Future<LBSolrClient.Rsp>> pendingFutures = new ConcurrentHashMap<Future<LBSolrClient.Rsp>, Boolean>().keySet();
 
   public TimeLimitedHttpShardHandler(HttpShardHandlerFactory shardHandlerFactory, Limiter limiter, boolean dryRun) {
     super(shardHandlerFactory);
@@ -31,6 +35,9 @@ public class TimeLimitedHttpShardHandler extends HttpShardHandler {
       if (response == null) {
         log.warn("Time limit {} exceeded in {}. Dry run mode: {}", limit, this, dryRun);
         if (!dryRun) {
+          for (Future<LBSolrClient.Rsp> future : pendingFutures) { //cancel all pending requests
+            future.cancel(true);
+          }
           throw new InterruptedException("Time limit " + limit + " exceeded");
         } else {
           return super.nextShardResponse();
@@ -44,11 +51,13 @@ public class TimeLimitedHttpShardHandler extends HttpShardHandler {
 
   @Override
   protected void onRequestComplete(Future<LBSolrClient.Rsp> future, ShardResponse response, long elapsedTime) {
+    pendingFutures.add(future);
     limiter.onRequestCompleted(future, response, elapsedTime);
   }
 
   @Override
   protected void onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest request, String shard, ModifiableSolrParams params) {
+    pendingFutures.remove(future);
     limiter.onRequestSubmitted(future, request, shard, params);
   }
 }
