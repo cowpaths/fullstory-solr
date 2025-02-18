@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -160,8 +161,7 @@ public class HttpShardHandler extends ShardHandler {
     }
 
     CompletableFuture<LBSolrClient.Rsp> future = this.lbClient.requestAsync(lbReq);
-    final ShardRequestFuture shardRequestFuture = new ShardRequestFuture(sreq, shard, params, future);
-    onRequestSubmit(shardRequestFuture);
+    onRequestSubmit(future, sreq, shard, params);
     future.whenComplete(
         (rsp, throwable) -> {
           if (rsp != null) {
@@ -179,7 +179,7 @@ public class HttpShardHandler extends ShardHandler {
             }
             responses.add(srsp);
           }
-          onRequestComplete(shardRequestFuture, srsp, ssr.elapsedTime);
+          onRequestComplete(future, srsp, ssr.elapsedTime);
         });
 
     responseFutureMap.put(srsp, future);
@@ -187,30 +187,19 @@ public class HttpShardHandler extends ShardHandler {
 
   /**
    * Subclasses could override this method to perform some operation on the future submitted
+   *
    * @param future
+   * @param request
+   * @param shard
+   * @param params
    */
-  protected void onRequestSubmit(ShardRequestFuture future) {
+  protected void onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest request, String shard, ModifiableSolrParams params) {
     // by default no-op
   }
 
-  protected void onRequestComplete(ShardRequestFuture future, ShardResponse response, long elapsedTime) {
+  protected void onRequestComplete(Future<LBSolrClient.Rsp> future, ShardResponse response, long elapsedTime) {
     // by default no-op
   }
-
-  protected static class ShardRequestFuture {
-    private final ShardRequest sreq;
-    private final String shard;
-    private final ModifiableSolrParams params;
-    private final CompletableFuture<LBSolrClient.Rsp> future;
-
-    protected ShardRequestFuture(ShardRequest sreq, String shard, ModifiableSolrParams params, CompletableFuture<LBSolrClient.Rsp> future) {
-      this.sreq = sreq;
-      this.shard = shard;
-      this.params = params;
-      this.future = future;
-    }
-  }
-
 
 
 
