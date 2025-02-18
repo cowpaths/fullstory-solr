@@ -1,10 +1,13 @@
 package org.apache.solr.handler.component;
 
+import org.apache.solr.client.solrj.impl.LBSolrClient;
+import org.apache.solr.common.params.ModifiableSolrParams;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.invoke.MethodHandles;
 import java.time.Duration;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 public class TimeLimitedHttpShardHandler extends HttpShardHandler {
@@ -38,14 +41,15 @@ public class TimeLimitedHttpShardHandler extends HttpShardHandler {
     }
   }
 
+
   @Override
-  protected void onRequestComplete(ShardRequestFuture future, ShardResponse response, long elapsedTime) {
+  protected void onRequestComplete(Future<LBSolrClient.Rsp> future, ShardResponse response, long elapsedTime) {
     limiter.onRequestCompleted(future, response, elapsedTime);
   }
 
   @Override
-  protected void onRequestSubmit(ShardRequestFuture future) {
-    limiter.onRequestSubmitted(future);
+  protected void onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest request, String shard, ModifiableSolrParams params) {
+    limiter.onRequestSubmitted(future, request, shard, params);
   }
 }
 
@@ -65,12 +69,12 @@ class SlowShardLimiter implements Limiter {
   }
 
   @Override
-  public void onRequestSubmitted(HttpShardHandler.ShardRequestFuture future) {
+  public void onRequestSubmitted(Future<LBSolrClient.Rsp> future, ShardRequest request, String shard, ModifiableSolrParams params) {
     // Do nothing
   }
 
   @Override
-  public void onRequestCompleted(HttpShardHandler.ShardRequestFuture future, ShardResponse response, long timeElapsed) {
+  public void onRequestCompleted(Future<LBSolrClient.Rsp> future, ShardResponse response, long timeElapsed) {
     if (timeElapsed > longestTimeElapsed) {
       longestTimeElapsed = timeElapsed;
     }
@@ -82,6 +86,6 @@ class SlowShardLimiter implements Limiter {
  */
 interface Limiter {
   Duration getNextTimeLimit();
-  void onRequestSubmitted(HttpShardHandler.ShardRequestFuture future);
-  void onRequestCompleted(HttpShardHandler.ShardRequestFuture future, ShardResponse response, long timeElapsed);
+  void onRequestSubmitted(Future<LBSolrClient.Rsp> future, ShardRequest request, String shard, ModifiableSolrParams params);
+  void onRequestCompleted(Future<LBSolrClient.Rsp> future, ShardResponse response, long timeElapsed);
 }
