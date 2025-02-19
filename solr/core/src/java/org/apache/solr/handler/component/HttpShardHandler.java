@@ -161,7 +161,7 @@ public class HttpShardHandler extends ShardHandler {
     }
 
     CompletableFuture<LBSolrClient.Rsp> future = this.lbClient.requestAsync(lbReq);
-    onRequestSubmit(future, sreq, shard, params);
+    ShardRequestCallback callback = onRequestSubmit(future, sreq, shard, params);
     future.whenComplete(
         (rsp, throwable) -> {
           if (rsp != null) {
@@ -179,29 +179,25 @@ public class HttpShardHandler extends ShardHandler {
             }
             responses.add(srsp);
           }
-          onRequestComplete(future, srsp, ssr.elapsedTime);
+          if (callback != null) {
+            callback.onComplete(srsp, ssr.elapsedTime);
+          }
         });
 
     responseFutureMap.put(srsp, future);
   }
 
   /**
-   * Subclasses could override this method to perform some operation on the future submitted
-   *
-   * @param future
-   * @param request
-   * @param shard
-   * @param params
+   * Subclasses could override this method to track shard request
    */
-  protected void onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest request, String shard, ModifiableSolrParams params) {
-    // by default no-op
+  protected ShardRequestCallback onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, String shard, ModifiableSolrParams params) {
+    // by default no callback
+    return null;
   }
 
-  protected void onRequestComplete(Future<LBSolrClient.Rsp> future, ShardResponse response, long elapsedTime) {
-    // by default no-op
+  protected interface ShardRequestCallback {
+    void onComplete(ShardResponse response, long elaspedTime);
   }
-
-
 
   /** Subclasses could modify the request based on the shard */
   protected QueryRequest makeQueryRequest(
