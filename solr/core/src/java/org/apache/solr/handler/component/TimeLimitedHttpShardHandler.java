@@ -78,7 +78,7 @@ class SlowShardTracker implements Tracker {
   private final long minWait;
   private final double multiplier;
   private final Set<Future<?>> pendingFutures = ConcurrentHashMap.newKeySet();
-  private final Timer timer = new Timer();
+  private Timer timer;
   private Instant lastCompletedTime;
 
   SlowShardTracker(long minWait, double multiplier, boolean dryRun) {
@@ -94,7 +94,11 @@ class SlowShardTracker implements Tracker {
 
   @Override
   public synchronized boolean onRequestCompleted(Future<?> future, long timeElapsed) {
-    timer.cancel(); //cancel previous timer
+    if (timer != null) { //cancel previous timer
+      timer.cancel();
+      timer = null;
+    }
+
     lastCompletedTime = Instant.now();
     if (timeElapsed > longestTimeElapsed) {
       longestTimeElapsed = timeElapsed;
@@ -105,19 +109,22 @@ class SlowShardTracker implements Tracker {
       return true;
     }
 
-    if (longestTimeElapsed * multiplier > minWait) {
+    long timeoutDuration = (long)(longestTimeElapsed * multiplier);
+    if (timeoutDuration > minWait) {
+      timer = new Timer();
       timer.schedule(new java.util.TimerTask() {
         @Override
         public void run() {
           if (!dryRun) {
             Set<Future<?>> removingFutures = new HashSet<>(pendingFutures);
             pendingFutures.clear();
+            log.info("Cancelling {} pending requests due to timeout duration {}ms exceeded. Last completed time {} vs Current time {}", pendingFutures.size(), timeoutDuration, lastCompletedTime, Instant.now());
             removingFutures.forEach(f -> f.cancel(true));
           } else {
-            log.info("Dry-run mode: would have cancelled {} pending requests. Last completed time {} vs Current time {}", pendingFutures.size(), lastCompletedTime, Instant.now());
+            log.info("Dry-run mode: would have cancelled {} pending requests due to timeout duration {}ms exceeded. Last completed time {} vs Current time {}", pendingFutures.size(), timeoutDuration, lastCompletedTime, Instant.now());
           }
         }
-      }, (long) (longestTimeElapsed * multiplier));
+      }, timeoutDuration);
       longestTimeElapsed = timeElapsed;
     }
     return false;
