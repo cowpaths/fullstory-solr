@@ -58,6 +58,7 @@ import org.apache.solr.common.params.ShardParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.params.UpdateParams;
 import org.apache.solr.common.util.ContentStream;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.ObjectReleaseTracker;
@@ -111,6 +112,12 @@ import org.slf4j.MDC;
  */
 public class Http2SolrClient extends HttpSolrClientBase {
   public static final String REQ_PRINCIPAL_KEY = "solr-req-principal";
+  private static final String DATA_NODE_ALLOW_RATE_LIMIT_ALWAYS_KEY =
+      "solr.dataNodeAllowRateLimitAlways";
+  private static final boolean DATA_NODE_ALLOW_RATE_LIMIT_ALWAYS_DEFAULT = false;
+  public static final boolean DATA_NODE_ALLOW_RATE_LIMIT_ALWAYS =
+      EnvUtils.getPropertyAsBool(
+          DATA_NODE_ALLOW_RATE_LIMIT_ALWAYS_KEY, DATA_NODE_ALLOW_RATE_LIMIT_ALWAYS_DEFAULT);
 
   private static volatile SSLConfig defaultSSLConfig;
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
@@ -598,6 +605,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
     req.headers(
         headers -> headers.put(CommonParams.SOLR_REQUEST_CONTEXT_PARAM, context.toString()));
     if (context == SolrRequest.SolrClientContext.CLIENT
+        || DATA_NODE_ALLOW_RATE_LIMIT_ALWAYS
         || solrRequest.getParams().getBool(ShardParams.SHARDS_TOLERANT, false)) {
       // automatically set requestType on top-level requests (CLIENT), or if `shards.tolerant=true`.
       // NOTE: if `shards.tolerant=false`, do _not_ set the `Solr-Request-Type` header, because we
