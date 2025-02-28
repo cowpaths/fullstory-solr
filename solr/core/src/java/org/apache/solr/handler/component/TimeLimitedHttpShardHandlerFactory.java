@@ -25,14 +25,15 @@ import java.lang.invoke.MethodHandles;
 
 public class TimeLimitedHttpShardHandlerFactory extends HttpShardHandlerFactory {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-  private long minWait;
-  private double waitMultiplier;
+  private long timeout;
   private boolean dryRun;
   private boolean initialized;
 
-  static final String MIN_WAIT_CONFIG_KEY = "minWait"; //config key for minimum wait time in millisec - only consider limiting requests that take longer than this
-  static final String WAIT_MULTIPLIER_CONFIG_KEY = "waitMultiplier"; //config key for wait time multiplier - poll/wait for this multiplied by longest shard response latency observed so far. Interrupt the pending requests if such timeout is reached
+  static final String TIMEOUT_CONFIG_KEY = "timeout"; //config key for timeout in millisec
   static final String DRY_RUN_CONFIG_KEY = "dryRun";
+
+  private SlowNodeDetector slowNodeDetector;
+  private static final long SLOW_NODE_TTL = 60000; // 1 minute
 
   /**
    * Get {@link ShardHandler} that times out on slow shards.
@@ -44,30 +45,34 @@ public class TimeLimitedHttpShardHandlerFactory extends HttpShardHandlerFactory 
     if (!initialized) {
       throw new RuntimeException(TimeLimitedHttpShardHandlerFactory.class.getSimpleName() + " is not initialized, run init() first or check if there are any exceptions during init()");
     }
-    return new TimeLimitedHttpShardHandler(this, minWait, waitMultiplier, dryRun);
+    return new TimeLimitedHttpShardHandler(this, timeout, dryRun, slowNodeDetector);
+  }
+
+  /**
+   * For test
+   * @param slowNodeDetector
+   */
+  void setSlowNodeDetector(SlowNodeDetector slowNodeDetector) {
+    this.slowNodeDetector = slowNodeDetector;
   }
 
   @Override
   public void init(PluginInfo info) {
     super.init(info);
     NamedList<?> args = info.initArgs;
-    Object minWaitObject = args.get(MIN_WAIT_CONFIG_KEY);
+    Object minWaitObject = args.get(TIMEOUT_CONFIG_KEY);
     if (minWaitObject == null) {
-      throw new IllegalArgumentException("Missing required parameter: " + MIN_WAIT_CONFIG_KEY + " for " + TimeLimitedHttpShardHandlerFactory.class.getSimpleName() + " in solr config");
+      throw new IllegalArgumentException("Missing required parameter: " + TIMEOUT_CONFIG_KEY + " for " + TimeLimitedHttpShardHandlerFactory.class.getSimpleName() + " in solr config");
     }
-    minWait = Long.parseLong(minWaitObject.toString());
-
-    Object waitMultiplierObject = args.get(WAIT_MULTIPLIER_CONFIG_KEY);
-    if (waitMultiplierObject == null) {
-      throw new IllegalArgumentException("Missing required parameter: " + WAIT_MULTIPLIER_CONFIG_KEY + " for " + TimeLimitedHttpShardHandlerFactory.class.getSimpleName() + " in solr config");
-    }
-    waitMultiplier = Double.parseDouble(waitMultiplierObject.toString());
+    timeout = Long.parseLong(minWaitObject.toString());
 
     Object dryRunObject = args.get(DRY_RUN_CONFIG_KEY);
     if (dryRunObject != null) {
       dryRun = Boolean.parseBoolean(dryRunObject.toString());
     }
-    log.debug("Initialized {} with, minWait {}, waitMultiplier {}, and dryRun {}", TimeLimitedHttpShardHandlerFactory.class.getSimpleName(), minWait, waitMultiplier, dryRun);
+    log.debug("Initialized {} with, timeout {}, and dryRun {}", TimeLimitedHttpShardHandlerFactory.class.getSimpleName(), timeout, dryRun);
+
+    slowNodeDetector = SlowNodeDetector.build(SLOW_NODE_TTL);
 
     initialized = true;
   }

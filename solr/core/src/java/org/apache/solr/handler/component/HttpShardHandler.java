@@ -161,7 +161,7 @@ public class HttpShardHandler extends ShardHandler {
     }
 
     CompletableFuture<LBSolrClient.Rsp> future = this.lbClient.requestAsync(lbReq);
-    ShardRequestCallback callback = onRequestSubmit(future, sreq, shard, params);
+    ShardRequestCallback callback = onRequestSubmit(future, sreq, urls, params);
     future.whenComplete(
         (rsp, throwable) -> {
           if (rsp != null) {
@@ -190,7 +190,7 @@ public class HttpShardHandler extends ShardHandler {
   /**
    * Subclasses could override this method to track shard request
    */
-  protected ShardRequestCallback onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, String shard, ModifiableSolrParams params) {
+  protected ShardRequestCallback onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, List<String> shardUrls, ModifiableSolrParams params) {
     // by default no callback
     return null;
   }
@@ -233,7 +233,7 @@ public class HttpShardHandler extends ShardHandler {
   private ShardResponse take(boolean bailOnError) {
     try {
       while (pending.get() > 0) {
-        ShardResponse rsp = nextShardResponse();
+        ShardResponse rsp = responses.take();
         responseFutureMap.remove(rsp);
 
         pending.decrementAndGet();
@@ -252,10 +252,6 @@ public class HttpShardHandler extends ShardHandler {
       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
     }
     return null;
-  }
-
-  protected ShardResponse nextShardResponse() throws InterruptedException {
-    return responses.take();
   }
 
   @Override
