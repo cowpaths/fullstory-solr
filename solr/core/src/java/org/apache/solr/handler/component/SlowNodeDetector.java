@@ -4,6 +4,7 @@ import com.google.common.cache.CacheBuilder;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -14,7 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 class SlowNodeDetector {
   //  static final SlowNodeDetector SINGLETON = new SlowNodeDetector(SlowNodeDetectorManager.slowNodeTtl);
   final Set<String> slowNodes;
-  final double latencyRatioThreshold = 1.5;
+  final double latencyDropRatioThreshold = 0.5; //identify as a latency drop point when current latency is < 0.5 of previous
   final int iterationPercentageThreshold = 10; //only iterate up to this percentage of sorted response (slowest first) to find a drop
   final int minCorePerRequest = 512; //minimum number of cores per Shard Request to be considered for slow node detection
   final int minLatency = 10000; //minimum latency to be considered as slow node
@@ -42,14 +43,14 @@ class SlowNodeDetector {
 
 
   void notifyRequestStats(RequestStats stats) {
-    ComputeResult result = computeSlowNodes(stats, new HashSet<>(slowNodes));
+    Set<String> newSlowNodes = computeSlowNodes(stats);
 
-    if (result != null) {
-      slowNodes.addAll(result.slowNodes);
+    if (newSlowNodes != null) {
+      slowNodes.addAll(newSlowNodes);
     }
   }
 
-  private ComputeResult computeSlowNodes(RequestStats stats, HashSet<String> existingSlowNodes) {
+  private Set<String> computeSlowNodes(RequestStats stats) {
     if (stats.responseLatencies.size() <= minCorePerRequest) {
       return null; //not enough responses to make a decision
     }
@@ -71,13 +72,13 @@ class SlowNodeDetector {
       if (index++ > iterationThreshold) {
         break;
       }
-      if (previousLatency != null && previousLatency / current.latency > latencyRatioThreshold) {
-        //found the drop in latencies, all the previous nodes are slow
+      if (previousLatency != null && (double) current.latency / previousLatency < latencyDropRatioThreshold) {
+        //found the drop in latencies, all the iterated nodes are potentially slow
         foundLatencyDrop = true;
         break;
       }
 
-      //no drop point found so far and the rest latencies would not be significant enough to form a drop
+      //no latency drop point found so far and the rest latencies would not be significant enough to form a drop
       if (current.latency < minLatency) {
         break;
       }
@@ -99,24 +100,7 @@ class SlowNodeDetector {
       }
     }
 
-    //only nodes that are known to be slow and involved in this ShardRequest shall be considered as recovered nodes
-    Set<String> recoveredNodes = new HashSet<>(existingSlowNodes);
-    recoveredNodes.retainAll(stats.responseCountByNode.keySet()); //assume all that are processed are fast again now
-
-    //then remove the ones that are detected slow
-    recoveredNodes.removeAll(slowNodes);
-
-    return new ComputeResult(slowNodes, recoveredNodes);
-  }
-
-  private static class ComputeResult {
-    final Set<String> slowNodes;
-    final Set<String> recoveredNodes;
-
-    public ComputeResult(Set<String> slowNodes, Set<String> recoveredNodes) {
-      this.slowNodes = slowNodes;
-      this.recoveredNodes = recoveredNodes;
-    }
+    return slowNodes;
   }
 }
 
