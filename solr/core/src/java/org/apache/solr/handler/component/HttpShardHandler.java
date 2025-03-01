@@ -169,6 +169,9 @@ public class HttpShardHandler extends ShardHandler {
             srsp.setShardAddress(rsp.getServer());
             ssr.elapsedTime =
                 TimeUnit.MILLISECONDS.convert(System.nanoTime() - startTime, TimeUnit.NANOSECONDS);
+            if (callback != null) {
+              callback.onResponse(rsp, ssr.elapsedTime);
+            }
             responses.add(srsp);
           } else if (throwable != null) {
             ssr.elapsedTime =
@@ -177,10 +180,10 @@ public class HttpShardHandler extends ShardHandler {
             if (throwable instanceof SolrException) {
               srsp.setResponseCode(((SolrException) throwable).code());
             }
+            if (callback != null) {
+              callback.onException(throwable, ssr.elapsedTime);
+            }
             responses.add(srsp);
-          }
-          if (callback != null) {
-            callback.onComplete(srsp, ssr.elapsedTime);
           }
         });
 
@@ -196,7 +199,8 @@ public class HttpShardHandler extends ShardHandler {
   }
 
   protected interface ShardRequestCallback {
-    void onComplete(ShardResponse response, long elaspedTime);
+    void onResponse(LBSolrClient.Rsp response, long elapsedTime);
+    void onException(Throwable exception, long elapsedTime);
   }
 
   /** Subclasses could modify the request based on the shard */

@@ -72,7 +72,7 @@ public class TimeLimitedHttpShardHandlerFactory extends HttpShardHandlerFactory 
     }
     log.debug("Initialized {} with, timeout {}, and dryRun {}", TimeLimitedHttpShardHandlerFactory.class.getSimpleName(), timeout, dryRun);
 
-    slowNodeDetector = SlowNodeDetector.build(SLOW_NODE_TTL);
+    slowNodeDetector = new SlowNodeDetector.Builder().withSlowNodeTtl(SLOW_NODE_TTL).build();
 
     initialized = true;
   }
