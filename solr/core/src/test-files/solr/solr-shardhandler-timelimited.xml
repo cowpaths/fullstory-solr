@@ -17,6 +17,6 @@
 -->
 <solr>
   <shardHandlerFactory name="shardHandlerFactory" class="solr.TimeLimitedHttpShardHandlerFactory">
-    <long name="timeout">10000</long>
+    <long name="timeout">1000</long>
   </shardHandlerFactory>
 </solr>

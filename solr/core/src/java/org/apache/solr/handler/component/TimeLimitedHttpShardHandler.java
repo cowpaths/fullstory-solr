@@ -36,17 +36,17 @@ public class TimeLimitedHttpShardHandler extends HttpShardHandler {
 
   @Override
   protected ShardRequestCallback onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, List<String> shardUrls, ModifiableSolrParams params) {
-    String node = getHostName(shardUrls.get(0)); //only consider the first shard url for now
+    String node = getNode(shardUrls.get(0)); //only consider the first shard url for now
     ShardRequestTrackingCallback callback = new ShardRequestTrackingCallback(future, shardRequest, node);
     listeners.computeIfAbsent(shardRequest, k -> new ShardRequestListener(minWait, dryRun, slowNodeDetector.getSlowNodes())).onRequestSubmitted(node, future);
     return callback;
   }
 
 
-  static String getHostName(String urlString) {
+  static String getNode(String urlString) {
     try {
       URL url = new URL(urlString);
-      return url.getHost();
+      return url.getAuthority();
     } catch (MalformedURLException e) {
       throw new IllegalArgumentException("Invalid URL: " + urlString, e);
     }
@@ -68,16 +68,29 @@ public class TimeLimitedHttpShardHandler extends HttpShardHandler {
       this.node = node;
     }
     @Override
-    public void onComplete(ShardResponse response, long elapsedTime) {
-      listeners.compute(shardRequest, (k, v) -> {
-        if (v != null) {
-          if (v.onRequestCompleted(node, future, elapsedTime)) { //if canceller/tracker is done with all pending future/shards with this shard request
-            slowNodeDetector.notifyRequestStats(v.stats); //notify the slowNodeDetector of the execution stats of all the submissions by this shard request
-            return null;
+    public void onResponse(LBSolrClient.Rsp response, long elapsedTime) {
+      onComplete(elapsedTime);
+    }
+
+    @Override
+    public void onException(Throwable exception, long elapsedTime) {
+      onComplete(elapsedTime);
+    }
+
+    private void onComplete(long elapsedTime) {
+      try {
+        listeners.compute(shardRequest, (k, v) -> {
+          if (v != null) {
+            if (v.onRequestCompleted(node, future, elapsedTime)) { //if canceller/tracker is done with all pending future/shards with this shard request
+              slowNodeDetector.notifyRequestStats(v.stats); //notify the slowNodeDetector of the execution stats of all the submissions by this shard request
+              return null;
+            }
           }
-        }
-        return v;
-      });
+          return v;
+        });
+      } catch (Exception e) {
+        log.warn("Failed to notify stats to slowNodeDetector", e);
+      }
     }
   }
 }
@@ -102,7 +115,6 @@ class ShardRequestListener {
   private final Set<String> slowNodes;
   private final AtomicInteger pendingFuturesCountFromFastNode = new AtomicInteger(0);
 
-  private final Timer timer = new Timer();
   private TimerTask timeoutTask = null;
   final RequestStats stats = new RequestStats();
 
@@ -131,10 +143,10 @@ class ShardRequestListener {
 
 
     if (!slowNodes.contains(node)) {
-      pendingFuturesCountFromFastNode.decrementAndGet();
+      System.out.println(pendingFuturesCountFromFastNode.decrementAndGet());
     }
 
-    if (pendingFuturesCountFromFastNode.get() <= 0) { //all pending reqs are from slow nodes, start a timer to possibly timeout
+    if (timeoutTask == null && pendingFuturesCountFromFastNode.get() <= 0) { //all pending reqs are from slow nodes, start a timer to possibly timeout
       timeoutTask = new java.util.TimerTask() {
         @Override
         public void run() {
@@ -150,7 +162,7 @@ class ShardRequestListener {
           }
         }
       };
-      timer.schedule(timeoutTask, timeout);
+      new Timer(true).schedule(timeoutTask, timeout);
     }
 
     return false;

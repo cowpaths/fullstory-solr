@@ -1,57 +1,74 @@
 package org.apache.solr.handler.component;
 
-import com.google.common.cache.CacheBuilder;
+import com.github.benmanes.caffeine.cache.Caffeine;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
-import java.util.SortedSet;
-import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 class SlowNodeDetector {
   //  static final SlowNodeDetector SINGLETON = new SlowNodeDetector(SlowNodeDetectorManager.slowNodeTtl);
-  final Set<String> slowNodes;
-  final double latencyDropRatioThreshold = 0.5; //identify as a latency drop point when current latency is < 0.5 of previous
-  final int iterationPercentageThreshold = 10; //only iterate up to this percentage of sorted response (slowest first) to find a drop
-  final int minCorePerRequest = 512; //minimum number of cores per Shard Request to be considered for slow node detection
-  final int minLatency = 10000; //minimum latency to be considered as slow node
+  private final ConcurrentMap<String, Object> slowNodes;
+  private static final double DEFAULT_LATENCY_DROP_RATIO_THRESHOLD = 0.5;
+  private static final int DEFAULT_ITERATION_PERCENTAGE_THRESHOLD = 10;
+  private static final int DEFAULT_MIN_CORE_PER_REQUEST = 512;
+  private static final int DEFAULT_SLOW_LATENCY_THRESHOLD = 10000;
+  private static final int DEFAULT_SLOW_NODE_TTL = 60000;
 
-  static SlowNodeDetector build(long ttl) {
-    return new SlowNodeDetector(ttl);
-  }
+  private final double latencyDropRatioThreshold; //identify as a latency drop point when current latency is < 0.5 of previous
+  private final int iterationPercentageThreshold; //only iterate up to this percentage of sorted response (slowest first) to find a drop
+  private final int minCorePerRequest; //minimum number of cores per Shard Request to be considered for slow node detection
+  private final int slowLatencyThreshold; //minimum latency to be considered as slow node
 
-  private SlowNodeDetector(long ttl) {
-    CacheBuilder<Object, Object> builder = CacheBuilder.newBuilder();
 
-    if (ttl >= 0) {
-      builder.expireAfterWrite(ttl, java.util.concurrent.TimeUnit.MILLISECONDS);
+  private SlowNodeDetector(double latencyDropRatioThreshold, int iterationPercentageThreshold, int minCorePerRequest, int slowLatencyThreshold, long slowNodeTtl) {
+    this.latencyDropRatioThreshold = latencyDropRatioThreshold;
+    this.iterationPercentageThreshold = iterationPercentageThreshold;
+    this.minCorePerRequest = minCorePerRequest;
+    this.slowLatencyThreshold = slowLatencyThreshold;
+
+    Caffeine<Object, Object> builder = Caffeine.newBuilder();
+
+    if (slowNodeTtl >= 0) {
+      builder.expireAfterWrite(slowNodeTtl, java.util.concurrent.TimeUnit.MILLISECONDS);
     }
-    slowNodes = builder.<String, Object>build().asMap().keySet();
+    slowNodes = builder.<String, Object>build().asMap();
   }
 
   Set<String> getSlowNodes() {
-    return new HashSet<>(slowNodes);
+    return new HashSet<>(slowNodes.keySet());
   }
 
-  void reset() { //for testing
-    slowNodes.clear();
+  /**
+   * For test only
+   */
+  void setSlowNodes(Set<String> slowNodes) {
+    this.slowNodes.clear();
+    for (String slowNode : slowNodes) {
+      this.slowNodes.put(slowNode, Boolean.TRUE);
+    }
   }
+
 
 
   void notifyRequestStats(RequestStats stats) {
     Set<String> newSlowNodes = computeSlowNodes(stats);
 
     if (newSlowNodes != null) {
-      slowNodes.addAll(newSlowNodes);
+      for (String slowNode : newSlowNodes) {
+        slowNodes.put(slowNode, Boolean.TRUE);
+      }
     }
   }
 
   private Set<String> computeSlowNodes(RequestStats stats) {
-    if (stats.responseLatencies.size() <= minCorePerRequest) {
+    if (stats.responseLatencies.size() < minCorePerRequest) {
       return null; //not enough responses to make a decision
     }
     int iterationThreshold = stats.responseLatencies.size() * iterationPercentageThreshold / 100;
@@ -59,7 +76,9 @@ class SlowNodeDetector {
       return null; //not enough responses to make a decision
     }
 
-    if (stats.responseLatencies.first().latency < minLatency) {
+    Collections.sort(stats.responseLatencies);
+
+    if (stats.responseLatencies.get(0).latency < slowLatencyThreshold) {
       return null; //fastest response is not slow enough to consider any node as slow
     }
 
@@ -79,7 +98,7 @@ class SlowNodeDetector {
       }
 
       //no latency drop point found so far and the rest latencies would not be significant enough to form a drop
-      if (current.latency < minLatency) {
+      if (current.latency < slowLatencyThreshold) {
         break;
       }
 
@@ -102,11 +121,49 @@ class SlowNodeDetector {
 
     return slowNodes;
   }
+
+  static class Builder {
+    private double latencyDropRatioThreshold = DEFAULT_LATENCY_DROP_RATIO_THRESHOLD; //identify as a latency drop point when current latency is < 0.5 of previous
+    private int iterationPercentageThreshold = DEFAULT_ITERATION_PERCENTAGE_THRESHOLD; //only iterate up to this percentage of sorted response (slowest first) to find a drop
+    private int minCorePerRequest = DEFAULT_MIN_CORE_PER_REQUEST; //minimum number of cores per Shard Request to be considered for slow node detection
+    private int slowLatencyThreshold = DEFAULT_SLOW_LATENCY_THRESHOLD; //minimum latency to be considered as slow node
+    private long slowNodeTtl = DEFAULT_SLOW_NODE_TTL;
+
+    public Builder withLatencyDropRatioThreshold(double latencyDropRatioThreshold) {
+      this.latencyDropRatioThreshold = latencyDropRatioThreshold;
+      return this;
+    }
+
+    public Builder withIterationPercentageThreshold(int iterationPercentageThreshold) {
+      this.iterationPercentageThreshold = iterationPercentageThreshold;
+      return this;
+    }
+
+    public Builder withMinCorePerRequest(int minCorePerRequest) {
+      this.minCorePerRequest = minCorePerRequest;
+      return this;
+    }
+
+    public Builder withSlowLatencyThreshold(int slowLatencyThreshold) {
+      this.slowLatencyThreshold = slowLatencyThreshold;
+      return this;
+    }
+
+    public Builder withSlowNodeTtl(long slowNodeTtl) {
+      this.slowNodeTtl = slowNodeTtl;
+      return this;
+    }
+
+    public SlowNodeDetector build() {
+      return new SlowNodeDetector(latencyDropRatioThreshold, iterationPercentageThreshold, minCorePerRequest, slowLatencyThreshold, slowNodeTtl);
+    }
+
+  }
 }
 
 
 class RequestStats {
-  final SortedSet<NodeLatency> responseLatencies = new TreeSet<>();
+  final List<NodeLatency> responseLatencies = new ArrayList<>();
   final Map<String, Integer> responseCountByNode = new ConcurrentHashMap<>();
 
   RequestStats() {
@@ -130,23 +187,10 @@ class RequestStats {
       }
       return this.node.compareTo(other.node);
     }
-
-    @Override
-    public boolean equals(Object o) {
-      if (this == o) return true;
-      if (o == null || getClass() != o.getClass()) return false;
-      NodeLatency that = (NodeLatency) o;
-      return latency == that.latency && Objects.equals(node, that.node);
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(node, latency);
-    }
   }
 
   public synchronized void recordLatency(String node, long latency) {
     responseLatencies.add(new NodeLatency(node, latency));
-    responseCountByNode.compute(node, (k, c) -> c != null ? c++ : 1);
+    responseCountByNode.compute(node, (k, c) -> c != null ? c + 1 : 1);
   }
 }
