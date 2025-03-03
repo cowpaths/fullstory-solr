@@ -2,6 +2,8 @@ package org.apache.solr.handler.component;
 
 import org.apache.solr.client.solrj.impl.LBSolrClient;
 import org.apache.solr.common.params.ModifiableSolrParams;
+import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.common.util.SolrNamedThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,8 +17,10 @@ import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class TimeLimitedHttpShardHandler extends HttpShardHandler {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
@@ -115,7 +119,7 @@ class ShardRequestListener {
   private final Set<String> slowNodes;
   private final AtomicInteger pendingFuturesCountFromFastNode = new AtomicInteger(0);
 
-  private TimerTask timeoutTask = null;
+  private volatile Future<?> timeoutTask = null;
   final RequestStats stats = new RequestStats();
 
   ShardRequestListener(long timeout, boolean dryRun, Set<String> slowNodes) {
@@ -136,33 +140,43 @@ class ShardRequestListener {
     pendingFutures.remove(future);
     if (pendingFutures.isEmpty()) { //every submitted futures are processed
       if (timeoutTask != null) {
-        timeoutTask.cancel();
+        timeoutTask.cancel(true);
       }
       return true;
     }
 
-
     if (!slowNodes.contains(node)) {
-      System.out.println(pendingFuturesCountFromFastNode.decrementAndGet());
+      pendingFuturesCountFromFastNode.decrementAndGet();
     }
 
     if (timeoutTask == null && pendingFuturesCountFromFastNode.get() <= 0) { //all pending reqs are from slow nodes, start a timer to possibly timeout
-      timeoutTask = new java.util.TimerTask() {
-        @Override
-        public void run() {
+      ExecutorService executorService = null;
+      try {
+        executorService = ExecutorUtil.newMDCAwareSingleThreadExecutor(new SolrNamedThreadFactory("SlowNodeTimeout"));
+        timeoutTask = executorService.submit(() -> {
+          try {
+            Thread.sleep(timeout);
+          } catch (InterruptedException e) {
+            //ok. The responses came back before timeout
+            return;
+          }
           Set<Future<?>> removingFutures = new HashSet<>(pendingFutures);
           pendingFutures.clear();
           if (!removingFutures.isEmpty()) {
             if (!dryRun) {
               log.info("Cancelling {} pending requests due to timeout duration {}ms exceeded. ", removingFutures.size(), timeout);
               removingFutures.forEach(f -> f.cancel(true));
+              log.info("{} Pending requests cancelled", removingFutures.size());
             } else {
               log.info("Dry-run mode: would have cancelled {} pending requests due to timeout duration {}ms exceeded", removingFutures.size(), timeout);
             }
           }
+        });
+      } finally {
+        if (executorService != null) {
+          executorService.shutdown();
         }
-      };
-      new Timer(true).schedule(timeoutTask, timeout);
+      }
     }
 
     return false;
