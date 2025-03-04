@@ -13,7 +13,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 class SlowNodeDetector {
-  //  static final SlowNodeDetector SINGLETON = new SlowNodeDetector(SlowNodeDetectorManager.slowNodeTtl);
   private final ConcurrentMap<String, Object> slowNodes;
   private static final double DEFAULT_LATENCY_DROP_RATIO_THRESHOLD = 0.5;
   private static final int DEFAULT_MAX_SLOW_NODE_PERCENTAGE = 10;
