@@ -16,20 +16,20 @@ class SlowNodeDetector {
   //  static final SlowNodeDetector SINGLETON = new SlowNodeDetector(SlowNodeDetectorManager.slowNodeTtl);
   private final ConcurrentMap<String, Object> slowNodes;
   private static final double DEFAULT_LATENCY_DROP_RATIO_THRESHOLD = 0.5;
-  private static final int DEFAULT_ITERATION_PERCENTAGE_THRESHOLD = 10;
+  private static final int DEFAULT_MAX_SLOW_NODE_PERCENTAGE = 10;
   private static final int DEFAULT_MIN_CORE_PER_REQUEST = 512;
   private static final int DEFAULT_SLOW_LATENCY_THRESHOLD = 10000;
   private static final int DEFAULT_SLOW_NODE_TTL = 60000;
 
   private final double latencyDropRatioThreshold; //identify as a latency drop point when current latency is < 0.5 of previous
-  private final int iterationPercentageThreshold; //only iterate up to this percentage of sorted response (slowest first) to find a drop
+  private final int maxSlowResponsePercentage; //o//can only find up to this percentage of slow node. If more than this percentage of potential slow nodes detected, do not return any slow node at all
   private final int minCorePerRequest; //minimum number of cores per Shard Request to be considered for slow node detection
   private final int slowLatencyThreshold; //minimum latency to be considered as slow node
 
 
-  private SlowNodeDetector(double latencyDropRatioThreshold, int iterationPercentageThreshold, int minCorePerRequest, int slowLatencyThreshold, long slowNodeTtl) {
+  private SlowNodeDetector(double latencyDropRatioThreshold, int maxSlowResponsePercentage, int minCorePerRequest, int slowLatencyThreshold, long slowNodeTtl) {
     this.latencyDropRatioThreshold = latencyDropRatioThreshold;
-    this.iterationPercentageThreshold = iterationPercentageThreshold;
+    this.maxSlowResponsePercentage = maxSlowResponsePercentage;
     this.minCorePerRequest = minCorePerRequest;
     this.slowLatencyThreshold = slowLatencyThreshold;
 
@@ -71,8 +71,8 @@ class SlowNodeDetector {
     if (stats.responseLatencies.size() < minCorePerRequest) {
       return null; //not enough responses to make a decision
     }
-    int iterationThreshold = stats.responseLatencies.size() * iterationPercentageThreshold / 100;
-    if (iterationThreshold < 1) {
+    int maxSlowResponseCount = stats.responseLatencies.size() * maxSlowResponsePercentage / 100;
+    if (maxSlowResponseCount < 1) {
       return null; //not enough responses to make a decision
     }
 
@@ -88,7 +88,7 @@ class SlowNodeDetector {
 
     int index = 0;
     for (RequestStats.NodeLatency current : stats.responseLatencies) {
-      if (index++ > iterationThreshold) {
+      if (index++ > maxSlowResponseCount) { //too many potential slow responses, not a good data as we assume they are minority
         break;
       }
       if (previousLatency != null && (double) current.latency / previousLatency < latencyDropRatioThreshold) {
@@ -124,7 +124,7 @@ class SlowNodeDetector {
 
   static class Builder {
     private double latencyDropRatioThreshold = DEFAULT_LATENCY_DROP_RATIO_THRESHOLD; //identify as a latency drop point when current latency is < 0.5 of previous
-    private int iterationPercentageThreshold = DEFAULT_ITERATION_PERCENTAGE_THRESHOLD; //only iterate up to this percentage of sorted response (slowest first) to find a drop
+    private int maxSlowResponsePercentage = DEFAULT_MAX_SLOW_NODE_PERCENTAGE; //can only find up to this percentage of slow node. If more than this percentage of potential slow nodes detected, do not return any slow node at all
     private int minCorePerRequest = DEFAULT_MIN_CORE_PER_REQUEST; //minimum number of cores per Shard Request to be considered for slow node detection
     private int slowLatencyThreshold = DEFAULT_SLOW_LATENCY_THRESHOLD; //minimum latency to be considered as slow node
     private long slowNodeTtl = DEFAULT_SLOW_NODE_TTL;
@@ -134,8 +134,8 @@ class SlowNodeDetector {
       return this;
     }
 
-    public Builder withIterationPercentageThreshold(int iterationPercentageThreshold) {
-      this.iterationPercentageThreshold = iterationPercentageThreshold;
+    public Builder withMaxSlowResponsePercentage(int maxSlowResponsePercentage) {
+      this.maxSlowResponsePercentage = maxSlowResponsePercentage;
       return this;
     }
 
@@ -155,7 +155,7 @@ class SlowNodeDetector {
     }
 
     public SlowNodeDetector build() {
-      return new SlowNodeDetector(latencyDropRatioThreshold, iterationPercentageThreshold, minCorePerRequest, slowLatencyThreshold, slowNodeTtl);
+      return new SlowNodeDetector(latencyDropRatioThreshold, maxSlowResponsePercentage, minCorePerRequest, slowLatencyThreshold, slowNodeTtl);
     }
 
   }
