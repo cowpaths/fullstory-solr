@@ -16,7 +16,7 @@
  limitations under the License.
 -->
 <solr>
-  <shardHandlerFactory name="shardHandlerFactory" class="solr.TimeLimitedHttpShardHandlerFactory">
-    <long name="timeout">1000</long>
+  <shardHandlerFactory name="shardHandlerFactory" class="org.apache.solr.handler.component.TimeLimitedHttpShardHandlerFactory">
+    <long name="slowNodeTimeout">1000</long>
   </shardHandlerFactory>
 </solr>

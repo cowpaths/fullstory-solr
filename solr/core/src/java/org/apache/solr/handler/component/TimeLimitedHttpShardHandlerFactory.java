@@ -16,8 +16,12 @@
  */
 package org.apache.solr.handler.component;
 
+import com.codahale.metrics.Counter;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.core.PluginInfo;
+import org.apache.solr.core.SolrInfoBean;
+import org.apache.solr.metrics.SolrMetricManager;
+import org.apache.solr.metrics.SolrMetricsContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,15 +29,17 @@ import java.lang.invoke.MethodHandles;
 
 public class TimeLimitedHttpShardHandlerFactory extends HttpShardHandlerFactory {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-  private long timeout;
+  private long slowNodeTimeout;
   private boolean dryRun;
   private boolean initialized;
 
-  static final String TIMEOUT_CONFIG_KEY = "timeout"; //config key for timeout in millisec
+  static final String TIMEOUT_CONFIG_KEY = "slowNodeTimeout"; //config key for timeout in millisec
   static final String DRY_RUN_CONFIG_KEY = "dryRun";
 
   private SlowNodeDetector slowNodeDetector;
   private static final long SLOW_NODE_TTL = 60000; // 1 minute
+  private SolrMetricsContext solrMetricsContext;
+  Counter cancelledSlowNodeRequests;
 
   /**
    * Get {@link ShardHandler} that times out on slow shards.
@@ -45,7 +51,7 @@ public class TimeLimitedHttpShardHandlerFactory extends HttpShardHandlerFactory 
     if (!initialized) {
       throw new RuntimeException(TimeLimitedHttpShardHandlerFactory.class.getSimpleName() + " is not initialized, run init() first or check if there are any exceptions during init()");
     }
-    return new TimeLimitedHttpShardHandler(this, timeout, dryRun, slowNodeDetector);
+    return new TimeLimitedHttpShardHandler(this, slowNodeTimeout, dryRun, slowNodeDetector, (timedOutTasks) -> cancelledSlowNodeRequests.inc(timedOutTasks.size()));
   }
 
   /**
@@ -64,16 +70,24 @@ public class TimeLimitedHttpShardHandlerFactory extends HttpShardHandlerFactory 
     if (minWaitObject == null) {
       throw new IllegalArgumentException("Missing required parameter: " + TIMEOUT_CONFIG_KEY + " for " + TimeLimitedHttpShardHandlerFactory.class.getSimpleName() + " in solr config");
     }
-    timeout = Long.parseLong(minWaitObject.toString());
+    slowNodeTimeout = Long.parseLong(minWaitObject.toString());
 
     Object dryRunObject = args.get(DRY_RUN_CONFIG_KEY);
     if (dryRunObject != null) {
       dryRun = Boolean.parseBoolean(dryRunObject.toString());
     }
-    log.debug("Initialized {} with, timeout {}, and dryRun {}", TimeLimitedHttpShardHandlerFactory.class.getSimpleName(), timeout, dryRun);
+    log.debug("Initialized {} with, timeout {}, and dryRun {}", TimeLimitedHttpShardHandlerFactory.class.getSimpleName(), slowNodeTimeout, dryRun);
 
     slowNodeDetector = new SlowNodeDetector.Builder().withSlowNodeTtl(SLOW_NODE_TTL).build();
 
     initialized = true;
+  }
+
+  @Override
+  public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
+    super.initializeMetrics(parentContext, scope);
+    solrMetricsContext = parentContext.getChildContext(this);
+    String expandedScope = SolrMetricManager.mkName(scope, SolrInfoBean.Category.QUERY.name());
+    cancelledSlowNodeRequests = solrMetricsContext.counter("cancelledSlowNodeRequests", expandedScope);
   }
 }
