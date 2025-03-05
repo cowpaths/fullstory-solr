@@ -26,7 +26,7 @@ class TimeLimitedHttpShardHandler extends HttpShardHandler {
   private final long minWait;
   private final boolean dryRun;
 
-  private final ConcurrentMap<ShardRequest, ShardRequestListener> listeners = new ConcurrentHashMap<>();
+  private final ConcurrentMap<ShardRequest, ShardRequestActor> actors = new ConcurrentHashMap<>();
   private final SlowNodeDetector slowNodeDetector;
   private final TimeoutCallback timeoutCallback;
 
@@ -38,14 +38,12 @@ class TimeLimitedHttpShardHandler extends HttpShardHandler {
     this.timeoutCallback = timeoutCallback;
   }
 
-
   @Override
   protected ShardRequestCallback onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, List<String> shardUrls, ModifiableSolrParams params) {
     ShardRequestTrackingCallback callback = new ShardRequestTrackingCallback(future, shardRequest, shardUrls);
-    listeners.computeIfAbsent(shardRequest, k -> new SlowNodeShardRequestListener(minWait, dryRun, slowNodeDetector, timeoutCallback)).onRequestSubmitted(shardUrls, future);
+    actors.computeIfAbsent(shardRequest, k -> new SlowNodeShardRequestActor(minWait, dryRun, slowNodeDetector, timeoutCallback)).onRequestSubmitted(shardUrls, future);
     return callback;
   }
-
 
   /**
    * Callback to track ShardRequest and a Future created by sending such request to a single shard.
@@ -76,7 +74,7 @@ class TimeLimitedHttpShardHandler extends HttpShardHandler {
 
     private void onComplete(long elapsedTime, String selectedShardUrl) {
       try {
-        listeners.compute(shardRequest, (k, v) -> {
+        actors.compute(shardRequest, (k, v) -> {
           if (v != null) {
             if (v.onRequestCompleted(selectedShardUrl, shardUrls, future, elapsedTime)) { //if canceller/tracker is done with all pending future/shards with this shard request
               return null;
@@ -91,7 +89,10 @@ class TimeLimitedHttpShardHandler extends HttpShardHandler {
   }
 }
 
-interface ShardRequestListener {
+/**
+ * This gets notified when such ShardRequest instance is submitted/completed to/on any shard url
+ */
+interface ShardRequestActor {
   void onRequestSubmitted(List<String> shardUrls, Future<?> future);
   boolean onRequestCompleted(String selectedShardUrl, List<String> shardUrls, Future<?> future, long timeElapsed);
 }
@@ -100,16 +101,14 @@ interface ShardRequestListener {
 /**
  * Tied to a single ShardRequest instance, which can be retried/submitted to many shard urls.
  * <p>
- * This gets notified when such ShardRequest instance is submitted/completed to/on any shard url
- * <p>
- * This listener keeps a list of pending future for all in-flight request submissions, and perform:
+ * This actor keeps a list of pending future for all in-flight request submissions, and perform:
  * <ol>
  *   <li> When all the remaining pending futures are from the slowNodes list, start a timer task to timeout/cancel all of
  * them according to the timeout value (only prints a message if dryRun is true)
- *   <li> Keep track of the latency stats of all the response
+ *   <li> Keep track of the latency stats of all the response and report it to the SlowNodeDetector when all the pending futures complete
  * </ol>
  */
-class SlowNodeShardRequestListener implements ShardRequestListener {
+class SlowNodeShardRequestActor implements ShardRequestActor {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private final boolean dryRun;
   private final long timeout;
@@ -122,7 +121,7 @@ class SlowNodeShardRequestListener implements ShardRequestListener {
   private volatile Future<?> timeoutTask = null;
   final RequestStats stats = new RequestStats();
 
-  SlowNodeShardRequestListener(long timeout, boolean dryRun, SlowNodeDetector detector, TimeoutCallback timeoutCallback) {
+  SlowNodeShardRequestActor(long timeout, boolean dryRun, SlowNodeDetector detector, TimeoutCallback timeoutCallback) {
     this.timeout = timeout;
     this.dryRun = dryRun;
     this.slowNodes = detector.getSlowNodes(); //get a snapshot here for simplicity
@@ -134,7 +133,7 @@ class SlowNodeShardRequestListener implements ShardRequestListener {
   public void onRequestSubmitted(List<String> shardUrls, Future<?> future) {
     pendingFutures.add(future);
 
-    int futureOnFastNodeCount = shardUrls.stream().map(SlowNodeShardRequestListener::getNode).filter(v -> !slowNodes.contains(v)).collect(Collectors.toSet()).size();
+    int futureOnFastNodeCount = shardUrls.stream().map(SlowNodeShardRequestActor::getNode).filter(v -> !slowNodes.contains(v)).collect(Collectors.toSet()).size();
     pendingFutureCountFromFastNode.addAndGet(futureOnFastNodeCount);
   }
 
@@ -151,7 +150,7 @@ class SlowNodeShardRequestListener implements ShardRequestListener {
       return true;
     }
 
-    int futureOnFastNodeCount = shardUrls.stream().map(SlowNodeShardRequestListener::getNode).filter(v -> !slowNodes.contains(v)).collect(Collectors.toSet()).size();
+    int futureOnFastNodeCount = shardUrls.stream().map(SlowNodeShardRequestActor::getNode).filter(v -> !slowNodes.contains(v)).collect(Collectors.toSet()).size();
     pendingFutureCountFromFastNode.addAndGet(-1 * futureOnFastNodeCount);
 
 
