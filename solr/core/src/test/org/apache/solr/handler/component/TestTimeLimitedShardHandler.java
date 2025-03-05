@@ -19,6 +19,7 @@ package org.apache.solr.handler.component;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.client.solrj.impl.Http2SolrClient;
 import org.apache.solr.client.solrj.impl.LBHttp2SolrClient;
+import org.apache.solr.client.solrj.impl.LBSolrClient;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.core.CoreContainer;
@@ -164,7 +165,14 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
     Http2SolrClient client = new Http2SolrClient.Builder().build();
 
     ExecutorService executor = ExecutorUtil.newMDCAwareCachedThreadPool(TestTimeLimitedShardHandler.class.getSimpleName());
-    factory.loadbalancer = new LBHttp2SolrClient(client, new String[0]) {
+
+    class RspWithServer extends LBSolrClient.Rsp {
+      RspWithServer(String server) {
+        super();
+        this.server = server;
+      }
+    }
+    factory.loadbalancer = new LBHttp2SolrClient(client) {
       @Override
       public CompletableFuture<Rsp> requestAsync(Req req) {
         long latency = latenciesByUrl.getOrDefault(req.getServers().get(0), defaultLatency);
@@ -175,13 +183,19 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
             Thread.currentThread().interrupt();
             //OK
           }
-          return new Rsp();
+          return new RspWithServer(req.getServers().get(0));
         }, executor);
       }
     };
+
+
     return new TestFixture(cc, factory, client, executor, slowNodeDetector);
   }
+
+
 }
+
+
 
 class TestFixture implements Closeable {
   CoreContainer cc;
