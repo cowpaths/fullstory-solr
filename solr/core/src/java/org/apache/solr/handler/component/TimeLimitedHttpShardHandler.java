@@ -1,5 +1,6 @@
 package org.apache.solr.handler.component;
 
+import com.google.common.collect.MapMaker;
 import org.apache.solr.client.solrj.impl.LBSolrClient;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.util.ExecutorUtil;
@@ -26,7 +27,7 @@ class TimeLimitedHttpShardHandler extends HttpShardHandler {
   private final long minWait;
   private final boolean dryRun;
 
-  private final ConcurrentMap<ShardRequest, ShardRequestActor> actors = new ConcurrentHashMap<>();
+  private final ConcurrentMap<ShardRequest, ShardRequestActor> actors = new MapMaker().weakKeys().makeMap();
   private final SlowNodeDetector slowNodeDetector;
   private final TimeoutCallback timeoutCallback;
 
@@ -133,8 +134,21 @@ class SlowNodeShardRequestActor implements ShardRequestActor {
   public void onRequestSubmitted(List<String> shardUrls, Future<?> future) {
     pendingFutures.add(future);
 
-    int futureOnFastNodeCount = shardUrls.stream().map(SlowNodeShardRequestActor::getNode).filter(v -> !slowNodes.contains(v)).collect(Collectors.toSet()).size();
-    pendingFutureCountFromFastNode.addAndGet(futureOnFastNodeCount);
+    //if any of the shard URLs is from a slow node, then we don't count it as a fast node future as it could potentially be slow
+    //This is done such that we can more effectively terminate pending futures with a mix of slow and fast nodes for
+    //the same shard.
+    if (!hasSlowNodeShardUrl(shardUrls)) {
+      pendingFutureCountFromFastNode.incrementAndGet();
+    }
+  }
+
+  private boolean hasSlowNodeShardUrl(List<String> shardUrls) {
+    for (String shardUrl : shardUrls) {
+      if (slowNodes.contains(getNode(shardUrl))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   public synchronized boolean onRequestCompleted(String selectedShardUrl, List<String> shardUrls, Future<?> future, long timeElapsed) {
@@ -150,9 +164,9 @@ class SlowNodeShardRequestActor implements ShardRequestActor {
       return true;
     }
 
-    int futureOnFastNodeCount = shardUrls.stream().map(SlowNodeShardRequestActor::getNode).filter(v -> !slowNodes.contains(v)).collect(Collectors.toSet()).size();
-    pendingFutureCountFromFastNode.addAndGet(-1 * futureOnFastNodeCount);
-
+    if (!hasSlowNodeShardUrl(shardUrls)) {
+      pendingFutureCountFromFastNode.decrementAndGet();
+    }
 
     if (timeoutTask == null && pendingFutureCountFromFastNode.get() <= 0) { //all pending reqs are from slow nodes, start a timer to possibly timeout
       ExecutorService executorService = null;
@@ -168,15 +182,15 @@ class SlowNodeShardRequestActor implements ShardRequestActor {
           Set<Future<?>> removingFutures = new HashSet<>(pendingFutures);
           pendingFutures.clear();
           if (!removingFutures.isEmpty()) {
+            if (timeoutCallback != null) {
+              timeoutCallback.accept(removingFutures);
+            }
             if (!dryRun) {
               log.info("Cancelling {} pending requests due to timeout duration {}ms exceeded. ", removingFutures.size(), timeout);
               removingFutures.forEach(f -> f.cancel(true));
               log.info("{} Pending requests cancelled", removingFutures.size());
             } else {
               log.info("Dry-run mode: would have cancelled {} pending requests due to timeout duration {}ms exceeded", removingFutures.size(), timeout);
-            }
-            if (timeoutCallback != null) {
-              timeoutCallback.accept(removingFutures);
             }
           }
         });
