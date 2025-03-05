@@ -78,6 +78,7 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
 //      List<Throwable> exceptions = response.getShardRequest().responses.stream().filter(r -> r.getException() != null).map(ShardResponse::getException).collect(Collectors.toList());
       assertNull(response.getException()); //no exception, since the slow nodes are not detected yet before execution of this shard request
       assertEquals(Set.of("solr-10:8983", "solr-11:8983"), fixture.slowNodeDetector.getSlowNodes());
+      assertEquals(0, fixture.factory.cancelledSlowNodeRequests.getCount()); //no cancelled requests yet
     }
   }
 
@@ -108,6 +109,7 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
       assertEquals(SHARD_COUNT, response.getShardRequest().responses.size());
       assertNull(response.getException());
       assertTrue(fixture.slowNodeDetector.getSlowNodes().isEmpty());
+      assertEquals(0, fixture.factory.cancelledSlowNodeRequests.getCount());
     }
   }
 
@@ -147,6 +149,7 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
       assertEquals(2 * 8, exceptions.size()); //2 slow nodes, 8 replicas per node
 
       assertEquals(Set.of("solr-10:8983", "solr-11:8983"), fixture.slowNodeDetector.getSlowNodes());
+      assertEquals(2 * 8, fixture.factory.cancelledSlowNodeRequests.getCount());
     }
   }
 

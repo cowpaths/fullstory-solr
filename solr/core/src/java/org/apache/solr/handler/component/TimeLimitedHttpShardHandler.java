@@ -18,20 +18,24 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
-public class TimeLimitedHttpShardHandler extends HttpShardHandler {
+class TimeLimitedHttpShardHandler extends HttpShardHandler {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private final long minWait;
   private final boolean dryRun;
 
   private final ConcurrentMap<ShardRequest, ShardRequestListener> listeners = new ConcurrentHashMap<>();
   private final SlowNodeDetector slowNodeDetector;
+  private final TimeoutCallback timeoutCallback;
 
-  public TimeLimitedHttpShardHandler(HttpShardHandlerFactory shardHandlerFactory, long minWait, boolean dryRun, SlowNodeDetector slowNodeDetector) {
+  TimeLimitedHttpShardHandler(HttpShardHandlerFactory shardHandlerFactory, long minWait, boolean dryRun, SlowNodeDetector slowNodeDetector, TimeoutCallback timeoutCallback) {
     super(shardHandlerFactory);
     this.minWait = minWait;
     this.dryRun = dryRun;
     this.slowNodeDetector = slowNodeDetector;
+    this.timeoutCallback = timeoutCallback;
   }
 
 
@@ -39,7 +43,7 @@ public class TimeLimitedHttpShardHandler extends HttpShardHandler {
   protected ShardRequestCallback onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, List<String> shardUrls, ModifiableSolrParams params) {
     String node = getNode(shardUrls.get(0)); //only consider the first shard url for now
     ShardRequestTrackingCallback callback = new ShardRequestTrackingCallback(future, shardRequest, node);
-    listeners.computeIfAbsent(shardRequest, k -> new ShardRequestListener(minWait, dryRun, slowNodeDetector.getSlowNodes())).onRequestSubmitted(node, future);
+    listeners.computeIfAbsent(shardRequest, k -> new ShardRequestListener(minWait, dryRun, slowNodeDetector.getSlowNodes(), timeoutCallback)).onRequestSubmitted(node, future);
     return callback;
   }
 
@@ -115,14 +119,16 @@ class ShardRequestListener {
   private final Set<Future<?>> pendingFutures = ConcurrentHashMap.newKeySet();
   private final Set<String> slowNodes;
   private final AtomicInteger pendingFuturesCountFromFastNode = new AtomicInteger(0);
+  private final TimeoutCallback timeoutCallback;
 
   private volatile Future<?> timeoutTask = null;
   final RequestStats stats = new RequestStats();
 
-  ShardRequestListener(long timeout, boolean dryRun, Set<String> slowNodes) {
+  ShardRequestListener(long timeout, boolean dryRun, Set<String> slowNodes, TimeoutCallback timeoutCallback) {
     this.timeout = timeout;
     this.dryRun = dryRun;
     this.slowNodes = slowNodes;
+    this.timeoutCallback = timeoutCallback;
   }
 
   void onRequestSubmitted(String node, Future<?> future) {
@@ -167,6 +173,9 @@ class ShardRequestListener {
             } else {
               log.info("Dry-run mode: would have cancelled {} pending requests due to timeout duration {}ms exceeded", removingFutures.size(), timeout);
             }
+            if (timeoutCallback != null) {
+              timeoutCallback.accept(removingFutures);
+            }
           }
         });
       } finally {
@@ -178,5 +187,8 @@ class ShardRequestListener {
 
     return false;
   }
+}
+
+interface TimeoutCallback extends Consumer<Set<Future<?>>> {
 }
 
