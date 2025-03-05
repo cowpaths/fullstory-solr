@@ -19,7 +19,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import java.util.function.Function;
+import java.util.stream.Collectors;
 
 class TimeLimitedHttpShardHandler extends HttpShardHandler {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
@@ -41,9 +41,9 @@ class TimeLimitedHttpShardHandler extends HttpShardHandler {
 
   @Override
   protected ShardRequestCallback onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, List<String> shardUrls, ModifiableSolrParams params) {
-    String node = getNode(shardUrls.get(0)); //only consider the first shard url for now
-    ShardRequestTrackingCallback callback = new ShardRequestTrackingCallback(future, shardRequest, node);
-    listeners.computeIfAbsent(shardRequest, k -> new ShardRequestListener(minWait, dryRun, slowNodeDetector.getSlowNodes(), timeoutCallback)).onRequestSubmitted(node, future);
+    Set<String> nodes = shardUrls.stream().map(TimeLimitedHttpShardHandler::getNode).collect(Collectors.toSet());
+    ShardRequestTrackingCallback callback = new ShardRequestTrackingCallback(future, shardRequest, nodes);
+    listeners.computeIfAbsent(shardRequest, k -> new ShardRequestListener(minWait, dryRun, slowNodeDetector.getSlowNodes(), timeoutCallback)).onRequestSubmitted(nodes, future);
     return callback;
   }
 
@@ -65,28 +65,29 @@ class TimeLimitedHttpShardHandler extends HttpShardHandler {
   class ShardRequestTrackingCallback implements HttpShardHandler.ShardRequestCallback { //TODO maybe use a name that indicates we assume using Slow node canceller for this
     private final ShardRequest shardRequest;
     private final Future<LBSolrClient.Rsp> future;
-    private final String node;
+    private final Set<String> shardNodes;
 
-    ShardRequestTrackingCallback(Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, String node) {
+    ShardRequestTrackingCallback(Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, Set<String> shardNodes) {
       this.future = future;
       this.shardRequest = shardRequest;
-      this.node = node;
+      this.shardNodes = shardNodes;
     }
     @Override
     public void onResponse(LBSolrClient.Rsp response, long elapsedTime) {
-      onComplete(elapsedTime);
+      onComplete(elapsedTime, response.getServer() != null ? getNode(response.getServer()) : null);
     }
 
     @Override
     public void onException(Throwable exception, long elapsedTime) {
-      onComplete(elapsedTime);
+      //TODO is it possible to infer the selected node? If it has timed out, perhaps we can assume all shardNodes are slow?
+      onComplete(elapsedTime, null);
     }
 
-    private void onComplete(long elapsedTime) {
+    private void onComplete(long elapsedTime, String selectedNode) {
       try {
         listeners.compute(shardRequest, (k, v) -> {
           if (v != null) {
-            if (v.onRequestCompleted(node, future, elapsedTime)) { //if canceller/tracker is done with all pending future/shards with this shard request
+            if (v.onRequestCompleted(selectedNode, shardNodes, future, elapsedTime)) { //if canceller/tracker is done with all pending future/shards with this shard request
               slowNodeDetector.notifyRequestStats(v.stats); //notify the slowNodeDetector of the execution stats of all the submissions by this shard request
               return null;
             }
@@ -131,15 +132,19 @@ class ShardRequestListener {
     this.timeoutCallback = timeoutCallback;
   }
 
-  void onRequestSubmitted(String node, Future<?> future) {
+  void onRequestSubmitted(Set<String> shardNodes, Future<?> future) {
     pendingFutures.add(future);
-    if (!slowNodes.contains(node)) {
-      pendingFuturesCountFromFastNode.incrementAndGet();
+    Set<String> futuresOnFastNodes = new HashSet<>(shardNodes);
+    futuresOnFastNodes.removeAll(slowNodes);
+    if (!futuresOnFastNodes.isEmpty()) {
+      pendingFuturesCountFromFastNode.addAndGet(futuresOnFastNodes.size());
     }
   }
 
-  synchronized boolean onRequestCompleted(String node, Future<?> future, long timeElapsed) {
-    stats.recordLatency(node, timeElapsed);
+  synchronized boolean onRequestCompleted(String selectedNode, Set<String> shardNodes, Future<?> future, long timeElapsed) {
+    if (selectedNode != null) { //might be null if exception occurred
+      stats.recordLatency(selectedNode, timeElapsed);
+    }
     pendingFutures.remove(future);
     if (pendingFutures.isEmpty()) { //every submitted futures are processed
       if (timeoutTask != null) {
@@ -148,8 +153,10 @@ class ShardRequestListener {
       return true;
     }
 
-    if (!slowNodes.contains(node)) {
-      pendingFuturesCountFromFastNode.decrementAndGet();
+    Set<String> futuresOnFastNodes = new HashSet<>(shardNodes);
+    futuresOnFastNodes.removeAll(slowNodes);
+    if (!futuresOnFastNodes.isEmpty()) {
+      pendingFuturesCountFromFastNode.addAndGet(-1 * futuresOnFastNodes.size());
     }
 
     if (timeoutTask == null && pendingFuturesCountFromFastNode.get() <= 0) { //all pending reqs are from slow nodes, start a timer to possibly timeout
