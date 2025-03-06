@@ -748,6 +748,17 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   protected void search(List<LeafReaderContext> leaves, Weight weight, Collector collector)
       throws IOException {
     QueryLimits queryLimits = QueryLimits.getCurrentLimits();
+
+    String testSlowCollection = System.getenv("TEST_SLOW_COLLECTION");
+    if (testSlowCollection != null) {
+      try {
+        log.warn("!!!!!!!!TESTING WITH ARTIFICIAL 30 SEC PAUSE ON COLLECTION {}", testSlowCollection);
+        TimeUnit.SECONDS.sleep(30);
+      } catch (InterruptedException e) {
+        throw new RuntimeException(e);
+      }
+    }
+
     if (useExitableDirectoryReader || !queryLimits.isLimitsEnabled()) {
       // no timeout.  Pass through to super class
       super.search(leaves, weight, collector);
