@@ -753,12 +753,20 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     if (testSlowCollections != null) {
       boolean trigger = "*".equals(testSlowCollections);
       if (!trigger) {
-        trigger = Arrays.stream(testSlowCollections.split(",")).anyMatch(s -> s.equals(core.getCoreDescriptor().getCollectionName()));
+        trigger =
+            Arrays.stream(testSlowCollections.split(","))
+                .anyMatch(s -> s.equals(core.getCoreDescriptor().getCollectionName()));
       }
       if (trigger) {
         try {
-          int wait = System.getenv("TEST_SLOW_WAIT") != null ? Integer.parseInt(System.getenv("TEST_SLOW_WAIT")) : 30000;
-          log.warn("!!!!!!!!TESTING WITH ARTIFICIAL {} MILLISEC PAUSE ON COLLECTION {}", wait, core.getCoreDescriptor().getCollectionName());
+          int wait =
+              System.getenv("TEST_SLOW_WAIT") != null
+                  ? Integer.parseInt(System.getenv("TEST_SLOW_WAIT"))
+                  : 30000;
+          log.warn(
+              "!!!!!!!!TESTING WITH ARTIFICIAL {} MILLISEC PAUSE ON COLLECTION {}",
+              wait,
+              core.getCoreDescriptor().getCollectionName());
           TimeUnit.MILLISECONDS.sleep(wait);
         } catch (InterruptedException e) {
           throw new RuntimeException(e);
