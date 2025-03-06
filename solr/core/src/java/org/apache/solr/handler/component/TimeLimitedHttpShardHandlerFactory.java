@@ -33,11 +33,15 @@ public class TimeLimitedHttpShardHandlerFactory extends HttpShardHandlerFactory 
   private boolean dryRun;
   private boolean initialized;
 
-  static final String TIMEOUT_CONFIG_KEY = "slowNodeTimeout"; //config key for timeout in millisec
-  static final String DRY_RUN_CONFIG_KEY = "dryRun";
+  private static final String TIMEOUT_CONFIG_KEY = "slowNodeTimeout"; //config key for timeout in millisec
+  private static final String LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY  = "latencyDropRatioThreshold";
+  private static final String MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY = "maxSlowResponsePercentage";
+  private static final String MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY = "minShardCountPerRequest";
+  private static final String SLOW_LATENCY_THRESHOLD_CONFIG_KEY = "slowLatencyThreshold";
+  private static final String SLOW_NODE_TTL_CONFIG_KEY = "slowNodeTtl";
+  private static final String DRY_RUN_CONFIG_KEY = "dryRun";
 
   private SlowNodeDetector slowNodeDetector;
-  private static final long SLOW_NODE_TTL = 60000; // 1 minute
   private SolrMetricsContext solrMetricsContext;
   Counter cancelledSlowNodeRequests;
 
@@ -66,20 +70,45 @@ public class TimeLimitedHttpShardHandlerFactory extends HttpShardHandlerFactory 
   public void init(PluginInfo info) {
     super.init(info);
     NamedList<?> args = info.initArgs;
-    Object minWaitObject = args.get(TIMEOUT_CONFIG_KEY);
-    if (minWaitObject == null) {
-      throw new IllegalArgumentException("Missing required parameter: " + TIMEOUT_CONFIG_KEY + " for " + TimeLimitedHttpShardHandlerFactory.class.getSimpleName() + " in solr config");
-    }
-    slowNodeTimeout = Long.parseLong(minWaitObject.toString());
 
+    //Actor params
     Object dryRunObject = args.get(DRY_RUN_CONFIG_KEY);
     if (dryRunObject != null) {
       dryRun = Boolean.parseBoolean(dryRunObject.toString());
     }
-    log.debug("Initialized {} with, timeout {}, and dryRun {}", TimeLimitedHttpShardHandlerFactory.class.getSimpleName(), slowNodeTimeout, dryRun);
 
-    slowNodeDetector = new SlowNodeDetector.Builder().withSlowNodeTtl(SLOW_NODE_TTL).build();
+    Object slowNodeTimeoutObj = args.get(TIMEOUT_CONFIG_KEY);
+    if (slowNodeTimeoutObj == null) {
+      throw new IllegalArgumentException("Missing required parameter: " + TIMEOUT_CONFIG_KEY + " for " + TimeLimitedHttpShardHandlerFactory.class.getSimpleName() + " in solr config");
+    }
+    slowNodeTimeout = Long.parseLong(slowNodeTimeoutObj.toString());
 
+    log.debug("Initialing {} with {} {}, {} {}", TimeLimitedHttpShardHandlerFactory.class.getSimpleName(), DRY_RUN_CONFIG_KEY, dryRun, TIMEOUT_CONFIG_KEY, slowNodeTimeoutObj);
+
+    //Detector params and build detector here
+    SlowNodeDetector.Builder builder = new SlowNodeDetector.Builder();
+    if (args.get(LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY) != null) {
+      builder.withLatencyDropRatioThreshold(Double.parseDouble(args.get(LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY).toString()));
+      log.debug("With {} {}", LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY, args.get(LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY));
+    }
+    if (args.get(MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY) != null) {
+      builder.withMaxSlowResponsePercentage(Integer.parseInt(args.get(MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY).toString()));
+      log.debug("With {} {}", MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY, args.get(MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY));
+    }
+    if (args.get(MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY) != null) {
+      builder.withMinShardCountPerRequest(Integer.parseInt(args.get(MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY).toString()));
+      log.debug("With {} {}", MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY, args.get(MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY));
+    }
+    if (args.get(SLOW_LATENCY_THRESHOLD_CONFIG_KEY) != null) {
+      builder.withSlowLatencyThreshold(Integer.parseInt(args.get(SLOW_LATENCY_THRESHOLD_CONFIG_KEY).toString()));
+      log.debug("With {} {}", SLOW_LATENCY_THRESHOLD_CONFIG_KEY, args.get(SLOW_LATENCY_THRESHOLD_CONFIG_KEY));
+    }
+    if (args.get(SLOW_NODE_TTL_CONFIG_KEY) != null) {
+      builder.withSlowNodeTtl(Long.parseLong(args.get(SLOW_NODE_TTL_CONFIG_KEY).toString()));
+      log.debug("With {} {}", SLOW_NODE_TTL_CONFIG_KEY, args.get(SLOW_NODE_TTL_CONFIG_KEY));
+    }
+
+    slowNodeDetector = builder.build();
     initialized = true;
   }
 

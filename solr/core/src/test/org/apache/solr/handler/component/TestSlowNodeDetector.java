@@ -178,7 +178,7 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
       }
     }
 
-    SlowNodeDetector detector = new SlowNodeDetector.Builder().withMinCorePerRequest(1024).build();
+    SlowNodeDetector detector = new SlowNodeDetector.Builder().withMinShardCountPerRequest(1024).build();
     detector.notifyRequestStats(stats);
     assertEquals(Collections.emptySet(), detector.getSlowNodes());
   }
