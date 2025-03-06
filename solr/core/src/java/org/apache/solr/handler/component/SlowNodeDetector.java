@@ -22,14 +22,22 @@ class SlowNodeDetector {
 
   private final double latencyDropRatioThreshold; //identify as a latency drop point when current latency is < 0.5 of previous
   private final int maxSlowResponsePercentage; //o//can only find up to this percentage of slow node. If more than this percentage of potential slow nodes detected, do not return any slow node at all
-  private final int minCorePerRequest; //minimum number of cores per Shard Request to be considered for slow node detection
-  private final int slowLatencyThreshold; //minimum latency to be considered as slow node
+  private final int minShardCountPerRequest; //minimum number of shards per Shard Request to be considered for slow node detection
+  private final int slowLatencyThreshold; //minimum latency in millisec to be considered as slow node
 
 
-  private SlowNodeDetector(double latencyDropRatioThreshold, int maxSlowResponsePercentage, int minCorePerRequest, int slowLatencyThreshold, long slowNodeTtl) {
+  /**
+   *
+   * @param latencyDropRatioThreshold
+   * @param maxSlowResponsePercentage
+   * @param minShardCountPerRequest
+   * @param slowLatencyThreshold
+   * @param slowNodeTtl in millisec
+   */
+  private SlowNodeDetector(double latencyDropRatioThreshold, int maxSlowResponsePercentage, int minShardCountPerRequest, int slowLatencyThreshold, long slowNodeTtl) {
     this.latencyDropRatioThreshold = latencyDropRatioThreshold;
     this.maxSlowResponsePercentage = maxSlowResponsePercentage;
-    this.minCorePerRequest = minCorePerRequest;
+    this.minShardCountPerRequest = minShardCountPerRequest;
     this.slowLatencyThreshold = slowLatencyThreshold;
 
     Caffeine<Object, Object> builder = Caffeine.newBuilder();
@@ -67,7 +75,7 @@ class SlowNodeDetector {
   }
 
   private Set<String> computeSlowNodes(RequestStats stats) {
-    if (stats.responseLatencies.size() < minCorePerRequest) {
+    if (stats.responseLatencies.size() < minShardCountPerRequest) {
       return null; //not enough responses to make a decision
     }
     int maxSlowResponseCount = stats.responseLatencies.size() * maxSlowResponsePercentage / 100;
@@ -124,7 +132,7 @@ class SlowNodeDetector {
   static class Builder {
     private double latencyDropRatioThreshold = DEFAULT_LATENCY_DROP_RATIO_THRESHOLD; //identify as a latency drop point when current latency is < 0.5 of previous
     private int maxSlowResponsePercentage = DEFAULT_MAX_SLOW_NODE_PERCENTAGE; //can only find up to this percentage of slow node. If more than this percentage of potential slow nodes detected, do not return any slow node at all
-    private int minCorePerRequest = DEFAULT_MIN_CORE_PER_REQUEST; //minimum number of cores per Shard Request to be considered for slow node detection
+    private int minShardCountPerRequest = DEFAULT_MIN_CORE_PER_REQUEST; //minimum number of cores per Shard Request to be considered for slow node detection
     private int slowLatencyThreshold = DEFAULT_SLOW_LATENCY_THRESHOLD; //minimum latency to be considered as slow node
     private long slowNodeTtl = DEFAULT_SLOW_NODE_TTL;
 
@@ -138,8 +146,8 @@ class SlowNodeDetector {
       return this;
     }
 
-    public Builder withMinCorePerRequest(int minCorePerRequest) {
-      this.minCorePerRequest = minCorePerRequest;
+    public Builder withMinShardCountPerRequest(int minShardCountPerRequest) {
+      this.minShardCountPerRequest = minShardCountPerRequest;
       return this;
     }
 
@@ -154,7 +162,7 @@ class SlowNodeDetector {
     }
 
     public SlowNodeDetector build() {
-      return new SlowNodeDetector(latencyDropRatioThreshold, maxSlowResponsePercentage, minCorePerRequest, slowLatencyThreshold, slowNodeTtl);
+      return new SlowNodeDetector(latencyDropRatioThreshold, maxSlowResponsePercentage, minShardCountPerRequest, slowLatencyThreshold, slowNodeTtl);
     }
 
   }
