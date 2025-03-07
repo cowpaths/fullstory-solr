@@ -749,38 +749,6 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       throws IOException {
     QueryLimits queryLimits = QueryLimits.getCurrentLimits();
 
-    String testSlowCollections = System.getenv("TEST_SLOW_COLLECTIONS");
-    boolean trigger = false;
-    if (testSlowCollections != null) {
-      trigger = "*".equals(testSlowCollections);
-      if (!trigger) {
-        trigger =
-                Arrays.stream(testSlowCollections.split(","))
-                        .anyMatch(s -> s.equals(core.getCoreDescriptor().getCollectionName()));
-      }
-    }
-
-    if (!trigger) {
-      trigger = System.getenv("TEST_SLOW_COLLECTION_PREFIX") != null && core.getCoreDescriptor().getCollectionName().startsWith(System.getenv("TEST_SLOW_COLLECTION_PREFIX"));
-    }
-
-    if (trigger) {
-      try {
-        int wait =
-            System.getenv("TEST_SLOW_WAIT") != null
-                ? Integer.parseInt(System.getenv("TEST_SLOW_WAIT"))
-                : 30000;
-        log.warn(
-            "!!!!!!!!TESTING WITH ARTIFICIAL {} MILLISEC PAUSE ON COLLECTION {}",
-            wait,
-            core.getCoreDescriptor().getCollectionName());
-        TimeUnit.MILLISECONDS.sleep(wait);
-      } catch (InterruptedException e) {
-        throw new RuntimeException(e);
-      }
-    }
-
-
     if (useExitableDirectoryReader || !queryLimits.isLimitsEnabled()) {
       // no timeout.  Pass through to super class
       super.search(leaves, weight, collector);

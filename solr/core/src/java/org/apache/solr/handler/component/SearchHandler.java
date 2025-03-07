@@ -36,6 +36,7 @@ import java.util.Set;
 import java.util.Spliterator;
 import java.util.Spliterators;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
@@ -487,6 +488,7 @@ public class SearchHandler extends RequestHandlerBase
       //  see: b06495c2798b96604b19346eaa8b2b17caed0a9b
       BloomStrField.init(req);
       try {
+        testWait(req.getCore()); //TODO only for testing
         // The semantics of debugging vs not debugging are different enough that
         // it makes sense to have two control loops
         if (!rb.isDebug()) {
@@ -687,6 +689,43 @@ public class SearchHandler extends RequestHandlerBase
       shardInfo.add(shardInfoName, nl);
       rsp.getValues().add(ShardParams.SHARDS_INFO, shardInfo);
     }
+  }
+
+  private static void testWait(SolrCore core) {
+    if (core == null) {
+      return;
+    }
+    String testSlowCollections = System.getenv("TEST_SLOW_COLLECTIONS");
+    boolean trigger = false;
+    if (testSlowCollections != null) {
+      trigger = "*".equals(testSlowCollections);
+      if (!trigger) {
+        trigger =
+                Arrays.stream(testSlowCollections.split(","))
+                        .anyMatch(s -> s.equals(core.getCoreDescriptor().getCollectionName()));
+      }
+    }
+
+    if (!trigger) {
+      trigger = System.getenv("TEST_SLOW_COLLECTION_PREFIX") != null && core.getCoreDescriptor().getCollectionName().startsWith(System.getenv("TEST_SLOW_COLLECTION_PREFIX"));
+    }
+
+    if (trigger) {
+      try {
+        int wait =
+                System.getenv("TEST_SLOW_WAIT") != null
+                        ? Integer.parseInt(System.getenv("TEST_SLOW_WAIT"))
+                        : 30000;
+        log.warn(
+                "!!!!!!!!TESTING WITH ARTIFICIAL {} MILLISEC PAUSE ON COLLECTION {}",
+                wait,
+                core.getCoreDescriptor().getCollectionName());
+        TimeUnit.MILLISECONDS.sleep(wait);
+      } catch (InterruptedException e) {
+        throw new RuntimeException(e);
+      }
+    }
+
   }
 
   // TODO(mg@fullstory): this non-tolerable exception stuff should be upstreamed
