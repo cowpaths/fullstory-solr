@@ -119,6 +119,7 @@ public class LBHttp2SolrClient extends LBSolrClient {
     return solrClient;
   }
 
+  @Override
   public SolrRequest.SolrClientContext getContext() {
     return solrClient.getContext();
   }
