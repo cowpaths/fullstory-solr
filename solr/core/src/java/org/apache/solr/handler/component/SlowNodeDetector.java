@@ -20,7 +20,7 @@ class SlowNodeDetector implements SolrMetricProducer {
   private static final int DEFAULT_MAX_SLOW_NODE_PERCENTAGE = 10;
   private static final int DEFAULT_MIN_CORE_PER_REQUEST = 512;
   private static final int DEFAULT_SLOW_LATENCY_THRESHOLD = 10000;
-  private static final int DEFAULT_SLOW_NODE_TTL = 60000;
+  private static final int DEFAULT_SLOW_NODE_TTL = 3600000;
 
   private final double latencyDropRatioThreshold;
   private final int maxSlowResponsePercentage;
