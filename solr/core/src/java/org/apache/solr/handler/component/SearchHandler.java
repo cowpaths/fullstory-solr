@@ -552,7 +552,7 @@ public class SearchHandler extends RequestHandlerBase
 
       final Map<String, String> headers;
       if (DATA_NODE_ALLOW_RATE_LIMIT_ALWAYS
-          || req.getParams().getBool(ShardParams.SHARDS_TOLERANT, false)) {
+          || ShardParams.getShardsTolerantAsBool(req.getParams())) {
         // NOTE: if `shards.tolerant=false`, we may _not_ want to set the `Solr-Request-Type`
         // header, because we could end up doing a lot of extra work at the cluster level,
         // retrying requests that may only have failed to obtain a ratelimit permit on a
