@@ -287,7 +287,7 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
   private static TestFixture buildTestFixture(String configFile, Map<String, Long> latenciesByUrl, Set<String> exceptionUrl, long defaultLatency) {
     final Path home = SolrTestCaseJ4.TEST_PATH();
     CoreContainer cc = CoreContainer.createAndLoad(home, home.resolve(configFile));
-    org.apache.solr.handler.component.TimeLimitedHttpShardHandlerFactory factory = (TimeLimitedHttpShardHandlerFactory) cc.getShardHandlerFactory();
+    TimeLimitingHttpShardHandlerFactory factory = (TimeLimitingHttpShardHandlerFactory) cc.getShardHandlerFactory();
     SlowNodeDetector slowNodeDetector = new SlowNodeDetector.Builder().withSlowNodeTtl(-1).withSlowLatencyThreshold(1000).build();
     factory.setSlowNodeDetector(slowNodeDetector);
     Http2SolrClient client = new Http2SolrClient.Builder().build();
@@ -332,12 +332,12 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
 
 class TestFixture implements Closeable {
   CoreContainer cc;
-  TimeLimitedHttpShardHandlerFactory factory;
+  TimeLimitingHttpShardHandlerFactory factory;
   Http2SolrClient client;
   ExecutorService executorService;
   SlowNodeDetector slowNodeDetector;
 
-  TestFixture(CoreContainer cc, TimeLimitedHttpShardHandlerFactory factory, Http2SolrClient client, ExecutorService executorService, SlowNodeDetector slowNodeDetector) {
+  TestFixture(CoreContainer cc, TimeLimitingHttpShardHandlerFactory factory, Http2SolrClient client, ExecutorService executorService, SlowNodeDetector slowNodeDetector) {
     this.cc = cc;
     this.factory = factory;
     this.client = client;

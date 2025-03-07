@@ -27,7 +27,7 @@ import org.slf4j.LoggerFactory;
 
 import java.lang.invoke.MethodHandles;
 
-public class TimeLimitedHttpShardHandlerFactory extends HttpShardHandlerFactory {
+public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private long slowNodeTimeout;
   private boolean dryRun;
@@ -53,9 +53,9 @@ public class TimeLimitedHttpShardHandlerFactory extends HttpShardHandlerFactory 
   @Override
   public ShardHandler getShardHandler() {
     if (!initialized) {
-      throw new RuntimeException(TimeLimitedHttpShardHandlerFactory.class.getSimpleName() + " is not initialized, run init() first or check if there are any exceptions during init()");
+      throw new RuntimeException(TimeLimitingHttpShardHandlerFactory.class.getSimpleName() + " is not initialized, run init() first or check if there are any exceptions during init()");
     }
-    return new TimeLimitedHttpShardHandler(this, slowNodeTimeout, dryRun, slowNodeDetector, (timedOutTasks) -> cancelledSlowNodeRequests.inc(timedOutTasks.size()));
+    return new TimeLimitingHttpShardHandler(this, slowNodeTimeout, dryRun, slowNodeDetector, (timedOutTasks) -> cancelledSlowNodeRequests.inc(timedOutTasks.size()));
   }
 
   /**
@@ -79,11 +79,11 @@ public class TimeLimitedHttpShardHandlerFactory extends HttpShardHandlerFactory 
 
     Object slowNodeTimeoutObj = args.get(TIMEOUT_CONFIG_KEY);
     if (slowNodeTimeoutObj == null) {
-      throw new IllegalArgumentException("Missing required parameter: " + TIMEOUT_CONFIG_KEY + " for " + TimeLimitedHttpShardHandlerFactory.class.getSimpleName() + " in solr config");
+      throw new IllegalArgumentException("Missing required parameter: " + TIMEOUT_CONFIG_KEY + " for " + TimeLimitingHttpShardHandlerFactory.class.getSimpleName() + " in solr config");
     }
     slowNodeTimeout = Long.parseLong(slowNodeTimeoutObj.toString());
 
-    log.debug("Initialing {} with {} {}, {} {}", TimeLimitedHttpShardHandlerFactory.class.getSimpleName(), DRY_RUN_CONFIG_KEY, dryRun, TIMEOUT_CONFIG_KEY, slowNodeTimeoutObj);
+    log.debug("Initialing {} with {} {}, {} {}", TimeLimitingHttpShardHandlerFactory.class.getSimpleName(), DRY_RUN_CONFIG_KEY, dryRun, TIMEOUT_CONFIG_KEY, slowNodeTimeoutObj);
 
     //Detector params and build detector here
     SlowNodeDetector.Builder builder = new SlowNodeDetector.Builder();

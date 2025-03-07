@@ -23,7 +23,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
-class TimeLimitedHttpShardHandler extends HttpShardHandler {
+class TimeLimitingHttpShardHandler extends HttpShardHandler {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private final long slowNodeTimeout;
   private final boolean dryRun;
@@ -32,7 +32,7 @@ class TimeLimitedHttpShardHandler extends HttpShardHandler {
   private final SlowNodeDetector slowNodeDetector;
   private final TimeoutCallback timeoutCallback;
 
-  TimeLimitedHttpShardHandler(HttpShardHandlerFactory shardHandlerFactory, long slowNodeTimeout, boolean dryRun, SlowNodeDetector slowNodeDetector, TimeoutCallback timeoutCallback) {
+  TimeLimitingHttpShardHandler(HttpShardHandlerFactory shardHandlerFactory, long slowNodeTimeout, boolean dryRun, SlowNodeDetector slowNodeDetector, TimeoutCallback timeoutCallback) {
     super(shardHandlerFactory);
     this.slowNodeTimeout = slowNodeTimeout;
     this.dryRun = dryRun;
