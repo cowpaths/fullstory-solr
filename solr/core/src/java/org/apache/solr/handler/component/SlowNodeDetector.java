@@ -1,6 +1,8 @@
 package org.apache.solr.handler.component;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
+import org.apache.solr.metrics.SolrMetricProducer;
+import org.apache.solr.metrics.SolrMetricsContext;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -12,7 +14,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-class SlowNodeDetector {
+class SlowNodeDetector implements SolrMetricProducer {
   private final ConcurrentMap<String, Object> slowNodes;
   private static final double DEFAULT_LATENCY_DROP_RATIO_THRESHOLD = 0.5;
   private static final int DEFAULT_MAX_SLOW_NODE_PERCENTAGE = 10;
@@ -20,19 +22,19 @@ class SlowNodeDetector {
   private static final int DEFAULT_SLOW_LATENCY_THRESHOLD = 10000;
   private static final int DEFAULT_SLOW_NODE_TTL = 60000;
 
-  private final double latencyDropRatioThreshold; //identify as a latency drop point when current latency is < 0.5 of previous
-  private final int maxSlowResponsePercentage; //o//can only find up to this percentage of slow node. If more than this percentage of potential slow nodes detected, do not return any slow node at all
-  private final int minShardCountPerRequest; //minimum number of shards per Shard Request to be considered for slow node detection
-  private final int slowLatencyThreshold; //minimum latency in millisec to be considered as slow node
+  private final double latencyDropRatioThreshold;
+  private final int maxSlowResponsePercentage;
+  private final int minShardCountPerRequest;
+  private final int slowLatencyThreshold;
 
 
   /**
    *
-   * @param latencyDropRatioThreshold
-   * @param maxSlowResponsePercentage
-   * @param minShardCountPerRequest
-   * @param slowLatencyThreshold
-   * @param slowNodeTtl in millisec
+   * @param latencyDropRatioThreshold identify as a latency drop point when current latency is < 0.5 of previous
+   * @param maxSlowResponsePercentage If more than this percentage of potential slow nodes detected, do not return any slow node at all
+   * @param minShardCountPerRequest minimum number of shards per Shard Request to be considered for slow node detection
+   * @param slowLatencyThreshold minimum latency in millisec to be considered as slow node
+   * @param slowNodeTtl slow node list entry expire on write(detection) in millisec
    */
   private SlowNodeDetector(double latencyDropRatioThreshold, int maxSlowResponsePercentage, int minShardCountPerRequest, int slowLatencyThreshold, long slowNodeTtl) {
     this.latencyDropRatioThreshold = latencyDropRatioThreshold;
@@ -127,6 +129,17 @@ class SlowNodeDetector {
     }
 
     return slowNodes;
+  }
+
+  @Override
+  public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
+    parentContext.gauge(slowNodes::keySet, true, "slowNodes", scope);
+    parentContext.gauge(slowNodes::size, true, "slowNodeCount", scope);
+  }
+
+  @Override
+  public SolrMetricsContext getSolrMetricsContext() { // using the same context as parent
+    return null;
   }
 
   static class Builder {

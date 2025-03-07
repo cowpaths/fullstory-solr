@@ -24,16 +24,16 @@ import java.util.stream.Collectors;
 
 class TimeLimitedHttpShardHandler extends HttpShardHandler {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-  private final long minWait;
+  private final long slowNodeTimeout;
   private final boolean dryRun;
 
   private final ConcurrentMap<ShardRequest, ShardRequestActor> actors = new MapMaker().weakKeys().makeMap();
   private final SlowNodeDetector slowNodeDetector;
   private final TimeoutCallback timeoutCallback;
 
-  TimeLimitedHttpShardHandler(HttpShardHandlerFactory shardHandlerFactory, long minWait, boolean dryRun, SlowNodeDetector slowNodeDetector, TimeoutCallback timeoutCallback) {
+  TimeLimitedHttpShardHandler(HttpShardHandlerFactory shardHandlerFactory, long slowNodeTimeout, boolean dryRun, SlowNodeDetector slowNodeDetector, TimeoutCallback timeoutCallback) {
     super(shardHandlerFactory);
-    this.minWait = minWait;
+    this.slowNodeTimeout = slowNodeTimeout;
     this.dryRun = dryRun;
     this.slowNodeDetector = slowNodeDetector;
     this.timeoutCallback = timeoutCallback;
@@ -42,7 +42,7 @@ class TimeLimitedHttpShardHandler extends HttpShardHandler {
   @Override
   protected ShardRequestCallback onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, List<String> shardUrls, ModifiableSolrParams params) {
     ShardRequestTrackingCallback callback = new ShardRequestTrackingCallback(future, shardRequest, shardUrls);
-    actors.computeIfAbsent(shardRequest, k -> new SlowNodeShardRequestActor(minWait, dryRun, slowNodeDetector, timeoutCallback)).onRequestSubmitted(shardUrls, future);
+    actors.computeIfAbsent(shardRequest, k -> new SlowNodeShardRequestActor(slowNodeTimeout, dryRun, slowNodeDetector, timeoutCallback)).onRequestSubmitted(shardUrls, future);
     return callback;
   }
 
