@@ -91,7 +91,7 @@ class SlowNodeDetector implements SolrMetricProducer {
     }
 
     Collections.sort(stats.responseLatencies);
-
+    log.info("Slowest latest from {} all {}", stats.responseLatencies.get(0).node, stats.responseLatencies);
     if (stats.responseLatencies.get(0).latency < slowLatencyThreshold) {
       return null; // fastest response is not slow enough to consider any node as slow
     }
@@ -251,6 +251,11 @@ class RequestStats {
         return timeComparison;
       }
       return this.node.compareTo(other.node);
+    }
+
+    @Override
+    public String toString() {
+      return "NodeLatency{" + "node='" + node + '\'' + ", latency=" + latency + '}';
     }
   }
 
