@@ -117,6 +117,16 @@ public class TimeLimitedHttpShardHandlerFactory extends HttpShardHandlerFactory 
     super.initializeMetrics(parentContext, scope);
     solrMetricsContext = parentContext.getChildContext(this);
     String expandedScope = SolrMetricManager.mkName(scope, SolrInfoBean.Category.QUERY.name());
-    cancelledSlowNodeRequests = solrMetricsContext.counter("cancelledSlowNodeRequests", expandedScope);
+    cancelledSlowNodeRequests =
+        solrMetricsContext.counter("cancelledSlowNodeRequests", expandedScope);
+
+    if (slowNodeDetector != null) {
+      slowNodeDetector.initializeMetrics(solrMetricsContext, expandedScope);
+    }
+  }
+
+  @Override
+  public SolrMetricsContext getSolrMetricsContext() {
+    return solrMetricsContext;
   }
 }
