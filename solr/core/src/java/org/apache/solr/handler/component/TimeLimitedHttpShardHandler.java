@@ -3,6 +3,7 @@ package org.apache.solr.handler.component;
 import com.google.common.collect.MapMaker;
 import org.apache.solr.client.solrj.impl.LBSolrClient;
 import org.apache.solr.common.params.ModifiableSolrParams;
+import org.apache.solr.common.params.ShardParams;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.SolrNamedThreadFactory;
 import org.slf4j.Logger;
@@ -11,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import java.lang.invoke.MethodHandles;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -20,14 +22,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
 
 class TimeLimitedHttpShardHandler extends HttpShardHandler {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private final long slowNodeTimeout;
   private final boolean dryRun;
 
-  private final ConcurrentMap<ShardRequest, ShardRequestActor> actors = new MapMaker().weakKeys().makeMap();
+  private final ConcurrentMap<ShardRequest, List<ShardRequestActor>> actorsByShardRequest = new MapMaker().weakKeys().makeMap();
   private final SlowNodeDetector slowNodeDetector;
   private final TimeoutCallback timeoutCallback;
 
@@ -42,7 +43,15 @@ class TimeLimitedHttpShardHandler extends HttpShardHandler {
   @Override
   protected ShardRequestCallback onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, List<String> shardUrls, ModifiableSolrParams params) {
     ShardRequestTrackingCallback callback = new ShardRequestTrackingCallback(future, shardRequest, shardUrls);
-    actors.computeIfAbsent(shardRequest, k -> new SlowNodeShardRequestActor(slowNodeTimeout, dryRun, slowNodeDetector, timeoutCallback)).onRequestSubmitted(shardUrls, future);
+    List<ShardRequestActor> shardRequestActors = actorsByShardRequest.computeIfAbsent(shardRequest, k -> {
+      List<ShardRequestActor> actors = new ArrayList<>();
+      actors.add(new NodeStatsCollector(slowNodeDetector));
+      if ("true".equalsIgnoreCase(shardRequest.params.get(ShardParams.SHARDS_TOLERANT))) {
+        actors.add(new SlowNodeTimeoutActor(slowNodeTimeout, dryRun, slowNodeDetector.getSlowNodes(), timeoutCallback));
+      }
+      return actors;
+    });
+    shardRequestActors.forEach(actor -> actor.onRequestSubmitted(shardUrls, future));
     return callback;
   }
 
@@ -75,13 +84,14 @@ class TimeLimitedHttpShardHandler extends HttpShardHandler {
 
     private void onComplete(long elapsedTime, String selectedShardUrl) {
       try {
-        actors.compute(shardRequest, (k, v) -> {
-          if (v != null) {
-            if (v.onRequestCompleted(selectedShardUrl, shardUrls, future, elapsedTime)) { //if canceller/tracker is done with all pending future/shards with this shard request
+        actorsByShardRequest.compute(shardRequest, (k, actors) -> {
+          if (actors != null) {
+            actors.removeIf(actor -> actor.onRequestCompleted(selectedShardUrl, shardUrls, future, elapsedTime));
+            if (actors.isEmpty()) {
               return null;
             }
           }
-          return v;
+          return actors;
         });
       } catch (Exception e) {
         log.warn("Failed to notify stats to slowNodeDetector", e);
@@ -98,18 +108,58 @@ interface ShardRequestActor {
   boolean onRequestCompleted(String selectedShardUrl, List<String> shardUrls, Future<?> future, long timeElapsed);
 }
 
+class Util {
+  static String getNode(String urlString) {
+    try {
+      URL url = new URL(urlString);
+      return url.getAuthority();
+    } catch (MalformedURLException e) {
+      throw new IllegalArgumentException("Invalid URL: " + urlString, e);
+    }
+  }
+}
 
 /**
  * Tied to a single ShardRequest instance, which can be retried/submitted to many shard urls.
  * <p>
- * This actor keeps a list of pending future for all in-flight request submissions, and perform:
- * <ol>
- *   <li> When all the remaining pending futures are from the slowNodes list, start a timer task to timeout/cancel all of
- * them according to the timeout value (only prints a message if dryRun is true)
- *   <li> Keep track of the latency stats of all the response and report it to the SlowNodeDetector when all the pending futures complete
- * </ol>
+ * This actor keeps the stats for each shard response latency and notify the SlowNodeDetector when all of them complete
  */
-class SlowNodeShardRequestActor implements ShardRequestActor {
+class NodeStatsCollector implements ShardRequestActor {
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  private final SlowNodeDetector detector;
+  private final AtomicInteger pendingCount = new AtomicInteger(0);
+  final RequestStats stats = new RequestStats();
+
+  NodeStatsCollector(SlowNodeDetector detector) {
+    this.detector = detector;
+  }
+
+  @Override
+  public void onRequestSubmitted(List<String> shardUrls, Future<?> future) {
+    pendingCount.incrementAndGet();
+  }
+
+
+  public synchronized boolean onRequestCompleted(String selectedShardUrl, List<String> shardUrls, Future<?> future, long timeElapsed) {
+    if (selectedShardUrl != null) { //might be null if exception occurred
+      stats.recordLatency(Util.getNode(selectedShardUrl), timeElapsed);
+    }
+    if (pendingCount.decrementAndGet() == 0) {
+      detector.notifyRequestStats(stats); //notify the slowNodeDetector of the execution stats of all the submissions by this shard request
+      return true;
+    }
+    return false;
+  }
+}
+
+/**
+ * Tied to a single ShardRequest instance, which can be retried/submitted to many shard urls.
+ * <p>
+ * This actor keeps a list of pending future for all in-flight request submissions. When all the remaining pending
+ * futures are from the slowNodes list, start a timer task to timeout/cancel all of them according to the timeout value
+ * (only prints a message if dryRun is true)
+ */
+class SlowNodeTimeoutActor implements ShardRequestActor {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private final boolean dryRun;
   private final long timeout;
@@ -117,16 +167,12 @@ class SlowNodeShardRequestActor implements ShardRequestActor {
   private final Set<String> slowNodes;
   private final AtomicInteger pendingFutureCountFromFastNode = new AtomicInteger(0);
   private final TimeoutCallback timeoutCallback;
-  private final SlowNodeDetector detector;
-
   private volatile Future<?> timeoutTask = null;
-  final RequestStats stats = new RequestStats();
 
-  SlowNodeShardRequestActor(long timeout, boolean dryRun, SlowNodeDetector detector, TimeoutCallback timeoutCallback) {
+  SlowNodeTimeoutActor(long timeout, boolean dryRun, Set<String> slowNodes, TimeoutCallback timeoutCallback) {
     this.timeout = timeout;
     this.dryRun = dryRun;
-    this.slowNodes = detector.getSlowNodes(); //get a snapshot here for simplicity
-    this.detector = detector;
+    this.slowNodes = slowNodes;
     this.timeoutCallback = timeoutCallback;
   }
 
@@ -144,7 +190,7 @@ class SlowNodeShardRequestActor implements ShardRequestActor {
 
   private boolean hasSlowNodeShardUrl(List<String> shardUrls) {
     for (String shardUrl : shardUrls) {
-      if (slowNodes.contains(getNode(shardUrl))) {
+      if (slowNodes.contains(Util.getNode(shardUrl))) {
         return true;
       }
     }
@@ -152,15 +198,11 @@ class SlowNodeShardRequestActor implements ShardRequestActor {
   }
 
   public synchronized boolean onRequestCompleted(String selectedShardUrl, List<String> shardUrls, Future<?> future, long timeElapsed) {
-    if (selectedShardUrl != null) { //might be null if exception occurred
-      stats.recordLatency(getNode(selectedShardUrl), timeElapsed);
-    }
     pendingFutures.remove(future);
     if (pendingFutures.isEmpty()) { //every submitted futures are processed
       if (timeoutTask != null) {
         timeoutTask.cancel(true);
       }
-      detector.notifyRequestStats(stats); //notify the slowNodeDetector of the execution stats of all the submissions by this shard request
       return true;
     }
 
@@ -202,15 +244,6 @@ class SlowNodeShardRequestActor implements ShardRequestActor {
     }
 
     return false;
-  }
-
-  static String getNode(String urlString) {
-    try {
-      URL url = new URL(urlString);
-      return url.getAuthority();
-    } catch (MalformedURLException e) {
-      throw new IllegalArgumentException("Invalid URL: " + urlString, e);
-    }
   }
 }
 
