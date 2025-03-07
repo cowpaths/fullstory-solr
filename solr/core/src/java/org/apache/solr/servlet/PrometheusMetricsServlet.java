@@ -78,6 +78,7 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         new OsMetricsApiCaller(),
         new ThreadMetricsApiCaller(),
         new StatusCodeMetricsApiCaller(),
+        new NodeMetricsApiCaller(),
         new AggregateMetricsApiCaller(),
         new CoresMetricsApiCaller());
   }
@@ -570,6 +571,48 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
                   parent,
                   "org.eclipse.jetty.server.handler.DefaultHandler.5xx-responses",
                   property)));
+    }
+  }
+
+  static class NodeMetricsApiCaller extends MetricsByPrefixApiCaller {
+
+    NodeMetricsApiCaller() {
+      super("solr.node", "QUERY.httpShardHandler", "cancelledSlowNodeRequests", "slowNodeCount");
+    }
+
+    /*
+    "metrics":{
+      "solr.node":{
+        "QUERY.httpShardHandler.cancelledSlowNodeRequests":87,
+        ...
+        "QUERY.httpShardHandler.slowNodeCount":0,
+       */
+    @Override
+    protected void handle(ResultContext resultContext, JsonNode metrics) throws IOException {
+      List<PrometheusMetric> results = resultContext.resultMetrics;
+      JsonNode parent = metrics.path("solr.node");
+      Number value;
+
+      value = getNumber(parent,"QUERY.httpShardHandler.slowNodeCount");
+      if (!value.equals(INVALID_NUMBER)) {
+        results.add(
+                new PrometheusMetric(
+                        "slow_node_count",
+                        PrometheusMetricType.GAUGE,
+                        "current number of slow nodes detected",
+                        value
+                        ));
+      }
+      value = getNumber(parent,"QUERY.httpShardHandler.cancelledSlowNodeRequests");
+      if (!value.equals(INVALID_NUMBER)) {
+        results.add(
+                new PrometheusMetric(
+                        "cancelled_slow_node_requests",
+                        PrometheusMetricType.COUNTER,
+                        "accumulative count of requests to shard cancelled due to slow node",
+                        value
+                        ));
+      }
     }
   }
 
