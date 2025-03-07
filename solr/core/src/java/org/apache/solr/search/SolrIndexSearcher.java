@@ -756,6 +756,9 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         trigger =
             Arrays.stream(testSlowCollections.split(","))
                 .anyMatch(s -> s.equals(core.getCoreDescriptor().getCollectionName()));
+        if (!trigger) {
+          trigger = System.getenv("TEST_SLOW_COLLECTION_PREFIX") != null && core.getCoreDescriptor().getCollectionName().startsWith(System.getenv("TEST_SLOW_COLLECTION_PREFIX"));
+        }
       }
       if (trigger) {
         try {
