@@ -1,9 +1,6 @@
 package org.apache.solr.handler.component;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
-import org.apache.solr.metrics.SolrMetricProducer;
-import org.apache.solr.metrics.SolrMetricsContext;
-
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -13,6 +10,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import org.apache.solr.metrics.SolrMetricProducer;
+import org.apache.solr.metrics.SolrMetricsContext;
 
 class SlowNodeDetector implements SolrMetricProducer {
   private final ConcurrentMap<String, Object> slowNodes;
@@ -27,16 +26,22 @@ class SlowNodeDetector implements SolrMetricProducer {
   private final int minShardCountPerRequest;
   private final int slowLatencyThreshold;
 
-
   /**
-   *
-   * @param latencyDropRatioThreshold identify as a latency drop point when current latency is < 0.5 of previous
-   * @param maxSlowResponsePercentage If more than this percentage of potential slow nodes detected, do not return any slow node at all
-   * @param minShardCountPerRequest minimum number of shards per Shard Request to be considered for slow node detection
+   * @param latencyDropRatioThreshold identify as a latency drop point when current latency is < 0.5
+   *     of previous
+   * @param maxSlowResponsePercentage If more than this percentage of potential slow nodes detected,
+   *     do not return any slow node at all
+   * @param minShardCountPerRequest minimum number of shards per Shard Request to be considered for
+   *     slow node detection
    * @param slowLatencyThreshold minimum latency in millisec to be considered as slow node
    * @param slowNodeTtl slow node list entry expire on write(detection) in millisec
    */
-  private SlowNodeDetector(double latencyDropRatioThreshold, int maxSlowResponsePercentage, int minShardCountPerRequest, int slowLatencyThreshold, long slowNodeTtl) {
+  private SlowNodeDetector(
+      double latencyDropRatioThreshold,
+      int maxSlowResponsePercentage,
+      int minShardCountPerRequest,
+      int slowLatencyThreshold,
+      long slowNodeTtl) {
     this.latencyDropRatioThreshold = latencyDropRatioThreshold;
     this.maxSlowResponsePercentage = maxSlowResponsePercentage;
     this.minShardCountPerRequest = minShardCountPerRequest;
@@ -54,17 +59,13 @@ class SlowNodeDetector implements SolrMetricProducer {
     return new HashSet<>(slowNodes.keySet());
   }
 
-  /**
-   * For test only
-   */
+  /** For test only */
   void setSlowNodes(Set<String> slowNodes) {
     this.slowNodes.clear();
     for (String slowNode : slowNodes) {
       this.slowNodes.put(slowNode, Boolean.TRUE);
     }
   }
-
-
 
   void notifyRequestStats(RequestStats stats) {
     Set<String> newSlowNodes = computeSlowNodes(stats);
@@ -78,17 +79,17 @@ class SlowNodeDetector implements SolrMetricProducer {
 
   private Set<String> computeSlowNodes(RequestStats stats) {
     if (stats.responseLatencies.size() < minShardCountPerRequest) {
-      return null; //not enough responses to make a decision
+      return null; // not enough responses to make a decision
     }
     int maxSlowResponseCount = stats.responseLatencies.size() * maxSlowResponsePercentage / 100;
     if (maxSlowResponseCount < 1) {
-      return null; //not enough responses to make a decision
+      return null; // not enough responses to make a decision
     }
 
     Collections.sort(stats.responseLatencies);
 
     if (stats.responseLatencies.get(0).latency < slowLatencyThreshold) {
-      return null; //fastest response is not slow enough to consider any node as slow
+      return null; // fastest response is not slow enough to consider any node as slow
     }
 
     Long previousLatency = null;
@@ -97,16 +98,20 @@ class SlowNodeDetector implements SolrMetricProducer {
 
     int index = 0;
     for (RequestStats.NodeLatency current : stats.responseLatencies) {
-      if (index++ > maxSlowResponseCount) { //too many potential slow responses, not a good data as we assume they are minority
+      if (index++
+          > maxSlowResponseCount) { // too many potential slow responses, not a good data as we
+        // assume they are minority
         break;
       }
-      if (previousLatency != null && (double) current.latency / previousLatency < latencyDropRatioThreshold) {
-        //found the drop in latencies, all the iterated nodes are potentially slow
+      if (previousLatency != null
+          && (double) current.latency / previousLatency < latencyDropRatioThreshold) {
+        // found the drop in latencies, all the iterated nodes are potentially slow
         foundLatencyDrop = true;
         break;
       }
 
-      //no latency drop point found so far and the rest latencies would not be significant enough to form a drop
+      // no latency drop point found so far and the rest latencies would not be significant enough
+      // to form a drop
       if (current.latency < slowLatencyThreshold) {
         break;
       }
@@ -115,14 +120,17 @@ class SlowNodeDetector implements SolrMetricProducer {
       iteratedResponseCountByNode.compute(current.node, (k, v) -> v == null ? 1 : v + 1);
     }
 
-
     Set<String> slowNodes = new HashSet<>();
-    if (foundLatencyDrop) { //then that means there are some nodes that are significantly slower than others
-      for (Map.Entry<String, Integer> nodeWithSlowResponseCount : iteratedResponseCountByNode.entrySet()) {
+    if (foundLatencyDrop) { // then that means there are some nodes that are significantly slower
+      // than others
+      for (Map.Entry<String, Integer> nodeWithSlowResponseCount :
+          iteratedResponseCountByNode.entrySet()) {
         String potentialSlowNode = nodeWithSlowResponseCount.getKey();
 
-        //all responses of this node is slow, it is a slow node
-        if (nodeWithSlowResponseCount.getValue().equals(stats.responseCountByNode.get(potentialSlowNode))) {
+        // all responses of this node is slow, it is a slow node
+        if (nodeWithSlowResponseCount
+            .getValue()
+            .equals(stats.responseCountByNode.get(potentialSlowNode))) {
           slowNodes.add(potentialSlowNode);
         }
       }
@@ -143,10 +151,18 @@ class SlowNodeDetector implements SolrMetricProducer {
   }
 
   static class Builder {
-    private double latencyDropRatioThreshold = DEFAULT_LATENCY_DROP_RATIO_THRESHOLD; //identify as a latency drop point when current latency is < 0.5 of previous
-    private int maxSlowResponsePercentage = DEFAULT_MAX_SLOW_NODE_PERCENTAGE; //can only find up to this percentage of slow node. If more than this percentage of potential slow nodes detected, do not return any slow node at all
-    private int minShardCountPerRequest = DEFAULT_MIN_CORE_PER_REQUEST; //minimum number of cores per Shard Request to be considered for slow node detection
-    private int slowLatencyThreshold = DEFAULT_SLOW_LATENCY_THRESHOLD; //minimum latency to be considered as slow node
+    private double latencyDropRatioThreshold =
+        DEFAULT_LATENCY_DROP_RATIO_THRESHOLD; // identify as a latency drop point when current
+    // latency is < 0.5 of previous
+    private int maxSlowResponsePercentage =
+        DEFAULT_MAX_SLOW_NODE_PERCENTAGE; // can only find up to this percentage of slow node. If
+    // more than this percentage of potential slow nodes
+    // detected, do not return any slow node at all
+    private int minShardCountPerRequest =
+        DEFAULT_MIN_CORE_PER_REQUEST; // minimum number of cores per Shard Request to be considered
+    // for slow node detection
+    private int slowLatencyThreshold =
+        DEFAULT_SLOW_LATENCY_THRESHOLD; // minimum latency to be considered as slow node
     private long slowNodeTtl = DEFAULT_SLOW_NODE_TTL;
 
     public Builder withLatencyDropRatioThreshold(double latencyDropRatioThreshold) {
@@ -175,21 +191,23 @@ class SlowNodeDetector implements SolrMetricProducer {
     }
 
     public SlowNodeDetector build() {
-      return new SlowNodeDetector(latencyDropRatioThreshold, maxSlowResponsePercentage, minShardCountPerRequest, slowLatencyThreshold, slowNodeTtl);
+      return new SlowNodeDetector(
+          latencyDropRatioThreshold,
+          maxSlowResponsePercentage,
+          minShardCountPerRequest,
+          slowLatencyThreshold,
+          slowNodeTtl);
     }
-
   }
 }
-
 
 class RequestStats {
   final List<NodeLatency> responseLatencies = new ArrayList<>();
   final Map<String, Integer> responseCountByNode = new ConcurrentHashMap<>();
 
-  RequestStats() {
-  }
+  RequestStats() {}
 
-  static class NodeLatency implements Comparable<NodeLatency>{
+  static class NodeLatency implements Comparable<NodeLatency> {
     final String node;
     final long latency;
 
@@ -197,7 +215,6 @@ class RequestStats {
       this.node = node;
       this.latency = latency;
     }
-
 
     @Override
     public int compareTo(NodeLatency other) {

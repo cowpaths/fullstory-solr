@@ -16,14 +16,13 @@
  */
 package org.apache.solr.handler.component;
 
+import java.lang.invoke.MethodHandles;
+import java.util.Collections;
+import java.util.Set;
 import org.apache.solr.SolrTestCaseJ4;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.lang.invoke.MethodHandles;
-import java.util.Collections;
-import java.util.Set;
 
 /** Tests specifying a custom ShardHandlerFactory */
 public class TestSlowNodeDetector extends SolrTestCaseJ4 {
@@ -34,7 +33,7 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
     RequestStats stats = new RequestStats();
     final int SHARD_COUNT = 512;
 
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
       String node = "solr-" + serverIndex + ":8983";
       stats.recordLatency(node, 200);
@@ -50,11 +49,11 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
     RequestStats stats = new RequestStats();
     final int SHARD_COUNT = 512;
 
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
       String node = "solr-" + serverIndex + ":8983";
 
-      if (serverIndex == 1) { //1 slow nodes
+      if (serverIndex == 1) { // 1 slow nodes
         stats.recordLatency(node, 10000);
       } else {
         stats.recordLatency(node, 2000);
@@ -65,16 +64,17 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
     detector.notifyRequestStats(stats);
     assertEquals(Set.of("solr-1:8983"), detector.getSlowNodes());
   }
+
   @Test
   public void testDetection2SlowNodes() {
     RequestStats stats = new RequestStats();
     final int SHARD_COUNT = 512;
 
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
       String node = "solr-" + serverIndex + ":8983";
 
-      if (serverIndex == 10 || serverIndex == 15) { //2 slow nodes
+      if (serverIndex == 10 || serverIndex == 15) { // 2 slow nodes
         stats.recordLatency(node, 10000);
       } else {
         stats.recordLatency(node, 2000);
@@ -86,19 +86,17 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
     assertEquals(Set.of("solr-10:8983", "solr-15:8983"), detector.getSlowNodes());
   }
 
-  /**
-   * Most nodes are slow except 1. No slow node detected
-   */
+  /** Most nodes are slow except 1. No slow node detected */
   @Test
-  public void testDetection1FastNode()  {
+  public void testDetection1FastNode() {
     RequestStats stats = new RequestStats();
     final int SHARD_COUNT = 512;
 
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
       String node = "solr-" + serverIndex + ":8983";
 
-      if (serverIndex == 10 || serverIndex == 15) { //1 fast node
+      if (serverIndex == 10 || serverIndex == 15) { // 1 fast node
         stats.recordLatency(node, 2000);
       } else {
         stats.recordLatency(node, 10000);
@@ -110,15 +108,13 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
     assertEquals(Collections.emptySet(), detector.getSlowNodes());
   }
 
-  /**
-   * 1 slow node at 10s. But still less than 15s limit. Therefore, no slow node detected
-   */
+  /** 1 slow node at 10s. But still less than 15s limit. Therefore, no slow node detected */
   @Test
   public void testDetectionNoSlowNodeWithLatencyThreshold() {
     RequestStats stats = new RequestStats();
     final int SHARD_COUNT = 512;
 
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
       String node = "solr-" + serverIndex + ":8983";
 
@@ -129,45 +125,50 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
       }
     }
 
-    SlowNodeDetector detector = new SlowNodeDetector.Builder().withSlowLatencyThreshold(15000).build();
+    SlowNodeDetector detector =
+        new SlowNodeDetector.Builder().withSlowLatencyThreshold(15000).build();
     detector.notifyRequestStats(stats);
     assertEquals(Collections.emptySet(), detector.getSlowNodes());
   }
 
   /**
-   * 1 slow node at 10s. But dropping from 10 to 2 sec is 0.2, which is greater than 0.1 drop latency ratio limit. Therefore, no slow node detected
+   * 1 slow node at 10s. But dropping from 10 to 2 sec is 0.2, which is greater than 0.1 drop
+   * latency ratio limit. Therefore, no slow node detected
    */
   @Test
   public void testDetectionNoSlowNodeWithRatio() {
     RequestStats stats = new RequestStats();
     final int SHARD_COUNT = 512;
 
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
       String node = "solr-" + serverIndex + ":8983";
 
-      if (serverIndex == 1) { //1 slow node. But dropping from 10 -> 2 sec is 0.2, which is > 0.1 drop latency ratio limit
+      if (serverIndex
+          == 1) { // 1 slow node. But dropping from 10 -> 2 sec is 0.2, which is > 0.1 drop latency
+        // ratio limit
         stats.recordLatency(node, 10000);
       } else {
         stats.recordLatency(node, 2000);
       }
     }
 
-    SlowNodeDetector detector = new SlowNodeDetector.Builder().withLatencyDropRatioThreshold(0.1).build();
+    SlowNodeDetector detector =
+        new SlowNodeDetector.Builder().withLatencyDropRatioThreshold(0.1).build();
     detector.notifyRequestStats(stats);
     assertEquals(Collections.emptySet(), detector.getSlowNodes());
   }
 
-
   /**
-   * 1 slow node at 10s. But only 512 cores, which is less than 1024 settings. Therefore, no slow node detected
+   * 1 slow node at 10s. But only 512 cores, which is less than 1024 settings. Therefore, no slow
+   * node detected
    */
   @Test
   public void testDetectionNoSlowNodeWithMinCorePerRequest() {
     RequestStats stats = new RequestStats();
     final int SHARD_COUNT = 512;
 
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
       String node = "solr-" + serverIndex + ":8983";
 
@@ -178,20 +179,19 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
       }
     }
 
-    SlowNodeDetector detector = new SlowNodeDetector.Builder().withMinShardCountPerRequest(1024).build();
+    SlowNodeDetector detector =
+        new SlowNodeDetector.Builder().withMinShardCountPerRequest(1024).build();
     detector.notifyRequestStats(stats);
     assertEquals(Collections.emptySet(), detector.getSlowNodes());
   }
 
-  /**
-   * 1 slow node at 10s. But iteration threshold at . Therefore, no slow node detected
-   */
+  /** 1 slow node at 10s. But iteration threshold at . Therefore, no slow node detected */
   @Test
   public void testDetectionNoSlowNodeWithMaxSlowResponsePercentage() {
     RequestStats stats = new RequestStats();
     final int SHARD_COUNT = 512;
 
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
       String node = "solr-" + serverIndex + ":8983";
 
@@ -202,10 +202,9 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
       }
     }
 
-    SlowNodeDetector detector = new SlowNodeDetector.Builder().withMaxSlowResponsePercentage(1).build();
+    SlowNodeDetector detector =
+        new SlowNodeDetector.Builder().withMaxSlowResponsePercentage(1).build();
     detector.notifyRequestStats(stats);
     assertEquals(Collections.emptySet(), detector.getSlowNodes());
   }
 }
-
-

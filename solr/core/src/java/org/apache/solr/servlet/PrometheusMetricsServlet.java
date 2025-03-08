@@ -593,25 +593,23 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
       JsonNode parent = metrics.path("solr.node");
       Number value;
 
-      value = getNumber(parent,"QUERY.httpShardHandler.slowNodeCount");
+      value = getNumber(parent, "QUERY.httpShardHandler.slowNodeCount");
       if (!value.equals(INVALID_NUMBER)) {
         results.add(
-                new PrometheusMetric(
-                        "slow_node_count",
-                        PrometheusMetricType.GAUGE,
-                        "current number of slow nodes detected",
-                        value
-                        ));
+            new PrometheusMetric(
+                "slow_node_count",
+                PrometheusMetricType.GAUGE,
+                "current number of slow nodes detected",
+                value));
       }
-      value = getNumber(parent,"QUERY.httpShardHandler.cancelledSlowNodeRequests");
+      value = getNumber(parent, "QUERY.httpShardHandler.cancelledSlowNodeRequests");
       if (!value.equals(INVALID_NUMBER)) {
         results.add(
-                new PrometheusMetric(
-                        "cancelled_slow_node_requests",
-                        PrometheusMetricType.COUNTER,
-                        "accumulative count of requests to shard cancelled due to slow node",
-                        value
-                        ));
+            new PrometheusMetric(
+                "cancelled_slow_node_requests",
+                PrometheusMetricType.COUNTER,
+                "accumulative count of requests to shard cancelled due to slow node",
+                value));
       }
     }
   }

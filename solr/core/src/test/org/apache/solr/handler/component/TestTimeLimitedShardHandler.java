@@ -16,17 +16,6 @@
  */
 package org.apache.solr.handler.component;
 
-import org.apache.solr.SolrTestCaseJ4;
-import org.apache.solr.client.solrj.impl.Http2SolrClient;
-import org.apache.solr.client.solrj.impl.LBHttp2SolrClient;
-import org.apache.solr.client.solrj.impl.LBSolrClient;
-import org.apache.solr.common.params.ModifiableSolrParams;
-import org.apache.solr.common.util.ExecutorUtil;
-import org.apache.solr.core.CoreContainer;
-import org.junit.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
@@ -42,6 +31,16 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
+import org.apache.solr.SolrTestCaseJ4;
+import org.apache.solr.client.solrj.impl.Http2SolrClient;
+import org.apache.solr.client.solrj.impl.LBHttp2SolrClient;
+import org.apache.solr.client.solrj.impl.LBSolrClient;
+import org.apache.solr.common.params.ModifiableSolrParams;
+import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.core.CoreContainer;
+import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Tests specifying a custom ShardHandlerFactory */
 public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
@@ -49,39 +48,48 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
 
   /**
    * This ensures stats are collected and reported by ShardHandler to the SlowNodeDetector.
-   * <p>
-   * For through testing on the SlowNodeDetector, please refer to the corresponding TestSlowNodeDetector
+   *
+   * <p>For through testing on the SlowNodeDetector, please refer to the corresponding
+   * TestSlowNodeDetector
    */
   @Test
   public void testDetectionSlowNodes() throws IOException {
     List<String> shards = new ArrayList<>();
     final int SHARD_COUNT = 512;
     Map<String, Long> latenciesByShard = new HashMap<>();
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
-      String shard = "http://solr-" + serverIndex + ":8983/solr/coll_shard" + (i + 1) + "_replica_n" + (i + 1);
+      String shard =
+          "http://solr-" + serverIndex + ":8983/solr/coll_shard" + (i + 1) + "_replica_n" + (i + 1);
       shards.add(shard);
-      if (serverIndex == 10 || serverIndex == 11) { //2 slow nodes
+      if (serverIndex == 10 || serverIndex == 11) { // 2 slow nodes
         latenciesByShard.put(shard, 2000L);
       }
     }
-    try (TestFixture fixture = buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShard, 100)){
+    try (TestFixture fixture =
+        buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShard, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
-      org.apache.solr.handler.component.ShardRequest sreq = new org.apache.solr.handler.component.ShardRequest();
-
+      org.apache.solr.handler.component.ShardRequest sreq =
+          new org.apache.solr.handler.component.ShardRequest();
 
       sreq.actualShards = shards.toArray(new String[0]);
       for (String shard : shards) {
         handler.submit(sreq, shard, new ModifiableSolrParams());
       }
 
-      org.apache.solr.handler.component.ShardResponse response = handler.takeCompletedIncludingErrors();
+      org.apache.solr.handler.component.ShardResponse response =
+          handler.takeCompletedIncludingErrors();
       assertEquals(SHARD_COUNT, response.getShardRequest().responses.size());
 
-//      List<Throwable> exceptions = response.getShardRequest().responses.stream().filter(r -> r.getException() != null).map(ShardResponse::getException).collect(Collectors.toList());
-      assertNull(response.getException()); //no exception, since the slow nodes are not detected yet before execution of this shard request
+      //      List<Throwable> exceptions = response.getShardRequest().responses.stream().filter(r ->
+      // r.getException() != null).map(ShardResponse::getException).collect(Collectors.toList());
+      assertNull(
+          response
+              .getException()); // no exception, since the slow nodes are not detected yet before
+      // execution of this shard request
       assertEquals(Set.of("solr-10:8983", "solr-11:8983"), fixture.slowNodeDetector.getSlowNodes());
-      assertEquals(0, fixture.factory.cancelledSlowNodeRequests.getCount()); //no cancelled requests yet
+      assertEquals(
+          0, fixture.factory.cancelledSlowNodeRequests.getCount()); // no cancelled requests yet
     }
   }
 
@@ -89,64 +97,77 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
   public void testDetectionSlowNodesMultipleReplicas() throws IOException {
     List<String> shards = new ArrayList<>();
     final int SHARD_COUNT = 512;
-    final int REPLICA_COUNT = 3; //replica per shard
+    final int REPLICA_COUNT = 3; // replica per shard
     Map<String, Long> latenciesByShardUrl = new HashMap<>();
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
-      List<String> shardUrls = new ArrayList<>(); //urls for this shard
-      for (int j = 0; j < REPLICA_COUNT; j ++) { //each shard has 3 replicas
-        String shardUrl = "http://solr-" + serverIndex + ":8983/solr/coll_shard" + (i + 1) + "_replica_n" + (j * i + 1);
-        if (serverIndex == 10 || serverIndex == 11) { //2 slow nodes
+      List<String> shardUrls = new ArrayList<>(); // urls for this shard
+      for (int j = 0; j < REPLICA_COUNT; j++) { // each shard has 3 replicas
+        String shardUrl =
+            "http://solr-"
+                + serverIndex
+                + ":8983/solr/coll_shard"
+                + (i + 1)
+                + "_replica_n"
+                + (j * i + 1);
+        if (serverIndex == 10 || serverIndex == 11) { // 2 slow nodes
           latenciesByShardUrl.put(shardUrl, 2000L);
         }
         shardUrls.add(shardUrl);
-        serverIndex ++;
+        serverIndex++;
       }
       shards.add(String.join("|", shardUrls));
     }
-    try (TestFixture fixture = buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShardUrl, 100)){
+    try (TestFixture fixture =
+        buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShardUrl, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
-      org.apache.solr.handler.component.ShardRequest sreq = new org.apache.solr.handler.component.ShardRequest();
-
+      org.apache.solr.handler.component.ShardRequest sreq =
+          new org.apache.solr.handler.component.ShardRequest();
 
       sreq.actualShards = shards.toArray(new String[0]);
       for (String shard : shards) {
         handler.submit(sreq, shard, new ModifiableSolrParams());
       }
 
-      org.apache.solr.handler.component.ShardResponse response = handler.takeCompletedIncludingErrors();
+      org.apache.solr.handler.component.ShardResponse response =
+          handler.takeCompletedIncludingErrors();
       assertEquals(SHARD_COUNT, response.getShardRequest().responses.size());
 
-      assertNull(response.getException()); //no exception, since the slow nodes are not detected yet before execution of this shard request
+      assertNull(
+          response
+              .getException()); // no exception, since the slow nodes are not detected yet before
+      // execution of this shard request
       assertEquals(Set.of("solr-10:8983", "solr-11:8983"), fixture.slowNodeDetector.getSlowNodes());
-      assertEquals(0, fixture.factory.cancelledSlowNodeRequests.getCount()); //no cancelled requests yet
+      assertEquals(
+          0, fixture.factory.cancelledSlowNodeRequests.getCount()); // no cancelled requests yet
     }
   }
 
-  /**
-   * This ensures handler execution should not be affected if there are no slow nodes tracked
-   */
+  /** This ensures handler execution should not be affected if there are no slow nodes tracked */
   @Test
   public void testExecutionNoSlowNodes() throws IOException {
     List<String> shards = new ArrayList<>();
     final int SHARD_COUNT = 512;
     Map<String, Long> latenciesByShard = new HashMap<>();
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
-      String shard = "http://solr-" + serverIndex + ":8983/solr/coll_shard" + (i + 1) + "_replica_n" + (i + 1);
+      String shard =
+          "http://solr-" + serverIndex + ":8983/solr/coll_shard" + (i + 1) + "_replica_n" + (i + 1);
       shards.add(shard);
     }
-    try (TestFixture fixture = buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShard, 100)){
+    try (TestFixture fixture =
+        buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShard, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
-      org.apache.solr.handler.component.ShardRequest sreq = new org.apache.solr.handler.component.ShardRequest();
-
+      org.apache.solr.handler.component.ShardRequest sreq =
+          new org.apache.solr.handler.component.ShardRequest();
 
       sreq.actualShards = shards.toArray(new String[0]);
       for (String shard : shards) {
         handler.submit(sreq, shard, new ModifiableSolrParams());
       }
 
-      org.apache.solr.handler.component.ShardResponse response = handler.takeCompletedIncludingErrors();
+      org.apache.solr.handler.component.ShardResponse response =
+          handler.takeCompletedIncludingErrors();
       assertEquals(SHARD_COUNT, response.getShardRequest().responses.size());
       assertNull(response.getException());
       assertTrue(fixture.slowNodeDetector.getSlowNodes().isEmpty());
@@ -154,46 +175,50 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
     }
   }
 
-
-  /**
-   * This ensures slow node execution would time out if it has been detected as slow before
-   */
+  /** This ensures slow node execution would time out if it has been detected as slow before */
   @Test
   public void testExecutionSlowNodes() throws IOException {
     List<String> shards = new ArrayList<>();
     final int SHARD_COUNT = 512;
     Map<String, Long> latenciesByShard = new HashMap<>();
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
-      String shard = "http://solr-" + serverIndex + ":8983/solr/coll_shard" + (i + 1) + "_replica_n" + (i + 1);
-      if (serverIndex == 10 || serverIndex == 11) { //2 slow nodes
+      String shard =
+          "http://solr-" + serverIndex + ":8983/solr/coll_shard" + (i + 1) + "_replica_n" + (i + 1);
+      if (serverIndex == 10 || serverIndex == 11) { // 2 slow nodes
         latenciesByShard.put(shard, 5000L);
       }
       shards.add(shard);
     }
-    try (TestFixture fixture = buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShard, 100)){
+    try (TestFixture fixture =
+        buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShard, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
-      org.apache.solr.handler.component.ShardRequest sreq = new org.apache.solr.handler.component.ShardRequest();
-      fixture.slowNodeDetector.setSlowNodes(Set.of("solr-10:8983", "solr-11:8983")); //simulate slow nodes in previous run
-
+      org.apache.solr.handler.component.ShardRequest sreq =
+          new org.apache.solr.handler.component.ShardRequest();
+      fixture.slowNodeDetector.setSlowNodes(
+          Set.of("solr-10:8983", "solr-11:8983")); // simulate slow nodes in previous run
 
       sreq.actualShards = shards.toArray(new String[0]);
       for (String shard : shards) {
         handler.submit(sreq, shard, new ModifiableSolrParams());
       }
 
-      org.apache.solr.handler.component.ShardResponse response = handler.takeCompletedIncludingErrors();
+      org.apache.solr.handler.component.ShardResponse response =
+          handler.takeCompletedIncludingErrors();
       assertEquals(SHARD_COUNT, response.getShardRequest().responses.size());
 
       assertTrue(response.getException() instanceof CancellationException);
-      List<Throwable> exceptions = response.getShardRequest().responses.stream().filter(r -> r.getException() != null).map(ShardResponse::getException).collect(Collectors.toList());
-      assertEquals(2 * 8, exceptions.size()); //2 slow nodes, 8 replicas per node
+      List<Throwable> exceptions =
+          response.getShardRequest().responses.stream()
+              .filter(r -> r.getException() != null)
+              .map(ShardResponse::getException)
+              .collect(Collectors.toList());
+      assertEquals(2 * 8, exceptions.size()); // 2 slow nodes, 8 replicas per node
 
       assertEquals(Set.of("solr-10:8983", "solr-11:8983"), fixture.slowNodeDetector.getSlowNodes());
       assertEquals(2 * 8, fixture.factory.cancelledSlowNodeRequests.getCount());
     }
   }
-
 
   /**
    * This ensures slow node execution would time out properly on replication factor greater than 1
@@ -202,39 +227,52 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
   public void testExecutionSlowNodesMultipleReplica() throws IOException {
     List<String> shards = new ArrayList<>();
     final int SHARD_COUNT = 512;
-    final int REPLICA_COUNT = 3; //replica per shard
+    final int REPLICA_COUNT = 3; // replica per shard
     Map<String, Long> latenciesByShardUrl = new HashMap<>();
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
-      List<String> shardUrls = new ArrayList<>(); //urls for this shard
-      for (int j = 0; j < REPLICA_COUNT; j ++) { //each shard has 3 replicas
-        String shardUrl = "http://solr-" + serverIndex + ":8983/solr/coll_shard" + (i + 1) + "_replica_n" + (j * i + 1);
-        if (serverIndex == 10 || serverIndex == 11) { //2 slow nodes
+      List<String> shardUrls = new ArrayList<>(); // urls for this shard
+      for (int j = 0; j < REPLICA_COUNT; j++) { // each shard has 3 replicas
+        String shardUrl =
+            "http://solr-"
+                + serverIndex
+                + ":8983/solr/coll_shard"
+                + (i + 1)
+                + "_replica_n"
+                + (j * i + 1);
+        if (serverIndex == 10 || serverIndex == 11) { // 2 slow nodes
           latenciesByShardUrl.put(shardUrl, 2000L);
         }
         shardUrls.add(shardUrl);
-        serverIndex ++;
+        serverIndex++;
       }
       shards.add(String.join("|", shardUrls));
     }
 
-    try (TestFixture fixture = buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShardUrl, 100)){
+    try (TestFixture fixture =
+        buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShardUrl, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
-      org.apache.solr.handler.component.ShardRequest sreq = new org.apache.solr.handler.component.ShardRequest();
-      fixture.slowNodeDetector.setSlowNodes(Set.of("solr-10:8983", "solr-11:8983")); //simulate slow nodes in previous run
-
+      org.apache.solr.handler.component.ShardRequest sreq =
+          new org.apache.solr.handler.component.ShardRequest();
+      fixture.slowNodeDetector.setSlowNodes(
+          Set.of("solr-10:8983", "solr-11:8983")); // simulate slow nodes in previous run
 
       sreq.actualShards = shards.toArray(new String[0]);
       for (String shard : shards) {
         handler.submit(sreq, shard, new ModifiableSolrParams());
       }
 
-      org.apache.solr.handler.component.ShardResponse response = handler.takeCompletedIncludingErrors();
+      org.apache.solr.handler.component.ShardResponse response =
+          handler.takeCompletedIncludingErrors();
       assertEquals(SHARD_COUNT, response.getShardRequest().responses.size());
 
       assertTrue(response.getException() instanceof CancellationException);
-      List<Throwable> exceptions = response.getShardRequest().responses.stream().filter(r -> r.getException() != null).map(ShardResponse::getException).collect(Collectors.toList());
-      assertEquals(2 * 8, exceptions.size()); //2 slow nodes, 8 replicas per node
+      List<Throwable> exceptions =
+          response.getShardRequest().responses.stream()
+              .filter(r -> r.getException() != null)
+              .map(ShardResponse::getException)
+              .collect(Collectors.toList());
+      assertEquals(2 * 8, exceptions.size()); // 2 slow nodes, 8 replicas per node
 
       assertEquals(Set.of("solr-10:8983", "solr-11:8983"), fixture.slowNodeDetector.getSlowNodes());
       assertEquals(2 * 8, fixture.factory.cancelledSlowNodeRequests.getCount());
@@ -243,6 +281,7 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
 
   /**
    * Ensures with exception code logic would still flow normally
+   *
    * @throws IOException
    */
   public void testException() throws IOException {
@@ -250,49 +289,63 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
     final int SHARD_COUNT = 512;
     Set<String> exceptionUrls = new HashSet<>();
     Map<String, Long> latenciesByShardUrl = new HashMap<>();
-    for (int i = 0; i < SHARD_COUNT; i ++) {
+    for (int i = 0; i < SHARD_COUNT; i++) {
       int serverIndex = (i / 8 + 1);
-      String shard = "http://solr-" + serverIndex + ":8983/solr/coll_shard" + (i + 1) + "_replica_n" + (i + 1);
+      String shard =
+          "http://solr-" + serverIndex + ":8983/solr/coll_shard" + (i + 1) + "_replica_n" + (i + 1);
       shards.add(shard);
-      if (serverIndex == 10 || serverIndex == 11) { //2 nodes with exception even with high latency they cannot be marked as slow node
+      if (serverIndex == 10
+          || serverIndex
+              == 11) { // 2 nodes with exception even with high latency they cannot be marked as
+        // slow node
         exceptionUrls.add(shard);
         latenciesByShardUrl.put(shard, 2000L);
       }
     }
-    try (TestFixture fixture = buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShardUrl, exceptionUrls, 100)){
+    try (TestFixture fixture =
+        buildTestFixture(
+            "solr-shardhandler-timeLimited.xml", latenciesByShardUrl, exceptionUrls, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
-      org.apache.solr.handler.component.ShardRequest sreq = new org.apache.solr.handler.component.ShardRequest();
-
+      org.apache.solr.handler.component.ShardRequest sreq =
+          new org.apache.solr.handler.component.ShardRequest();
 
       sreq.actualShards = shards.toArray(new String[0]);
       for (String shard : shards) {
         handler.submit(sreq, shard, new ModifiableSolrParams());
       }
 
-      org.apache.solr.handler.component.ShardResponse response = handler.takeCompletedIncludingErrors();
+      org.apache.solr.handler.component.ShardResponse response =
+          handler.takeCompletedIncludingErrors();
       assertEquals(SHARD_COUNT, response.getShardRequest().responses.size());
 
       assertTrue(response.getException() instanceof RuntimeException);
       assertTrue(fixture.slowNodeDetector.getSlowNodes().isEmpty());
-      assertEquals(0, fixture.factory.cancelledSlowNodeRequests.getCount()); //no cancelled requests
+      assertEquals(
+          0, fixture.factory.cancelledSlowNodeRequests.getCount()); // no cancelled requests
     }
   }
 
-
-  private static TestFixture buildTestFixture(String configFile, Map<String, Long> latenciesByUrl, long defaultLatency) {
+  private static TestFixture buildTestFixture(
+      String configFile, Map<String, Long> latenciesByUrl, long defaultLatency) {
     return buildTestFixture(configFile, latenciesByUrl, Collections.emptySet(), defaultLatency);
   }
 
-
-  private static TestFixture buildTestFixture(String configFile, Map<String, Long> latenciesByUrl, Set<String> exceptionUrl, long defaultLatency) {
+  private static TestFixture buildTestFixture(
+      String configFile,
+      Map<String, Long> latenciesByUrl,
+      Set<String> exceptionUrl,
+      long defaultLatency) {
     final Path home = SolrTestCaseJ4.TEST_PATH();
     CoreContainer cc = CoreContainer.createAndLoad(home, home.resolve(configFile));
-    TimeLimitingHttpShardHandlerFactory factory = (TimeLimitingHttpShardHandlerFactory) cc.getShardHandlerFactory();
-    SlowNodeDetector slowNodeDetector = new SlowNodeDetector.Builder().withSlowNodeTtl(-1).withSlowLatencyThreshold(1000).build();
+    TimeLimitingHttpShardHandlerFactory factory =
+        (TimeLimitingHttpShardHandlerFactory) cc.getShardHandlerFactory();
+    SlowNodeDetector slowNodeDetector =
+        new SlowNodeDetector.Builder().withSlowNodeTtl(-1).withSlowLatencyThreshold(1000).build();
     factory.setSlowNodeDetector(slowNodeDetector);
     Http2SolrClient client = new Http2SolrClient.Builder().build();
 
-    ExecutorService executor = ExecutorUtil.newMDCAwareCachedThreadPool(TestTimeLimitedShardHandler.class.getSimpleName());
+    ExecutorService executor =
+        ExecutorUtil.newMDCAwareCachedThreadPool(TestTimeLimitedShardHandler.class.getSimpleName());
 
     class RspWithServer extends LBSolrClient.Rsp {
       RspWithServer(String server) {
@@ -300,35 +353,34 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
         this.server = server;
       }
     }
-    factory.loadbalancer = new LBHttp2SolrClient(client) {
-      @Override
-      public CompletableFuture<Rsp> requestAsync(Req req) {
-        String selectedShardUrl = req.getServers().get(0); //first replica is always picked for this impl
-        long latency = latenciesByUrl.getOrDefault(selectedShardUrl, defaultLatency);
-        return CompletableFuture.supplyAsync(() -> {
-          try {
-            Thread.sleep(latency);
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            //OK
-          }
-          if (exceptionUrl.contains(selectedShardUrl)) {
-            throw new RuntimeException("Simulated exception");
-          }
+    factory.loadbalancer =
+        new LBHttp2SolrClient(client) {
+          @Override
+          public CompletableFuture<Rsp> requestAsync(Req req) {
+            String selectedShardUrl =
+                req.getServers().get(0); // first replica is always picked for this impl
+            long latency = latenciesByUrl.getOrDefault(selectedShardUrl, defaultLatency);
+            return CompletableFuture.supplyAsync(
+                () -> {
+                  try {
+                    Thread.sleep(latency);
+                  } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    // OK
+                  }
+                  if (exceptionUrl.contains(selectedShardUrl)) {
+                    throw new RuntimeException("Simulated exception");
+                  }
 
-          return new RspWithServer(selectedShardUrl);
-        }, executor);
-      }
-    };
-
+                  return new RspWithServer(selectedShardUrl);
+                },
+                executor);
+          }
+        };
 
     return new TestFixture(cc, factory, client, executor, slowNodeDetector);
   }
-
-
 }
-
-
 
 class TestFixture implements Closeable {
   CoreContainer cc;
@@ -337,14 +389,18 @@ class TestFixture implements Closeable {
   ExecutorService executorService;
   SlowNodeDetector slowNodeDetector;
 
-  TestFixture(CoreContainer cc, TimeLimitingHttpShardHandlerFactory factory, Http2SolrClient client, ExecutorService executorService, SlowNodeDetector slowNodeDetector) {
+  TestFixture(
+      CoreContainer cc,
+      TimeLimitingHttpShardHandlerFactory factory,
+      Http2SolrClient client,
+      ExecutorService executorService,
+      SlowNodeDetector slowNodeDetector) {
     this.cc = cc;
     this.factory = factory;
     this.client = client;
     this.executorService = executorService;
     this.slowNodeDetector = slowNodeDetector;
   }
-
 
   @Override
   public void close() throws IOException {

@@ -190,16 +190,19 @@ public class HttpShardHandler extends ShardHandler {
     responseFutureMap.put(srsp, future);
   }
 
-  /**
-   * Subclasses could override this method to track shard request
-   */
-  protected ShardRequestCallback onRequestSubmit(Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, List<String> shardUrls, ModifiableSolrParams params) {
+  /** Subclasses should override this method to track ShardRequest */
+  protected ShardRequestCallback onRequestSubmit(
+      Future<LBSolrClient.Rsp> future,
+      ShardRequest shardRequest,
+      List<String> shardUrls,
+      ModifiableSolrParams params) {
     // by default no callback
     return null;
   }
 
   protected interface ShardRequestCallback {
     void onResponse(LBSolrClient.Rsp response, long elapsedTime);
+
     void onException(Throwable exception, long elapsedTime);
   }
 
