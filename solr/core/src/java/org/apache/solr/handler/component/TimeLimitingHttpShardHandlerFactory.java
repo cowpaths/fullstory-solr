@@ -17,6 +17,7 @@
 package org.apache.solr.handler.component;
 
 import com.codahale.metrics.Counter;
+import java.lang.invoke.MethodHandles;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.core.PluginInfo;
 import org.apache.solr.core.SolrInfoBean;
@@ -25,16 +26,15 @@ import org.apache.solr.metrics.SolrMetricsContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.lang.invoke.MethodHandles;
-
 public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private long slowNodeTimeout;
   private boolean dryRun;
   private boolean initialized;
 
-  private static final String TIMEOUT_CONFIG_KEY = "slowNodeTimeout"; //config key for timeout in millisec
-  private static final String LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY  = "latencyDropRatioThreshold";
+  private static final String TIMEOUT_CONFIG_KEY =
+      "slowNodeTimeout"; // config key for timeout in millisec
+  private static final String LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY = "latencyDropRatioThreshold";
   private static final String MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY = "maxSlowResponsePercentage";
   private static final String MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY = "minShardCountPerRequest";
   private static final String SLOW_LATENCY_THRESHOLD_CONFIG_KEY = "slowLatencyThreshold";
@@ -46,22 +46,25 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
   Counter cancelledSlowNodeRequests;
 
   /**
-   * Get {@link ShardHandler} that times out on slow shards.
-   * Take note the returned ShardHandler is expected to handle a single batch of identical requests submitted
-   * sequentially
-   **/
+   * Get {@link ShardHandler} that times out on slow shards. Take note the returned ShardHandler is
+   * expected to handle a single batch of identical requests submitted sequentially
+   */
   @Override
   public ShardHandler getShardHandler() {
     if (!initialized) {
-      throw new RuntimeException(TimeLimitingHttpShardHandlerFactory.class.getSimpleName() + " is not initialized, run init() first or check if there are any exceptions during init()");
+      throw new RuntimeException(
+          TimeLimitingHttpShardHandlerFactory.class.getSimpleName()
+              + " is not initialized, run init() first or check if there are any exceptions during init()");
     }
-    return new TimeLimitingHttpShardHandler(this, slowNodeTimeout, dryRun, slowNodeDetector, (timedOutTasks) -> cancelledSlowNodeRequests.inc(timedOutTasks.size()));
+    return new TimeLimitingHttpShardHandler(
+        this,
+        slowNodeTimeout,
+        dryRun,
+        slowNodeDetector,
+        (timedOutTasks) -> cancelledSlowNodeRequests.inc(timedOutTasks.size()));
   }
 
-  /**
-   * For test
-   * @param slowNodeDetector
-   */
+  /** For test */
   void setSlowNodeDetector(SlowNodeDetector slowNodeDetector) {
     this.slowNodeDetector = slowNodeDetector;
   }
@@ -71,7 +74,7 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
     super.init(info);
     NamedList<?> args = info.initArgs;
 
-    //Actor params
+    // Actor params
     Object dryRunObject = args.get(DRY_RUN_CONFIG_KEY);
     if (dryRunObject != null) {
       dryRun = Boolean.parseBoolean(dryRunObject.toString());
@@ -79,29 +82,56 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
 
     Object slowNodeTimeoutObj = args.get(TIMEOUT_CONFIG_KEY);
     if (slowNodeTimeoutObj == null) {
-      throw new IllegalArgumentException("Missing required parameter: " + TIMEOUT_CONFIG_KEY + " for " + TimeLimitingHttpShardHandlerFactory.class.getSimpleName() + " in solr config");
+      throw new IllegalArgumentException(
+          "Missing required parameter: "
+              + TIMEOUT_CONFIG_KEY
+              + " for "
+              + TimeLimitingHttpShardHandlerFactory.class.getSimpleName()
+              + " in solr config");
     }
     slowNodeTimeout = Long.parseLong(slowNodeTimeoutObj.toString());
 
-    log.debug("Initialing {} with {} {}, {} {}", TimeLimitingHttpShardHandlerFactory.class.getSimpleName(), DRY_RUN_CONFIG_KEY, dryRun, TIMEOUT_CONFIG_KEY, slowNodeTimeoutObj);
+    log.debug(
+        "Initialing {} with {} {}, {} {}",
+        TimeLimitingHttpShardHandlerFactory.class.getSimpleName(),
+        DRY_RUN_CONFIG_KEY,
+        dryRun,
+        TIMEOUT_CONFIG_KEY,
+        slowNodeTimeoutObj);
 
-    //Detector params and build detector here
+    // Detector params and build detector here
     SlowNodeDetector.Builder builder = new SlowNodeDetector.Builder();
     if (args.get(LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY) != null) {
-      builder.withLatencyDropRatioThreshold(Double.parseDouble(args.get(LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY).toString()));
-      log.debug("With {} {}", LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY, args.get(LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY));
+      builder.withLatencyDropRatioThreshold(
+          Double.parseDouble(args.get(LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY).toString()));
+      log.debug(
+          "With {} {}",
+          LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY,
+          args.get(LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY));
     }
     if (args.get(MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY) != null) {
-      builder.withMaxSlowResponsePercentage(Integer.parseInt(args.get(MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY).toString()));
-      log.debug("With {} {}", MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY, args.get(MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY));
+      builder.withMaxSlowResponsePercentage(
+          Integer.parseInt(args.get(MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY).toString()));
+      log.debug(
+          "With {} {}",
+          MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY,
+          args.get(MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY));
     }
     if (args.get(MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY) != null) {
-      builder.withMinShardCountPerRequest(Integer.parseInt(args.get(MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY).toString()));
-      log.debug("With {} {}", MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY, args.get(MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY));
+      builder.withMinShardCountPerRequest(
+          Integer.parseInt(args.get(MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY).toString()));
+      log.debug(
+          "With {} {}",
+          MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY,
+          args.get(MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY));
     }
     if (args.get(SLOW_LATENCY_THRESHOLD_CONFIG_KEY) != null) {
-      builder.withSlowLatencyThreshold(Integer.parseInt(args.get(SLOW_LATENCY_THRESHOLD_CONFIG_KEY).toString()));
-      log.debug("With {} {}", SLOW_LATENCY_THRESHOLD_CONFIG_KEY, args.get(SLOW_LATENCY_THRESHOLD_CONFIG_KEY));
+      builder.withSlowLatencyThreshold(
+          Integer.parseInt(args.get(SLOW_LATENCY_THRESHOLD_CONFIG_KEY).toString()));
+      log.debug(
+          "With {} {}",
+          SLOW_LATENCY_THRESHOLD_CONFIG_KEY,
+          args.get(SLOW_LATENCY_THRESHOLD_CONFIG_KEY));
     }
     if (args.get(SLOW_NODE_TTL_CONFIG_KEY) != null) {
       builder.withSlowNodeTtl(Long.parseLong(args.get(SLOW_NODE_TTL_CONFIG_KEY).toString()));
