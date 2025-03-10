@@ -92,7 +92,7 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
     slowNodeTimeout = Long.parseLong(slowNodeTimeoutObj.toString());
 
     log.debug(
-        "Initialing {} with {} {}, {} {}",
+        "Initializing Actors in {} with {} {}, {} {}",
         TimeLimitingHttpShardHandlerFactory.class.getSimpleName(),
         DRY_RUN_CONFIG_KEY,
         dryRun,
@@ -105,7 +105,7 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
       builder.withLatencyDropRatioThreshold(
           Double.parseDouble(args.get(LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY).toString()));
       log.debug(
-          "With {} {}",
+          "SlowNodeDetector with {} {}",
           LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY,
           args.get(LATENCY_DROP_RATIO_THRESHOLD_CONFIG_KEY));
     }
@@ -113,7 +113,7 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
       builder.withMaxSlowResponsePercentage(
           Integer.parseInt(args.get(MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY).toString()));
       log.debug(
-          "With {} {}",
+          "SlowNodeDetector with {} {}",
           MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY,
           args.get(MAX_SLOW_RESPONSE_PERCENTAGE_CONFIG_KEY));
     }
@@ -121,7 +121,7 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
       builder.withMinShardCountPerRequest(
           Integer.parseInt(args.get(MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY).toString()));
       log.debug(
-          "With {} {}",
+          "SlowNodeDetector with {} {}",
           MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY,
           args.get(MIN_SHARD_COUNT_PER_REQUEST_CONFIG_KEY));
     }
@@ -129,13 +129,13 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
       builder.withSlowLatencyThreshold(
           Integer.parseInt(args.get(SLOW_LATENCY_THRESHOLD_CONFIG_KEY).toString()));
       log.debug(
-          "With {} {}",
+          "SlowNodeDetector with {} {}",
           SLOW_LATENCY_THRESHOLD_CONFIG_KEY,
           args.get(SLOW_LATENCY_THRESHOLD_CONFIG_KEY));
     }
     if (args.get(SLOW_NODE_TTL_CONFIG_KEY) != null) {
       builder.withSlowNodeTtl(Long.parseLong(args.get(SLOW_NODE_TTL_CONFIG_KEY).toString()));
-      log.debug("With {} {}", SLOW_NODE_TTL_CONFIG_KEY, args.get(SLOW_NODE_TTL_CONFIG_KEY));
+      log.debug("SlowNodeDetector with {} {}", SLOW_NODE_TTL_CONFIG_KEY, args.get(SLOW_NODE_TTL_CONFIG_KEY));
     }
 
     slowNodeDetector = builder.build();
