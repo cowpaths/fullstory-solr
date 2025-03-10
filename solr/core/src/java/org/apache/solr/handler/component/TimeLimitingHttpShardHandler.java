@@ -1,6 +1,6 @@
 package org.apache.solr.handler.component;
 
-import com.google.common.collect.MapMaker;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import java.lang.invoke.MethodHandles;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -27,8 +27,8 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
   private final long slowNodeTimeout;
   private final boolean dryRun;
 
-  private final ConcurrentMap<ShardRequest, List<ShardRequestActor>> actorsByShardRequest =
-      new MapMaker().weakKeys().makeMap();
+  private final ConcurrentMap<ShardRequest, List<ShardRequestActor>> actorsByShardRequest = Caffeine.newBuilder().weakKeys().<ShardRequest, List<ShardRequestActor>>build().asMap();
+
   private final SlowNodeDetector slowNodeDetector;
   private final TimeoutCallback timeoutCallback;
 
