@@ -279,9 +279,7 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
     }
   }
 
-  /**
-   * Ensures with exception code logic would still flow normally
-   */
+  /** Ensures with exception code logic would still flow normally */
   public void testException() throws IOException {
     List<String> shards = new ArrayList<>();
     final int SHARD_COUNT = 512;

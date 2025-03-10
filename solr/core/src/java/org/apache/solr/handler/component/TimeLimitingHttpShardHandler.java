@@ -27,7 +27,8 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
   private final long slowNodeTimeout;
   private final boolean dryRun;
 
-  private final ConcurrentMap<ShardRequest, List<ShardRequestActor>> actorsByShardRequest = Caffeine.newBuilder().weakKeys().<ShardRequest, List<ShardRequestActor>>build().asMap();
+  private final ConcurrentMap<ShardRequest, List<ShardRequestActor>> actorsByShardRequest =
+      Caffeine.newBuilder().weakKeys().<ShardRequest, List<ShardRequestActor>>build().asMap();
 
   private final SlowNodeDetector slowNodeDetector;
   private final TimeoutCallback timeoutCallback;
