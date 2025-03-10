@@ -93,12 +93,12 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
 
     if (log.isInfoEnabled()) {
       log.info(
-              "Initializing Actors in {} with {} {}, {} {}",
-              TimeLimitingHttpShardHandlerFactory.class.getSimpleName(),
-              DRY_RUN_CONFIG_KEY,
-              dryRun,
-              TIMEOUT_CONFIG_KEY,
-              slowNodeTimeoutObj);
+          "Initializing Actors in {} with {} {}, {} {}",
+          TimeLimitingHttpShardHandlerFactory.class.getSimpleName(),
+          DRY_RUN_CONFIG_KEY,
+          dryRun,
+          TIMEOUT_CONFIG_KEY,
+          slowNodeTimeoutObj);
     }
 
     // Detector params and build detector here

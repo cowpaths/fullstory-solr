@@ -271,18 +271,18 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
                     if (!dryRun) {
                       if (log.isInfoEnabled()) {
                         log.info(
-                                "Cancelling {} pending requests due to timeout duration {}ms exceeded. ",
-                                removingFutures.size(),
-                                timeout);
+                            "Cancelling {} pending requests due to timeout duration {}ms exceeded. ",
+                            removingFutures.size(),
+                            timeout);
                       }
                       removingFutures.forEach(f -> f.cancel(true));
                       log.info("{} Pending requests cancelled", removingFutures.size());
                     } else {
                       if (log.isInfoEnabled()) {
                         log.info(
-                                "Dry-run mode: would have cancelled {} pending requests due to timeout duration {}ms exceeded",
-                                removingFutures.size(),
-                                timeout);
+                            "Dry-run mode: would have cancelled {} pending requests due to timeout duration {}ms exceeded",
+                            removingFutures.size(),
+                            timeout);
                       }
                     }
                   }
