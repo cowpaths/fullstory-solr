@@ -276,7 +276,9 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
                             timeout);
                       }
                       removingFutures.forEach(f -> f.cancel(true));
-                      log.info("{} Pending requests cancelled", removingFutures.size());
+                      if (log.isInfoEnabled()) {
+                        log.info("{} Pending requests cancelled", removingFutures.size());
+                      }
                     } else {
                       if (log.isInfoEnabled()) {
                         log.info(
