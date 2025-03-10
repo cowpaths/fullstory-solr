@@ -201,13 +201,18 @@ class SlowNodeDetector implements SolrMetricProducer {
 
     @Override
     public String toString() {
-      return "Builder{" +
-              "latencyDropRatioThreshold=" + latencyDropRatioThreshold +
-              ", maxSlowResponsePercentage=" + maxSlowResponsePercentage +
-              ", minShardCountPerRequest=" + minShardCountPerRequest +
-              ", slowLatencyThreshold=" + slowLatencyThreshold +
-              ", slowNodeTtl=" + slowNodeTtl +
-              '}';
+      return "Builder{"
+          + "latencyDropRatioThreshold="
+          + latencyDropRatioThreshold
+          + ", maxSlowResponsePercentage="
+          + maxSlowResponsePercentage
+          + ", minShardCountPerRequest="
+          + minShardCountPerRequest
+          + ", slowLatencyThreshold="
+          + slowLatencyThreshold
+          + ", slowNodeTtl="
+          + slowNodeTtl
+          + '}';
     }
   }
 }
