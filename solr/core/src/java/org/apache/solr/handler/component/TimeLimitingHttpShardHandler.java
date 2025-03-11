@@ -60,7 +60,9 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
             k -> {
               List<ShardRequestActor> actors = new ArrayList<>();
               actors.add(new NodeStatsCollector(slowNodeDetector));
-              if ("true".equalsIgnoreCase(shardRequest.params.get(ShardParams.SHARDS_TOLERANT))) {
+              if (shardRequest.params != null
+                  && "true"
+                      .equalsIgnoreCase(shardRequest.params.get(ShardParams.SHARDS_TOLERANT))) {
                 actors.add(
                     new SlowNodeTimeoutActor(
                         slowNodeTimeout, dryRun, slowNodeDetector.getSlowNodes(), timeoutCallback));
