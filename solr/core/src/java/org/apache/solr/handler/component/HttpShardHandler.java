@@ -62,7 +62,7 @@ public class HttpShardHandler extends ShardHandler {
 
   private HttpShardHandlerFactory httpShardHandlerFactory;
   private Map<ShardResponse, CompletableFuture<LBSolrClient.Rsp>> responseFutureMap;
-  protected BlockingQueue<ShardResponse> responses;
+  private BlockingQueue<ShardResponse> responses;
   private AtomicInteger pending;
   private Map<String, List<String>> shardToURLs;
   private LBHttp2SolrClient lbClient;
