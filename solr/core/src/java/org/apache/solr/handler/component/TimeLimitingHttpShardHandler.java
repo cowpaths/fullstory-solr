@@ -37,11 +37,12 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
   private final TimeoutCallback timeoutCallback;
 
   /**
-   *
-   * @param slowNodeTimeout how long in milliseconds to wait before timing out (cancelling) requests to slow nodes
-   * @param dryRun  whether to actually cancel the pending requests or just log the cancellation
-   * @param slowNodeDetector  detector implementation to detect slow nodes
-   * @param timeoutCallback callback to be invoked when timeout is reached, whether the pending requests are cancelled due to dryRun mode
+   * @param slowNodeTimeout how long in milliseconds to wait before timing out (cancelling) requests
+   *     to slow nodes
+   * @param dryRun whether to actually cancel the pending requests or just log the cancellation
+   * @param slowNodeDetector detector implementation to detect slow nodes
+   * @param timeoutCallback callback to be invoked when timeout is reached, whether the pending
+   *     requests are cancelled due to dryRun mode
    */
   TimeLimitingHttpShardHandler(
       HttpShardHandlerFactory shardHandlerFactory,
@@ -84,14 +85,14 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
   }
 
   /**
-   * Callback to track ShardRequest and a Future created by sending such request to a single shard URL.
+   * Callback to track ShardRequest and a Future created by sending such request to a single shard
+   * URL.
    *
    * <p>Take note that the ShardRequest can be reused/shared by sending to many different shards.
    * Therefore, we need this class as a reference back to the corresponding ShardRequest when such
    * future is completed.
    */
-  class ShardRequestTrackingCallback
-      implements HttpShardHandler.ShardRequestCallback {
+  class ShardRequestTrackingCallback implements HttpShardHandler.ShardRequestCallback {
     private final ShardRequest shardRequest;
     private final Future<LBSolrClient.Rsp> future;
     private final List<String> shardUrls;
@@ -212,14 +213,16 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
   private volatile Future<?> timeoutTask = null;
 
   /**
-   * A ShardRequestActor that times out all pending requests if all of them are from slow nodes. Each instance of this
-   * class is tied to a single ShardRequest instance, which can be retried/submitted to many shard urls.
+   * A ShardRequestActor that times out all pending requests if all of them are from slow nodes.
+   * Each instance of this class is tied to a single ShardRequest instance, which can be
+   * retried/submitted to many shard urls.
    *
-   * @param timeout timeout in milliseconds, if all pending requests remain are from slow nodes, a task to cancelled all
-   *                pending requests will be scheduled with this timeout as delay
+   * @param timeout timeout in milliseconds, if all pending requests remain are from slow nodes, a
+   *     task to cancelled all pending requests will be scheduled with this timeout as delay
    * @param dryRun whether to actually cancel the pending requests or just log the cancellation
    * @param slowNodes set of slow nodes, this should not change during the lifetime of this actor
-   * @param timeoutCallback callback to be invoked when timeout is reached, whether the pending requests are cancelled due to dryRun mode
+   * @param timeoutCallback callback to be invoked when timeout is reached, whether the pending
+   *     requests are cancelled due to dryRun mode
    */
   SlowNodeTimeoutActor(
       long timeout, boolean dryRun, Set<String> slowNodes, TimeoutCallback timeoutCallback) {

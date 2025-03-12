@@ -143,7 +143,7 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
     cancelledSlowNodeRequests =
         solrMetricsContext.counter("cancelledSlowNodeRequests", expandedScope);
     cancelledDryRunSlowNodeRequests =
-            solrMetricsContext.counter("cancelledDryRunSlowNodeRequests", expandedScope);
+        solrMetricsContext.counter("cancelledDryRunSlowNodeRequests", expandedScope);
 
     if (slowNodeDetector != null) {
       slowNodeDetector.initializeMetrics(solrMetricsContext, expandedScope);
