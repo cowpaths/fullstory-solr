@@ -67,7 +67,7 @@ public class TestTimeLimitingShardHandler extends SolrTestCaseJ4 {
       }
     }
     try (TestFixture fixture =
-        buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShard, 100)) {
+        buildTestFixture("solr-shardhandler-timelimited.xml", latenciesByShard, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
       org.apache.solr.handler.component.ShardRequest sreq =
           new org.apache.solr.handler.component.ShardRequest();
@@ -119,7 +119,7 @@ public class TestTimeLimitingShardHandler extends SolrTestCaseJ4 {
       shards.add(String.join("|", shardUrls));
     }
     try (TestFixture fixture =
-        buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShardUrl, 100)) {
+        buildTestFixture("solr-shardhandler-timelimited.xml", latenciesByShardUrl, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
       org.apache.solr.handler.component.ShardRequest sreq =
           new org.apache.solr.handler.component.ShardRequest();
@@ -156,7 +156,7 @@ public class TestTimeLimitingShardHandler extends SolrTestCaseJ4 {
       shards.add(shard);
     }
     try (TestFixture fixture =
-        buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShard, 100)) {
+        buildTestFixture("solr-shardhandler-timelimited.xml", latenciesByShard, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
       org.apache.solr.handler.component.ShardRequest sreq =
           new org.apache.solr.handler.component.ShardRequest();
@@ -193,7 +193,7 @@ public class TestTimeLimitingShardHandler extends SolrTestCaseJ4 {
       shards.add(shard);
     }
     try (TestFixture fixture =
-        buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShard, 100)) {
+        buildTestFixture("solr-shardhandler-timelimited.xml", latenciesByShard, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
       org.apache.solr.handler.component.ShardRequest sreq =
           new org.apache.solr.handler.component.ShardRequest();
@@ -239,7 +239,7 @@ public class TestTimeLimitingShardHandler extends SolrTestCaseJ4 {
       shards.add(shard);
     }
     try (TestFixture fixture =
-        buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShard, 100)) {
+        buildTestFixture("solr-shardhandler-timelimited.xml", latenciesByShard, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
       org.apache.solr.handler.component.ShardRequest sreq =
           new org.apache.solr.handler.component.ShardRequest();
@@ -281,7 +281,7 @@ public class TestTimeLimitingShardHandler extends SolrTestCaseJ4 {
       shards.add(shard);
     }
     try (TestFixture fixture =
-        buildTestFixture("solr-shardhandler-timeLimited-dry-run.xml", latenciesByShard, 100)) {
+        buildTestFixture("solr-shardhandler-timelimited-dry-run.xml", latenciesByShard, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
       org.apache.solr.handler.component.ShardRequest sreq =
           new org.apache.solr.handler.component.ShardRequest();
@@ -340,7 +340,7 @@ public class TestTimeLimitingShardHandler extends SolrTestCaseJ4 {
     }
 
     try (TestFixture fixture =
-        buildTestFixture("solr-shardhandler-timeLimited.xml", latenciesByShardUrl, 100)) {
+        buildTestFixture("solr-shardhandler-timelimited.xml", latenciesByShardUrl, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
       org.apache.solr.handler.component.ShardRequest sreq =
           new org.apache.solr.handler.component.ShardRequest();
@@ -392,7 +392,7 @@ public class TestTimeLimitingShardHandler extends SolrTestCaseJ4 {
     }
     try (TestFixture fixture =
         buildTestFixture(
-            "solr-shardhandler-timeLimited.xml", latenciesByShardUrl, exceptionUrls, 100)) {
+            "solr-shardhandler-timelimited.xml", latenciesByShardUrl, exceptionUrls, 100)) {
       org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
       org.apache.solr.handler.component.ShardRequest sreq =
           new org.apache.solr.handler.component.ShardRequest();
