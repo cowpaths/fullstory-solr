@@ -47,8 +47,14 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
   Counter cancelledDryRunSlowNodeRequests;
 
   /**
-   * Get {@link ShardHandler} that times out on slow shards. Take note the returned ShardHandler is
-   * expected to handle a single batch of identical requests submitted sequentially
+   * Get {@link ShardHandler} that times out on slow shards.
+   *
+   * <p>Take note the returned ShardHandler is expected to handle ShardRequests spawned by a single
+   * top level query.
+   *
+   * <p>Each ShardRequest are expected to be submitted to all the relevant cores in relatively close
+   * timeframes (ie most requests are submitted before the first response comes back) Otherwise, it
+   * might not detect slow nodes nor timeout slow requests as expected.
    */
   @Override
   public ShardHandler getShardHandler() {

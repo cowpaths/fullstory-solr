@@ -236,11 +236,11 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
   public void onRequestSubmitted(List<String> shardUrls, Future<?> future) {
     pendingFutures.add(future);
 
-    // if any of the shard URLs is from a slow node, then we don't count it as a fast node future as
-    // it could potentially be slow
-    // This is done such that we can more effectively terminate pending futures with a mix of slow
-    // and fast nodes for
-    // the same shard.
+    // This is a shardRequest being submitted to a single shard. However with multiple replicas,
+    // there will be multiple shard URLs.
+    // if any of those replicas are from a known slow node, then we will NOT count this pending
+    // future as a "fast node future". Therefore, we assume this future can be potentially slow
+    // and subjected to timeout.
     if (!hasSlowNodeShardUrl(shardUrls)) {
       pendingFutureCountFromFastNode.incrementAndGet();
     }
