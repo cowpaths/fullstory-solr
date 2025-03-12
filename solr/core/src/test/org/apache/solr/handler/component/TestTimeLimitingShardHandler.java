@@ -43,8 +43,7 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Tests specifying a custom ShardHandlerFactory */
-public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
+public class TestTimeLimitingShardHandler extends SolrTestCaseJ4 {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   /**
@@ -266,6 +265,46 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
     }
   }
 
+  /** This ensures slow node execution would NOT time out as it's in dry-run mode */
+  @Test
+  public void testExecutionSlowNodesDryRun() throws IOException {
+    List<String> shards = new ArrayList<>();
+    final int SHARD_COUNT = 512;
+    Map<String, Long> latenciesByShard = new HashMap<>();
+    for (int i = 0; i < SHARD_COUNT; i++) {
+      int serverIndex = (i / 8 + 1);
+      String shard =
+              "http://solr-" + serverIndex + ":8983/solr/coll_shard" + (i + 1) + "_replica_n" + (i + 1);
+      if (serverIndex == 10 || serverIndex == 11) { // 2 slow nodes
+        latenciesByShard.put(shard, 5000L);
+      }
+      shards.add(shard);
+    }
+    try (TestFixture fixture =
+                 buildTestFixture("solr-shardhandler-timeLimited-dry-run.xml", latenciesByShard, 100)) {
+      org.apache.solr.handler.component.ShardHandler handler = fixture.factory.getShardHandler();
+      org.apache.solr.handler.component.ShardRequest sreq =
+              new org.apache.solr.handler.component.ShardRequest();
+      fixture.slowNodeDetector.setSlowNodes(
+              Set.of("solr-10:8983", "solr-11:8983")); // simulate slow nodes in previous run
+      sreq.params = new ModifiableSolrParams();
+      sreq.params.set(ShardParams.SHARDS_TOLERANT, true);
+      sreq.actualShards = shards.toArray(new String[0]);
+      for (String shard : shards) {
+        handler.submit(sreq, shard, new ModifiableSolrParams());
+      }
+
+      org.apache.solr.handler.component.ShardResponse response =
+              handler.takeCompletedIncludingErrors();
+      assertEquals(SHARD_COUNT, response.getShardRequest().responses.size());
+
+      assertNull(response.getException()); //no timeout due to dry-run
+
+      assertEquals(Set.of("solr-10:8983", "solr-11:8983"), fixture.slowNodeDetector.getSlowNodes());
+      assertEquals(2 * 8, fixture.factory.cancelledDryRunSlowNodeRequests.getCount()); //different counter for dry-run
+    }
+  }
+
   /**
    * This ensures slow node execution would time out properly on replication factor greater than 1
    */
@@ -391,7 +430,7 @@ public class TestTimeLimitedShardHandler extends SolrTestCaseJ4 {
     Http2SolrClient client = new Http2SolrClient.Builder().build();
 
     ExecutorService executor =
-        ExecutorUtil.newMDCAwareCachedThreadPool(TestTimeLimitedShardHandler.class.getSimpleName());
+        ExecutorUtil.newMDCAwareCachedThreadPool(TestTimeLimitingShardHandler.class.getSimpleName());
 
     class RspWithServer extends LBSolrClient.Rsp {
       RspWithServer(String server) {

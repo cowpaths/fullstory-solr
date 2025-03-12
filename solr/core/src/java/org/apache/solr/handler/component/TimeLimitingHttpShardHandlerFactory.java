@@ -44,6 +44,7 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
   private SlowNodeDetector slowNodeDetector;
   private SolrMetricsContext solrMetricsContext;
   Counter cancelledSlowNodeRequests;
+  Counter cancelledDryRunSlowNodeRequests;
 
   /**
    * Get {@link ShardHandler} that times out on slow shards. Take note the returned ShardHandler is
@@ -61,7 +62,10 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
         slowNodeTimeout,
         dryRun,
         slowNodeDetector,
-        (timedOutTasks) -> cancelledSlowNodeRequests.inc(timedOutTasks.size()));
+        (timedOutTasks) -> {
+          Counter counter = dryRun ? cancelledDryRunSlowNodeRequests : cancelledSlowNodeRequests;
+          counter.inc(timedOutTasks.size());
+        });
   }
 
   /** For test */
@@ -138,6 +142,8 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
     String expandedScope = SolrMetricManager.mkName(scope, SolrInfoBean.Category.QUERY.name());
     cancelledSlowNodeRequests =
         solrMetricsContext.counter("cancelledSlowNodeRequests", expandedScope);
+    cancelledDryRunSlowNodeRequests =
+            solrMetricsContext.counter("cancelledDryRunSlowNodeRequests", expandedScope);
 
     if (slowNodeDetector != null) {
       slowNodeDetector.initializeMetrics(solrMetricsContext, expandedScope);
