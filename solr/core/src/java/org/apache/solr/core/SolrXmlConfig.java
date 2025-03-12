@@ -19,6 +19,7 @@ package org.apache.solr.core;
 import static org.apache.solr.common.params.CommonParams.NAME;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.lang.invoke.MethodHandles;
 import java.nio.charset.StandardCharsets;
@@ -36,6 +37,7 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import javax.management.MBeanServer;
 import org.apache.solr.client.solrj.impl.HttpClientUtil;
 import org.apache.solr.cloud.ClusterSingleton;
@@ -195,6 +197,15 @@ public class SolrXmlConfig {
         throw new SolrException(
             SolrException.ErrorCode.SERVER_ERROR,
             "solr.xml does not exist in " + configFile.getParent() + " cannot start Solr");
+      }
+      if (log.isInfoEnabled()) {
+        log.info("solr.xml does not exist {}", configFile);
+        Path configDir = configFile.getParent();
+        try (Stream<Path> fileStream = Files.list(configDir)) {
+          fileStream.forEach(path -> log.info("Found file: {}", path.getFileName()));
+        } catch (IOException e) {
+          log.warn("Cannot iterate the dir with error " + e.getMessage(), e);
+        }
       }
       log.info("solr.xml not found in SOLR_HOME, using built-in default");
       String solrInstallDir = System.getProperty(SolrDispatchFilter.SOLR_INSTALL_DIR_ATTRIBUTE);
