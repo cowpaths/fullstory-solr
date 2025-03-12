@@ -190,7 +190,8 @@ class NodeStatsCollector implements ShardRequestActor {
  *
  * <p>This actor keeps a list of pending future for all in-flight request submissions. When all the
  * remaining pending futures are from the slowNodes list, start a timer task to timeout/cancel all
- * of them according to the timeout value (do not time out and only print a message if dryRun is true)
+ * of them according to the timeout value (do not time out and only print a message if dryRun is
+ * true)
  */
 class SlowNodeTimeoutActor implements ShardRequestActor {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
