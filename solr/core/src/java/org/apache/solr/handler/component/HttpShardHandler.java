@@ -66,6 +66,11 @@ public class HttpShardHandler extends ShardHandler {
   private Map<String, List<String>> shardToURLs;
   private LBHttp2SolrClient lbClient;
 
+  //TODO for debugging
+  public LBHttp2SolrClient getLbClient() {
+    return lbClient;
+  }
+
   public HttpShardHandler(HttpShardHandlerFactory httpShardHandlerFactory) {
     this.httpShardHandlerFactory = httpShardHandlerFactory;
     this.lbClient = httpShardHandlerFactory.loadbalancer;
@@ -160,6 +165,7 @@ public class HttpShardHandler extends ShardHandler {
     }
 
     CompletableFuture<LBSolrClient.Rsp> future = this.lbClient.requestAsync(lbReq);
+
     future.whenComplete(
         (rsp, throwable) -> {
           if (rsp != null) {
