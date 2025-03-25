@@ -315,7 +315,6 @@ public class HttpShardHandlerFactory extends ShardHandlerFactory
     int soTimeout =
         getParameter(args, HttpClientUtil.PROP_SO_TIMEOUT, HttpClientUtil.DEFAULT_SO_TIMEOUT, sb);
 
-
     Long destinationIdleTimeout = getParameter(args, DESTINATION_IDLE_TIMEOUT, null, sb);
     this.defaultClient =
         new Http2SolrClient.Builder()

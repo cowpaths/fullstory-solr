@@ -69,7 +69,6 @@ import org.eclipse.jetty.client.ProtocolHandlers;
 import org.eclipse.jetty.client.ProxyConfiguration;
 import org.eclipse.jetty.client.Socks4Proxy;
 import org.eclipse.jetty.client.api.AuthenticationStore;
-import org.eclipse.jetty.client.api.Destination;
 import org.eclipse.jetty.client.api.Request;
 import org.eclipse.jetty.client.api.Response;
 import org.eclipse.jetty.client.api.Result;
@@ -1251,11 +1250,6 @@ public class Http2SolrClient extends HttpSolrClientBase {
         MDC.clear();
       }
     }
-  }
-
-  //TODO for debugging
-  public List<Destination> getClientDestinations() {
-    return httpClient.getDestinations();
   }
 
   /**

@@ -118,12 +118,6 @@ public class LBHttp2SolrClient extends LBSolrClient {
     return solrClient;
   }
 
-
-  //TODO for debugging
-  public Http2SolrClient getSolrClient() {
-    return solrClient;
-  }
-
   /**
    * Note: This setter method is <b>not thread-safe</b>.
    *

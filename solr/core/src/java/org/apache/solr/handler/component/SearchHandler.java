@@ -564,8 +564,6 @@ public class SearchHandler extends RequestHandlerBase
             // presume we'll get a response from each shard we send to
             sreq.responses = new ArrayList<>(sreq.actualShards.length);
 
-
-            log.info("Debugging client destinations {}", ((HttpShardHandler) shardHandler1).getLbClient().getSolrClient().getClientDestinations());
             // TODO: map from shard to address[]
             for (String shard : sreq.actualShards) {
               ModifiableSolrParams params = new ModifiableSolrParams(sreq.params);
