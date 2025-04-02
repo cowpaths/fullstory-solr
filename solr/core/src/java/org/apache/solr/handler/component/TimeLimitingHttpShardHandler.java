@@ -23,6 +23,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * A {@link HttpShardHandler} that detects slow nodes and times out requests to them if applicable.
+ *
+ * <p>Should only be used for SearchHandler
  */
 class TimeLimitingHttpShardHandler extends HttpShardHandler {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
