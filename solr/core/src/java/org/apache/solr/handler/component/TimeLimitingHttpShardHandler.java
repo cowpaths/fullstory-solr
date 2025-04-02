@@ -1,8 +1,16 @@
 package org.apache.solr.handler.component;
 
+import org.apache.solr.client.solrj.impl.LBSolrClient;
+import org.apache.solr.common.params.ModifiableSolrParams;
+import org.apache.solr.common.params.ShardParams;
+import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.common.util.SolrNamedThreadFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.lang.invoke.MethodHandles;
-import java.net.MalformedURLException;
-import java.net.URL;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -13,13 +21,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import org.apache.solr.client.solrj.impl.LBSolrClient;
-import org.apache.solr.common.params.ModifiableSolrParams;
-import org.apache.solr.common.params.ShardParams;
-import org.apache.solr.common.util.ExecutorUtil;
-import org.apache.solr.common.util.SolrNamedThreadFactory;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * A {@link HttpShardHandler} that detects slow nodes and times out requests to them if applicable.
@@ -189,10 +190,10 @@ interface ShardRequestActor {
 class Util {
   static String getNode(String urlString) {
     try {
-      URL url = new URL(urlString);
-      return url.getAuthority();
-    } catch (MalformedURLException e) {
-      throw new IllegalArgumentException("Invalid URL: " + urlString, e);
+      URI uri = new URI(urlString);
+      return uri.getAuthority();
+    } catch (URISyntaxException e) {
+      throw new IllegalArgumentException("Invalid URI: " + urlString, e);
     }
   }
 }
