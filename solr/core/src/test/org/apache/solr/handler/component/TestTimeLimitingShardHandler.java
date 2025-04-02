@@ -81,11 +81,8 @@ public class TestTimeLimitingShardHandler extends SolrTestCaseJ4 {
           handler.takeCompletedIncludingErrors();
       assertEquals(SHARD_COUNT, response.getShardRequest().responses.size());
 
-      //      List<Throwable> exceptions = response.getShardRequest().responses.stream().filter(r ->
-      // r.getException() != null).map(ShardResponse::getException).collect(Collectors.toList());
-      assertNull(
-          response
-              .getException()); // no exception, since the slow nodes are not detected yet before
+      // no exception, since the slow nodes are not detected yet before
+      assertNull(response.getException());
       // execution of this shard request
       assertEquals(Set.of("solr-10:8983", "solr-11:8983"), fixture.slowNodeDetector.getSlowNodes());
       assertEquals(
