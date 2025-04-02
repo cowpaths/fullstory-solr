@@ -1,6 +1,5 @@
 package org.apache.solr.handler.component;
 
-import com.github.benmanes.caffeine.cache.Caffeine;
 import java.lang.invoke.MethodHandles;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -30,8 +29,8 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
   private final long slowNodeTimeout;
   private final boolean dryRun;
 
-  private final ConcurrentMap<ShardRequest, List<ShardRequestActor>> actorsByShardRequest =
-      Caffeine.newBuilder().weakKeys().<ShardRequest, List<ShardRequestActor>>build().asMap();
+  private final ConcurrentMap<ShardRequest, ShardRequestTracker> activeShardRequests =
+      new ConcurrentHashMap<>();
 
   private final SlowNodeDetector slowNodeDetector;
   private final TimeoutCallback timeoutCallback;
@@ -63,23 +62,28 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
       ShardRequest shardRequest,
       List<String> shardUrls,
       ModifiableSolrParams params) {
-    boolean shardsTolerant = shardRequest.params != null && ShardParams.getShardsTolerantAsBool(shardRequest.params);
+    boolean shardsTolerant =
+        shardRequest.params != null && ShardParams.getShardsTolerantAsBool(shardRequest.params);
     ShardRequestTrackingCallback callback =
         new ShardRequestTrackingCallback(future, shardRequest, shardsTolerant, shardUrls);
-    List<ShardRequestActor> shardRequestActors =
-        actorsByShardRequest.computeIfAbsent(
-            shardRequest,
-            k -> {
-              List<ShardRequestActor> actors = new ArrayList<>();
-              actors.add(new NodeStatsCollector(slowNodeDetector));
-              if (shardsTolerant) {
-                actors.add(
-                    new SlowNodeTimeoutActor(
-                        slowNodeTimeout, dryRun, slowNodeDetector.getSlowNodes(), timeoutCallback));
-              }
-              return actors;
-            });
-    shardRequestActors.forEach(actor -> actor.onRequestSubmitted(shardUrls, future));
+    activeShardRequests.compute(
+        shardRequest,
+        (k, tracker) -> {
+          if (tracker == null) {
+            List<ShardRequestActor> actors = new ArrayList<>();
+            actors.add(new NodeStatsCollector(slowNodeDetector));
+            if (shardsTolerant) {
+              actors.add(
+                  new SlowNodeTimeoutActor(
+                      slowNodeTimeout, dryRun, slowNodeDetector.getSlowNodes(), timeoutCallback));
+            }
+            tracker = new ShardRequestTracker(actors);
+          }
+          tracker.actors.forEach(actor -> actor.onRequestSubmitted(shardUrls, future));
+          tracker.outstandingRequestCount.incrementAndGet();
+          return tracker;
+        });
+
     return callback;
   }
 
@@ -98,7 +102,10 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
     private final boolean shardsTolerant;
 
     ShardRequestTrackingCallback(
-        Future<LBSolrClient.Rsp> future, ShardRequest shardRequest, boolean shardsTolerant, List<String> shardUrls) {
+        Future<LBSolrClient.Rsp> future,
+        ShardRequest shardRequest,
+        boolean shardsTolerant,
+        List<String> shardUrls) {
       this.future = future;
       this.shardRequest = shardRequest;
       this.shardUrls = shardUrls;
@@ -119,27 +126,40 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
 
     private void onComplete(long elapsedTime, String selectedShardUrl, boolean isException) {
       try {
-        actorsByShardRequest.compute(
+        activeShardRequests.compute(
             shardRequest,
-            (k, actors) -> {
-              if (actors != null) {
-                actors.forEach(actor -> actor.onRequestCompleted(selectedShardUrl, shardUrls, future, elapsedTime));
-                if (isLastResponse(isException)) {
-                  actors.forEach(ShardRequestActor::flush);
-                  return null; //remove this shardRequest from the map on last response
+            (k, tracker) -> {
+              if (tracker != null) {
+                tracker.actors.forEach(
+                    actor ->
+                        actor.onRequestCompleted(selectedShardUrl, shardUrls, future, elapsedTime));
+                int outstandingRequestCount = tracker.outstandingRequestCount.decrementAndGet();
+                if (isLastResponse(isException, outstandingRequestCount)) {
+                  tracker.actors.forEach(ShardRequestActor::flush);
+                  return null; // remove this shardRequest from the map on last response
                 }
               }
-              return actors;
+              return tracker;
             });
       } catch (Exception e) {
         log.warn("Failed to notify stats to slowNodeDetector", e);
       }
     }
-    private boolean isLastResponse(boolean isException) {
+
+    private boolean isLastResponse(boolean isException, int outstandingRequestCount) {
       if (!shardsTolerant && isException) {
         return true;
       }
-      return processedResponseCount.get() == shardRequest.actualShards.length;
+      return outstandingRequestCount <= 0;
+    }
+  }
+
+  static class ShardRequestTracker {
+    final List<ShardRequestActor> actors;
+    final AtomicInteger outstandingRequestCount = new AtomicInteger(0);
+
+    ShardRequestTracker(List<ShardRequestActor> actors) {
+      this.actors = actors;
     }
   }
 }
@@ -152,7 +172,14 @@ interface ShardRequestActor {
       String selectedShardUrl, List<String> shardUrls, Future<?> future, long timeElapsed);
 
   /**
-   * Flushes when the last response for a shardRequest is received
+   * Flushes when the last response is received.
+   *
+   * <p>This happens either when all submitted requests are completed or an exception occurred while
+   * the handler is not shard fault-tolerant
+   *
+   * <p>In an edge case, there could be pauses with request submissions such that flush is triggered
+   * before all the requests are submitted for a particular ShardRequest. In such case, flush could
+   * be invoked more than once.
    */
   void flush();
 }
@@ -183,9 +210,7 @@ class NodeStatsCollector implements ShardRequestActor {
   }
 
   @Override
-  public void onRequestSubmitted(List<String> shardUrls, Future<?> future) {
-
-  }
+  public void onRequestSubmitted(List<String> shardUrls, Future<?> future) {}
 
   @Override
   public synchronized void onRequestCompleted(
@@ -325,7 +350,7 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
 
   @Override
   public void flush() {
-    if (timeoutTask != null) { //should no longer attempt to timeout as all responses are completed
+    if (timeoutTask != null) { // should no longer attempt to timeout as all responses are completed
       timeoutTask.cancel(true);
     }
     pendingFutures.clear();
