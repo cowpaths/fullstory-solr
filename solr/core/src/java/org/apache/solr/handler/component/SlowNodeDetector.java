@@ -258,4 +258,9 @@ class RequestStats {
     responseLatencies.add(new NodeLatency(node, latency));
     responseCountByNode.compute(node, (k, c) -> c != null ? c + 1 : 1);
   }
+
+  void clear() {
+    responseLatencies.clear();
+    responseCountByNode.clear();
+  }
 }

@@ -63,6 +63,7 @@ public class HttpShardHandler extends ShardHandler {
   private HttpShardHandlerFactory httpShardHandlerFactory;
   private Map<ShardResponse, CompletableFuture<LBSolrClient.Rsp>> responseFutureMap;
   private BlockingQueue<ShardResponse> responses;
+  protected final AtomicInteger processedResponseCount = new AtomicInteger(0);
   private AtomicInteger pending;
   private Map<String, List<String>> shardToURLs;
   private LBHttp2SolrClient lbClient;
@@ -150,6 +151,7 @@ public class HttpShardHandler extends ShardHandler {
               SolrException.ErrorCode.SERVICE_UNAVAILABLE, "no servers hosting shard: " + shard);
       srsp.setException(exception);
       srsp.setResponseCode(exception.code());
+      processedResponseCount.incrementAndGet();
       responses.add(srsp);
       return;
     }
@@ -169,10 +171,13 @@ public class HttpShardHandler extends ShardHandler {
             srsp.setShardAddress(rsp.getServer());
             ssr.elapsedTime =
                 TimeUnit.MILLISECONDS.convert(System.nanoTime() - startTime, TimeUnit.NANOSECONDS);
-            if (callback != null) {
-              callback.onResponse(rsp, ssr.elapsedTime);
+            synchronized(HttpShardHandler.this) {
+              processedResponseCount.incrementAndGet();
+              if (callback != null) {
+                callback.onResponse(rsp, ssr.elapsedTime);
+              }
+              responses.add(srsp);
             }
-            responses.add(srsp);
           } else if (throwable != null) {
             ssr.elapsedTime =
                 TimeUnit.MILLISECONDS.convert(System.nanoTime() - startTime, TimeUnit.NANOSECONDS);
@@ -180,10 +185,13 @@ public class HttpShardHandler extends ShardHandler {
             if (throwable instanceof SolrException) {
               srsp.setResponseCode(((SolrException) throwable).code());
             }
-            if (callback != null) {
-              callback.onException(throwable, ssr.elapsedTime);
+            synchronized(HttpShardHandler.this) {
+              processedResponseCount.incrementAndGet();
+              if (callback != null) {
+                callback.onException(throwable, ssr.elapsedTime);
+              }
+              responses.add(srsp);
             }
-            responses.add(srsp);
           }
         });
 
