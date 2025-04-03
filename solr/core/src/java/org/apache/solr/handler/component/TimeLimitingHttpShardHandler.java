@@ -1,5 +1,19 @@
 package org.apache.solr.handler.component;
 
+import java.lang.invoke.MethodHandles;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import org.apache.solr.client.solrj.impl.LBSolrClient;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.params.ShardParams;
@@ -7,20 +21,6 @@ import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.SolrNamedThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.lang.invoke.MethodHandles;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
 
 /**
  * A {@link HttpShardHandler} that detects slow nodes and times out requests to them if applicable.
@@ -138,7 +138,7 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
                         actor.onRequestCompleted(selectedShardUrl, shardUrls, future, elapsedTime));
                 int outstandingRequestCount = tracker.outstandingRequestCount.decrementAndGet();
                 if (isLastResponse(isException, outstandingRequestCount)) {
-                  tracker.actors.forEach(ShardRequestActor::flush);
+                  tracker.actors.forEach(ShardRequestActor::close);
                   return null; // remove this shardRequest from the map on last response
                 }
               }
@@ -175,16 +175,18 @@ interface ShardRequestActor {
       String selectedShardUrl, List<String> shardUrls, Future<?> future, long timeElapsed);
 
   /**
-   * Flushes when the last response is received.
+   * Close and flush when the last response is received.
    *
-   * <p>This happens either when all submitted requests are completed or an exception occurred while
-   * the handler is not shard fault-tolerant
+   * <p>This happens either when all previously submitted requests are completed (no in-flight
+   * requests) or an exception occurred while the handler is not shard fault-tolerant
    *
-   * <p>In an edge case, there could be pauses with request submissions such that flush is triggered
-   * before all the requests are submitted for a particular ShardRequest. In such case, flush could
-   * be invoked more than once.
+   * <p>After close is invoked, there shall be no further method calls to this Actor.
+   *
+   * <p>In an edge case, there could be pauses with request submissions such that close is triggered
+   * before all the requests for a particular ShardRequest are submitted. In such case, a new actor
+   * should be instantiated to handle the rest of the requests submission and completion.
    */
-  void flush();
+  void close();
 }
 
 class Util {
@@ -224,7 +226,7 @@ class NodeStatsCollector implements ShardRequestActor {
   }
 
   @Override
-  public void flush() {
+  public void close() {
     detector.notifyRequestStats(stats);
     stats.clear();
   }
@@ -246,7 +248,9 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
   private final Set<String> slowNodes;
   private final AtomicInteger pendingFutureCountFromFastNode = new AtomicInteger(0);
   private final TimeoutCallback timeoutCallback;
-  private volatile Future<?> timeoutTask = null;
+
+  // if non-null, then there is an active count down to cancel pending requests once timeout elapsed
+  private volatile CountDownLatch cancelCountDownLatch;
 
   /**
    * A ShardRequestActor that times out all pending requests if all of them are from slow nodes.
@@ -269,7 +273,7 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
   }
 
   @Override
-  public void onRequestSubmitted(List<String> shardUrls, Future<?> future) {
+  public synchronized void onRequestSubmitted(List<String> shardUrls, Future<?> future) {
     pendingFutures.add(future);
 
     // This is a shardRequest being submitted to a single shard. However with multiple replicas,
@@ -299,50 +303,52 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
       pendingFutureCountFromFastNode.decrementAndGet();
     }
 
-    if (timeoutTask == null
-        && pendingFutureCountFromFastNode.get()
-            <= 0) { // all pending reqs are from slow nodes, start a timer to possibly timeout
+    // all pending reqs are from slow nodes, start a countdown to possibly cancel those requests
+    if (cancelCountDownLatch == null && pendingFutureCountFromFastNode.get() <= 0) {
+      cancelCountDownLatch = new CountDownLatch(1);
       ExecutorService executorService = null;
       try {
         executorService =
             ExecutorUtil.newMDCAwareSingleThreadExecutor(
                 new SolrNamedThreadFactory("SlowNodeTimeout"));
-        timeoutTask =
-            executorService.submit(
-                () -> {
-                  try {
-                    Thread.sleep(timeout);
-                  } catch (InterruptedException e) {
-                    // ok. The responses came back before timeout
-                    return;
-                  }
-                  Set<Future<?>> removingFutures = new HashSet<>(pendingFutures);
-                  pendingFutures.clear();
-                  if (!removingFutures.isEmpty()) {
+        executorService.submit(
+            () -> {
+              try {
+                if (cancelCountDownLatch.await(timeout, TimeUnit.MILLISECONDS)) {
+                  return; // phew! All pending slow node requests completed before timeout
+                }
+
+                synchronized (SlowNodeTimeoutActor.this) {
+                  if (!pendingFutures.isEmpty()) {
                     if (timeoutCallback != null) {
-                      timeoutCallback.accept(removingFutures);
+                      timeoutCallback.accept(pendingFutures);
                     }
                     if (!dryRun) {
                       if (log.isInfoEnabled()) {
                         log.info(
                             "Cancelling {} pending requests due to timeout duration {}ms exceeded. ",
-                            removingFutures.size(),
+                            pendingFutures.size(),
                             timeout);
                       }
-                      removingFutures.forEach(f -> f.cancel(true));
+                      pendingFutures.forEach(f -> f.cancel(true));
                       if (log.isInfoEnabled()) {
-                        log.info("{} Pending requests cancelled", removingFutures.size());
+                        log.info("{} Pending requests cancelled", pendingFutures.size());
                       }
                     } else {
                       if (log.isInfoEnabled()) {
                         log.info(
                             "Dry-run mode: would have cancelled {} pending requests due to timeout duration {}ms exceeded",
-                            removingFutures.size(),
+                            pendingFutures.size(),
                             timeout);
                       }
                     }
+                    pendingFutures.clear();
                   }
-                });
+                }
+              } catch (InterruptedException e) {
+                // ok
+              }
+            });
       } finally {
         if (executorService != null) {
           executorService.shutdown();
@@ -352,9 +358,9 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
   }
 
   @Override
-  public void flush() {
-    if (timeoutTask != null) { // should no longer attempt to timeout as all responses are completed
-      timeoutTask.cancel(true);
+  public synchronized void close() {
+    if (cancelCountDownLatch != null) {
+      cancelCountDownLatch.countDown();
     }
     pendingFutures.clear();
   }
