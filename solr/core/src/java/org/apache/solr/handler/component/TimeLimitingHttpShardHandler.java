@@ -248,6 +248,7 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
   private final Set<String> slowNodes;
   private final AtomicInteger pendingFutureCountFromFastNode = new AtomicInteger(0);
   private final TimeoutCallback timeoutCallback;
+  private final ExecutorService executorService;
 
   // if non-null, then there is an active count down to cancel pending requests once timeout elapsed
   private volatile CountDownLatch cancelCountDownLatch;
@@ -270,6 +271,9 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
     this.dryRun = dryRun;
     this.slowNodes = slowNodes;
     this.timeoutCallback = timeoutCallback;
+    this.executorService =
+            ExecutorUtil.newMDCAwareSingleThreadExecutor(
+                    new SolrNamedThreadFactory("SlowNodeTimeout"));
   }
 
   @Override
@@ -306,54 +310,44 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
     // all pending reqs are from slow nodes, start a countdown to possibly cancel those requests
     if (cancelCountDownLatch == null && pendingFutureCountFromFastNode.get() <= 0) {
       cancelCountDownLatch = new CountDownLatch(1);
-      ExecutorService executorService = null;
-      try {
-        executorService =
-            ExecutorUtil.newMDCAwareSingleThreadExecutor(
-                new SolrNamedThreadFactory("SlowNodeTimeout"));
-        executorService.submit(
-            () -> {
-              try {
-                if (cancelCountDownLatch.await(timeout, TimeUnit.MILLISECONDS)) {
-                  return; // phew! All pending slow node requests completed before timeout
-                }
+      executorService.submit(
+        () -> {
+          try {
+            if (cancelCountDownLatch.await(timeout, TimeUnit.MILLISECONDS)) {
+              return; // phew! All pending slow node requests completed before timeout
+            }
 
-                synchronized (SlowNodeTimeoutActor.this) {
-                  if (!pendingFutures.isEmpty()) {
-                    if (timeoutCallback != null) {
-                      timeoutCallback.accept(pendingFutures);
-                    }
-                    if (!dryRun) {
-                      if (log.isInfoEnabled()) {
-                        log.info(
-                            "Cancelling {} pending requests due to timeout duration {}ms exceeded. ",
-                            pendingFutures.size(),
-                            timeout);
-                      }
-                      pendingFutures.forEach(f -> f.cancel(true));
-                      if (log.isInfoEnabled()) {
-                        log.info("{} Pending requests cancelled", pendingFutures.size());
-                      }
-                    } else {
-                      if (log.isInfoEnabled()) {
-                        log.info(
-                            "Dry-run mode: would have cancelled {} pending requests due to timeout duration {}ms exceeded",
-                            pendingFutures.size(),
-                            timeout);
-                      }
-                    }
-                    pendingFutures.clear();
+            synchronized (SlowNodeTimeoutActor.this) {
+              if (!pendingFutures.isEmpty()) {
+                if (timeoutCallback != null) {
+                  timeoutCallback.accept(pendingFutures);
+                }
+                if (!dryRun) {
+                  if (log.isInfoEnabled()) {
+                    log.info(
+                        "Cancelling {} pending requests due to timeout duration {}ms exceeded. ",
+                        pendingFutures.size(),
+                        timeout);
+                  }
+                  pendingFutures.forEach(f -> f.cancel(true));
+                  if (log.isInfoEnabled()) {
+                    log.info("{} Pending requests cancelled", pendingFutures.size());
+                  }
+                } else {
+                  if (log.isInfoEnabled()) {
+                    log.info(
+                        "Dry-run mode: would have cancelled {} pending requests due to timeout duration {}ms exceeded",
+                        pendingFutures.size(),
+                        timeout);
                   }
                 }
-              } catch (InterruptedException e) {
-                // ok
+                pendingFutures.clear();
               }
-            });
-      } finally {
-        if (executorService != null) {
-          executorService.shutdown();
-        }
-      }
+            }
+          } catch (InterruptedException e) {
+            // ok
+          }
+        });
     }
   }
 
@@ -363,6 +357,7 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
       cancelCountDownLatch.countDown();
     }
     pendingFutures.clear();
+    executorService.shutdown();
   }
 }
 
