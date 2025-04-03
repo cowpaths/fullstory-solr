@@ -1,6 +1,7 @@
 package org.apache.solr.handler.component;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
+import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -12,8 +13,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import org.apache.solr.metrics.SolrMetricProducer;
 import org.apache.solr.metrics.SolrMetricsContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 class SlowNodeDetector implements SolrMetricProducer {
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private final ConcurrentMap<String, Object> slowNodes;
   private static final double DEFAULT_LATENCY_DROP_RATIO_THRESHOLD = 0.5;
   private static final int DEFAULT_MAX_SLOW_NODE_PERCENTAGE = 10;
@@ -107,6 +111,10 @@ class SlowNodeDetector implements SolrMetricProducer {
           && (double) current.latency / previousLatency < latencyDropRatioThreshold) {
         // found the drop in latencies, all the iterated nodes are potentially slow
         foundLatencyDrop = true;
+        log.info(
+            "Found latency drop point found. Previous latency {} vs current latency {}",
+            previousLatency,
+            current.latency);
         break;
       }
 
@@ -134,6 +142,10 @@ class SlowNodeDetector implements SolrMetricProducer {
           slowNodes.add(potentialSlowNode);
         }
       }
+    }
+
+    if (log.isInfoEnabled() && !slowNodes.isEmpty()) {
+      log.info("Slow nodes detected: {}", slowNodes);
     }
 
     return slowNodes;
@@ -245,5 +257,10 @@ class RequestStats {
   public synchronized void recordLatency(String node, long latency) {
     responseLatencies.add(new NodeLatency(node, latency));
     responseCountByNode.compute(node, (k, c) -> c != null ? c + 1 : 1);
+  }
+
+  void clear() {
+    responseLatencies.clear();
+    responseCountByNode.clear();
   }
 }

@@ -577,13 +577,19 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
   static class NodeMetricsApiCaller extends MetricsByPrefixApiCaller {
 
     NodeMetricsApiCaller() {
-      super("solr.node", "QUERY.httpShardHandler", "cancelledSlowNodeRequests", "slowNodeCount");
+      super(
+          "solr.node",
+          "QUERY.httpShardHandler",
+          "cancelledSlowNodeRequests",
+          "cancelledDryRunSlowNodeRequests",
+          "slowNodeCount");
     }
 
     /*
     "metrics":{
       "solr.node":{
         "QUERY.httpShardHandler.cancelledSlowNodeRequests":87,
+        "QUERY.httpShardHandler.cancelledDryRunSlowNodeRequests":0,
         ...
         "QUERY.httpShardHandler.slowNodeCount":0,
        */
@@ -608,7 +614,16 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
             new PrometheusMetric(
                 "cancelled_slow_node_requests",
                 PrometheusMetricType.COUNTER,
-                "accumulative count of requests to shard cancelled due to slow node",
+                "cumulative count of requests to shard cancelled due to slow node",
+                value));
+      }
+      value = getNumber(parent, "QUERY.httpShardHandler.cancelledDryRunSlowNodeRequests");
+      if (!value.equals(INVALID_NUMBER)) {
+        results.add(
+            new PrometheusMetric(
+                "cancelled_slow_node_dry_run_requests",
+                PrometheusMetricType.COUNTER,
+                "cumulative count of requests to shard would have cancelled due to slow node but did not, due to dry-run mode",
                 value));
       }
     }

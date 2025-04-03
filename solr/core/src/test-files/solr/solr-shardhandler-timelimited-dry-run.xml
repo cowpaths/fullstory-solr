@@ -18,5 +18,6 @@
 <solr>
   <shardHandlerFactory name="shardHandlerFactory" class="solr.TimeLimitingHttpShardHandlerFactory">
     <long name="slowNodeTimeout">1000</long>
+    <bool name="dryRun">true</bool>
   </shardHandlerFactory>
 </solr>

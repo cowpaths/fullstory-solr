@@ -18,7 +18,10 @@ package org.apache.solr.handler.component;
 
 import com.codahale.metrics.Counter;
 import java.lang.invoke.MethodHandles;
+import java.util.concurrent.ExecutorService;
+import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.NamedList;
+import org.apache.solr.common.util.SolrNamedThreadFactory;
 import org.apache.solr.core.PluginInfo;
 import org.apache.solr.core.SolrInfoBean;
 import org.apache.solr.metrics.SolrMetricManager;
@@ -44,10 +47,18 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
   private SlowNodeDetector slowNodeDetector;
   private SolrMetricsContext solrMetricsContext;
   Counter cancelledSlowNodeRequests;
+  Counter cancelledDryRunSlowNodeRequests;
+  private ExecutorService executorService;
 
   /**
-   * Get {@link ShardHandler} that times out on slow shards. Take note the returned ShardHandler is
-   * expected to handle a single batch of identical requests submitted sequentially
+   * Get {@link ShardHandler} that times out on slow shards.
+   *
+   * <p>Take note the returned ShardHandler is expected to handle ShardRequests spawned by a single
+   * top level query.
+   *
+   * <p>Each ShardRequest are expected to be submitted to all the relevant cores in relatively close
+   * timeframes (ie most requests are submitted before the first response comes back) Otherwise, it
+   * might not detect slow nodes nor timeout slow requests as expected.
    */
   @Override
   public ShardHandler getShardHandler() {
@@ -61,7 +72,11 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
         slowNodeTimeout,
         dryRun,
         slowNodeDetector,
-        (timedOutTasks) -> cancelledSlowNodeRequests.inc(timedOutTasks.size()));
+        (timedOutTasks) -> {
+          Counter counter = dryRun ? cancelledDryRunSlowNodeRequests : cancelledSlowNodeRequests;
+          counter.inc(timedOutTasks.size());
+        },
+        executorService);
   }
 
   /** For test */
@@ -128,6 +143,10 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
     }
 
     slowNodeDetector = builder.build();
+    executorService =
+        ExecutorUtil.newMDCAwareCachedThreadPool(
+            new SolrNamedThreadFactory("TimeLimitingShardHandler"));
+
     initialized = true;
   }
 
@@ -138,6 +157,8 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
     String expandedScope = SolrMetricManager.mkName(scope, SolrInfoBean.Category.QUERY.name());
     cancelledSlowNodeRequests =
         solrMetricsContext.counter("cancelledSlowNodeRequests", expandedScope);
+    cancelledDryRunSlowNodeRequests =
+        solrMetricsContext.counter("cancelledDryRunSlowNodeRequests", expandedScope);
 
     if (slowNodeDetector != null) {
       slowNodeDetector.initializeMetrics(solrMetricsContext, expandedScope);
@@ -147,5 +168,13 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
   @Override
   public SolrMetricsContext getSolrMetricsContext() {
     return solrMetricsContext;
+  }
+
+  @Override
+  public void close() {
+    super.close();
+    if (executorService != null) {
+      executorService.shutdown();
+    }
   }
 }
