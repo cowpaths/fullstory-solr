@@ -67,27 +67,25 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
       ModifiableSolrParams params) {
     boolean shardsTolerant =
         shardRequest.params != null && ShardParams.getShardsTolerantAsBool(shardRequest.params);
-    ShardRequestTrackingCallback callback =
-        new ShardRequestTrackingCallback(future, shardRequest, shardsTolerant, shardUrls);
-    activeShardRequests.compute(
-        shardRequest,
-        (k, tracker) -> {
-          if (tracker == null) {
-            List<ShardRequestActor> actors = new ArrayList<>();
-            actors.add(new NodeStatsCollector(slowNodeDetector));
-            if (shardsTolerant) {
-              actors.add(
-                  new SlowNodeTimeoutActor(
-                      slowNodeTimeout, dryRun, slowNodeDetector.getSlowNodes(), timeoutCallback));
-            }
-            tracker = new ShardRequestTracker(actors);
-          }
-          tracker.actors.forEach(actor -> actor.onRequestSubmitted(shardUrls, future));
-          tracker.outstandingRequestCount.incrementAndGet();
-          return tracker;
-        });
+    ShardRequestTracker tracker =
+        activeShardRequests.computeIfAbsent(
+            shardRequest,
+            k -> {
+              List<ShardRequestActor> actors = new ArrayList<>();
+              actors.add(new NodeStatsCollector(slowNodeDetector));
+              if (shardsTolerant) {
+                actors.add(
+                    new SlowNodeTimeoutActor(
+                        slowNodeTimeout, dryRun, slowNodeDetector.getSlowNodes(), timeoutCallback));
+              }
+              return new ShardRequestTracker(actors);
+            });
 
-    return callback;
+    tracker.actors.forEach(actor -> actor.onRequestSubmitted(shardUrls, future));
+    tracker.outstandingRequestCount.incrementAndGet();
+
+    return new ShardRequestTrackingCallback(
+        future, shardRequest, tracker, shardsTolerant, shardUrls);
   }
 
   /**
@@ -101,16 +99,19 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
   class ShardRequestTrackingCallback implements HttpShardHandler.ShardRequestCallback {
     private final ShardRequest shardRequest;
     private final Future<LBSolrClient.Rsp> future;
+    private final ShardRequestTracker tracker;
     private final List<String> shardUrls;
     private final boolean shardsTolerant;
 
     ShardRequestTrackingCallback(
         Future<LBSolrClient.Rsp> future,
         ShardRequest shardRequest,
+        ShardRequestTracker tracker,
         boolean shardsTolerant,
         List<String> shardUrls) {
       this.future = future;
       this.shardRequest = shardRequest;
+      this.tracker = tracker;
       this.shardUrls = shardUrls;
       this.shardsTolerant = shardsTolerant;
     }
@@ -129,21 +130,16 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
 
     private void onComplete(long elapsedTime, String selectedShardUrl, boolean isException) {
       try {
-        activeShardRequests.compute(
-            shardRequest,
-            (k, tracker) -> {
-              if (tracker != null) {
-                tracker.actors.forEach(
-                    actor ->
-                        actor.onRequestCompleted(selectedShardUrl, shardUrls, future, elapsedTime));
-                int outstandingRequestCount = tracker.outstandingRequestCount.decrementAndGet();
-                if (isLastResponse(isException, outstandingRequestCount)) {
-                  tracker.actors.forEach(ShardRequestActor::close);
-                  return null; // remove this shardRequest from the map on last response
-                }
-              }
-              return tracker;
-            });
+        tracker.actors.forEach(
+            actor -> actor.onRequestCompleted(selectedShardUrl, shardUrls, future, elapsedTime));
+        int outstandingRequestCount = tracker.outstandingRequestCount.decrementAndGet();
+        if (isLastResponse(isException, outstandingRequestCount)) {
+          tracker.actors.forEach(ShardRequestActor::close);
+
+          // there could be some race condition here but benign
+          // (other thread triggers onRequestSubmit on actors which are already closed etc)
+          activeShardRequests.remove(shardRequest);
+        }
       } catch (Exception e) {
         log.warn("Failed to notify stats to slowNodeDetector", e);
       }
