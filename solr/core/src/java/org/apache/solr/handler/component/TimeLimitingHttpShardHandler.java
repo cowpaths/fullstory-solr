@@ -272,8 +272,7 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
     this.slowNodes = slowNodes;
     this.timeoutCallback = timeoutCallback;
     this.executorService =
-            ExecutorUtil.newMDCAwareSingleThreadExecutor(
-                    new SolrNamedThreadFactory("SlowNodeTimeout"));
+        ExecutorUtil.newMDCAwareSingleThreadExecutor(new SolrNamedThreadFactory("SlowNodeTimeout"));
   }
 
   @Override
@@ -311,37 +310,40 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
     if (cancelCountDownLatch == null && pendingFutureCountFromFastNode.get() <= 0) {
       cancelCountDownLatch = new CountDownLatch(1);
       executorService.submit(
-        () -> {
-          try {
-            if (cancelCountDownLatch.await(timeout, TimeUnit.MILLISECONDS)) {
-              return; // phew! All pending slow node requests completed before timeout
-            }
-
-            synchronized (SlowNodeTimeoutActor.this) {
-              if (!pendingFutures.isEmpty()) {
-                if (timeoutCallback != null) {
-                  timeoutCallback.accept(pendingFutures);
-                }
-                if (!dryRun) {
-                  pendingFutures.forEach(f -> f.cancel(true));
-                  if (log.isInfoEnabled()) {
-                    log.info("{} Pending requests cancelled due to timeout duration {}ms exceeded", pendingFutures.size(), timeout);
-                  }
-                } else {
-                  if (log.isInfoEnabled()) {
-                    log.info(
-                        "Dry-run mode: would have cancelled {} pending requests due to timeout duration {}ms exceeded",
-                        pendingFutures.size(),
-                        timeout);
-                  }
-                }
-                pendingFutures.clear();
+          () -> {
+            try {
+              if (cancelCountDownLatch.await(timeout, TimeUnit.MILLISECONDS)) {
+                return; // phew! All pending slow node requests completed before timeout
               }
+
+              synchronized (SlowNodeTimeoutActor.this) {
+                if (!pendingFutures.isEmpty()) {
+                  if (timeoutCallback != null) {
+                    timeoutCallback.accept(pendingFutures);
+                  }
+                  if (!dryRun) {
+                    pendingFutures.forEach(f -> f.cancel(true));
+                    if (log.isInfoEnabled()) {
+                      log.info(
+                          "{} Pending requests cancelled due to timeout duration {}ms exceeded",
+                          pendingFutures.size(),
+                          timeout);
+                    }
+                  } else {
+                    if (log.isInfoEnabled()) {
+                      log.info(
+                          "Dry-run mode: would have cancelled {} pending requests due to timeout duration {}ms exceeded",
+                          pendingFutures.size(),
+                          timeout);
+                    }
+                  }
+                  pendingFutures.clear();
+                }
+              }
+            } catch (InterruptedException e) {
+              // ok
             }
-          } catch (InterruptedException e) {
-            // ok
-          }
-        });
+          });
     }
   }
 
