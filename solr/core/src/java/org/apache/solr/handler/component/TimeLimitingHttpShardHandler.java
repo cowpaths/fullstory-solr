@@ -87,8 +87,8 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
               return new ShardRequestTracker(actors);
             });
 
-    tracker.actors.forEach(actor -> actor.onRequestSubmitted(shardUrls, future));
     tracker.outstandingRequestCount.incrementAndGet();
+    tracker.actors.forEach(actor -> actor.onRequestSubmitted(shardUrls, future));
 
     return new ShardRequestTrackingCallback(
         future, shardRequest, tracker, shardsTolerant, shardUrls);
