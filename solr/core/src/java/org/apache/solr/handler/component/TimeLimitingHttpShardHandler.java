@@ -44,6 +44,7 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
    * @param slowNodeDetector detector implementation to detect slow nodes
    * @param timeoutCallback callback to be invoked when timeout is reached, whether the pending
    *     requests are cancelled due to dryRun mode
+   * @param executorService executor service (thread pool) to execute actor tasks with
    */
   TimeLimitingHttpShardHandler(
       HttpShardHandlerFactory shardHandlerFactory,
@@ -265,6 +266,7 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
    * @param slowNodes set of slow nodes, this should not change during the lifetime of this actor
    * @param timeoutCallback callback to be invoked when timeout is reached, whether the pending
    *     requests are cancelled due to dryRun mode
+   * @param executorService executor service to run the timeout task
    */
   SlowNodeTimeoutActor(
       long timeout,
@@ -357,9 +359,6 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
       cancelCountDownLatch.countDown();
     }
     pendingFutures.clear();
-    if (executorService != null) {
-      executorService.shutdown();
-    }
   }
 }
 
