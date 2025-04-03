@@ -17,8 +17,6 @@ import java.util.function.Consumer;
 import org.apache.solr.client.solrj.impl.LBSolrClient;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.params.ShardParams;
-import org.apache.solr.common.util.ExecutorUtil;
-import org.apache.solr.common.util.SolrNamedThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,6 +35,7 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
 
   private final SlowNodeDetector slowNodeDetector;
   private final TimeoutCallback timeoutCallback;
+  private final ExecutorService executorService;
 
   /**
    * @param slowNodeTimeout how long in milliseconds to wait before timing out (cancelling) requests
@@ -51,12 +50,14 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
       long slowNodeTimeout,
       boolean dryRun,
       SlowNodeDetector slowNodeDetector,
-      TimeoutCallback timeoutCallback) {
+      TimeoutCallback timeoutCallback,
+      ExecutorService executorService) {
     super(shardHandlerFactory);
     this.slowNodeTimeout = slowNodeTimeout;
     this.dryRun = dryRun;
     this.slowNodeDetector = slowNodeDetector;
     this.timeoutCallback = timeoutCallback;
+    this.executorService = executorService;
   }
 
   @Override
@@ -76,7 +77,11 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
               if (shardsTolerant) {
                 actors.add(
                     new SlowNodeTimeoutActor(
-                        slowNodeTimeout, dryRun, slowNodeDetector.getSlowNodes(), timeoutCallback));
+                        slowNodeTimeout,
+                        dryRun,
+                        slowNodeDetector.getSlowNodes(),
+                        timeoutCallback,
+                        executorService));
               }
               return new ShardRequestTracker(actors);
             });
@@ -262,13 +267,16 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
    *     requests are cancelled due to dryRun mode
    */
   SlowNodeTimeoutActor(
-      long timeout, boolean dryRun, Set<String> slowNodes, TimeoutCallback timeoutCallback) {
+      long timeout,
+      boolean dryRun,
+      Set<String> slowNodes,
+      TimeoutCallback timeoutCallback,
+      ExecutorService executorService) {
     this.timeout = timeout;
     this.dryRun = dryRun;
     this.slowNodes = slowNodes;
     this.timeoutCallback = timeoutCallback;
-    this.executorService =
-        ExecutorUtil.newMDCAwareSingleThreadExecutor(new SolrNamedThreadFactory("SlowNodeTimeout"));
+    this.executorService = executorService;
   }
 
   @Override
@@ -349,7 +357,9 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
       cancelCountDownLatch.countDown();
     }
     pendingFutures.clear();
-    executorService.shutdown();
+    if (executorService != null) {
+      executorService.shutdown();
+    }
   }
 }
 
