@@ -182,13 +182,13 @@ interface ShardRequestActor {
    * <p>This happens either when all previously submitted requests are completed (no in-flight
    * requests) or an exception occurred while the handler is not shard fault-tolerant
    *
-   * <p>After close is invoked, it is expected that no further method calls be submitted to the Actor.
-   * However, in some rare cases, more calls could arrive after closing, the implementation
+   * <p>After close is invoked, it is expected that no further method calls be submitted to the
+   * Actor. However, in some rare cases, more calls could arrive after closing, the implementation
    * should ensure that it triggers no errors, the rest of the behaviors are undefined.
    *
-   * <p>Take note though unlikely, there could be pauses with request submissions such that close
-   * is triggered before all the requests for a particular ShardRequest are submitted. In such case,
-   * a new actor should be instantiated to handle the rest of the requests submission and completion.
+   * <p>Take note though unlikely, there could be pauses with request submissions such that close is
+   * triggered before all the requests for a particular ShardRequest are submitted. In such case, a
+   * new actor should be instantiated to handle the rest of the requests submission and completion.
    */
   void close();
 }
