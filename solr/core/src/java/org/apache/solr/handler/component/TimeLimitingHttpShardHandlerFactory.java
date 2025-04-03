@@ -173,6 +173,8 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
   @Override
   public void close() {
     super.close();
-    executorService.shutdown();
+    if (executorService != null) {
+      executorService.shutdown();
+    }
   }
 }
