@@ -330,13 +330,17 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
                     timeoutCallback.accept(pendingFutures);
                   }
                   if (!dryRun) {
-                    pendingFutures.forEach(f -> f.cancel(true));
+                    //create a clone as f.cancel could trigger onRequestCompleted and modifies the list while
+                    //we are iterating it here
+                    List<Future<?>> cancellingFutures = new ArrayList<>(pendingFutures);
+                    cancellingFutures.forEach(f -> f.cancel(true));
                     if (log.isInfoEnabled()) {
                       log.info(
-                          "{} Pending requests cancelled due to timeout duration {}ms exceeded",
-                          pendingFutures.size(),
-                          timeout);
+                              "Cancelled {} pending requests due to timeout duration {}ms exceeded",
+                              cancellingFutures.size(),
+                              timeout);
                     }
+
                   } else {
                     if (log.isInfoEnabled()) {
                       log.info(
