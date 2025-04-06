@@ -21,12 +21,14 @@ import static org.apache.lucene.codecs.lucene90.Lucene90StoredFieldsFormat.MODE_
 import java.io.IOException;
 import java.util.Map;
 import org.apache.lucene.codecs.Codec;
-import org.apache.lucene.codecs.lucene99.Lucene99Codec.Mode;
+import org.apache.lucene.codecs.DocValuesFormat;
+import org.apache.lucene.codecs.PostingsFormat;
+import org.apache.lucene.codecs.lucene90.Lucene90PostingsFormat;
+import org.apache.lucene.codecs.lucene95.Lucene95Codec.Mode;
 import org.apache.lucene.codecs.perfield.PerFieldDocValuesFormat;
 import org.apache.lucene.codecs.perfield.PerFieldPostingsFormat;
 import org.apache.lucene.index.SegmentInfo;
 import org.apache.lucene.index.SegmentInfos;
-import org.apache.lucene.tests.util.TestUtil;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.util.NamedList;
@@ -37,6 +39,17 @@ import org.apache.solr.util.TestHarness;
 import org.junit.BeforeClass;
 
 public class TestCodecSupport extends SolrTestCaseJ4 {
+
+  private static final class TestUtil {
+    // FS: temporarily shim TestUtil to override the default postings format
+    private static PostingsFormat getDefaultPostingsFormat() {
+      return new Lucene90PostingsFormat();
+    }
+
+    private static DocValuesFormat getDefaultDocValuesFormat() {
+      return org.apache.lucene.tests.util.TestUtil.getDefaultDocValuesFormat();
+    }
+  }
 
   @BeforeClass
   public static void beforeClass() throws Exception {

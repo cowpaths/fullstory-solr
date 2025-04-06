@@ -25,6 +25,9 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Set;
 import org.apache.lucene.codecs.Codec;
+import org.apache.lucene.codecs.KnnVectorsFormat;
+import org.apache.lucene.codecs.lucene95.Lucene95Codec;
+import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat;
 import org.apache.lucene.tests.util.TestUtil;
 import org.apache.solr.SolrTestCaseJ4;
 import org.junit.BeforeClass;
@@ -41,7 +44,13 @@ import org.junit.BeforeClass;
 public class TestSchemaCodecFactoryDefaults extends SolrTestCaseJ4 {
 
   // Note: we use TestUtil to get the "real" (not randomized) default for our current lucene version
-  private static final Codec LUCENE_DEFAULT_CODEC = TestUtil.getDefaultCodec();
+  private static final Codec LUCENE_DEFAULT_CODEC =
+      new Lucene95Codec() {
+        @Override
+        public KnnVectorsFormat getKnnVectorsFormatForField(String field) {
+          return new Lucene99HnswVectorsFormat();
+        }
+      };
 
   @BeforeClass
   public static void beforeClass() throws Exception {
@@ -77,7 +86,7 @@ public class TestSchemaCodecFactoryDefaults extends SolrTestCaseJ4 {
     assertThat(
         "SchemaCodec does not extend current default lucene codec",
         h.getCore().getCodec(),
-        instanceOf(LUCENE_DEFAULT_CODEC.getClass()));
+        instanceOf(Lucene95Codec.class));
   }
 
   /**

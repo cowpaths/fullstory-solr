@@ -25,8 +25,8 @@ import java.util.function.Function;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.Tokenizer;
 import org.apache.lucene.analysis.core.KeywordTokenizer;
-import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.codecs.PostingsFormat;
+import org.apache.lucene.codecs.lucene95.Lucene95Codec;
 import org.apache.lucene.codecs.perfield.PerFieldPostingsFormat;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.IndexReader;
@@ -101,7 +101,7 @@ public final class BloomStrField extends StrField implements SchemaAware {
       pf = PostingsFormat.forName(postingsFormat);
     } else {
       // start with the default postingsFormat.
-      pf = Codec.getDefault().postingsFormat();
+      pf = new Lucene95Codec().postingsFormat(); // temporarily hardcode to Lucene95Codec
       if (pf instanceof PerFieldPostingsFormat) {
         pf = ((PerFieldPostingsFormat) pf).getPostingsFormatForField("");
       }
