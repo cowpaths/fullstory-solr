@@ -49,20 +49,28 @@ public final class QueryResponseWriterUtil {
       String contentType)
       throws IOException {
 
-    if (responseWriter instanceof JacksonJsonWriter) {
-      JacksonJsonWriter binWriter = (JacksonJsonWriter) responseWriter;
-      BufferedOutputStream bos = new BufferedOutputStream(new NonFlushingStream(outputStream));
-      binWriter.write(bos, solrRequest, solrResponse);
-      bos.flush();
-    } else if (responseWriter instanceof BinaryQueryResponseWriter) {
-      BinaryQueryResponseWriter binWriter = (BinaryQueryResponseWriter) responseWriter;
-      binWriter.write(outputStream, solrRequest, solrResponse);
-    } else {
-      OutputStream out = new NonFlushingStream(outputStream);
-      Writer writer = buildWriter(out, ContentStreamBase.getCharsetFromContentType(contentType));
-      responseWriter.write(writer, solrRequest, solrResponse);
-      writer.flush();
-    }
+    solrRequest
+        .getCoreContainer()
+        .storedFieldsExecute(
+            () -> {
+              if (responseWriter instanceof JacksonJsonWriter) {
+                JacksonJsonWriter binWriter = (JacksonJsonWriter) responseWriter;
+                BufferedOutputStream bos =
+                    new BufferedOutputStream(new NonFlushingStream(outputStream));
+                binWriter.write(bos, solrRequest, solrResponse);
+                bos.flush();
+              } else if (responseWriter instanceof BinaryQueryResponseWriter) {
+                BinaryQueryResponseWriter binWriter = (BinaryQueryResponseWriter) responseWriter;
+                binWriter.write(outputStream, solrRequest, solrResponse);
+              } else {
+                OutputStream out = new NonFlushingStream(outputStream);
+                Writer writer =
+                    buildWriter(out, ContentStreamBase.getCharsetFromContentType(contentType));
+                responseWriter.write(writer, solrRequest, solrResponse);
+                writer.flush();
+              }
+              return null;
+            });
   }
 
   private static Writer buildWriter(OutputStream outputStream, String charset)

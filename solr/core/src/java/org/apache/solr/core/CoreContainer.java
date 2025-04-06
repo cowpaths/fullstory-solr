@@ -50,6 +50,7 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -176,6 +177,20 @@ public class CoreContainer {
   }
 
   final SolrCores solrCores;
+
+  private final ExecutorService storedFieldsExecutor =
+      ExecutorUtil.newMDCAwareCachedThreadPool("storedFieldsExecutor");
+
+  public void storedFieldsExecute(Callable<Void> callable) throws IOException {
+    Future<Void> future = storedFieldsExecutor.submit(callable);
+    try {
+      future.get();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    } catch (ExecutionException e) {
+      throw org.apache.lucene.util.IOUtils.rethrowAlways(e.getCause());
+    }
+  }
 
   public static class CoreLoadFailure {
 
@@ -1240,6 +1255,7 @@ public class CoreContainer {
       }
 
       ExecutorUtil.shutdownAndAwaitTermination(coreContainerWorkExecutor);
+      ExecutorUtil.shutdownAndAwaitTermination(storedFieldsExecutor);
 
       // First wake up the closer thread, it'll terminate almost immediately since it checks
       // isShutDown.

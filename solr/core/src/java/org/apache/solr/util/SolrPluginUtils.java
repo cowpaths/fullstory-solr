@@ -251,9 +251,15 @@ public class SolrPluginUtils {
 
       // get documents
       DocIterator iter = docs.iterator();
-      for (int i = 0; i < docs.size(); i++) {
-        searcher.doc(iter.nextDoc(), fieldFilter);
-      }
+      Set<String> fieldFilterF = fieldFilter;
+      req.getCoreContainer()
+          .storedFieldsExecute(
+              () -> {
+                for (int i = 0; i < docs.size(); i++) {
+                  searcher.doc(iter.nextDoc(), fieldFilterF);
+                }
+                return null;
+              });
     }
   }
 
