@@ -25,6 +25,9 @@ public abstract class ShardHandler {
 
   public abstract ShardResponse takeCompletedIncludingErrors();
 
+  public abstract ShardResponse takeCompletedIncludingErrorsWithTimeout(
+      long maxAllowedTimeInMillis);
+
   public abstract ShardResponse takeCompletedOrError();
 
   public abstract void cancelAll();
