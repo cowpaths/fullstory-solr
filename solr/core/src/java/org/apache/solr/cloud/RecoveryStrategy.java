@@ -57,6 +57,7 @@ import org.apache.solr.request.LocalSolrQueryRequest;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.request.SolrRequestHandler;
 import org.apache.solr.search.SolrIndexSearcher;
+import org.apache.solr.servlet.CoordinatorHttpSolrCall;
 import org.apache.solr.update.CommitUpdateCommand;
 import org.apache.solr.update.PeerSyncWithLeader;
 import org.apache.solr.update.UpdateLog;
@@ -328,6 +329,13 @@ public class RecoveryStrategy implements Runnable, Closeable {
   }
 
   public final void doRecovery(SolrCore core) throws Exception {
+    if (core.getCoreDescriptor()
+        .getName()
+        .startsWith(CoordinatorHttpSolrCall.SYNTHETIC_COLL_PREFIX)) {
+      log.info("Coordinator node. Short circuit recovery. Mark as ACTIVE");
+      zkController.publish(this.coreDescriptor, Replica.State.ACTIVE);
+      return;
+    }
     // we can lose our core descriptor, so store it now
     this.coreDescriptor = core.getCoreDescriptor();
 
