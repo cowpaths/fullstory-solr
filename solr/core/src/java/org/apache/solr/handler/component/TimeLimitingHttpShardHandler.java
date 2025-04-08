@@ -90,8 +90,7 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
     tracker.outstandingRequestCount.incrementAndGet();
     tracker.actors.forEach(actor -> actor.onRequestSubmitted(shardUrls, future));
 
-    return new ShardRequestTrackingCallback(
-        future, shardRequest, tracker, shardsTolerant, shardUrls);
+    return new ShardRequestTrackingCallback(future, shardRequest, tracker, shardUrls);
   }
 
   /**
@@ -107,39 +106,36 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
     private final Future<LBSolrClient.Rsp> future;
     private final ShardRequestTracker tracker;
     private final List<String> shardUrls;
-    private final boolean shardsTolerant;
 
     ShardRequestTrackingCallback(
         Future<LBSolrClient.Rsp> future,
         ShardRequest shardRequest,
         ShardRequestTracker tracker,
-        boolean shardsTolerant,
         List<String> shardUrls) {
       this.future = future;
       this.shardRequest = shardRequest;
       this.tracker = tracker;
       this.shardUrls = shardUrls;
-      this.shardsTolerant = shardsTolerant;
     }
 
     @Override
     public void onResponse(LBSolrClient.Rsp response, long elapsedTime) {
-      onComplete(elapsedTime, response.getServer(), false);
+      onComplete(elapsedTime, response.getServer());
     }
 
     @Override
     public void onException(Throwable exception, long elapsedTime) {
       // TODO is it possible to infer the selected node? If it has timed out, perhaps we can assume
       // all shardNodes are slow?
-      onComplete(elapsedTime, null, true);
+      onComplete(elapsedTime, null);
     }
 
-    private void onComplete(long elapsedTime, String selectedShardUrl, boolean isException) {
+    private void onComplete(long elapsedTime, String selectedShardUrl) {
       try {
         tracker.actors.forEach(
             actor -> actor.onRequestCompleted(selectedShardUrl, shardUrls, future, elapsedTime));
         int outstandingRequestCount = tracker.outstandingRequestCount.decrementAndGet();
-        if (isLastResponse(isException, outstandingRequestCount)) {
+        if (isLastResponse(outstandingRequestCount)) {
           tracker.actors.forEach(ShardRequestActor::close);
 
           // there could be some race condition here but benign
@@ -151,10 +147,7 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
       }
     }
 
-    private boolean isLastResponse(boolean isException, int outstandingRequestCount) {
-      if (!shardsTolerant && isException) {
-        return true;
-      }
+    private boolean isLastResponse(int outstandingRequestCount) {
       return outstandingRequestCount <= 0;
     }
   }
