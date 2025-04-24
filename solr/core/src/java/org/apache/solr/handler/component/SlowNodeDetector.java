@@ -72,16 +72,20 @@ class SlowNodeDetector implements SolrMetricProducer {
   }
 
   void notifyRequestStats(RequestStats stats) {
-    Set<String> newSlowNodes = computeSlowNodes(stats);
+    ComputeResult computeResult = computeSlowNodes(stats);;
 
-    if (newSlowNodes != null) {
-      for (String slowNode : newSlowNodes) {
+    if (computeResult != null) {
+      for (String slowNode : computeResult.newSlowNodes) {
         slowNodes.put(slowNode, Boolean.TRUE);
+      }
+      for (String purgingSlowNode : computeResult.recoveredSlowNodes) {
+        slowNodes.remove(purgingSlowNode);
       }
     }
   }
 
-  private Set<String> computeSlowNodes(RequestStats stats) {
+
+  private ComputeResult computeSlowNodes(RequestStats stats) {
     if (stats.responseLatencies.size() < minShardCountPerRequest) {
       return null; // not enough responses to make a decision
     }
@@ -100,11 +104,12 @@ class SlowNodeDetector implements SolrMetricProducer {
     boolean foundLatencyDrop = false;
     Map<String, Integer> iteratedResponseCountByNode = new HashMap<>();
 
+
+    //iterate response to find slow nodes
     int index = 0;
     for (RequestStats.NodeLatency current : stats.responseLatencies) {
-      if (index++
-          > maxSlowResponseCount) { // too many potential slow responses, not a good data as we
-        // assume they are minority
+      if (index++ > maxSlowResponseCount) {
+        // too many potential slow responses, not a good data as we assume they are minority
         break;
       }
       if (previousLatency != null
@@ -144,11 +149,65 @@ class SlowNodeDetector implements SolrMetricProducer {
       }
     }
 
-    if (log.isInfoEnabled() && !slowNodes.isEmpty()) {
-      log.info("Slow nodes detected: {}", slowNodes);
+    // find previous slow nodes that might have recovered
+    Set<String> recoveredNodes = new HashSet<>();
+    Set<String> recoveredSlowNodeCandidates = new HashSet<>(this.slowNodes.keySet());
+    recoveredSlowNodeCandidates.removeAll(slowNodes);
+
+    if (!recoveredSlowNodeCandidates.isEmpty()) {
+      //the threshold for sorted response to be considered as normal latency
+      int normalNodeResponseCount = stats.responseLatencies.size() - maxSlowResponseCount;
+      iteratedResponseCountByNode.clear();
+      for (int i = stats.responseLatencies.size() - 1; i >= normalNodeResponseCount; i--) {
+        RequestStats.NodeLatency latency = stats.responseLatencies.get(i);
+        if (!recoveredSlowNodeCandidates.contains(latency.node)) {
+          continue;
+        }
+        iteratedResponseCountByNode.compute(latency.node, (k, v) -> v == null ? 1 : v + 1);
+      }
+
+      // if the all responses of such node are considered normal, then consider the node as recovered
+      for (Map.Entry<String, Integer> nodeWithNormalResponseCount :
+              iteratedResponseCountByNode.entrySet()) {
+        String potentialRecoveredNode = nodeWithNormalResponseCount.getKey();
+
+        if (nodeWithNormalResponseCount
+                .getValue()
+                .equals(stats.responseCountByNode.get(potentialRecoveredNode))) {
+          recoveredNodes.add(potentialRecoveredNode);
+        }
+      }
+
     }
 
-    return slowNodes;
+    ComputeResult result = null;
+    if (!slowNodes.isEmpty() || !recoveredNodes.isEmpty()) {
+      result = new ComputeResult(slowNodes, recoveredNodes);
+    }
+
+    if (log.isInfoEnabled() && result != null) {
+      log.info("Slow nodes compute result: {}", result);
+    }
+
+    return result;
+  }
+
+  private static class ComputeResult {
+    Set<String> newSlowNodes;
+    Set<String> recoveredSlowNodes; //previously slow nodes that are no longer slow
+
+    ComputeResult(Set<String> newSlowNodes, Set<String> recoveredSlowNodes) {
+      this.newSlowNodes = newSlowNodes;
+      this.recoveredSlowNodes = recoveredSlowNodes;
+    }
+
+    @Override
+    public String toString() {
+      return "ComputeResult{" +
+              "newSlowNodes=" + newSlowNodes +
+              ", recoveredSlowNodes=" + recoveredSlowNodes +
+              '}';
+    }
   }
 
   @Override
