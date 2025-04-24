@@ -33,8 +33,8 @@ class SlowNodeDetector implements SolrMetricProducer {
   /**
    * @param latencyDropRatioThreshold identify as a latency drop point when current latency is < 0.5
    *     of previous
-   * @param maxSlowResponsePercentage If more than this percentage of potential slow nodes detected,
-   *     do not return any slow node at all
+   * @param maxSlowResponsePercentage Only up to this percentage of responses can be considered "slow".
+   *                                  The rest of the responses are considered "normal"
    * @param minShardCountPerRequest minimum number of shards per Shard Request to be considered for
    *     slow node detection
    * @param slowLatencyThreshold minimum latency in millisec to be considered as slow node
