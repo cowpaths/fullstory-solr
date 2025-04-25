@@ -208,7 +208,6 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
     assertEquals(Collections.emptySet(), detector.getSlowNodes());
   }
 
-
   @Test
   public void testDetection1SlowNode1RecoveredNode() {
     RequestStats stats = new RequestStats();
@@ -220,7 +219,7 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
 
       if (serverIndex == 1) { // 1 slow nodes
         stats.recordLatency(node, 10000);
-      } else if (serverIndex == 2) { //recovered nodes
+      } else if (serverIndex == 2) { // recovered nodes
         stats.recordLatency(node, 1999);
       } else {
         stats.recordLatency(node, 2000);
@@ -230,7 +229,7 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
     SlowNodeDetector detector = new SlowNodeDetector.Builder().build();
     detector.setSlowNodes(Set.of("solr-2:8983"));
     detector.notifyRequestStats(stats);
-    assertEquals(Set.of("solr-1:8983"), detector.getSlowNodes()); //solr-2:8983 is recovered
+    assertEquals(Set.of("solr-1:8983"), detector.getSlowNodes()); // solr-2:8983 is recovered
   }
 
   @Test
@@ -245,7 +244,8 @@ public class TestSlowNodeDetector extends SolrTestCaseJ4 {
       if (serverIndex == 1) { // 1 slow nodes
         stats.recordLatency(node, 10000);
       } else if (serverIndex == 2 && i % 2 == 0) {
-        // this node is not considered slow (only some shards are slow), however it has not recovered either
+        // this node is not considered slow (only some shards are slow), however it has not
+        // recovered either
         stats.recordLatency(node, 10000);
       } else {
         stats.recordLatency(node, 2000);

@@ -33,8 +33,8 @@ class SlowNodeDetector implements SolrMetricProducer {
   /**
    * @param latencyDropRatioThreshold identify as a latency drop point when current latency is < 0.5
    *     of previous
-   * @param maxSlowResponsePercentage Only up to this percentage of responses can be considered "slow".
-   *                                  The rest of the responses are considered "normal"
+   * @param maxSlowResponsePercentage Only up to this percentage of responses can be considered
+   *     "slow". The rest of the responses are considered "normal"
    * @param minShardCountPerRequest minimum number of shards per Shard Request to be considered for
    *     slow node detection
    * @param slowLatencyThreshold minimum latency in millisec to be considered as slow node
@@ -72,7 +72,8 @@ class SlowNodeDetector implements SolrMetricProducer {
   }
 
   void notifyRequestStats(RequestStats stats) {
-    ComputeResult computeResult = computeSlowNodes(stats);;
+    ComputeResult computeResult = computeSlowNodes(stats);
+    ;
 
     if (computeResult != null) {
       for (String slowNode : computeResult.newSlowNodes) {
@@ -83,7 +84,6 @@ class SlowNodeDetector implements SolrMetricProducer {
       }
     }
   }
-
 
   private ComputeResult computeSlowNodes(RequestStats stats) {
     if (stats.responseLatencies.size() < minShardCountPerRequest) {
@@ -104,8 +104,7 @@ class SlowNodeDetector implements SolrMetricProducer {
     boolean foundLatencyDrop = false;
     Map<String, Integer> iteratedResponseCountByNode = new HashMap<>();
 
-
-    //iterate response to find slow nodes
+    // iterate response to find slow nodes
     int index = 0;
     for (RequestStats.NodeLatency current : stats.responseLatencies) {
       if (index++ > maxSlowResponseCount) {
@@ -155,7 +154,7 @@ class SlowNodeDetector implements SolrMetricProducer {
     recoveredSlowNodeCandidates.removeAll(slowNodes);
 
     if (!recoveredSlowNodeCandidates.isEmpty()) {
-      //the threshold for sorted response to be considered as normal latency
+      // the threshold for sorted response to be considered as normal latency
       int normalNodeResponseCount = stats.responseLatencies.size() - maxSlowResponseCount;
       iteratedResponseCountByNode.clear();
       for (int i = stats.responseLatencies.size() - 1; i >= normalNodeResponseCount; i--) {
@@ -166,18 +165,18 @@ class SlowNodeDetector implements SolrMetricProducer {
         iteratedResponseCountByNode.compute(latency.node, (k, v) -> v == null ? 1 : v + 1);
       }
 
-      // if the all responses of such node are considered normal, then consider the node as recovered
+      // if the all responses of such node are considered normal, then consider the node as
+      // recovered
       for (Map.Entry<String, Integer> nodeWithNormalResponseCount :
-              iteratedResponseCountByNode.entrySet()) {
+          iteratedResponseCountByNode.entrySet()) {
         String potentialRecoveredNode = nodeWithNormalResponseCount.getKey();
 
         if (nodeWithNormalResponseCount
-                .getValue()
-                .equals(stats.responseCountByNode.get(potentialRecoveredNode))) {
+            .getValue()
+            .equals(stats.responseCountByNode.get(potentialRecoveredNode))) {
           recoveredNodes.add(potentialRecoveredNode);
         }
       }
-
     }
 
     ComputeResult result = null;
@@ -194,7 +193,7 @@ class SlowNodeDetector implements SolrMetricProducer {
 
   private static class ComputeResult {
     Set<String> newSlowNodes;
-    Set<String> recoveredSlowNodes; //previously slow nodes that are no longer slow
+    Set<String> recoveredSlowNodes; // previously slow nodes that are no longer slow
 
     ComputeResult(Set<String> newSlowNodes, Set<String> recoveredSlowNodes) {
       this.newSlowNodes = newSlowNodes;
@@ -203,10 +202,12 @@ class SlowNodeDetector implements SolrMetricProducer {
 
     @Override
     public String toString() {
-      return "ComputeResult{" +
-              "newSlowNodes=" + newSlowNodes +
-              ", recoveredSlowNodes=" + recoveredSlowNodes +
-              '}';
+      return "ComputeResult{"
+          + "newSlowNodes="
+          + newSlowNodes
+          + ", recoveredSlowNodes="
+          + recoveredSlowNodes
+          + '}';
     }
   }
 
