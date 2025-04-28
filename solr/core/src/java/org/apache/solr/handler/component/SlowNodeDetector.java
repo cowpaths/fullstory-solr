@@ -1,10 +1,12 @@
 package org.apache.solr.handler.component;
 
+import com.carrotsearch.hppc.ObjectIntHashMap;
+import com.carrotsearch.hppc.ObjectIntMap;
+import com.carrotsearch.hppc.cursors.ObjectIntCursor;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -102,7 +104,7 @@ class SlowNodeDetector implements SolrMetricProducer {
 
     Long previousLatency = null;
     boolean foundLatencyDrop = false;
-    Map<String, Integer> iteratedResponseCountByNode = new HashMap<>();
+    ObjectIntMap<String> iteratedResponseCountByNode = new ObjectIntHashMap<>();
 
     // iterate response to find slow nodes
     int index = 0;
@@ -129,20 +131,18 @@ class SlowNodeDetector implements SolrMetricProducer {
       }
 
       previousLatency = current.latency;
-      iteratedResponseCountByNode.compute(current.node, (k, v) -> v == null ? 1 : v + 1);
+      iteratedResponseCountByNode.putOrAdd(current.node, 1, 1);
     }
 
     Set<String> slowNodes = new HashSet<>();
-    if (foundLatencyDrop) { // then that means there are some nodes that are significantly slower
-      // than others
-      for (Map.Entry<String, Integer> nodeWithSlowResponseCount :
-          iteratedResponseCountByNode.entrySet()) {
-        String potentialSlowNode = nodeWithSlowResponseCount.getKey();
+    if (foundLatencyDrop) {
+      // then that means there are some nodes that are significantly slower than others
+      for (ObjectIntCursor<String> nodeWithSlowResponseCount : iteratedResponseCountByNode) {
+        String potentialSlowNode = nodeWithSlowResponseCount.key;
 
-        // all responses of this node is slow, it is a slow node
-        if (nodeWithSlowResponseCount
-            .getValue()
-            .equals(stats.responseCountByNode.get(potentialSlowNode))) {
+        if (nodeWithSlowResponseCount.value
+            == stats.responseCountByNode.getOrDefault(potentialSlowNode, 0)) {
+          // all responses of this node is slow, it is a slow node
           slowNodes.add(potentialSlowNode);
         }
       }
@@ -162,18 +162,16 @@ class SlowNodeDetector implements SolrMetricProducer {
         if (!recoveredSlowNodeCandidates.contains(latency.node)) {
           continue;
         }
-        iteratedResponseCountByNode.compute(latency.node, (k, v) -> v == null ? 1 : v + 1);
+        iteratedResponseCountByNode.putOrAdd(latency.node, 1, 1);
       }
 
       // if the all responses of such node are considered normal, then consider the node as
       // recovered
-      for (Map.Entry<String, Integer> nodeWithNormalResponseCount :
-          iteratedResponseCountByNode.entrySet()) {
-        String potentialRecoveredNode = nodeWithNormalResponseCount.getKey();
+      for (ObjectIntCursor<String> nodeWithNormalResponseCount : iteratedResponseCountByNode) {
+        String potentialRecoveredNode = nodeWithNormalResponseCount.key;
 
-        if (nodeWithNormalResponseCount
-            .getValue()
-            .equals(stats.responseCountByNode.get(potentialRecoveredNode))) {
+        if (nodeWithNormalResponseCount.value
+            == stats.responseCountByNode.getOrDefault(potentialRecoveredNode, 0)) {
           recoveredNodes.add(potentialRecoveredNode);
         }
       }
