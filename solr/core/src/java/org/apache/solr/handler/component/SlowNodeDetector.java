@@ -215,8 +215,22 @@ class SlowNodeDetector implements SolrMetricProducer {
   public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
     String nodeRegistry = SolrMetricManager.getRegistryName(SolrInfoBean.Group.node);
     SolrMetricManager manager = parentContext.getMetricManager();
-    manager.registerGauge(parentContext, nodeRegistry, slowNodes::keySet, parentContext.getTag(), SolrMetricManager.ResolutionStrategy.REPLACE, "slowNodes", scope);
-    manager.registerGauge(parentContext, nodeRegistry, slowNodes::size, parentContext.getTag(), SolrMetricManager.ResolutionStrategy.REPLACE, "slowNodeCount", scope);
+    manager.registerGauge(
+        parentContext,
+        nodeRegistry,
+        slowNodes::keySet,
+        parentContext.getTag(),
+        SolrMetricManager.ResolutionStrategy.REPLACE,
+        "slowNodes",
+        scope);
+    manager.registerGauge(
+        parentContext,
+        nodeRegistry,
+        slowNodes::size,
+        parentContext.getTag(),
+        SolrMetricManager.ResolutionStrategy.REPLACE,
+        "slowNodeCount",
+        scope);
   }
 
   @Override
