@@ -1180,8 +1180,8 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
       String prefixClause =
           Arrays.stream(prefixes)
               .distinct()
-              .map(p -> "," + URLEncoder.encode(p, StandardCharsets.UTF_8))
-              .collect(Collectors.joining());
+              .map(p -> URLEncoder.encode(p, StandardCharsets.UTF_8))
+              .collect(Collectors.joining(","));
       return String.format(
           Locale.ROOT,
           "wt=json&indent=false&compact=true&group=%s&prefix=%s%s",
