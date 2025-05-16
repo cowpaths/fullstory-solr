@@ -581,11 +581,7 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
       // with explicit "property" filter, it does not count down compute time
       super(
           "solr.node",
-          new String[] {
-            "QUERY.httpShardHandler.cancelledSlowNodeRequests",
-            "QUERY.httpShardHandler.cancelledDryRunSlowNodeRequests",
-            "QUERY.httpShardHandler.slowNodeCount"
-          });
+          "QUERY.httpShardHandler.cancelledSlowNodeRequests,QUERY.httpShardHandler.cancelledDryRunSlowNodeRequests,QUERY.httpShardHandler.slowNodeCount");
     }
 
     /*
@@ -1154,17 +1150,13 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
 
   private abstract static class MetricsByPrefixApiCaller extends MetricsApiCaller {
     protected final String group;
-    protected final String[] prefixes;
+    protected final String prefix;
     protected final String[] properties;
     protected final String property; // for backward compatibility
 
     MetricsByPrefixApiCaller(String group, String prefix, String... properties) {
-      this(group, new String[] {prefix}, properties);
-    }
-
-    MetricsByPrefixApiCaller(String group, String[] prefixes, String... properties) {
       this.group = group;
-      this.prefixes = prefixes;
+      this.prefix = prefix;
       this.properties = properties;
       this.property = properties.length > 0 ? properties[0] : null;
     }
@@ -1176,17 +1168,11 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
               .distinct()
               .map(p -> "&property=" + URLEncoder.encode(p, StandardCharsets.UTF_8))
               .collect(Collectors.joining());
-
-      String prefixClause =
-          Arrays.stream(prefixes)
-              .distinct()
-              .map(p -> URLEncoder.encode(p, StandardCharsets.UTF_8))
-              .collect(Collectors.joining(","));
       return String.format(
           Locale.ROOT,
           "wt=json&indent=false&compact=true&group=%s&prefix=%s%s",
           URLEncoder.encode(group, StandardCharsets.UTF_8),
-          prefixClause,
+          URLEncoder.encode(prefix, StandardCharsets.UTF_8),
           propertyClause);
     }
   }
