@@ -578,8 +578,7 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
 
     NodeMetricsApiCaller() {
       // use 3 prefixes instead of 1 generic prefix "QUERY.httpShardHandler" matches too many
-      // metrics,
-      // as even with explicit "property" filter, it does not cut down compute time
+      // metrics as even with explicit "property" filter, it does not cut down compute time
       super(
           "solr.node",
           "QUERY.httpShardHandler.cancelledSlowNodeRequests,QUERY.httpShardHandler.cancelledDryRunSlowNodeRequests,QUERY.httpShardHandler.slowNodeCount");
