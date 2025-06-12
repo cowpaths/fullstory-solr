@@ -108,9 +108,10 @@
          that match a particular query.
       -->
     <filterCache
+      class="${solr.filterCache.class:solr.CaffeineCache}"
       size="512"
       initialSize="512"
-      autowarmCount="2"
+      autowarmCount="${solr.filterCache.autowarmCount:2}"
       async="${solr.filterCache.async:false}"/>
 
     <queryResultCache
