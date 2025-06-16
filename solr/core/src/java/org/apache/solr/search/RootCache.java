@@ -115,7 +115,7 @@ class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     this(maxSize, Long.MAX_VALUE, 0, 0, parent, tierScope, externalListener);
   }
 
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings({"unchecked", "rawtypes"})
   public RootCache(
       int maxSize,
       long maxRamBytes,
@@ -416,8 +416,8 @@ class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
         : root.rootPut(key, value, pathFromRoot.iterator(), tierScope);
   }
 
+  @SuppressWarnings("unchecked")
   private V rootPut(K key, V value, Iterator<RootCache<K, V>> pathToLeaf, String leafKeyScope) {
-    @SuppressWarnings("unchecked")
     final V[] ret = (V[]) new Object[1];
     final RootCache<K, V> child = pathToLeaf.next();
     final long childMask = child.mask;
@@ -509,13 +509,13 @@ class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     return ret[0];
   }
 
+  @SuppressWarnings("unchecked")
   private V internalNestedPut(
       K key,
       V value,
       RefCountingKey<K> parentKey,
       long knownRefCount,
       Iterator<RootCache<K, V>> pathToLeaf) {
-    @SuppressWarnings("unchecked")
     final V[] ret = (V[]) new Object[1];
     if (isLeaf) {
       RefCountingKey<K> refCountingKey = new RefCountingKey<>(null, key, parentKey, knownRefCount);
@@ -609,8 +609,8 @@ class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     return ret[0];
   }
 
+  @SuppressWarnings("unchecked")
   private V internalNestedUpdate(K key, V value, RefCountingKey<K> parentKey, long knownRefCount) {
-    @SuppressWarnings("unchecked")
     final V[] ret = (V[]) new Object[1];
     RefCountingKey<K> refCountingKey = new RefCountingKey<>(null, key, parentKey, knownRefCount);
     if (isLeaf) {
@@ -729,13 +729,13 @@ class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
         key, mappingFunction, root == this ? null : pathFromRoot.iterator(), tierScope);
   }
 
+  @SuppressWarnings("unchecked")
   private V internalNestedPutIfAbsent(
       K key,
       V value,
       RefCountingKey<K> parentKey,
       long knownRefCount,
       Iterator<RootCache<K, V>> pathToLeaf) {
-    @SuppressWarnings("unchecked")
     final V[] ret = (V[]) new Object[1];
     if (isLeaf) {
       RefCountingKey<K> refCountingKey = new RefCountingKey<>(null, key, parentKey, knownRefCount);
@@ -872,6 +872,7 @@ class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     }
   }
 
+  @SuppressWarnings("unchecked")
   private V rootComputeIfAbsent(
       K key,
       IOFunction<? super K, ? extends V> mappingFunction,
@@ -893,7 +894,7 @@ class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     }
     RefCountingKey<K> refCountingKey =
         new RefCountingKey<>(leafKeyScope, childTierScope, key, childMask);
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "rawtypes"})
     RefCountingKey<K>[] rootKey = new RefCountingKey[] {refCountingKey};
     CompletableFuture<ValRef<V>> f =
         asyncCache
@@ -974,6 +975,7 @@ class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     return ret;
   }
 
+  @SuppressWarnings("unchecked")
   private void pollDeferredRemovals() {
     DeferredRemoval<K> toRemove;
     while ((toRemove = deferRemovalQueue.poll()) != null) {
@@ -1180,6 +1182,7 @@ class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     return removalListeners.unregister(listener, tierScope);
   }
 
+  @SuppressWarnings("rawtypes")
   public void close() {
     if (parent != null) {
       parent.unregister(

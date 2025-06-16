@@ -152,7 +152,7 @@ public class TestTieredCache extends SolrTestCase {
             new SynchronousQueue<>(),
             new ThreadPoolExecutor.CallerRunsPolicy());
     try {
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings({"unchecked", "rawtypes"})
       Future<Integer>[] futures = new Future[N_THREADS];
       // pre-start all the threads
       for (int i = 0; i < N_THREADS; i++) {
@@ -243,7 +243,7 @@ public class TestTieredCache extends SolrTestCase {
     RootCache<Integer, String> root = new RootCache<>(20, null, null);
     RootCache<Integer, String> leaf1 = new RootCache<>(18, root, "one");
     RootCache<Integer, String> leaf2 = new RootCache<>(4, root, "two");
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "rawtypes"})
     RootCache<Integer, String>[] leafCaches = new RootCache[] {leaf1, leaf2};
     ExecutorService executor =
         new ExecutorUtil.MDCAwareThreadPoolExecutor(
@@ -254,7 +254,7 @@ public class TestTieredCache extends SolrTestCase {
             new SynchronousQueue<>(),
             new ThreadPoolExecutor.CallerRunsPolicy());
     try {
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings({"unchecked", "rawtypes"})
       Future<Integer>[] futures = new Future[N_THREADS];
       // pre-start all the threads
       for (int i = 0; i < N_THREADS; i++) {
@@ -311,6 +311,7 @@ public class TestTieredCache extends SolrTestCase {
 
   @Test
   @ThreadLeakLingering(linger = 1000) // even proper threadpool shutdown can leak transient threads
+  @SuppressWarnings("rawtypes")
   public void test3() throws IOException, ExecutionException, InterruptedException {
     // seed B856D5E822A2585C
     final int MAX_STD_DEV = 500;

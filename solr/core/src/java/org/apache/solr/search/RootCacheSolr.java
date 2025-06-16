@@ -57,6 +57,7 @@ class RootCacheSolr<K, V> extends SolrCacheBase
 
   // SolrCache
   @Override
+  @SuppressWarnings("rawtypes")
   public Object init(Map args, Object persistence, CacheRegenerator regenerator) {
     tierScope = null; // TODO: e.g., coreName
     parent = null; // parent cache; TODO: lookup by name
