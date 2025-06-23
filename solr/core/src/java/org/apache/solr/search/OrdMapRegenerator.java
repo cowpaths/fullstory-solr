@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.function.LongFunction;
 import java.util.function.Supplier;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
@@ -33,6 +34,7 @@ import org.apache.lucene.index.OrdinalMap;
 import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.packed.PackedInts;
 import org.apache.solr.core.SolrConfig;
@@ -47,7 +49,7 @@ public class OrdMapRegenerator<M extends MetaEntry<OrdinalMap, M>>
   private static final int DEFAULT_REGEN_KEEPALIVE_MINUTES = 2;
   private static final long DEFAULT_REGEN_KEEPALIVE_NANOS =
       TimeUnit.MINUTES.toNanos(DEFAULT_REGEN_KEEPALIVE_MINUTES);
-  private static final OrdMapRegenerator<?> DEFAULT_INSTANCE =
+  private static final OrdMapRegenerator<KeepAliveValue<OrdinalMap>> DEFAULT_INSTANCE =
       new OrdMapRegenerator<>(DEFAULT_REGEN_KEEPALIVE_NANOS);
 
   private final long regenKeepAliveNanos;
@@ -64,34 +66,34 @@ public class OrdMapRegenerator<M extends MetaEntry<OrdinalMap, M>>
 
   @SuppressWarnings({"unchecked", "UnnecessaryLambda"})
   private static <M> Function<OrdinalMap, M> getWrapFunction() {
-    return (v) -> (M) new OrdinalMapValue(v, 0);
+    return (v) -> (M) new KeepAliveValue<>(v, 0);
   }
 
-  public static class OrdinalMapValue implements MetaEntry<OrdinalMap, OrdinalMapValue> {
+  public static class KeepAliveValue<T extends Accountable> implements MetaEntry<T, KeepAliveValue<T>> {
     private static final long BASE_RAM_BYTES_USED =
-        RamUsageEstimator.shallowSizeOfInstance(OrdinalMapValue.class);
-    private final OrdinalMap ordinalMap;
+        RamUsageEstimator.shallowSizeOfInstance(KeepAliveValue.class);
+    private final T val;
     private long accessTimestampNanos;
 
-    private OrdinalMapValue(OrdinalMap ordinalMap, long accessTimestampNanos) {
-      this.ordinalMap = ordinalMap;
+    private KeepAliveValue(T val, long accessTimestampNanos) {
+      this.val = val;
       this.accessTimestampNanos = accessTimestampNanos;
     }
 
     @Override
-    public OrdinalMap get() {
+    public T get() {
       accessTimestampNanos = System.nanoTime();
-      return ordinalMap;
+      return val;
     }
 
     @Override
     public long ramBytesUsed() {
-      return BASE_RAM_BYTES_USED + ordinalMap.ramBytesUsed();
+      return BASE_RAM_BYTES_USED + val.ramBytesUsed();
     }
 
     @Override
-    public OrdinalMapValue metaClone(OrdinalMap val) {
-      return new OrdinalMapValue(val, accessTimestampNanos);
+    public KeepAliveValue<T> metaClone(T val) {
+      return new KeepAliveValue<>(val, accessTimestampNanos);
     }
   }
 
@@ -108,6 +110,10 @@ public class OrdMapRegenerator<M extends MetaEntry<OrdinalMap, M>>
     return new CacheConfig(CaffeineCache.class, args, null);
   }
 
+  public static void configureRegenerator(SolrConfig solrConfig, CacheConfig config) {
+    configureRegenerator(solrConfig, config, ORDMAP_REGEN_SUPPLIER);
+  }
+
   /**
    * If no regenerator is explicitly configured for the specified {@link CacheConfig}, and if
    * autowarming is on, this method configures a regenerator. `regenKeepAlive` is respected if
@@ -115,7 +121,7 @@ public class OrdMapRegenerator<M extends MetaEntry<OrdinalMap, M>>
    * {@link SolrConfig} (or default of {@value #DEFAULT_REGEN_KEEPALIVE_MINUTES} minutes if no
    * autocommit interval can be determined).
    */
-  public static void configureRegenerator(SolrConfig solrConfig, CacheConfig config) {
+  public static void configureRegenerator(SolrConfig solrConfig, CacheConfig config, LongFunction<? extends CacheRegenerator> regenSupplier) {
     if (config.getRegenerator() != null
         || !new SolrCacheBase.AutoWarmCountRef(
                 (String) config.toMap(new HashMap<>()).get("autowarmCount"))
@@ -170,12 +176,16 @@ public class OrdMapRegenerator<M extends MetaEntry<OrdinalMap, M>>
           break;
       }
     }
-    if (regenKeepAliveNanos == DEFAULT_REGEN_KEEPALIVE_NANOS) {
-      config.setRegenerator(DEFAULT_INSTANCE);
-      return;
-    }
-    config.setRegenerator(new OrdMapRegenerator<>(regenKeepAliveNanos));
+    config.setRegenerator(regenSupplier.apply(regenKeepAliveNanos));
   }
+
+  private static final LongFunction<OrdMapRegenerator<KeepAliveValue<OrdinalMap>>> ORDMAP_REGEN_SUPPLIER = (regenKeepAliveNanos) -> {
+    if (regenKeepAliveNanos == DEFAULT_REGEN_KEEPALIVE_NANOS) {
+      return DEFAULT_INSTANCE;
+    } else {
+      return new OrdMapRegenerator<>(regenKeepAliveNanos);
+    }
+  };
 
   private static long getOpenSearcherIntervalNanos(SolrConfig solrConfig) {
     SolrConfig.UpdateHandlerInfo uinfo = solrConfig.getUpdateHandlerInfo();
@@ -217,7 +227,8 @@ public class OrdMapRegenerator<M extends MetaEntry<OrdinalMap, M>>
       return false;
     }
 
-    OrdinalMapValue ordinalMapValue = (OrdinalMapValue) oldVal;
+    @SuppressWarnings("unchecked")
+    KeepAliveValue<OrdinalMap> ordinalMapValue = (KeepAliveValue<OrdinalMap>) oldVal;
     final long extantTimestamp = ordinalMapValue.accessTimestampNanos;
     if (System.nanoTime() - extantTimestamp > regenKeepAliveNanos) {
       // it has been long enough since this was last accessed that we don't want to carry it forward
@@ -234,13 +245,13 @@ public class OrdMapRegenerator<M extends MetaEntry<OrdinalMap, M>>
     } else if (dvs instanceof SortedDocValues[]) {
       producer =
           (notUsed) ->
-              new OrdinalMapValue(
+              new KeepAliveValue<>(
                   OrdinalMap.build(readerKey, (SortedDocValues[]) dvs, PackedInts.DEFAULT),
                   extantTimestamp);
     } else if (dvs instanceof SortedSetDocValues[]) {
       producer =
           (notUsed) ->
-              new OrdinalMapValue(
+              new KeepAliveValue<>(
                   OrdinalMap.build(readerKey, (SortedSetDocValues[]) dvs, PackedInts.DEFAULT),
                   extantTimestamp);
     } else {
