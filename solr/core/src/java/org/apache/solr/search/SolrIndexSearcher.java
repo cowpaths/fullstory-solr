@@ -2529,12 +2529,6 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         : (cachedSegMap = SegmentMap.generateSegmentMap(this));
   }
 
-  public void bootstrap() {
-    for (int i = 0; i < cacheList.length; i++) {
-      cacheList[i].initialSearcher(this);
-    }
-  }
-
   /**
    * Called on the initial searcher for each core, immediately before <code>firstSearcherListeners
    * </code> are called for the searcher. This provides the opportunity to perform initialization on

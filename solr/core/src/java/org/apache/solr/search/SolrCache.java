@@ -230,23 +230,32 @@ public interface SolrCache<K, V> extends SolrInfoBean {
   }
 
   /**
+   * Returns the segmentMap for the searcher over which this cache is valid (cache is informed of
+   * this via {@link #initialSearcher(SolrIndexSearcher)} or {@link #warm(SolrIndexSearcher, SolrCache)}).
+   */
+  default SegmentMap getSegmentMap() {
+    return null;
+  }
+
+  /**
    * Intended for use as a cache value that wraps a raw value of type <code>V</code> in a {@link
    * MetaEntry} for tracking additional per-entry metadata.
    */
-  interface MetaEntry<V, E extends MetaEntry<V, E>> extends Supplier<V>, Accountable {
+  interface MetaEntry<K, V, E extends MetaEntry<K, V, E>> extends Accountable {
     /**
      * Returns a {@link MetaEntry} instance of the same concrete type, wrapping the specified raw
      * value. The returned value should inherit any relevant metadata from <code>this</code>
      * instance.
      */
     E metaClone(V val);
+    V get(SegmentMap segMap, K key, IOFunction<? super K, ? extends V> mappingFunction) throws IOException;
   }
 
   /**
    * A special extension of SolrMetricProducer that may be implemented by {@link CacheRegenerator}s
    * to register extra metrics associated with their associated {@link SolrCache}.
    */
-  interface SidecarMetricProducer<K, M extends MetaEntry<?, M>> extends SolrMetricProducer {
+  interface SidecarMetricProducer<K, M extends MetaEntry<?, ?, M>> extends SolrMetricProducer {
     /**
      * Special metrics initialization method.
      *

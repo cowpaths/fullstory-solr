@@ -22,35 +22,41 @@ import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.OrdinalMap;
 import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
+import org.apache.lucene.index.Term;
+import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.DocIdSetIterator;
-import org.apache.lucene.util.Accountable;
+import org.apache.lucene.search.Query;
+import org.apache.lucene.search.QueryVisitor;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.lucene.util.automaton.ByteRunAutomaton;
 import org.apache.lucene.util.packed.PackedInts;
 import org.apache.solr.core.SolrConfig;
 import org.apache.solr.index.SlowCompositeReaderWrapper;
 import org.apache.solr.search.SolrCache.MetaEntry;
+import org.apache.solr.search.OrdMapRegenerator.KeepAliveValue;
 import org.apache.solr.util.IOFunction;
 
 import java.io.IOException;
-import java.util.Collections;
-import java.util.HashMap;
+import java.util.AbstractMap;
 import java.util.List;
-import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 import java.util.function.LongFunction;
 import java.util.function.Supplier;
 
-import static org.apache.solr.common.params.CommonParams.NAME;
+import static org.apache.solr.search.OrdMapRegenerator.configureRegenerator0;
 
 /** Cache regenerator that builds OrdinalMap instances against the new searcher. */
-public class KeepAliveRegenerator<M extends MetaEntry<OrdinalMap, M>>
-    extends MetaCacheRegenerator<String, OrdinalMap, M> {
+public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
+    extends MetaCacheRegenerator<Query, DocSet, M> {
 
   private static final int DEFAULT_REGEN_KEEPALIVE_MINUTES = 2;
   private static final long DEFAULT_REGEN_KEEPALIVE_NANOS =
       TimeUnit.MINUTES.toNanos(DEFAULT_REGEN_KEEPALIVE_MINUTES);
-  private static final KeepAliveRegenerator<KeepAliveValue<OrdinalMap>> DEFAULT_INSTANCE =
+  private static final KeepAliveRegenerator<KeepAliveValue<Query, DocSet>> DEFAULT_INSTANCE =
       new KeepAliveRegenerator<>(DEFAULT_REGEN_KEEPALIVE_NANOS);
 
   private final long regenKeepAliveNanos;
@@ -66,121 +72,15 @@ public class KeepAliveRegenerator<M extends MetaEntry<OrdinalMap, M>>
   }
 
   @SuppressWarnings({"unchecked", "UnnecessaryLambda"})
-  private static <M> Function<OrdinalMap, M> getWrapFunction() {
-    return (v) -> (M) new KeepAliveValue<>(v, 0);
-  }
-
-  public static class KeepAliveValue<T extends Accountable> implements MetaEntry<T, KeepAliveValue<T>> {
-    private static final long BASE_RAM_BYTES_USED =
-        RamUsageEstimator.shallowSizeOfInstance(KeepAliveValue.class);
-    private final T val;
-    private long accessTimestampNanos;
-
-    private KeepAliveValue(T val, long accessTimestampNanos) {
-      this.val = val;
-      this.accessTimestampNanos = accessTimestampNanos;
-    }
-
-    @Override
-    public T get() {
-      accessTimestampNanos = System.nanoTime();
-      return val;
-    }
-
-    @Override
-    public long ramBytesUsed() {
-      return BASE_RAM_BYTES_USED + val.ramBytesUsed();
-    }
-
-    @Override
-    public KeepAliveValue<T> metaClone(T val) {
-      return new KeepAliveValue<>(val, accessTimestampNanos);
-    }
-  }
-
-  /**
-   * Configures and supplies a default `ordMapCache` {@link CacheConfig} of unlimited maximum size
-   * and modest initial size, with no autowarming.
-   */
-  public static CacheConfig getDefaultCacheConfig() {
-    // for back-compat, default to an effectively unlimited-sized cache with no regeneration
-    Map<String, String> args = new HashMap<>();
-    args.put(NAME, "ordMapCache");
-    args.put("size", Integer.toString(Integer.MAX_VALUE)); // effectively unlimited
-    args.put("initialSize", "10");
-    return new CacheConfig(CaffeineCache.class, args, null);
+  private static <M> BiFunction<SegmentMap, DocSet, M> getWrapFunction() {
+    return (segMap, v) -> (M) new KeepAliveSegAwareValue(segMap, v);
   }
 
   public static void configureRegenerator(SolrConfig solrConfig, CacheConfig config) {
-    configureRegenerator(solrConfig, config, ORDMAP_REGEN_SUPPLIER);
+    configureRegenerator0(solrConfig, config, DOCSET_REGEN_SUPPLIER);
   }
 
-  /**
-   * If no regenerator is explicitly configured for the specified {@link CacheConfig}, and if
-   * autowarming is on, this method configures a regenerator. `regenKeepAlive` is respected if
-   * explicitly set, implicitly defaulting to 2x the autocommit interval defined by the specified
-   * {@link SolrConfig} (or default of {@value #DEFAULT_REGEN_KEEPALIVE_MINUTES} minutes if no
-   * autocommit interval can be determined).
-   */
-  public static void configureRegenerator(SolrConfig solrConfig, CacheConfig config, LongFunction<? extends CacheRegenerator> regenSupplier) {
-    if (config.getRegenerator() != null
-        || !new SolrCacheBase.AutoWarmCountRef(
-                (String) config.toMap(new HashMap<>()).get("autowarmCount"))
-            .isAutoWarmingOn()) {
-      // If a regenerator is already explicitly configured, we don't want to replace it.
-      // Also, if autowarming is not on, we don't configure a regenerator. This is important
-      // because the regenerator is also used to wrap/unwrap the cache for the purpose of
-      // tracking metadata, etc. If there's no autowarm, the extra overhead is useless.
-      return;
-    }
-    String keepAliveConfig = (String) config.toMap(Collections.emptyMap()).get("regenKeepAlive");
-    final long regenKeepAliveNanos;
-    if (keepAliveConfig == null || keepAliveConfig.isEmpty()) {
-      long osiNanos;
-      if (solrConfig == null || (osiNanos = getOpenSearcherIntervalNanos(solrConfig)) == -1) {
-        regenKeepAliveNanos = DEFAULT_REGEN_KEEPALIVE_NANOS;
-      } else {
-        regenKeepAliveNanos = osiNanos << 1;
-      }
-    } else {
-      int lastIdx = keepAliveConfig.length() - 1;
-      String sub = keepAliveConfig.substring(0, lastIdx);
-      switch (keepAliveConfig.charAt(lastIdx)) {
-        case 's':
-          regenKeepAliveNanos = TimeUnit.SECONDS.toNanos(Long.parseLong(sub));
-          break;
-        case 'm':
-          regenKeepAliveNanos = TimeUnit.MINUTES.toNanos(Long.parseLong(sub));
-          break;
-        case 'h':
-          regenKeepAliveNanos = TimeUnit.HOURS.toNanos(Long.parseLong(sub));
-          break;
-        case 'd':
-          regenKeepAliveNanos = TimeUnit.DAYS.toNanos(Long.parseLong(sub));
-          break;
-        case '%':
-          int keepAlivePct = Integer.parseInt(sub);
-          if (keepAlivePct < 0) {
-            throw new IllegalArgumentException(
-                "regenKeepAlive % must be positive; found " + keepAlivePct);
-          }
-          long osiNanos;
-          if (solrConfig == null || (osiNanos = getOpenSearcherIntervalNanos(solrConfig)) == -1) {
-            throw new IllegalArgumentException(
-                "regenKeepAlive % must only be configured in conjunction with autoCommit time");
-          } else {
-            regenKeepAliveNanos = (osiNanos * keepAlivePct) / 100;
-          }
-          break;
-        default:
-          regenKeepAliveNanos = TimeUnit.MILLISECONDS.toNanos(Long.parseLong(keepAliveConfig));
-          break;
-      }
-    }
-    config.setRegenerator(regenSupplier.apply(regenKeepAliveNanos));
-  }
-
-  private static final LongFunction<KeepAliveRegenerator<KeepAliveValue<OrdinalMap>>> ORDMAP_REGEN_SUPPLIER = (regenKeepAliveNanos) -> {
+  private static final LongFunction<KeepAliveRegenerator<KeepAliveValue<Query, DocSet>>> DOCSET_REGEN_SUPPLIER = (regenKeepAliveNanos) -> {
     if (regenKeepAliveNanos == DEFAULT_REGEN_KEEPALIVE_NANOS) {
       return DEFAULT_INSTANCE;
     } else {
@@ -188,21 +88,113 @@ public class KeepAliveRegenerator<M extends MetaEntry<OrdinalMap, M>>
     }
   };
 
-  private static long getOpenSearcherIntervalNanos(SolrConfig solrConfig) {
-    SolrConfig.UpdateHandlerInfo uinfo = solrConfig.getUpdateHandlerInfo();
-    if (uinfo == null) {
-      return -1;
-    } else if (uinfo.autoSoftCommmitMaxTime != -1) {
-      if (uinfo.openSearcher && uinfo.autoCommmitMaxTime != -1) {
-        return TimeUnit.MILLISECONDS.toNanos(
-            Math.min(uinfo.autoCommmitMaxTime, uinfo.autoSoftCommmitMaxTime));
-      } else {
-        return TimeUnit.MILLISECONDS.toNanos(uinfo.autoSoftCommmitMaxTime);
+  private static boolean isCrossDoc(Query q) {
+    boolean[] ret = new boolean[1];
+    q.visit(new QueryVisitor() {
+      @Override
+      public QueryVisitor getSubVisitor(BooleanClause.Occur occur, Query parent) {
+        return isCrossDoc(parent);
       }
-    } else if (uinfo.openSearcher && uinfo.autoCommmitMaxTime != -1) {
-      return TimeUnit.MILLISECONDS.toNanos(uinfo.autoCommmitMaxTime);
-    } else {
-      return -1;
+
+      @Override
+      public void visitLeaf(Query query) {
+        isCrossDoc(query);
+      }
+
+      private QueryVisitor isCrossDoc(Query q) {
+        if (ret[0]) {
+          return EMPTY_VISITOR;
+        } else if (q.getClass().getSimpleName().endsWith("JoinQuery")) {
+          ret[0] = true;
+          return EMPTY_VISITOR;
+        } else {
+          return this;
+        }
+      }
+
+      @Override
+      public void consumeTerms(Query query, Term... terms) {
+        isCrossDoc(query);
+      }
+
+      @Override
+      public void consumeTermsMatching(Query query, String field, Supplier<ByteRunAutomaton> automaton) {
+        isCrossDoc(query);
+      }
+
+      @Override
+      public boolean acceptField(String field) {
+        return !ret[0];
+      }
+    });
+    return ret[0];
+  }
+
+  private static class KeepAliveSegAwareValue implements MetaEntry<Query, DocSet, KeepAliveValue<Query, DocSet>> {
+
+    private static final long BASE_RAM_BYTES_USED =
+        RamUsageEstimator.shallowSizeOfInstance(KeepAliveSegAwareValue.class) +
+            RamUsageEstimator.shallowSizeOfInstance(AtomicReference.class) +
+            RamUsageEstimator.shallowSizeOfInstance(AbstractMap.SimpleImmutableEntry.class) +
+            RamUsageEstimator.shallowSizeOfInstance(CompletableFuture.class);
+
+    private final AtomicReference<AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>>> ref;
+    private final long ramBytesUsed;
+
+    public KeepAliveSegAwareValue(SegmentMap segMap, DocSet val) {
+      CompletableFuture<DocSet> f = new CompletableFuture<>();
+      f.complete(val);
+      ref = new AtomicReference<>(new AbstractMap.SimpleImmutableEntry<>(segMap, f));
+      ramBytesUsed = BASE_RAM_BYTES_USED + val.ramBytesUsed();
+    }
+
+    public KeepAliveSegAwareValue(AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> entry, long accessTimestampNanos) {
+      ref = new AtomicReference<>(entry);
+      ramBytesUsed = BASE_RAM_BYTES_USED + entry.getValue().getNow(null).ramBytesUsed();
+    }
+
+    @Override
+    public KeepAliveValue<Query, DocSet> metaClone(DocSet val) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public DocSet get(SegmentMap segMap, Query key, IOFunction<? super Query, ? extends DocSet> mappingFunction) throws IOException {
+      AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> ref = this.ref.get();
+      try {
+        if (ref.getKey() == segMap) {
+          return ref.getValue().get();
+        }
+        CompletableFuture<DocSet> f = new CompletableFuture<>();
+        AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> newRef = new AbstractMap.SimpleImmutableEntry<>(segMap, f);
+        AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> actualNewRef = this.ref.compareAndExchange(ref, newRef);
+        if (actualNewRef == ref) {
+          // we compute
+          Query frankenstein = new SegAwareDocSetCache.FrankensteinQuery(key, ref.getKey().segments, ref.getValue().get());
+          DocSet computed = mappingFunction.apply(frankenstein);
+          f.complete(computed);
+          return computed;
+        } else if (actualNewRef.getKey() == segMap) {
+          return actualNewRef.getValue().get();
+        } else {
+          return mappingFunction.apply(key);
+        }
+      } catch (InterruptedException ex) {
+        Thread.currentThread().interrupt();
+        throw new RuntimeException(ex);
+      } catch (ExecutionException ex) {
+        Throwable cause = ex.getCause();
+        if (cause instanceof IOException) {
+          throw (IOException) cause;
+        } else {
+          throw new RuntimeException(ex);
+        }
+      }
+    }
+
+    @Override
+    public long ramBytesUsed() {
+      return ramBytesUsed;
     }
   }
 
@@ -229,17 +221,18 @@ public class KeepAliveRegenerator<M extends MetaEntry<OrdinalMap, M>>
     }
 
     @SuppressWarnings("unchecked")
-    KeepAliveValue<OrdinalMap> ordinalMapValue = (KeepAliveValue<OrdinalMap>) oldVal;
-    final long extantTimestamp = ordinalMapValue.accessTimestampNanos;
+    KeepAliveValue<String, OrdinalMap> ordinalMapValue = (KeepAliveValue<String, OrdinalMap>) oldVal;
+    final long extantTimestamp = ordinalMapValue.extantTimestamp();
     if (System.nanoTime() - extantTimestamp > regenKeepAliveNanos) {
       // it has been long enough since this was last accessed that we don't want to carry it forward
       return true;
     }
 
-    final String field = (String) oldKey;
+    final Query query = (Query) oldKey;
     final IndexReader.CacheKey readerKey = cacheHelper.getKey();
-    final IOFunction<? super String, ? extends Supplier<OrdinalMap>> producer;
-    DocIdSetIterator[] dvs = SlowCompositeReaderWrapper.getLeafDocValues(leaves, field);
+    final IOFunction<? super Query, ? extends KeepAliveValue<Query, OrdinalMap>> producer;
+    //TODO: adjust this for Query->DocSet (not OrdinalMap)
+    DocIdSetIterator[] dvs = SlowCompositeReaderWrapper.getLeafDocValues(leaves, null);
     if (dvs == null) {
       // All empty for this field, but should still warm others
       return true;
@@ -260,8 +253,8 @@ public class KeepAliveRegenerator<M extends MetaEntry<OrdinalMap, M>>
     }
 
     @SuppressWarnings("unchecked")
-    SolrCache<String, Supplier<OrdinalMap>> c = (SolrCache<String, Supplier<OrdinalMap>>) newCache;
-    c.computeIfAbsent(field, producer);
+    SolrCache<Query, KeepAliveValue<Query, OrdinalMap>> c = (SolrCache<Query, KeepAliveValue<Query, OrdinalMap>>) newCache;
+    c.computeIfAbsent(query, producer);
     return true;
   }
 }

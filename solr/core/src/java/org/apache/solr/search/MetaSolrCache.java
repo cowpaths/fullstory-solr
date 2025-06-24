@@ -18,7 +18,7 @@ package org.apache.solr.search;
 
 import java.io.IOException;
 import java.util.Map;
-import java.util.function.Function;
+import java.util.function.BiFunction;
 import org.apache.solr.metrics.SolrMetricsContext;
 import org.apache.solr.search.SolrCache.MetaEntry;
 import org.apache.solr.util.IOFunction;
@@ -28,9 +28,9 @@ import org.apache.solr.util.IOFunction;
  * {@link #backing} cache. Commonly used in conjunction with {@link
  * CacheRegenerator#wrap(SolrCache)}.
  */
-public class MetaSolrCache<K, V, M extends MetaEntry<V, M>> implements SolrCache<K, V> {
+public class MetaSolrCache<K, V, M extends MetaEntry<K, V, M>> implements SolrCache<K, V> {
   private final SolrCache<K, M> backing;
-  private final Function<V, M> mapping;
+  private final BiFunction<SegmentMap, V, M> mapping;
 
   /**
    * Creates an external view over the specified backing cache.
@@ -39,7 +39,7 @@ public class MetaSolrCache<K, V, M extends MetaEntry<V, M>> implements SolrCache
    * @param mapping a function that wraps "external" values as "internal" values associated with the
    *     backing cache.
    */
-  public MetaSolrCache(SolrCache<K, M> backing, Function<V, M> mapping) {
+  public MetaSolrCache(SolrCache<K, M> backing, BiFunction<SegmentMap, V, M> mapping) {
     this.backing = backing;
     this.mapping = mapping;
   }
@@ -67,26 +67,30 @@ public class MetaSolrCache<K, V, M extends MetaEntry<V, M>> implements SolrCache
 
   @Override
   public V put(K key, V value) {
-    MetaEntry<V, ?> replaced = backing.put(key, mapping.apply(value));
-    return replaced == null ? null : replaced.get();
+    SegmentMap segMap = backing.getSegmentMap();
+    M metaEntry = mapping.apply(segMap, value);
+    metaEntry.get(segMap, key, null); // treat the put as a "get", for the purpose of book-keeping.
+    MetaEntry<K, V, ?> replaced = backing.put(key, metaEntry);
+    return replaced == null ? null : replaced.get(segMap, key, null);
   }
 
   @Override
   public V get(K key) {
-    MetaEntry<V, ?> ret = backing.get(key);
-    return ret == null ? null : ret.get();
+    MetaEntry<K, V, ?> ret = backing.get(key);
+    return ret == null ? null : ret.get(backing.getSegmentMap(), key, null);
   }
 
   @Override
   public V remove(K key) {
-    MetaEntry<V, ?> removed = backing.remove(key);
-    return removed == null ? null : removed.get();
+    MetaEntry<K, V, ?> removed = backing.remove(key);
+    return removed == null ? null : removed.get(backing.getSegmentMap(), key, null);
   }
 
   @Override
   public V computeIfAbsent(K key, IOFunction<? super K, ? extends V> mappingFunction)
       throws IOException {
-    return backing.computeIfAbsent(key, (k) -> mapping.apply(mappingFunction.apply(k))).get();
+    SegmentMap segMap = backing.getSegmentMap();
+    return backing.computeIfAbsent(key, (k) -> mapping.apply(segMap, mappingFunction.apply(k))).get(segMap, key, mappingFunction);
   }
 
   @Override

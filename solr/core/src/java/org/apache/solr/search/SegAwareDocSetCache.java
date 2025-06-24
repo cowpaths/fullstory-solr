@@ -46,13 +46,13 @@ public class SegAwareDocSetCache extends SegAwareCache<Query, DocSet> {
     super(FILTER_CACHE_RECONSTRUCTOR_SHIM);
   }
 
-  private static class FrankensteinQuery extends Query implements ShimKey<Query> {
+  static class FrankensteinQuery extends Query implements ShimKey<Query> {
 
     private final Query backing;
     private final Map<IndexReader.CacheKey, SegmentMap.Segment> segs;
     private final DocSet stale;
 
-    private FrankensteinQuery(
+    FrankensteinQuery(
         Query backing, Map<IndexReader.CacheKey, SegmentMap.Segment> segs, DocSet stale) {
       this.backing = backing;
       this.segs = segs;

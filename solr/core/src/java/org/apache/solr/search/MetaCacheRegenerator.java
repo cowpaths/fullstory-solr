@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.ArrayUtil;
@@ -32,6 +33,7 @@ import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricsContext;
 import org.apache.solr.search.SolrCache.MetaEntry;
 import org.apache.solr.search.SolrCache.SidecarMetricProducer;
+import org.apache.solr.util.IOFunction;
 
 /**
  * Base class for {@link CacheRegenerator} implementations that may be used to internally wrap cache
@@ -60,7 +62,7 @@ import org.apache.solr.search.SolrCache.SidecarMetricProducer;
  * @param <M> {@link MetaEntry} value type. This is the type of the underlying "internal" cache that
  *     is used for autowarming and lifecycle operations.
  */
-public class MetaCacheRegenerator<K, V, M extends MetaEntry<V, M>>
+public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
     implements CacheRegenerator, SidecarMetricProducer<K, M> {
 
   private static final int DEFAULT_BUCKETS = 10;
@@ -76,7 +78,7 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<V, M>>
   }
 
   public static final class FilterHistogram
-      extends MetaCacheRegenerator<Query, DocSet, HitsMetaEntry<DocSet>> {
+      extends MetaCacheRegenerator<Query, DocSet, HitsMetaEntry<Query, DocSet>> {
     public FilterHistogram() {
       super(
           FILTER_REGEN_FUNC,
@@ -96,7 +98,7 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<V, M>>
   }
 
   public static final class FilterDump
-      extends MetaCacheRegenerator<Query, DocSet, HitsMetaEntry<DocSet>> {
+      extends MetaCacheRegenerator<Query, DocSet, HitsMetaEntry<Query, DocSet>> {
     public FilterDump() {
       super(
           FILTER_REGEN_FUNC,
@@ -129,7 +131,7 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<V, M>>
   }
 
   private final SearcherIOBiFunction<K, V> regenFunction;
-  private final Function<V, M> wrapFunction;
+  private final BiFunction<SegmentMap, V, M> wrapFunction;
   private final String metaType;
   private final Function<SolrCache<K, M>, MapWriter> mapWriterFunction;
   private SolrMetricsContext metricsContext;
@@ -141,7 +143,7 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<V, M>>
    *
    * @param wrapFunction function to wrap raw values in a {@link MetaEntry} wrapper.
    */
-  public MetaCacheRegenerator(Function<V, M> wrapFunction) {
+  public MetaCacheRegenerator(BiFunction<SegmentMap, V, M> wrapFunction) {
     this(null, wrapFunction, null, null);
   }
 
@@ -157,7 +159,7 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<V, M>>
    */
   public MetaCacheRegenerator(
       SearcherIOBiFunction<K, V> regenFunction,
-      Function<V, M> wrapFunction,
+      BiFunction<SegmentMap, V, M> wrapFunction,
       String metaType,
       Function<SolrCache<K, M>, MapWriter> mapWriterFunction) {
     this.regenFunction = regenFunction == null ? nullWarningRegenFunc() : regenFunction;
@@ -193,7 +195,7 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<V, M>>
   @Override
   public <K1> SolrCache<K1, ?> wrap(SolrCache<K1, ?> internal) {
     @SuppressWarnings("unchecked")
-    CaffeineCache<K, M> backing = (CaffeineCache<K, M>) internal;
+    SolrCache<K, M> backing = (SolrCache<K, M>) internal;
     @SuppressWarnings("unchecked")
     SolrCache<K1, ?> ret = (SolrCache<K1, ?>) new MetaSolrCache<>(backing, wrapFunction);
     return ret;
@@ -220,10 +222,10 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<V, M>>
     return metricsContext;
   }
 
-  private static class HitsMetaEntry<V> implements MetaEntry<V, HitsMetaEntry<V>> {
+  private static class HitsMetaEntry<K, V> implements MetaEntry<K, V, HitsMetaEntry<K, V>> {
     @SuppressWarnings("UnnecessaryLambda")
-    private static final Function<DocSet, HitsMetaEntry<DocSet>> WRAP_FUNC =
-        (v) -> new HitsMetaEntry<>(v, 0);
+    private static final BiFunction<SegmentMap, DocSet, HitsMetaEntry<Query, DocSet>> WRAP_FUNC =
+        (segMap, v) -> new HitsMetaEntry<>(v, 0);
 
     private static final long BASE_RAM_BYTES =
         RamUsageEstimator.shallowSizeOfInstance(MetaEntry.class);
@@ -238,7 +240,7 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<V, M>>
     }
 
     @Override
-    public V get() {
+    public V get(SegmentMap segMap, K key, IOFunction<? super K, ? extends V> mappingFunction) {
       hits.increment();
       return val;
     }
@@ -249,7 +251,7 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<V, M>>
     }
 
     @Override
-    public HitsMetaEntry<V> metaClone(V val) {
+    public HitsMetaEntry<K, V> metaClone(V val) {
       return new HitsMetaEntry<>(val, priorHits + hits.sum());
     }
   }
