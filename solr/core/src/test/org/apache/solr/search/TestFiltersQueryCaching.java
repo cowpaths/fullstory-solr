@@ -50,9 +50,11 @@ public class TestFiltersQueryCaching extends SolrTestCaseJ4 {
   private static final int MAX_SEG_SIZE = AVG_SEG_SIZE * 2;
   private static final int MAX_MERGE_AT_ONCE = 2;
   private static final String FILTER_CACHE_IMPL_CLASS_PROPNAME = "solr.filterCache.class";
+  private static final String FILTER_CACHE_REGEN_CLASS_PROPNAME = "solr.filterCache.regenerator";
   private static final String FILTER_CACHE_AUTOWARM_COUNT_PROPNAME =
       "solr.filterCache.autowarmCount";
   private static String RESTORE_FILTER_CACHE_IMPL_PROPERTY = null;
+  private static String RESTORE_FILTER_CACHE_REGEN_PROPERTY = null;
   private static String RESTORE_FILTER_AUTOWARM_COUNT_PROPERTY = null;
   private static boolean SEG_AWARE_FILTER_CACHE;
 
@@ -111,8 +113,11 @@ public class TestFiltersQueryCaching extends SolrTestCaseJ4 {
     RESTORE_FILTER_AUTOWARM_COUNT_PROPERTY =
         System.setProperty(FILTER_CACHE_AUTOWARM_COUNT_PROPNAME, "0");
     if (SEG_AWARE_FILTER_CACHE) {
+      System.setProperty(FILTER_CACHE_AUTOWARM_COUNT_PROPNAME, "100%");
       RESTORE_FILTER_CACHE_IMPL_PROPERTY =
-          System.setProperty(FILTER_CACHE_IMPL_CLASS_PROPNAME, "solr.SegAwareDocSetCache");
+          System.setProperty(FILTER_CACHE_IMPL_CLASS_PROPNAME, "solr.CaffeineCache");
+      RESTORE_FILTER_CACHE_REGEN_PROPERTY =
+          System.setProperty(FILTER_CACHE_REGEN_CLASS_PROPNAME, "solr.KeepAliveRegenerator");
     }
     initCore("solrconfig.xml", "schema_latest.xml");
     createIndex();
@@ -125,6 +130,11 @@ public class TestFiltersQueryCaching extends SolrTestCaseJ4 {
         System.clearProperty(FILTER_CACHE_IMPL_CLASS_PROPNAME);
       } else {
         System.setProperty(FILTER_CACHE_IMPL_CLASS_PROPNAME, RESTORE_FILTER_CACHE_IMPL_PROPERTY);
+      }
+      if (RESTORE_FILTER_CACHE_REGEN_PROPERTY == null) {
+        System.clearProperty(FILTER_CACHE_REGEN_CLASS_PROPNAME);
+      } else {
+        System.setProperty(FILTER_CACHE_REGEN_CLASS_PROPNAME, RESTORE_FILTER_CACHE_REGEN_PROPERTY);
       }
     }
     if (RESTORE_FILTER_AUTOWARM_COUNT_PROPERTY == null) {

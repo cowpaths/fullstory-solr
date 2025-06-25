@@ -112,6 +112,8 @@
       size="512"
       initialSize="512"
       autowarmCount="${solr.filterCache.autowarmCount:2}"
+      regenerator="${solr.filterCache.regenerator:}"
+      regenKeepAlive="${solr.filterCache.regenKeepAlive:7d}"
       async="${solr.filterCache.async:false}"/>
 
     <queryResultCache

@@ -157,7 +157,7 @@ public class CacheConfig implements MapSerializable {
           }
         };
     config.regenImpl = config.args.get("regenerator");
-    if (config.regenImpl != null) {
+    if (config.regenImpl != null && !config.regenImpl.isEmpty()) {
       config.regenerator =
           loader.newInstance(
               config.regenImpl,
@@ -171,6 +171,8 @@ public class CacheConfig implements MapSerializable {
   }
 
   private static final String[] EMPTY = new String[0];
+
+  @SuppressWarnings("rawtypes")
   private static final Class<?>[] REGEN_PARAMS = new Class[] {SolrConfig.class, CacheConfig.class};
 
   @SuppressWarnings("rawtypes")

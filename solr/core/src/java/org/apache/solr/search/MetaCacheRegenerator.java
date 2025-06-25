@@ -20,6 +20,7 @@ import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Snapshot;
 import com.codahale.metrics.UniformReservoir;
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.LongAdder;
@@ -34,6 +35,8 @@ import org.apache.solr.metrics.SolrMetricsContext;
 import org.apache.solr.search.SolrCache.MetaEntry;
 import org.apache.solr.search.SolrCache.SidecarMetricProducer;
 import org.apache.solr.util.IOFunction;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Base class for {@link CacheRegenerator} implementations that may be used to internally wrap cache
@@ -64,6 +67,8 @@ import org.apache.solr.util.IOFunction;
  */
 public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
     implements CacheRegenerator, SidecarMetricProducer<K, M> {
+
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private static final int DEFAULT_BUCKETS = 10;
   private static final SearcherIOBiFunction<Query, DocSet> FILTER_REGEN_FUNC =
@@ -205,6 +210,9 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
       // If this regenerator's not enabled, don't wrap, and we should remove
       // ourselves from the associated cache.
       if (internal instanceof SolrCacheBase) {
+        log.warn(
+            "configured cache regenerator for {} is disabled (perhaps because no autowarming?)",
+            internal);
         ((SolrCacheBase) internal).regenerator = null;
       }
       return internal;
