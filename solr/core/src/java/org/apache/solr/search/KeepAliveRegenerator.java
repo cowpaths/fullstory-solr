@@ -336,7 +336,8 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
 
     if (metaEntry.ref.get().getKey().registerOverlap(newSearcher.getSegmentMap()) < overlapThreshold
         || isCrossDoc(query)) {
-      if (lastAccessAgo > eagerKeepAliveNanos) {
+      if (lastAccessAgo < eagerKeepAliveNanos) {
+        // if we meet the criterion for eager warming, do it here (not leveraging segment-aware)
         c.computeIfAbsent(
             query,
             (q) -> {
@@ -349,6 +350,42 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
       return true;
     }
 
+    if (lastAccessAgo < eagerKeepAliveNanos) {
+      // if we're doing eager warming, do it here even for segment-aware entries. We can
+      // still benefit from the old cache entry.
+      c.computeIfAbsent(
+          query,
+          (q) -> {
+            AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> ref =
+                metaEntry.ref.get();
+            Query frankenstein;
+            try {
+              frankenstein =
+                  new SegAwareDocSetCache.FrankensteinQuery(
+                      query, ref.getKey().segments, ref.getValue().get());
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+              throw new RuntimeException(e);
+            } catch (ExecutionException e) {
+              Throwable cause = e.getCause();
+              if (cause instanceof IOException) {
+                throw (IOException) cause;
+              } else {
+                throw new RuntimeException(e);
+              }
+            }
+            DocSet docSet = newSearcher.getDocSetNC(frankenstein, null);
+            return new KeepAliveSegAwareValue(
+                newSearcher.getSegmentMap(),
+                docSet,
+                extantTimestamp,
+                partialHits,
+                partialHitsRatio);
+          });
+      return true;
+    }
+
+    // the lazy way. Just pass the stale cache entry along in case it's queried later
     c.computeIfAbsent(
         query, (q) -> new KeepAliveSegAwareValue(metaEntry, partialHits, partialHitsRatio));
     return true;
