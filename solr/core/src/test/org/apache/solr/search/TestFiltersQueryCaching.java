@@ -414,8 +414,8 @@ public class TestFiltersQueryCaching extends SolrTestCaseJ4 {
                   q));
       filterCacheMetrics = coreToFilterCacheMetrics(h.getCore());
       if (SEG_AWARE_FILTER_CACHE) {
-        // System.err.println("XXX \n"+filterCacheMetrics.entrySet().stream().map((e) -> "\t" +
-        // e).collect(Collectors.joining("\n")));
+        // System.err.println("XXX \n"+filterCacheMetrics.entrySet().stream()
+        //    .map((e) -> "\t" + e).collect(Collectors.joining("\n")));
         assertEquals(1, (long) filterCacheMetrics.get("cumulative_inserts"));
         assertEquals(reloads, (long) filterCacheMetrics.get("cumulative_hits"));
         assertEquals(0, (long) filterCacheMetrics.get("inserts"));

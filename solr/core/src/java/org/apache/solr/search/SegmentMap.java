@@ -16,11 +16,10 @@
  */
 package org.apache.solr.search;
 
-import com.carrotsearch.hppc.ObjectDoubleHashMap;
-import java.util.Collections;
-import java.util.HashMap;
+import java.util.AbstractMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReader;
@@ -30,29 +29,32 @@ public class SegmentMap {
 
   public static SegmentMap generateSegmentMap(SolrIndexSearcher searcher) {
     final List<LeafReaderContext> leafContexts = searcher.getLeafContexts();
-    Map<IndexReader.CacheKey, Segment> segs = new HashMap<>(leafContexts.size());
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    Map.Entry<IndexReader.CacheKey, Segment>[] segs = new Map.Entry[leafContexts.size()];
     int i = 0;
     for (LeafReaderContext ctx : leafContexts) {
       LeafReader r = ctx.reader();
       IndexReader.CacheKey coreKey = r.getCoreCacheHelper().getKey();
-      segs.put(
-          coreKey,
-          new Segment(
-              coreKey, r.getReaderCacheHelper().getKey(), ctx.docBase, r.numDocs(), r.maxDoc()));
+      segs[i++] =
+          new AbstractMap.SimpleImmutableEntry<>(
+              coreKey,
+              new Segment(
+                  coreKey,
+                  r.getReaderCacheHelper().getKey(),
+                  ctx.docBase,
+                  r.numDocs(),
+                  r.maxDoc()));
     }
     DirectoryReader r = searcher.getIndexReader();
     return new SegmentMap(
-        r.getReaderCacheHelper().getKey(),
-        Collections.unmodifiableMap(segs),
-        r.numDocs(),
-        r.maxDoc());
+        r.getReaderCacheHelper().getKey(), Map.ofEntries(segs), r.numDocs(), r.maxDoc());
   }
 
   public final IndexReader.CacheKey key;
   public final Map<IndexReader.CacheKey, Segment> segments;
   public final int numDocs;
   public final int maxDoc;
-  private final ObjectDoubleHashMap<IndexReader.CacheKey> overlap = new ObjectDoubleHashMap<>();
+  private final ConcurrentHashMap<IndexReader.CacheKey, Double> overlap = new ConcurrentHashMap<>();
 
   private SegmentMap(
       IndexReader.CacheKey key,
@@ -65,21 +67,23 @@ public class SegmentMap {
     this.maxDoc = maxDoc;
   }
 
-  public double registerOverlap(SegmentMap newSearcher) {
-    int count = 0;
-    final Map<IndexReader.CacheKey, Segment> newSegments = newSearcher.segments;
-    for (Segment s : segments.values()) {
-      if (newSegments.containsKey(s.coreKey)) {
-        count += s.maxDoc;
-      }
-    }
-    double ret = (double) count / newSearcher.maxDoc;
-    overlap.put(newSearcher.key, ret);
-    return ret;
+  public double registerOverlap(SegmentMap other) {
+    return overlap.computeIfAbsent(
+        other.key,
+        (k) -> {
+          int count = 0;
+          final Map<IndexReader.CacheKey, Segment> otherSegments = other.segments;
+          for (Segment s : segments.values()) {
+            if (otherSegments.containsKey(s.coreKey)) {
+              count += s.maxDoc;
+            }
+          }
+          return (double) count / other.maxDoc;
+        });
   }
 
   public double getOverlap(IndexReader.CacheKey newSearcher) {
-    return overlap.getOrDefault(newSearcher, 0);
+    return overlap.getOrDefault(newSearcher, 0d);
   }
 
   public static class Segment {

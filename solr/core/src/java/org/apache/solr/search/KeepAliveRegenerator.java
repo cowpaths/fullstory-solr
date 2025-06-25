@@ -28,6 +28,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.DoubleAdder;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiFunction;
 import java.util.function.Supplier;
 import org.apache.lucene.index.DirectoryReader;
@@ -39,8 +41,8 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryVisitor;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.automaton.ByteRunAutomaton;
+import org.apache.solr.common.MapWriter;
 import org.apache.solr.core.SolrConfig;
-import org.apache.solr.search.OrdMapRegenerator.KeepAliveValue;
 import org.apache.solr.search.SolrCache.MetaEntry;
 import org.apache.solr.util.IOFunction;
 
@@ -52,8 +54,11 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
   private static final long DEFAULT_REGEN_KEEPALIVE_NANOS =
       TimeUnit.MINUTES.toNanos(DEFAULT_REGEN_KEEPALIVE_MINUTES);
 
+  private static final double DEFAULT_OVERLAP_THRESHOLD = 0.5;
+
   private final long regenKeepAliveNanos;
   private final long eagerKeepAliveNanos;
+  private final double overlapThreshold;
 
   public KeepAliveRegenerator() {
     this(DEFAULT_REGEN_KEEPALIVE_NANOS, 0);
@@ -67,23 +72,47 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
   }
 
   public KeepAliveRegenerator(SolrConfig solrConfig, CacheConfig cacheConfig) {
-    super(autowarmOn(cacheConfig), getWrapFunction());
+    this(solrConfig, cacheConfig, new LongAdder(), new DoubleAdder());
+  }
+
+  private KeepAliveRegenerator(
+      SolrConfig solrConfig,
+      CacheConfig cacheConfig,
+      LongAdder partialHits,
+      DoubleAdder partialHitsRatio) {
+    super(autowarmOn(cacheConfig), getWrapFunction(partialHits, partialHitsRatio));
     Map<String, Object> cacheConfigArgs = cacheConfig.toMap(Collections.emptyMap());
     this.regenKeepAliveNanos =
         getRegenKeepAliveNanos("regenKeepAlive", solrConfig, cacheConfigArgs, null);
     this.eagerKeepAliveNanos =
         getRegenKeepAliveNanos("eagerKeepAlive", solrConfig, cacheConfigArgs, "0");
+    this.partialHits = partialHits;
+    this.partialHitsRatio = partialHitsRatio;
+    String tmp = (String) cacheConfigArgs.get("overlapThreshold");
+    this.overlapThreshold = tmp == null ? DEFAULT_OVERLAP_THRESHOLD : Double.parseDouble(tmp);
   }
 
   private KeepAliveRegenerator(long regenKeepAliveNanos, long eagerKeepAliveNanos) {
-    super(true, getWrapFunction());
+    this(regenKeepAliveNanos, eagerKeepAliveNanos, new LongAdder(), new DoubleAdder());
+  }
+
+  private KeepAliveRegenerator(
+      long regenKeepAliveNanos,
+      long eagerKeepAliveNanos,
+      LongAdder partialHits,
+      DoubleAdder partialHitsRatio) {
+    super(true, getWrapFunction(partialHits, partialHitsRatio));
     this.regenKeepAliveNanos = regenKeepAliveNanos;
     this.eagerKeepAliveNanos = eagerKeepAliveNanos;
+    this.partialHits = partialHits;
+    this.partialHitsRatio = partialHitsRatio;
+    this.overlapThreshold = DEFAULT_OVERLAP_THRESHOLD;
   }
 
   @SuppressWarnings({"unchecked", "UnnecessaryLambda"})
-  private static <M> BiFunction<SegmentMap, DocSet, M> getWrapFunction() {
-    return (segMap, v) -> (M) new KeepAliveSegAwareValue(segMap, v);
+  private static <M> BiFunction<SegmentMap, DocSet, M> getWrapFunction(
+      LongAdder partialHits, DoubleAdder partialHitsRatio) {
+    return (segMap, v) -> (M) new KeepAliveSegAwareValue(segMap, v, partialHits, partialHitsRatio);
   }
 
   private static boolean isCrossDoc(Query q) {
@@ -131,7 +160,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
   }
 
   private static class KeepAliveSegAwareValue
-      implements MetaEntry<Query, DocSet, KeepAliveValue<Query, DocSet>> {
+      implements MetaEntry<Query, DocSet, KeepAliveSegAwareValue> {
 
     private static final long BASE_RAM_BYTES_USED =
         RamUsageEstimator.shallowSizeOfInstance(KeepAliveSegAwareValue.class)
@@ -142,35 +171,50 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     private final AtomicReference<
             AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>>>
         ref;
+    private final LongAdder partialHits;
+    private final DoubleAdder partialHitsRatio;
     private final long ramBytesUsed;
     private long accessTimestampNanos;
 
-    public KeepAliveSegAwareValue(SegmentMap segMap, DocSet val) {
+    public KeepAliveSegAwareValue(
+        SegmentMap segMap, DocSet val, LongAdder partialHits, DoubleAdder partialHitsRatio) {
       CompletableFuture<DocSet> f = new CompletableFuture<>();
       f.complete(val);
       ref = new AtomicReference<>(new AbstractMap.SimpleImmutableEntry<>(segMap, f));
       ramBytesUsed = BASE_RAM_BYTES_USED + val.ramBytesUsed();
       this.accessTimestampNanos = System.nanoTime();
+      this.partialHits = partialHits;
+      this.partialHitsRatio = partialHitsRatio;
     }
 
-    public KeepAliveSegAwareValue(SegmentMap segMap, DocSet val, long accessTimestampNanos) {
+    public KeepAliveSegAwareValue(
+        SegmentMap segMap,
+        DocSet val,
+        long accessTimestampNanos,
+        LongAdder partialHits,
+        DoubleAdder partialHitsRatio) {
       CompletableFuture<DocSet> f = new CompletableFuture<>();
       f.complete(val);
       ref = new AtomicReference<>(new AbstractMap.SimpleImmutableEntry<>(segMap, f));
       ramBytesUsed = BASE_RAM_BYTES_USED + val.ramBytesUsed();
       this.accessTimestampNanos = accessTimestampNanos;
+      this.partialHits = partialHits;
+      this.partialHitsRatio = partialHitsRatio;
     }
 
-    public KeepAliveSegAwareValue(KeepAliveSegAwareValue template) {
+    public KeepAliveSegAwareValue(
+        KeepAliveSegAwareValue template, LongAdder partialHits, DoubleAdder partialHitsRatio) {
       AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> entry =
           template.ref.get();
       ref = new AtomicReference<>(template.ref.get());
       ramBytesUsed = BASE_RAM_BYTES_USED + entry.getValue().getNow(null).ramBytesUsed();
       this.accessTimestampNanos = template.accessTimestampNanos;
+      this.partialHits = partialHits;
+      this.partialHitsRatio = partialHitsRatio;
     }
 
     @Override
-    public KeepAliveValue<Query, DocSet> metaClone(DocSet val) {
+    public KeepAliveSegAwareValue metaClone(DocSet val) {
       throw new UnsupportedOperationException();
     }
 
@@ -198,6 +242,8 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
                   key, ref.getKey().segments, ref.getValue().get());
           DocSet computed = mappingFunction.apply(frankenstein);
           f.complete(computed);
+          partialHits.increment();
+          partialHitsRatio.add(ref.getKey().getOverlap(segMap.key));
           return computed;
         } else if (witness.getKey() == segMap) {
           return witness.getValue().get();
@@ -221,6 +267,35 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     public long ramBytesUsed() {
       return ramBytesUsed;
     }
+  }
+
+  private final LongAdder partialHits;
+  private final DoubleAdder partialHitsRatio;
+  private final LongAdder priorPartialHits = new LongAdder();
+  private final DoubleAdder priorPartialHitsRatio = new DoubleAdder();
+
+  @Override
+  public void postWarm() {
+    priorPartialHits.add(partialHits.sumThenReset());
+    priorPartialHitsRatio.add(partialHitsRatio.sumThenReset());
+  }
+
+  @Override
+  public void appendMetrics(MapWriter.EntryWriter map) throws IOException {
+    final long partialHitCount = partialHits.sum();
+    final double currentPartialHitRatio = partialHitsRatio.sum();
+    final long cumPartialHitCount = priorPartialHits.sum() + partialHitCount;
+    final double cumCurrentPartialHitsRatio = priorPartialHitsRatio.sum() + currentPartialHitRatio;
+    map.put("partialHits", partialHitCount);
+    map.put("partialHitsRatio", currentPartialHitRatio);
+    map.put(
+        "partialRatioPerHit",
+        partialHitCount == 0 ? 1.0 : (currentPartialHitRatio / partialHitCount));
+    map.put("cumulative_partialHits", cumPartialHitCount);
+    map.put("cumulative_partialHitsRatio", cumCurrentPartialHitsRatio);
+    map.put(
+        "cumulative_partialRatioPerHit",
+        cumPartialHitCount == 0 ? 1.0 : (cumCurrentPartialHitsRatio / cumPartialHitCount));
   }
 
   @Override
@@ -259,20 +334,23 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     SolrCache<Query, KeepAliveSegAwareValue> c =
         (SolrCache<Query, KeepAliveSegAwareValue>) newCache;
 
-    if (isCrossDoc(query)) {
+    if (metaEntry.ref.get().getKey().registerOverlap(newSearcher.getSegmentMap()) < overlapThreshold
+        || isCrossDoc(query)) {
       if (lastAccessAgo > eagerKeepAliveNanos) {
         c.computeIfAbsent(
             query,
             (q) -> {
               SegmentMap segMap = newSearcher.getSegmentMap();
               DocSet docSet = newSearcher.getDocSetNC(query, null);
-              return new KeepAliveSegAwareValue(segMap, docSet, extantTimestamp);
+              return new KeepAliveSegAwareValue(
+                  segMap, docSet, extantTimestamp, partialHits, partialHitsRatio);
             });
       }
       return true;
     }
 
-    c.computeIfAbsent(query, (q) -> new KeepAliveSegAwareValue(metaEntry));
+    c.computeIfAbsent(
+        query, (q) -> new KeepAliveSegAwareValue(metaEntry, partialHits, partialHitsRatio));
     return true;
   }
 }

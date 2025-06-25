@@ -72,7 +72,7 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
 
   @SuppressWarnings({"unchecked", "UnnecessaryLambda"})
   private static <M> BiFunction<SegmentMap, OrdinalMap, M> getWrapFunction() {
-    return (segMap, v) -> (M) new KeepAliveValue<>(v, 0);
+    return (segMap, v) -> (M) new KeepAliveValue<>(v, System.nanoTime());
   }
 
   public static class KeepAliveValue<K, T extends Accountable>

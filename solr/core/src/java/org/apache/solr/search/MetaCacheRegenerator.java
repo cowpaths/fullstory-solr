@@ -184,6 +184,12 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
     this.mapWriterFunction = mapWriterFunction;
   }
 
+  public void postWarm() {
+    // no-op default implementation
+  }
+
+  public void appendMetrics(MapWriter.EntryWriter map) throws IOException {}
+
   @Override
   @SuppressWarnings("unchecked")
   public <K1, M1> boolean regenerateItem(
@@ -220,7 +226,7 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
     @SuppressWarnings("unchecked")
     SolrCache<K, M> backing = (SolrCache<K, M>) internal;
     @SuppressWarnings("unchecked")
-    SolrCache<K1, ?> ret = (SolrCache<K1, ?>) new MetaSolrCache<>(backing, wrapFunction);
+    SolrCache<K1, ?> ret = (SolrCache<K1, ?>) new MetaSolrCache<>(backing, wrapFunction, this);
     return ret;
   }
 
