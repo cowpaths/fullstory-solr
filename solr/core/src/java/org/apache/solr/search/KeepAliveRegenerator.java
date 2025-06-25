@@ -178,15 +178,15 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
         }
         CompletableFuture<DocSet> f = new CompletableFuture<>();
         AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> newRef = new AbstractMap.SimpleImmutableEntry<>(segMap, f);
-        AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> actualNewRef = this.ref.compareAndExchange(ref, newRef);
-        if (actualNewRef == ref) {
+        AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> witness = this.ref.compareAndExchange(ref, newRef);
+        if (witness == ref) {
           // we compute
           Query frankenstein = new SegAwareDocSetCache.FrankensteinQuery(key, ref.getKey().segments, ref.getValue().get());
           DocSet computed = mappingFunction.apply(frankenstein);
           f.complete(computed);
           return computed;
-        } else if (actualNewRef.getKey() == segMap) {
-          return actualNewRef.getValue().get();
+        } else if (witness.getKey() == segMap) {
+          return witness.getValue().get();
         } else {
           return mappingFunction.apply(key);
         }
