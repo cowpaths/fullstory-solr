@@ -16,19 +16,7 @@
  */
 package org.apache.solr.search;
 
-import org.apache.lucene.index.DirectoryReader;
-import org.apache.lucene.index.IndexReader;
-import org.apache.lucene.index.LeafReaderContext;
-import org.apache.lucene.index.Term;
-import org.apache.lucene.search.BooleanClause;
-import org.apache.lucene.search.Query;
-import org.apache.lucene.search.QueryVisitor;
-import org.apache.lucene.util.RamUsageEstimator;
-import org.apache.lucene.util.automaton.ByteRunAutomaton;
-import org.apache.solr.core.SolrConfig;
-import org.apache.solr.search.SolrCache.MetaEntry;
-import org.apache.solr.search.OrdMapRegenerator.KeepAliveValue;
-import org.apache.solr.util.IOFunction;
+import static org.apache.solr.search.OrdMapRegenerator.getRegenKeepAliveNanos;
 
 import java.io.IOException;
 import java.util.AbstractMap;
@@ -42,8 +30,19 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Supplier;
-
-import static org.apache.solr.search.OrdMapRegenerator.getRegenKeepAliveNanos;
+import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.Term;
+import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.Query;
+import org.apache.lucene.search.QueryVisitor;
+import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.lucene.util.automaton.ByteRunAutomaton;
+import org.apache.solr.core.SolrConfig;
+import org.apache.solr.search.OrdMapRegenerator.KeepAliveValue;
+import org.apache.solr.search.SolrCache.MetaEntry;
+import org.apache.solr.util.IOFunction;
 
 /** Cache regenerator that builds OrdinalMap instances against the new searcher. */
 public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
@@ -63,15 +62,17 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
 
   static boolean autowarmOn(CacheConfig config) {
     return new SolrCacheBase.AutoWarmCountRef(
-        (String) config.toMap(new HashMap<>()).get("autowarmCount"))
+            (String) config.toMap(new HashMap<>()).get("autowarmCount"))
         .isAutoWarmingOn();
   }
 
   public KeepAliveRegenerator(SolrConfig solrConfig, CacheConfig cacheConfig) {
     super(autowarmOn(cacheConfig), getWrapFunction());
     Map<String, Object> cacheConfigArgs = cacheConfig.toMap(Collections.emptyMap());
-    this.regenKeepAliveNanos = getRegenKeepAliveNanos("regenKeepAlive", solrConfig, cacheConfigArgs, null);
-    this.eagerKeepAliveNanos = getRegenKeepAliveNanos("eagerKeepAlive", solrConfig, cacheConfigArgs, "0");
+    this.regenKeepAliveNanos =
+        getRegenKeepAliveNanos("regenKeepAlive", solrConfig, cacheConfigArgs, null);
+    this.eagerKeepAliveNanos =
+        getRegenKeepAliveNanos("eagerKeepAlive", solrConfig, cacheConfigArgs, "0");
   }
 
   private KeepAliveRegenerator(long regenKeepAliveNanos, long eagerKeepAliveNanos) {
@@ -87,55 +88,60 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
 
   private static boolean isCrossDoc(Query q) {
     boolean[] ret = new boolean[1];
-    q.visit(new QueryVisitor() {
-      @Override
-      public QueryVisitor getSubVisitor(BooleanClause.Occur occur, Query parent) {
-        return isCrossDoc(parent);
-      }
+    q.visit(
+        new QueryVisitor() {
+          @Override
+          public QueryVisitor getSubVisitor(BooleanClause.Occur occur, Query parent) {
+            return isCrossDoc(parent);
+          }
 
-      @Override
-      public void visitLeaf(Query query) {
-        isCrossDoc(query);
-      }
+          @Override
+          public void visitLeaf(Query query) {
+            isCrossDoc(query);
+          }
 
-      private QueryVisitor isCrossDoc(Query q) {
-        if (ret[0]) {
-          return EMPTY_VISITOR;
-        } else if (q.getClass().getSimpleName().endsWith("JoinQuery")) {
-          ret[0] = true;
-          return EMPTY_VISITOR;
-        } else {
-          return this;
-        }
-      }
+          private QueryVisitor isCrossDoc(Query q) {
+            if (ret[0]) {
+              return EMPTY_VISITOR;
+            } else if (q.getClass().getSimpleName().endsWith("JoinQuery")) {
+              ret[0] = true;
+              return EMPTY_VISITOR;
+            } else {
+              return this;
+            }
+          }
 
-      @Override
-      public void consumeTerms(Query query, Term... terms) {
-        isCrossDoc(query);
-      }
+          @Override
+          public void consumeTerms(Query query, Term... terms) {
+            isCrossDoc(query);
+          }
 
-      @Override
-      public void consumeTermsMatching(Query query, String field, Supplier<ByteRunAutomaton> automaton) {
-        isCrossDoc(query);
-      }
+          @Override
+          public void consumeTermsMatching(
+              Query query, String field, Supplier<ByteRunAutomaton> automaton) {
+            isCrossDoc(query);
+          }
 
-      @Override
-      public boolean acceptField(String field) {
-        return !ret[0];
-      }
-    });
+          @Override
+          public boolean acceptField(String field) {
+            return !ret[0];
+          }
+        });
     return ret[0];
   }
 
-  private static class KeepAliveSegAwareValue implements MetaEntry<Query, DocSet, KeepAliveValue<Query, DocSet>> {
+  private static class KeepAliveSegAwareValue
+      implements MetaEntry<Query, DocSet, KeepAliveValue<Query, DocSet>> {
 
     private static final long BASE_RAM_BYTES_USED =
-        RamUsageEstimator.shallowSizeOfInstance(KeepAliveSegAwareValue.class) +
-            RamUsageEstimator.shallowSizeOfInstance(AtomicReference.class) +
-            RamUsageEstimator.shallowSizeOfInstance(AbstractMap.SimpleImmutableEntry.class) +
-            RamUsageEstimator.shallowSizeOfInstance(CompletableFuture.class);
+        RamUsageEstimator.shallowSizeOfInstance(KeepAliveSegAwareValue.class)
+            + RamUsageEstimator.shallowSizeOfInstance(AtomicReference.class)
+            + RamUsageEstimator.shallowSizeOfInstance(AbstractMap.SimpleImmutableEntry.class)
+            + RamUsageEstimator.shallowSizeOfInstance(CompletableFuture.class);
 
-    private final AtomicReference<AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>>> ref;
+    private final AtomicReference<
+            AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>>>
+        ref;
     private final long ramBytesUsed;
     private long accessTimestampNanos;
 
@@ -156,7 +162,8 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     }
 
     public KeepAliveSegAwareValue(KeepAliveSegAwareValue template) {
-      AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> entry = template.ref.get();
+      AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> entry =
+          template.ref.get();
       ref = new AtomicReference<>(template.ref.get());
       ramBytesUsed = BASE_RAM_BYTES_USED + entry.getValue().getNow(null).ramBytesUsed();
       this.accessTimestampNanos = template.accessTimestampNanos;
@@ -168,7 +175,9 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     }
 
     @Override
-    public DocSet get(SegmentMap segMap, Query key, IOFunction<? super Query, ? extends DocSet> mappingFunction) throws IOException {
+    public DocSet get(
+        SegmentMap segMap, Query key, IOFunction<? super Query, ? extends DocSet> mappingFunction)
+        throws IOException {
       AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> ref = this.ref.get();
       accessTimestampNanos = System.nanoTime();
       try {
@@ -178,11 +187,15 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
           return null;
         }
         CompletableFuture<DocSet> f = new CompletableFuture<>();
-        AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> newRef = new AbstractMap.SimpleImmutableEntry<>(segMap, f);
-        AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> witness = this.ref.compareAndExchange(ref, newRef);
+        AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> newRef =
+            new AbstractMap.SimpleImmutableEntry<>(segMap, f);
+        AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> witness =
+            this.ref.compareAndExchange(ref, newRef);
         if (witness == ref) {
           // we compute
-          Query frankenstein = new SegAwareDocSetCache.FrankensteinQuery(key, ref.getKey().segments, ref.getValue().get());
+          Query frankenstein =
+              new SegAwareDocSetCache.FrankensteinQuery(
+                  key, ref.getKey().segments, ref.getValue().get());
           DocSet computed = mappingFunction.apply(frankenstein);
           f.complete(computed);
           return computed;
@@ -243,15 +256,18 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     final Query query = (Query) oldKey;
 
     @SuppressWarnings("unchecked")
-    SolrCache<Query, KeepAliveSegAwareValue> c = (SolrCache<Query, KeepAliveSegAwareValue>) newCache;
+    SolrCache<Query, KeepAliveSegAwareValue> c =
+        (SolrCache<Query, KeepAliveSegAwareValue>) newCache;
 
     if (isCrossDoc(query)) {
       if (lastAccessAgo > eagerKeepAliveNanos) {
-        c.computeIfAbsent(query, (q) -> {
-          SegmentMap segMap = newSearcher.getSegmentMap();
-          DocSet docSet = newSearcher.getDocSetNC(query, null);
-          return new KeepAliveSegAwareValue(segMap, docSet, extantTimestamp);
-        });
+        c.computeIfAbsent(
+            query,
+            (q) -> {
+              SegmentMap segMap = newSearcher.getSegmentMap();
+              DocSet docSet = newSearcher.getDocSetNC(query, null);
+              return new KeepAliveSegAwareValue(segMap, docSet, extantTimestamp);
+            });
       }
       return true;
     }

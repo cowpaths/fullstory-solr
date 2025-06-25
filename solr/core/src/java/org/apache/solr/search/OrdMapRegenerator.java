@@ -17,6 +17,7 @@
 package org.apache.solr.search;
 
 import static org.apache.solr.common.params.CommonParams.NAME;
+import static org.apache.solr.search.KeepAliveRegenerator.autowarmOn;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -39,8 +40,6 @@ import org.apache.solr.core.SolrConfig;
 import org.apache.solr.index.SlowCompositeReaderWrapper;
 import org.apache.solr.search.SolrCache.MetaEntry;
 import org.apache.solr.util.IOFunction;
-
-import static org.apache.solr.search.KeepAliveRegenerator.autowarmOn;
 
 /** Cache regenerator that builds OrdinalMap instances against the new searcher. */
 public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
@@ -66,7 +65,9 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
 
   public OrdMapRegenerator(SolrConfig solrConfig, CacheConfig cacheConfig) {
     super(autowarmOn(cacheConfig), getWrapFunction());
-    this.regenKeepAliveNanos = getRegenKeepAliveNanos("regenKeepAlive", solrConfig, cacheConfig.toMap(Collections.emptyMap()), null);
+    this.regenKeepAliveNanos =
+        getRegenKeepAliveNanos(
+            "regenKeepAlive", solrConfig, cacheConfig.toMap(Collections.emptyMap()), null);
   }
 
   @SuppressWarnings({"unchecked", "UnnecessaryLambda"})
@@ -74,7 +75,8 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
     return (segMap, v) -> (M) new KeepAliveValue<>(v, 0);
   }
 
-  public static class KeepAliveValue<K, T extends Accountable> implements MetaEntry<K, T, KeepAliveValue<K, T>> {
+  public static class KeepAliveValue<K, T extends Accountable>
+      implements MetaEntry<K, T, KeepAliveValue<K, T>> {
     private static final long BASE_RAM_BYTES_USED =
         RamUsageEstimator.shallowSizeOfInstance(KeepAliveValue.class);
     private final T val;
@@ -120,7 +122,11 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
    * interval defined by the specified {@link SolrConfig} (or default of {@value
    * #DEFAULT_REGEN_KEEPALIVE_MINUTES} minutes if no autocommit interval can be determined).
    */
-  static long getRegenKeepAliveNanos(String argName, SolrConfig solrConfig, Map<String, Object> cacheConfigArgs, String defaultConfig) {
+  static long getRegenKeepAliveNanos(
+      String argName,
+      SolrConfig solrConfig,
+      Map<String, Object> cacheConfigArgs,
+      String defaultConfig) {
     String keepAliveConfig = (String) cacheConfigArgs.getOrDefault(argName, defaultConfig);
     final long regenKeepAliveNanos;
     if (keepAliveConfig == null || keepAliveConfig.isEmpty()) {
@@ -209,7 +215,8 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
     }
 
     @SuppressWarnings("unchecked")
-    KeepAliveValue<String, OrdinalMap> ordinalMapValue = (KeepAliveValue<String, OrdinalMap>) oldVal;
+    KeepAliveValue<String, OrdinalMap> ordinalMapValue =
+        (KeepAliveValue<String, OrdinalMap>) oldVal;
     final long extantTimestamp = ordinalMapValue.accessTimestampNanos;
     if (System.nanoTime() - extantTimestamp > regenKeepAliveNanos) {
       // it has been long enough since this was last accessed that we don't want to carry it forward
@@ -240,7 +247,8 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
     }
 
     @SuppressWarnings("unchecked")
-    SolrCache<String, KeepAliveValue<String, OrdinalMap>> c = (SolrCache<String, KeepAliveValue<String, OrdinalMap>>) newCache;
+    SolrCache<String, KeepAliveValue<String, OrdinalMap>> c =
+        (SolrCache<String, KeepAliveValue<String, OrdinalMap>>) newCache;
     c.computeIfAbsent(field, producer);
     return true;
   }

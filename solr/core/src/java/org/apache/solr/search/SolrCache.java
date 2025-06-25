@@ -21,7 +21,6 @@ import java.io.UncheckedIOException;
 import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
-import java.util.function.Supplier;
 import org.apache.lucene.util.Accountable;
 import org.apache.solr.core.SolrInfoBean;
 import org.apache.solr.metrics.SolrMetricProducer;
@@ -232,7 +231,8 @@ public interface SolrCache<K, V> extends SolrInfoBean {
 
   /**
    * Returns the segmentMap for the searcher over which this cache is valid (cache is informed of
-   * this via {@link #initialSearcher(SolrIndexSearcher)} or {@link #warm(SolrIndexSearcher, SolrCache)}).
+   * this via {@link #initialSearcher(SolrIndexSearcher)} or {@link #warm(SolrIndexSearcher,
+   * SolrCache)}).
    */
   default SegmentMap getSegmentMap() {
     return null;
@@ -249,7 +249,9 @@ public interface SolrCache<K, V> extends SolrInfoBean {
      * instance.
      */
     E metaClone(V val);
-    V get(SegmentMap segMap, K key, IOFunction<? super K, ? extends V> mappingFunction) throws IOException;
+
+    V get(SegmentMap segMap, K key, IOFunction<? super K, ? extends V> mappingFunction)
+        throws IOException;
 
     default V get(SegmentMap segMap, K key) {
       try {

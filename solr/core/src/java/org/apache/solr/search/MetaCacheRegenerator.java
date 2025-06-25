@@ -154,8 +154,8 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
    * This ctor should be used by subclasses that are strictly interested in cache entry metadata for
    * the purpose of reporting nuanced cache metrics.
    *
-   * @param enabled allow to disable; e.g., for cases where autowarming is a pre-requisite, and
-   *     not enabled.
+   * @param enabled allow to disable; e.g., for cases where autowarming is a pre-requisite, and not
+   *     enabled.
    * @param regenFunction Function to regenerate raw value for the provided searcher and key.
    * @param wrapFunction function to wrap raw values in a {@link MetaEntry} wrapper.
    * @param metaType suffix added to the associated cache's metric name to define extra

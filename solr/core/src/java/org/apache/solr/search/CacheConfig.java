@@ -158,7 +158,13 @@ public class CacheConfig implements MapSerializable {
         };
     config.regenImpl = config.args.get("regenerator");
     if (config.regenImpl != null) {
-      config.regenerator = loader.newInstance(config.regenImpl, CacheRegenerator.class, EMPTY, REGEN_PARAMS, new Object[]{solrConfig, config});
+      config.regenerator =
+          loader.newInstance(
+              config.regenImpl,
+              CacheRegenerator.class,
+              EMPTY,
+              REGEN_PARAMS,
+              new Object[] {solrConfig, config});
     }
 
     return config;

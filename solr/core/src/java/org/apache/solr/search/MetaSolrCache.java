@@ -90,7 +90,9 @@ public class MetaSolrCache<K, V, M extends MetaEntry<K, V, M>> implements SolrCa
   public V computeIfAbsent(K key, IOFunction<? super K, ? extends V> mappingFunction)
       throws IOException {
     SegmentMap segMap = backing.getSegmentMap();
-    return backing.computeIfAbsent(key, (k) -> mapping.apply(segMap, mappingFunction.apply(k))).get(segMap, key, mappingFunction);
+    return backing
+        .computeIfAbsent(key, (k) -> mapping.apply(segMap, mappingFunction.apply(k)))
+        .get(segMap, key, mappingFunction);
   }
 
   @Override
