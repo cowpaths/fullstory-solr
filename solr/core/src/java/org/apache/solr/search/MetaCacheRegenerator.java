@@ -81,6 +81,7 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
       extends MetaCacheRegenerator<Query, DocSet, HitsMetaEntry<Query, DocSet>> {
     public FilterHistogram() {
       super(
+          true,
           FILTER_REGEN_FUNC,
           HitsMetaEntry.WRAP_FUNC,
           ".histogram",
@@ -101,6 +102,7 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
       extends MetaCacheRegenerator<Query, DocSet, HitsMetaEntry<Query, DocSet>> {
     public FilterDump() {
       super(
+          true,
           FILTER_REGEN_FUNC,
           HitsMetaEntry.WRAP_FUNC,
           ".dump",
@@ -130,6 +132,7 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
     V apply(SolrIndexSearcher s, K k) throws IOException;
   }
 
+  private final boolean enabled;
   private final SearcherIOBiFunction<K, V> regenFunction;
   private final BiFunction<SegmentMap, V, M> wrapFunction;
   private final String metaType;
@@ -143,14 +146,16 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
    *
    * @param wrapFunction function to wrap raw values in a {@link MetaEntry} wrapper.
    */
-  public MetaCacheRegenerator(BiFunction<SegmentMap, V, M> wrapFunction) {
-    this(null, wrapFunction, null, null);
+  public MetaCacheRegenerator(boolean enabled, BiFunction<SegmentMap, V, M> wrapFunction) {
+    this(enabled, null, wrapFunction, null, null);
   }
 
   /**
    * This ctor should be used by subclasses that are strictly interested in cache entry metadata for
    * the purpose of reporting nuanced cache metrics.
    *
+   * @param enabled allow to disable; e.g., for cases where autowarming is a pre-requisite, and
+   *     not enabled.
    * @param regenFunction Function to regenerate raw value for the provided searcher and key.
    * @param wrapFunction function to wrap raw values in a {@link MetaEntry} wrapper.
    * @param metaType suffix added to the associated cache's metric name to define extra
@@ -158,10 +163,12 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
    * @param mapWriterFunction defines the mapWriter for supplying meta-metrics
    */
   public MetaCacheRegenerator(
+      boolean enabled,
       SearcherIOBiFunction<K, V> regenFunction,
       BiFunction<SegmentMap, V, M> wrapFunction,
       String metaType,
       Function<SolrCache<K, M>, MapWriter> mapWriterFunction) {
+    this.enabled = enabled;
     this.regenFunction = regenFunction == null ? nullWarningRegenFunc() : regenFunction;
     this.wrapFunction = wrapFunction;
     if (metaType == null ^ mapWriterFunction == null) {
@@ -194,6 +201,14 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
 
   @Override
   public <K1> SolrCache<K1, ?> wrap(SolrCache<K1, ?> internal) {
+    if (!enabled) {
+      // If this regenerator's not enabled, don't wrap, and we should remove
+      // ourselves from the associated cache.
+      if (internal instanceof SolrCacheBase) {
+        ((SolrCacheBase) internal).regenerator = null;
+      }
+      return internal;
+    }
     @SuppressWarnings("unchecked")
     SolrCache<K, M> backing = (SolrCache<K, M>) internal;
     @SuppressWarnings("unchecked")

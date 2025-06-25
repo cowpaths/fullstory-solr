@@ -25,9 +25,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
-import java.util.function.Function;
-import java.util.function.LongFunction;
-import java.util.function.Supplier;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
@@ -42,6 +39,8 @@ import org.apache.solr.core.SolrConfig;
 import org.apache.solr.index.SlowCompositeReaderWrapper;
 import org.apache.solr.search.SolrCache.MetaEntry;
 import org.apache.solr.util.IOFunction;
+
+import static org.apache.solr.search.KeepAliveRegenerator.autowarmOn;
 
 /** Cache regenerator that builds OrdinalMap instances against the new searcher. */
 public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
@@ -61,8 +60,13 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
   }
 
   private OrdMapRegenerator(long regenKeepAliveNanos) {
-    super(getWrapFunction());
+    super(true, getWrapFunction());
     this.regenKeepAliveNanos = regenKeepAliveNanos;
+  }
+
+  public OrdMapRegenerator(SolrConfig solrConfig, CacheConfig cacheConfig) {
+    super(autowarmOn(cacheConfig), getWrapFunction());
+    this.regenKeepAliveNanos = getRegenKeepAliveNanos(solrConfig, cacheConfig);
   }
 
   @SuppressWarnings({"unchecked", "UnnecessaryLambda"})
@@ -96,10 +100,6 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
     public KeepAliveValue<K, T> metaClone(T val) {
       return new KeepAliveValue<>(val, accessTimestampNanos);
     }
-
-    public long extantTimestamp() {
-      return accessTimestampNanos;
-    }
   }
 
   /**
@@ -115,28 +115,12 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
     return new CacheConfig(CaffeineCache.class, args, null);
   }
 
-  public static void configureRegenerator(SolrConfig solrConfig, CacheConfig config) {
-    configureRegenerator0(solrConfig, config, ORDMAP_REGEN_SUPPLIER);
-  }
-
   /**
-   * If no regenerator is explicitly configured for the specified {@link CacheConfig}, and if
-   * autowarming is on, this method configures a regenerator. `regenKeepAlive` is respected if
-   * explicitly set, implicitly defaulting to 2x the autocommit interval defined by the specified
-   * {@link SolrConfig} (or default of {@value #DEFAULT_REGEN_KEEPALIVE_MINUTES} minutes if no
-   * autocommit interval can be determined).
+   * `regenKeepAlive` is respected if explicitly set, implicitly defaulting to 2x the autocommit
+   * interval defined by the specified {@link SolrConfig} (or default of {@value
+   * #DEFAULT_REGEN_KEEPALIVE_MINUTES} minutes if no autocommit interval can be determined).
    */
-  public static void configureRegenerator0(SolrConfig solrConfig, CacheConfig config, LongFunction<? extends CacheRegenerator> regenSupplier) {
-    if (config.getRegenerator() != null
-        || !new SolrCacheBase.AutoWarmCountRef(
-                (String) config.toMap(new HashMap<>()).get("autowarmCount"))
-            .isAutoWarmingOn()) {
-      // If a regenerator is already explicitly configured, we don't want to replace it.
-      // Also, if autowarming is not on, we don't configure a regenerator. This is important
-      // because the regenerator is also used to wrap/unwrap the cache for the purpose of
-      // tracking metadata, etc. If there's no autowarm, the extra overhead is useless.
-      return;
-    }
+  static long getRegenKeepAliveNanos(SolrConfig solrConfig, CacheConfig config) {
     String keepAliveConfig = (String) config.toMap(Collections.emptyMap()).get("regenKeepAlive");
     final long regenKeepAliveNanos;
     if (keepAliveConfig == null || keepAliveConfig.isEmpty()) {
@@ -181,16 +165,8 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
           break;
       }
     }
-    config.setRegenerator(regenSupplier.apply(regenKeepAliveNanos));
+    return regenKeepAliveNanos;
   }
-
-  private static final LongFunction<OrdMapRegenerator<KeepAliveValue<String, OrdinalMap>>> ORDMAP_REGEN_SUPPLIER = (regenKeepAliveNanos) -> {
-    if (regenKeepAliveNanos == DEFAULT_REGEN_KEEPALIVE_NANOS) {
-      return DEFAULT_INSTANCE;
-    } else {
-      return new OrdMapRegenerator<>(regenKeepAliveNanos);
-    }
-  };
 
   private static long getOpenSearcherIntervalNanos(SolrConfig solrConfig) {
     SolrConfig.UpdateHandlerInfo uinfo = solrConfig.getUpdateHandlerInfo();
@@ -234,7 +210,7 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
 
     @SuppressWarnings("unchecked")
     KeepAliveValue<String, OrdinalMap> ordinalMapValue = (KeepAliveValue<String, OrdinalMap>) oldVal;
-    final long extantTimestamp = ordinalMapValue.extantTimestamp();
+    final long extantTimestamp = ordinalMapValue.accessTimestampNanos;
     if (System.nanoTime() - extantTimestamp > regenKeepAliveNanos) {
       // it has been long enough since this was last accessed that we don't want to carry it forward
       return true;

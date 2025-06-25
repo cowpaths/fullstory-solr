@@ -19,35 +19,29 @@ package org.apache.solr.search;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
-import org.apache.lucene.index.OrdinalMap;
-import org.apache.lucene.index.SortedDocValues;
-import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause;
-import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryVisitor;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.automaton.ByteRunAutomaton;
-import org.apache.lucene.util.packed.PackedInts;
 import org.apache.solr.core.SolrConfig;
-import org.apache.solr.index.SlowCompositeReaderWrapper;
 import org.apache.solr.search.SolrCache.MetaEntry;
 import org.apache.solr.search.OrdMapRegenerator.KeepAliveValue;
 import org.apache.solr.util.IOFunction;
 
 import java.io.IOException;
 import java.util.AbstractMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
-import java.util.function.LongFunction;
 import java.util.function.Supplier;
 
-import static org.apache.solr.search.OrdMapRegenerator.configureRegenerator0;
+import static org.apache.solr.search.OrdMapRegenerator.getRegenKeepAliveNanos;
 
 /** Cache regenerator that builds OrdinalMap instances against the new searcher. */
 public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
@@ -56,37 +50,39 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
   private static final int DEFAULT_REGEN_KEEPALIVE_MINUTES = 2;
   private static final long DEFAULT_REGEN_KEEPALIVE_NANOS =
       TimeUnit.MINUTES.toNanos(DEFAULT_REGEN_KEEPALIVE_MINUTES);
-  private static final KeepAliveRegenerator<KeepAliveValue<Query, DocSet>> DEFAULT_INSTANCE =
-      new KeepAliveRegenerator<>(DEFAULT_REGEN_KEEPALIVE_NANOS);
 
   private final long regenKeepAliveNanos;
+  private final boolean warmEagerly;
 
   public KeepAliveRegenerator() {
-    this(DEFAULT_REGEN_KEEPALIVE_NANOS);
+    this(DEFAULT_REGEN_KEEPALIVE_NANOS, false);
     // default ctor in case someone specifies this class via standard `"regen"=[className]` syntax
   }
 
-  private KeepAliveRegenerator(long regenKeepAliveNanos) {
-    super(getWrapFunction());
+  static boolean autowarmOn(CacheConfig config) {
+    return new SolrCacheBase.AutoWarmCountRef(
+        (String) config.toMap(new HashMap<>()).get("autowarmCount"))
+        .isAutoWarmingOn();
+  }
+
+  public KeepAliveRegenerator(SolrConfig solrConfig, CacheConfig cacheConfig) {
+    super(autowarmOn(cacheConfig), getWrapFunction());
+    this.regenKeepAliveNanos = getRegenKeepAliveNanos(solrConfig, cacheConfig);
+
+    // default to false
+    this.warmEagerly = "true".equals(cacheConfig.toMap(null).get("warmEagerly"));
+  }
+
+  private KeepAliveRegenerator(long regenKeepAliveNanos, boolean warmEagerly) {
+    super(true, getWrapFunction());
     this.regenKeepAliveNanos = regenKeepAliveNanos;
+    this.warmEagerly = warmEagerly;
   }
 
   @SuppressWarnings({"unchecked", "UnnecessaryLambda"})
   private static <M> BiFunction<SegmentMap, DocSet, M> getWrapFunction() {
     return (segMap, v) -> (M) new KeepAliveSegAwareValue(segMap, v);
   }
-
-  public static void configureRegenerator(SolrConfig solrConfig, CacheConfig config) {
-    configureRegenerator0(solrConfig, config, DOCSET_REGEN_SUPPLIER);
-  }
-
-  private static final LongFunction<KeepAliveRegenerator<KeepAliveValue<Query, DocSet>>> DOCSET_REGEN_SUPPLIER = (regenKeepAliveNanos) -> {
-    if (regenKeepAliveNanos == DEFAULT_REGEN_KEEPALIVE_NANOS) {
-      return DEFAULT_INSTANCE;
-    } else {
-      return new KeepAliveRegenerator<>(regenKeepAliveNanos);
-    }
-  };
 
   private static boolean isCrossDoc(Query q) {
     boolean[] ret = new boolean[1];
@@ -140,17 +136,29 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
 
     private final AtomicReference<AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>>> ref;
     private final long ramBytesUsed;
+    private long accessTimestampNanos;
 
     public KeepAliveSegAwareValue(SegmentMap segMap, DocSet val) {
       CompletableFuture<DocSet> f = new CompletableFuture<>();
       f.complete(val);
       ref = new AtomicReference<>(new AbstractMap.SimpleImmutableEntry<>(segMap, f));
       ramBytesUsed = BASE_RAM_BYTES_USED + val.ramBytesUsed();
+      this.accessTimestampNanos = System.nanoTime();
     }
 
-    public KeepAliveSegAwareValue(AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> entry, long accessTimestampNanos) {
-      ref = new AtomicReference<>(entry);
+    public KeepAliveSegAwareValue(SegmentMap segMap, DocSet val, long accessTimestampNanos) {
+      CompletableFuture<DocSet> f = new CompletableFuture<>();
+      f.complete(val);
+      ref = new AtomicReference<>(new AbstractMap.SimpleImmutableEntry<>(segMap, f));
+      ramBytesUsed = BASE_RAM_BYTES_USED + val.ramBytesUsed();
+      this.accessTimestampNanos = accessTimestampNanos;
+    }
+
+    public KeepAliveSegAwareValue(KeepAliveSegAwareValue template) {
+      AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> entry = template.ref.get();
+      ref = new AtomicReference<>(template.ref.get());
       ramBytesUsed = BASE_RAM_BYTES_USED + entry.getValue().getNow(null).ramBytesUsed();
+      this.accessTimestampNanos = template.accessTimestampNanos;
     }
 
     @Override
@@ -161,6 +169,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     @Override
     public DocSet get(SegmentMap segMap, Query key, IOFunction<? super Query, ? extends DocSet> mappingFunction) throws IOException {
       AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> ref = this.ref.get();
+      accessTimestampNanos = System.nanoTime();
       try {
         if (ref.getKey() == segMap) {
           return ref.getValue().get();
@@ -220,41 +229,30 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
       return false;
     }
 
-    @SuppressWarnings("unchecked")
-    KeepAliveValue<String, OrdinalMap> ordinalMapValue = (KeepAliveValue<String, OrdinalMap>) oldVal;
-    final long extantTimestamp = ordinalMapValue.extantTimestamp();
+    KeepAliveSegAwareValue metaEntry = (KeepAliveSegAwareValue) oldVal;
+    final long extantTimestamp = metaEntry.accessTimestampNanos;
     if (System.nanoTime() - extantTimestamp > regenKeepAliveNanos) {
       // it has been long enough since this was last accessed that we don't want to carry it forward
       return true;
     }
 
     final Query query = (Query) oldKey;
-    final IndexReader.CacheKey readerKey = cacheHelper.getKey();
-    final IOFunction<? super Query, ? extends KeepAliveValue<Query, OrdinalMap>> producer;
-    //TODO: adjust this for Query->DocSet (not OrdinalMap)
-    DocIdSetIterator[] dvs = SlowCompositeReaderWrapper.getLeafDocValues(leaves, null);
-    if (dvs == null) {
-      // All empty for this field, but should still warm others
-      return true;
-    } else if (dvs instanceof SortedDocValues[]) {
-      producer =
-          (notUsed) ->
-              new KeepAliveValue<>(
-                  OrdinalMap.build(readerKey, (SortedDocValues[]) dvs, PackedInts.DEFAULT),
-                  extantTimestamp);
-    } else if (dvs instanceof SortedSetDocValues[]) {
-      producer =
-          (notUsed) ->
-              new KeepAliveValue<>(
-                  OrdinalMap.build(readerKey, (SortedSetDocValues[]) dvs, PackedInts.DEFAULT),
-                  extantTimestamp);
-    } else {
-      throw new IllegalStateException();
-    }
 
     @SuppressWarnings("unchecked")
-    SolrCache<Query, KeepAliveValue<Query, OrdinalMap>> c = (SolrCache<Query, KeepAliveValue<Query, OrdinalMap>>) newCache;
-    c.computeIfAbsent(query, producer);
+    SolrCache<Query, KeepAliveSegAwareValue> c = (SolrCache<Query, KeepAliveSegAwareValue>) newCache;
+
+    if (isCrossDoc(query)) {
+      if (warmEagerly) {
+        c.computeIfAbsent(query, (q) -> {
+          SegmentMap segMap = newSearcher.getSegmentMap();
+          DocSet docSet = newSearcher.getDocSetNC(query, null);
+          return new KeepAliveSegAwareValue(segMap, docSet, extantTimestamp);
+        });
+      }
+      return true;
+    }
+
+    c.computeIfAbsent(query, (q) -> new KeepAliveSegAwareValue(metaEntry));
     return true;
   }
 }
