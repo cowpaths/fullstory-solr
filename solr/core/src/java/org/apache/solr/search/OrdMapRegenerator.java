@@ -66,7 +66,7 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
 
   public OrdMapRegenerator(SolrConfig solrConfig, CacheConfig cacheConfig) {
     super(autowarmOn(cacheConfig), getWrapFunction());
-    this.regenKeepAliveNanos = getRegenKeepAliveNanos(solrConfig, cacheConfig);
+    this.regenKeepAliveNanos = getRegenKeepAliveNanos("regenKeepAlive", solrConfig, cacheConfig.toMap(Collections.emptyMap()), null);
   }
 
   @SuppressWarnings({"unchecked", "UnnecessaryLambda"})
@@ -120,8 +120,8 @@ public class OrdMapRegenerator<M extends MetaEntry<String, OrdinalMap, M>>
    * interval defined by the specified {@link SolrConfig} (or default of {@value
    * #DEFAULT_REGEN_KEEPALIVE_MINUTES} minutes if no autocommit interval can be determined).
    */
-  static long getRegenKeepAliveNanos(SolrConfig solrConfig, CacheConfig config) {
-    String keepAliveConfig = (String) config.toMap(Collections.emptyMap()).get("regenKeepAlive");
+  static long getRegenKeepAliveNanos(String argName, SolrConfig solrConfig, Map<String, Object> cacheConfigArgs, String defaultConfig) {
+    String keepAliveConfig = (String) cacheConfigArgs.getOrDefault(argName, defaultConfig);
     final long regenKeepAliveNanos;
     if (keepAliveConfig == null || keepAliveConfig.isEmpty()) {
       long osiNanos;

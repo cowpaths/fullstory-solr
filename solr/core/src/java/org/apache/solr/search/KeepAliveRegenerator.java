@@ -32,8 +32,10 @@ import org.apache.solr.util.IOFunction;
 
 import java.io.IOException;
 import java.util.AbstractMap;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -52,10 +54,10 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
       TimeUnit.MINUTES.toNanos(DEFAULT_REGEN_KEEPALIVE_MINUTES);
 
   private final long regenKeepAliveNanos;
-  private final boolean warmEagerly;
+  private final long eagerKeepAliveNanos;
 
   public KeepAliveRegenerator() {
-    this(DEFAULT_REGEN_KEEPALIVE_NANOS, false);
+    this(DEFAULT_REGEN_KEEPALIVE_NANOS, 0);
     // default ctor in case someone specifies this class via standard `"regen"=[className]` syntax
   }
 
@@ -67,16 +69,15 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
 
   public KeepAliveRegenerator(SolrConfig solrConfig, CacheConfig cacheConfig) {
     super(autowarmOn(cacheConfig), getWrapFunction());
-    this.regenKeepAliveNanos = getRegenKeepAliveNanos(solrConfig, cacheConfig);
-
-    // default to false
-    this.warmEagerly = "true".equals(cacheConfig.toMap(null).get("warmEagerly"));
+    Map<String, Object> cacheConfigArgs = cacheConfig.toMap(Collections.emptyMap());
+    this.regenKeepAliveNanos = getRegenKeepAliveNanos("regenKeepAlive", solrConfig, cacheConfigArgs, null);
+    this.eagerKeepAliveNanos = getRegenKeepAliveNanos("eagerKeepAlive", solrConfig, cacheConfigArgs, "0");
   }
 
-  private KeepAliveRegenerator(long regenKeepAliveNanos, boolean warmEagerly) {
+  private KeepAliveRegenerator(long regenKeepAliveNanos, long eagerKeepAliveNanos) {
     super(true, getWrapFunction());
     this.regenKeepAliveNanos = regenKeepAliveNanos;
-    this.warmEagerly = warmEagerly;
+    this.eagerKeepAliveNanos = eagerKeepAliveNanos;
   }
 
   @SuppressWarnings({"unchecked", "UnnecessaryLambda"})
@@ -233,7 +234,8 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
 
     KeepAliveSegAwareValue metaEntry = (KeepAliveSegAwareValue) oldVal;
     final long extantTimestamp = metaEntry.accessTimestampNanos;
-    if (System.nanoTime() - extantTimestamp > regenKeepAliveNanos) {
+    long lastAccessAgo = System.nanoTime() - extantTimestamp;
+    if (lastAccessAgo > regenKeepAliveNanos) {
       // it has been long enough since this was last accessed that we don't want to carry it forward
       return true;
     }
@@ -244,7 +246,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     SolrCache<Query, KeepAliveSegAwareValue> c = (SolrCache<Query, KeepAliveSegAwareValue>) newCache;
 
     if (isCrossDoc(query)) {
-      if (warmEagerly) {
+      if (lastAccessAgo > eagerKeepAliveNanos) {
         c.computeIfAbsent(query, (q) -> {
           SegmentMap segMap = newSearcher.getSegmentMap();
           DocSet docSet = newSearcher.getDocSetNC(query, null);
