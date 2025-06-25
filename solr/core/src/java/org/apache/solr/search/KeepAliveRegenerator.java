@@ -173,6 +173,8 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
       try {
         if (ref.getKey() == segMap) {
           return ref.getValue().get();
+        } else if (mappingFunction == null) {
+          return null;
         }
         CompletableFuture<DocSet> f = new CompletableFuture<>();
         AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> newRef = new AbstractMap.SimpleImmutableEntry<>(segMap, f);

@@ -17,6 +17,7 @@
 package org.apache.solr.search;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -249,6 +250,14 @@ public interface SolrCache<K, V> extends SolrInfoBean {
      */
     E metaClone(V val);
     V get(SegmentMap segMap, K key, IOFunction<? super K, ? extends V> mappingFunction) throws IOException;
+
+    default V get(SegmentMap segMap, K key) {
+      try {
+        return get(segMap, key, null);
+      } catch (IOException ex) {
+        throw new UncheckedIOException(ex);
+      }
+    }
   }
 
   /**

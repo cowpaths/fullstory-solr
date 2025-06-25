@@ -69,21 +69,21 @@ public class MetaSolrCache<K, V, M extends MetaEntry<K, V, M>> implements SolrCa
   public V put(K key, V value) {
     SegmentMap segMap = backing.getSegmentMap();
     M metaEntry = mapping.apply(segMap, value);
-    metaEntry.get(segMap, key, null); // treat the put as a "get", for the purpose of book-keeping.
+    metaEntry.get(segMap, key); // treat the put as a "get", for the purpose of book-keeping.
     MetaEntry<K, V, ?> replaced = backing.put(key, metaEntry);
-    return replaced == null ? null : replaced.get(segMap, key, null);
+    return replaced == null ? null : replaced.get(segMap, key);
   }
 
   @Override
   public V get(K key) {
     MetaEntry<K, V, ?> ret = backing.get(key);
-    return ret == null ? null : ret.get(backing.getSegmentMap(), key, null);
+    return ret == null ? null : ret.get(backing.getSegmentMap(), key);
   }
 
   @Override
   public V remove(K key) {
     MetaEntry<K, V, ?> removed = backing.remove(key);
-    return removed == null ? null : removed.get(backing.getSegmentMap(), key, null);
+    return removed == null ? null : removed.get(backing.getSegmentMap(), key);
   }
 
   @Override
