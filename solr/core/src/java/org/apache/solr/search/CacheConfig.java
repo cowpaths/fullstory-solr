@@ -199,6 +199,19 @@ public class CacheConfig implements MapSerializable {
     return new HashMap<>(args);
   }
 
+  public CacheConfig withArgs(Map<String, String> newArgs) {
+    if (newArgs == null || newArgs.isEmpty()) {
+      return this;
+    }
+    if (this.args == null) {
+      this.args = newArgs;
+    } else {
+      this.args = new HashMap<>(this.args);
+      this.args.putAll(newArgs);
+    }
+    return this;
+  }
+
   public String getNodeName() {
     return nodeName;
   }
