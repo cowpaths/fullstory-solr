@@ -48,11 +48,13 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.ArrayUtil;
+import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.util.IOFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+@SuppressWarnings("ReferenceEquality")
 public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
@@ -79,7 +81,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
   private final RemovalListenerRegistry<RefCountingKey<K>, V> removalListeners =
       new RemovalListenerRegistry<>();
 
-  private final Map<RootCache<K, V>, RemovalListener<RefCountingKey<K>, V>> children =
+  private final IdentityHashMap<RootCache<K, V>, RemovalListener<RefCountingKey<K>, V>> children =
       new IdentityHashMap<>();
 
   private boolean isLeaf = true;
@@ -225,7 +227,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
       assert children.isEmpty();
     } else {
       int[] childrenEmpty = new int[1];
-      Set<K> mergedChildren = new HashSet<>(ordered.size());
+      Set<K> mergedChildren = CollectionUtil.newHashSet(ordered.size());
       for (RootCache<K, V> child : children.keySet()) {
         mergedChildren.addAll(child.validate(prefix.concat("  "), childrenEmpty, ps));
       }
@@ -1130,6 +1132,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     }
 
     @Override
+    @SuppressWarnings("EqualsUnsafeCast")
     public boolean equals(Object obj) {
       RefCountingKey<?> other = (RefCountingKey<?>) obj;
       return key.equals(other.key) && Objects.equals(keyScope, other.keyScope);
@@ -1259,7 +1262,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     boolean verifyRemovalCounts() {
       long one = stockRemovalEventCount.sum();
       long two = manualRemovalEventCount.sum();
-      System.err.println("verify! " + one + " ?= " + two);
+      log.info("verify! {} ?= {}", one, two);
       return one == two;
     }
 

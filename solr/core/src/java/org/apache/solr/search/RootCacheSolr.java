@@ -30,7 +30,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.RamUsageEstimator;
-import org.apache.solr.common.SolrException;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricsContext;
 import org.apache.solr.util.IOFunction;
@@ -149,7 +148,9 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
                     searcher, this, old, entry.getKey(), entry.getValue());
               });
       if (ex != null) {
-        SolrException.log(log, "Error during auto-warming of key:" + ex.getKey(), ex.getValue());
+        if (log.isErrorEnabled()) {
+          log.error("Error during auto-warming of key:{}", ex.getKey(), ex.getValue());
+        }
       }
     }
 

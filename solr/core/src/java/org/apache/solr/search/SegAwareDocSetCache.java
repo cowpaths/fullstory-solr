@@ -170,6 +170,7 @@ public class SegAwareDocSetCache extends SegAwareCache<Query, DocSet> {
     }
 
     @Override
+    @SuppressWarnings("ReferenceEquality")
     public Query rewrite(IndexReader reader) throws IOException {
       Query rewrittenBacking = backing.rewrite(reader);
       return rewrittenBacking == backing

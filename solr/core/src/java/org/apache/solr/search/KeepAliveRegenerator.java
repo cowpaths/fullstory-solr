@@ -219,6 +219,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     }
 
     @Override
+    @SuppressWarnings("ReferenceEquality")
     public DocSet get(
         SegmentMap segMap, Query key, IOFunction<? super Query, ? extends DocSet> mappingFunction)
         throws IOException {

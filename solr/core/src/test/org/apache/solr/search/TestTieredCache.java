@@ -61,7 +61,7 @@ public class TestTieredCache extends SolrTestCase {
     return perTier;
   }
 
-  private final class CacheStruct {
+  private static final class CacheStruct {
     final RootCache<Integer, String> cache;
     final RootCache<Integer, String> parent;
 
