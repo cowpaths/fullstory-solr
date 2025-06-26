@@ -33,7 +33,6 @@ import org.apache.solr.common.MapWriter;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricsContext;
 import org.apache.solr.search.SolrCache.MetaEntry;
-import org.apache.solr.search.SolrCache.SidecarMetricProducer;
 import org.apache.solr.util.IOFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,8 +64,7 @@ import org.slf4j.LoggerFactory;
  * @param <M> {@link MetaEntry} value type. This is the type of the underlying "internal" cache that
  *     is used for autowarming and lifecycle operations.
  */
-public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
-    implements CacheRegenerator, SidecarMetricProducer<K, M> {
+public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>> implements CacheRegenerator {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -142,7 +140,6 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
   private final BiFunction<SegmentMap, V, M> wrapFunction;
   private final String metaType;
   private final Function<SolrCache<K, M>, MapWriter> mapWriterFunction;
-  private SolrMetricsContext metricsContext;
 
   /**
    * This ctor should be used by subclasses that will make regen decisions based on metadata. Such
@@ -230,25 +227,11 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>>
     return ret;
   }
 
-  @Override
-  public void initializeMetrics(
-      SolrMetricsContext parentContext, String scope, SolrCache<K, M> cache) {
-    this.metricsContext = parentContext;
+  public void initializeMetrics(SolrMetricsContext context, String scope, SolrCache<K, M> cache) {
     if (metaType != null) {
       MetricsMap metricsMap = new MetricsMap(mapWriterFunction.apply(cache));
-      metricsContext.gauge(
-          metricsMap, true, scope.concat(metaType), cache.getCategory().toString());
+      context.gauge(metricsMap, true, scope.concat(metaType), cache.getCategory().toString());
     }
-  }
-
-  @Override
-  public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
-  public SolrMetricsContext getSolrMetricsContext() {
-    return metricsContext;
   }
 
   private static class HitsMetaEntry<K, V> implements MetaEntry<K, V, HitsMetaEntry<K, V>> {

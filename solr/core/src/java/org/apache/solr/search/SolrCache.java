@@ -23,8 +23,6 @@ import java.util.function.BiConsumer;
 import java.util.function.Function;
 import org.apache.lucene.util.Accountable;
 import org.apache.solr.core.SolrInfoBean;
-import org.apache.solr.metrics.SolrMetricProducer;
-import org.apache.solr.metrics.SolrMetricsContext;
 import org.apache.solr.util.IOFunction;
 
 /** Primary API for dealing with Solr's internal caches. */
@@ -260,20 +258,5 @@ public interface SolrCache<K, V> extends SolrInfoBean {
         throw new UncheckedIOException(ex);
       }
     }
-  }
-
-  /**
-   * A special extension of SolrMetricProducer that may be implemented by {@link CacheRegenerator}s
-   * to register extra metrics associated with their associated {@link SolrCache}.
-   */
-  interface SidecarMetricProducer<K, M extends MetaEntry<?, ?, M>> extends SolrMetricProducer {
-    /**
-     * Special metrics initialization method.
-     *
-     * @param parentContext the context of the associated cache.
-     * @param scope the scope of this metrics sidecar, as defined by the caller
-     * @param cache the associated cache
-     */
-    void initializeMetrics(SolrMetricsContext parentContext, String scope, SolrCache<K, M> cache);
   }
 }
