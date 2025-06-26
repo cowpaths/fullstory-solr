@@ -207,6 +207,7 @@ public class MetaSolrCache<K, V, M extends MetaEntry<K, V, M>> implements SolrCa
 
     @Override
     public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
+      // first grab metrics from the backing cache, to present as if our own
       final MetricsMap[] wrappedMap = new MetricsMap[1];
       final SolrMetricsContext tmp =
           new SolrMetricsContext(null, null, null) {
@@ -226,7 +227,7 @@ public class MetaSolrCache<K, V, M extends MetaEntry<K, V, M>> implements SolrCa
               };
             }
           };
-      backing.initializeMetrics(tmp, null);
+      backing.initializeMetrics(tmp, scope);
       solrMetricsContext = parentContext.getChildContext(this);
       final MetricsMap backingMetrics = wrappedMap[0];
       MetricsMap cacheMap =
@@ -236,6 +237,7 @@ public class MetaSolrCache<K, V, M extends MetaEntry<K, V, M>> implements SolrCa
                 regen.appendMetrics(map);
               });
       solrMetricsContext.gauge(cacheMap, true, scope, getCategory().toString());
+      regen.initializeMetrics(solrMetricsContext, scope, this);
     }
 
     @Override

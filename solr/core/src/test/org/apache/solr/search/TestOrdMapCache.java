@@ -170,6 +170,7 @@ public class TestOrdMapCache extends SolrTestCaseJ4 {
                     + "      class=\"solr.CaffeineCache\"\n"
                     + "      size=\"1\"\n"
                     + "      autowarmCount=\"100%\"\n"
+                    + "      regenerator=\"solr.OrdMapRegenerator\"\n"
                     + keepAlive
                     + "      initialSize=\"1\"/>\n"
                     + "</query></config>"));
@@ -242,6 +243,7 @@ public class TestOrdMapCache extends SolrTestCaseJ4 {
                     + "      class=\"solr.CaffeineCache\"\n"
                     + "      size=\"1\"\n"
                     + "      autowarmCount=\"100%\"\n"
+                    + "      regenerator=\"solr.OrdMapRegenerator\"\n"
                     + "      regenKeepAlive=\"500\"\n"
                     + "      initialSize=\"1\"/>\n"
                     + "</query></config>"));
@@ -346,6 +348,7 @@ public class TestOrdMapCache extends SolrTestCaseJ4 {
                     + "<ordMapCache\n"
                     + "      class=\"solr.CaffeineCache\"\n"
                     + "      size=\"1\"\n"
+                    + "      regenerator=\"solr.OrdMapRegenerator\"\n"
                     + "      initialSize=\"1\"/>\n"
                     + "</query></config>"));
 
