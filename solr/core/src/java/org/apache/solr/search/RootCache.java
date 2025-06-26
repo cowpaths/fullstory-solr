@@ -53,7 +53,7 @@ import org.apache.solr.util.IOFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
+public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
