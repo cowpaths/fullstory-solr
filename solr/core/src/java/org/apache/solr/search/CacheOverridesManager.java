@@ -93,8 +93,6 @@ public class CacheOverridesManager {
     } else {
       log.warn("Unexpected format for cacheOverrides in cluster properties: {}", cacheOverridesContents);
     }
-
-    log.info("!!!!!processCacheOverrides {} values {}", System.identityHashCode(this), overridesByCacheName);
   }
 
   public List<Map<String, String>> getOverrides(String cacheName, String collection) {
