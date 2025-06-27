@@ -341,7 +341,7 @@ public class SegAwareCache<K, V> extends SolrCacheBase implements SolrCache<K, V
 
   @Override
   public String getName() {
-    return backing.name();
+    return backing.getName();
   }
 
   @Override
