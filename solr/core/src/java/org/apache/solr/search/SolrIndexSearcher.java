@@ -431,6 +431,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     assert ObjectReleaseTracker.track(this);
   }
 
+  @SuppressWarnings("unchecked")
   private<K, V> SolrCache<K, V> buildCache(SolrConfig solrConfig, String cacheName, SolrCore core) {
     CacheConfig cacheConfig;
     switch (cacheName) {
