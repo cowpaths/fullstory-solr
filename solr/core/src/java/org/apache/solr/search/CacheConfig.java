@@ -86,7 +86,7 @@ public class CacheConfig implements MapSerializable {
     if (nodes == null || nodes.isEmpty()) {
       return new LinkedHashMap<>();
     }
-    Map<String, CacheConfig> result = CollectionUtil.newHashMap(nodes.size());
+    Map<String, CacheConfig> result = CollectionUtil.newLinkedHashMap(nodes.size());
     for (ConfigNode node : nodes) {
       if (node.boolAttr("enabled", true)) {
         CacheConfig config =

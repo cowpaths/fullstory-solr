@@ -30,6 +30,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.solr.core.SolrCore;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricsContext;
 import org.apache.solr.util.IOFunction;
@@ -41,12 +42,15 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
+  private static final String PARENT_PARAM_NAME = "parent";
+
   private static final long BASE_RAM_BYTES_USED =
       RamUsageEstimator.shallowSizeOfInstance(RootCacheSolr.class);
   private RootCache<K, V> rootCache = null;
 
   private String tierScope;
-  private RootCacheSolr<K, V> parent;
+  private String parentCacheName;
+  private RootCache<K, V> parent;
   private int maxSize;
   private long maxRamBytes;
   private int initialSize;
@@ -58,8 +62,9 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
   @Override
   @SuppressWarnings("rawtypes")
   public Object init(Map args, Object persistence, CacheRegenerator regenerator) {
-    tierScope = null; // TODO: e.g., coreName
-    parent = null; // parent cache; TODO: lookup by name
+    tierScope = null; // core name -- initialized in `initWithSearcher()`
+    parent = null; // parent cache -- initialized in `initWithSearcher()`
+    parentCacheName = (String) args.get(PARENT_PARAM_NAME);
     String str = (String) args.get(SIZE_PARAM);
     maxSize = (str == null) ? 1024 : Integer.parseInt(str);
     str = (String) args.get(INITIAL_SIZE_PARAM);
@@ -75,15 +80,11 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
     maxRamBytes = maxRamMB < 0 ? Long.MAX_VALUE : maxRamMB * 1024L * 1024L;
     description = generateDescription(maxSize, initialSize);
     initialRamBytes = RamUsageEstimator.sizeOfObject(description);
-    rootCache =
-        new RootCache<>(
-            maxSize,
-            maxRamBytes,
-            initialSize,
-            maxIdleTimeSec,
-            parent == null ? null : parent.rootCache,
-            tierScope,
-            this);
+    if (parentCacheName == null) {
+      // only init here if there's no parent cache specified.
+      // if there's a parent cache, we know we'll have to re-init later, so don't bother yet
+      initRootCache();
+    }
     return persistence;
   }
 
@@ -128,8 +129,78 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
     rootCache.clear();
   }
 
+  private void initRootCache() {
+    rootCache =
+        new RootCache<>(maxSize, maxRamBytes, initialSize, maxIdleTimeSec, parent, tierScope, this);
+  }
+
+  private SegmentMap segMap;
+
+  @Override
+  public SegmentMap getSegmentMap() {
+    return segMap;
+  }
+
+  @SuppressWarnings("unchecked")
+  private void initWithSearcher(SolrIndexSearcher s) {
+    if (s == null) {
+      return;
+    }
+    segMap = s.getSegmentMap();
+    SolrCore core = s.getCore();
+    tierScope = core.getName();
+    if (parentCacheName != null) {
+      // first try check whether the configured parent cache is available within the searcher. This
+      // is load-order dependent, so atm custom caches may have built-in caches (e.g.,
+      // `filterCache`) as parent, but not vice-versa, and custom caches may have earlier-declared
+      // custom caches as parent, but not vice-versa.
+      RootCacheSolr<K, V> parentSolrCache;
+      switch (parentCacheName) {
+        case "filterCache":
+          parentSolrCache = (RootCacheSolr<K, V>) s.getFilterCache();
+          break;
+        case "fieldValueCache":
+          parentSolrCache = (RootCacheSolr<K, V>) s.getFieldValueCache();
+          break;
+        case "ordMapCache":
+          parentSolrCache = (RootCacheSolr<K, V>) s.getOrdMapCache();
+          break;
+        default:
+          parentSolrCache = (RootCacheSolr<K, V>) s.getCache(parentCacheName);
+          break;
+        case "queryResultCache":
+        case "documentCache":
+          throw new IllegalArgumentException(
+              "SolrIndexSearcher does not (yet) provide access to " + parentCacheName);
+      }
+      if (parentSolrCache == null) {
+        // fallback to the (presumably more common) case where parent cache is scoped to the core
+        // container.
+        parentSolrCache = (RootCacheSolr<K, V>) core.getCoreContainer().getCache(parentCacheName);
+        if (parentSolrCache == null) {
+          throw new IllegalArgumentException("parent cache not found: " + parentSolrCache);
+        }
+      }
+      RootCache<K, V> parent = parentSolrCache.rootCache;
+      if (parent != this.parent) {
+        this.parent = parent;
+        // parent was changed (set), so we must re-init the root cache
+        initRootCache();
+      } else if (parent == null) {
+        // see above comment about parent dependencies being load-order dependent
+        throw new IllegalArgumentException("parent cache not yet initialized: " + parentSolrCache);
+      }
+    }
+  }
+
+  @Override
+  public void initialSearcher(SolrIndexSearcher initialSearcher) {
+    initWithSearcher(initialSearcher);
+  }
+
   @Override
   public void warm(SolrIndexSearcher searcher, SolrCache<K, V> old) {
+    initWithSearcher(searcher);
     if (regenerator == null) {
       return;
     }
