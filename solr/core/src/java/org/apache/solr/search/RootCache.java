@@ -45,6 +45,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.ToIntBiFunction;
 import java.util.stream.Collectors;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.ArrayUtil;
@@ -70,7 +71,61 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
   private final long initialRamBytes;
 
   private final String tierScope;
-  private AsyncCache<RefCountingKey<K>, ValRef<V>> asyncCache;
+  private ShimCache<RefCountingKey<K>, ValRef<V>> asyncCache;
+
+  private interface ShimCache<K, V> {
+    Map<K, CompletableFuture<V>> asMap();
+
+    Cache<K, ?> synchronous();
+
+    CompletableFuture<V> getIfPresent(K key);
+  }
+
+  private static final class AsyncShim<K, V> implements ShimCache<K, V> {
+    private final AsyncCache<K, V> backing;
+
+    private AsyncShim(AsyncCache<K, V> backing) {
+      this.backing = backing;
+    }
+
+    @Override
+    public Map<K, CompletableFuture<V>> asMap() {
+      return backing.asMap();
+    }
+
+    @Override
+    public Cache<K, ?> synchronous() {
+      return backing.synchronous();
+    }
+
+    @Override
+    public CompletableFuture<V> getIfPresent(K key) {
+      return backing.getIfPresent(key);
+    }
+  }
+
+  private static final class SyncShim<K, V> implements ShimCache<K, V> {
+    private final Cache<K, CompletableFuture<V>> backing;
+
+    private SyncShim(Cache<K, CompletableFuture<V>> backing) {
+      this.backing = backing;
+    }
+
+    @Override
+    public Map<K, CompletableFuture<V>> asMap() {
+      return backing.asMap();
+    }
+
+    @Override
+    public Cache<K, ?> synchronous() {
+      return backing;
+    }
+
+    @Override
+    public CompletableFuture<V> getIfPresent(K key) {
+      return backing.getIfPresent(key);
+    }
+  }
 
   private final RootCache<K, V> parent;
 
@@ -103,7 +158,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
 
   private final RemovalListener<K, V> externalListener;
 
-  private final RemovalListener<RefCountingKey<K>, ValRef<V>> rawEvictionListener;
+  private final RemovalListener<RefCountingKey<K>, Object> rawEvictionListener;
 
   public RootCache(int maxSize, RootCache<K, V> parent, String tierScope) {
     this(maxSize, parent, tierScope, null);
@@ -131,18 +186,20 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     if (parent == null) {
       rawEvictionListener =
           (key, value, cause) -> {
-            V val = value.val;
+            ValRef<V> valRef = (ValRef<V>) value;
+            V val = valRef.val;
             removalListeners.onRemoval(
                 key, val, cause, RemovalListenerRegistry.Source.SELF, key.tierScope);
-            onRemoval(key.key, value, val, cause);
+            onRemoval(key.key, valRef, val, cause);
           };
     } else {
       rawEvictionListener =
           (key, value, cause) -> {
-            V val = value.ref.get();
+            ValRef<V> valRef = (ValRef<V>) value;
+            V val = valRef.ref.get();
             removalListeners.onRemoval(
                 key, val, cause, RemovalListenerRegistry.Source.SELF, key.tierScope);
-            onRemoval(key.key, value, val, cause);
+            onRemoval(key.key, valRef, val, cause);
           };
     }
     this.maxSize = maxSize;
@@ -318,12 +375,14 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     if (this.maxSize == maxSize) {
       return -1;
     }
-    Cache<RefCountingKey<K>, ValRef<V>> sync = asyncCache.synchronous();
-    Optional<Policy.Eviction<RefCountingKey<K>, ValRef<V>>> evictionOpt = sync.policy().eviction();
+    @SuppressWarnings("unchecked")
+    Cache<RefCountingKey<K>, Object> sync =
+        (Cache<RefCountingKey<K>, Object>) asyncCache.synchronous();
+    Optional<Policy.Eviction<RefCountingKey<K>, Object>> evictionOpt = sync.policy().eviction();
     if (evictionOpt.isEmpty()) {
       return -1;
     } else {
-      Policy.Eviction<RefCountingKey<K>, ValRef<V>> eviction = evictionOpt.get();
+      Policy.Eviction<RefCountingKey<K>, Object> eviction = evictionOpt.get();
       eviction.setMaximum(maxSize);
       this.maxSize = maxSize;
       initialSize = Math.min(1024, this.maxSize);
@@ -335,11 +394,12 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
   public boolean setMaxRamMB(long newMaxRamBytes) {
     if (newMaxRamBytes != maxRamBytes) {
       maxRamBytes = newMaxRamBytes;
-      Cache<RefCountingKey<K>, ValRef<V>> sync = asyncCache.synchronous();
-      Optional<Policy.Eviction<RefCountingKey<K>, ValRef<V>>> evictionOpt =
-          sync.policy().eviction();
+      @SuppressWarnings("unchecked")
+      Cache<RefCountingKey<K>, Object> sync =
+          (Cache<RefCountingKey<K>, Object>) asyncCache.synchronous();
+      Optional<Policy.Eviction<RefCountingKey<K>, Object>> evictionOpt = sync.policy().eviction();
       if (evictionOpt.isPresent()) {
-        Policy.Eviction<RefCountingKey<K>, ValRef<V>> eviction = evictionOpt.get();
+        Policy.Eviction<RefCountingKey<K>, Object> eviction = evictionOpt.get();
         if (!eviction.isWeighted()) {
           // rebuild cache using weigher
           asyncCache = buildCache(asyncCache);
@@ -357,35 +417,51 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     return false;
   }
 
-  private AsyncCache<RefCountingKey<K>, ValRef<V>> buildCache(
-      AsyncCache<RefCountingKey<K>, ValRef<V>> prev) {
-    Caffeine<RefCountingKey<K>, ValRef<V>> builder =
-        Caffeine.newBuilder()
-            .initialCapacity(initialSize)
-            .executor(Runnable::run)
-            .evictionListener(rawEvictionListener)
-            .recordStats();
+  private <T> Caffeine<RefCountingKey<K>, T> builder(
+      ToIntBiFunction<RefCountingKey<K>, T> weigher) {
+    @SuppressWarnings("unchecked")
+    Caffeine<RefCountingKey<K>, T> builder =
+        (Caffeine<RefCountingKey<K>, T>)
+            Caffeine.newBuilder()
+                .initialCapacity(initialSize)
+                .executor(Runnable::run)
+                .evictionListener(rawEvictionListener)
+                .recordStats();
     if (maxIdleTimeSec > 0) {
       builder.expireAfterAccess(Duration.ofSeconds(maxIdleTimeSec));
     }
     if (maxRamBytes != Long.MAX_VALUE) {
       builder.maximumWeight(maxRamBytes);
-      builder.weigher(
-          (k, v) ->
-              (int) (v.recordedRamBytes != -1 ? v.recordedRamBytes : calcRamBytes(k.key, v.val)));
+      builder.weigher(weigher::applyAsInt);
     } else {
       builder.maximumSize(maxSize);
     }
     removalListenerParityChecker = newRemovalInstanceParityChecker(builder);
+    return builder;
+  }
+
+  private ShimCache<RefCountingKey<K>, ValRef<V>> buildCache(
+      ShimCache<RefCountingKey<K>, ValRef<V>> prev) {
     // TODO: we could probably make all non-root caches synchronous, but because it simplifies the
     //  code, and because we need someplace to record `mask` metadata anyway, we'll leave it
     //  all-async for now. Plan to circle back and evaluate performance implications.
-    AsyncCache<RefCountingKey<K>, ValRef<V>> ret = builder.buildAsync();
+    ShimCache<RefCountingKey<K>, ValRef<V>> ret;
+    if (parent == null) {
+      ret = new AsyncShim<>(builder(asyncWeigher).buildAsync());
+    } else {
+      ret = new SyncShim<>(builder(syncWeigher).build());
+    }
     if (prev != null) {
       ret.asMap().putAll(prev.asMap());
     }
     return ret;
   }
+
+  private final ToIntBiFunction<RefCountingKey<K>, ValRef<V>> asyncWeigher =
+      (k, v) -> (int) (v.recordedRamBytes != -1 ? v.recordedRamBytes : calcRamBytes(k.key, v.val));
+
+  private final ToIntBiFunction<RefCountingKey<K>, CompletableFuture<ValRef<V>>> syncWeigher =
+      (k, v) -> asyncWeigher.applyAsInt(k, v.getNow(null));
 
   public V get(K rawKey) {
     // `get()` is different from other operations in that it can proceed opportunistically, and
@@ -837,13 +913,22 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
 
   public Map.Entry<K, Exception> forEachTopEntry(
       int maxEntries, IOFunction<Map.Entry<K, V>, Boolean> regenerate) {
-    Map<RefCountingKey<K>, ValRef<V>> hottest =
-        asyncCache.synchronous().policy().eviction().map(p -> p.hottest(maxEntries)).orElse(null);
+    @SuppressWarnings("unchecked")
+    Map<RefCountingKey<K>, Object> hottest =
+        (Map<RefCountingKey<K>, Object>)
+            asyncCache
+                .synchronous()
+                .policy()
+                .eviction()
+                .map(p -> p.hottest(maxEntries))
+                .orElse(null);
     if (hottest != null) {
-      for (Map.Entry<RefCountingKey<K>, ValRef<V>> e : hottest.entrySet()) {
+      boolean root = parent == null;
+      for (Map.Entry<RefCountingKey<K>, Object> e : hottest.entrySet()) {
         K key = e.getKey().key;
         try {
-          if (!regenerate.apply(new AbstractMap.SimpleImmutableEntry<>(key, e.getValue().val))) {
+          if (!regenerate.apply(
+              new AbstractMap.SimpleImmutableEntry<>(key, unwrap(e.getValue(), root)))) {
             break;
           }
         } catch (Exception ex) {
@@ -852,6 +937,15 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
       }
     }
     return null;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static <V> V unwrap(Object o, boolean root) {
+    if (root) {
+      return ((ValRef<V>) o).val;
+    } else {
+      return ((CompletableFuture<ValRef<V>>) o).getNow(null).val;
+    }
   }
 
   private static class ValRef<V> {
@@ -1231,7 +1325,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
   }
 
   private static <K, V> RemovalListenerParityChecker<K, ValRef<V>> newRemovalInstanceParityChecker(
-      Caffeine<K, ValRef<V>> builder) {
+      Caffeine<?, ?> builder) {
     boolean[] assertionsEnabled = new boolean[1];
     assert assertionsEnabled[0] = true;
     return assertionsEnabled[0] ? new RemovalListenerParityChecker<>(builder) : null;
@@ -1245,7 +1339,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     private final LongAdder stockRemovalEventCount = new LongAdder();
     private final LongAdder manualRemovalEventCount = new LongAdder();
 
-    RemovalListenerParityChecker(Caffeine<K, V> builder) {
+    RemovalListenerParityChecker(Caffeine<?, ?> builder) {
       builder.removalListener(
           (k, v, c) -> {
             stockRemovalEventCount.increment();
