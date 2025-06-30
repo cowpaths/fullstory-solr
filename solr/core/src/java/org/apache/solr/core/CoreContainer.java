@@ -1043,7 +1043,7 @@ public class CoreContainer {
       metricManager.loadClusterReporters(metricReporters, this);
     }
 
-    cacheOverridesManager = new CacheOverridesManager(zkClientSupplier.get(), this);
+    cacheOverridesManager = new CacheOverridesManager(zkClientSupplier.get());
 
     // setup executor to load cores in parallel
     ExecutorService coreLoadExecutor =
