@@ -424,7 +424,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   }
 
   @SuppressWarnings("unchecked")
-  private<K, V> SolrCache<K, V> buildCache(SolrConfig solrConfig, String cacheName, SolrCore core) {
+  private <K, V> SolrCache<K, V> buildCache(
+      SolrConfig solrConfig, String cacheName, SolrCore core) {
     CacheConfig cacheConfig;
     switch (cacheName) {
       case "fieldValueCache":
@@ -436,7 +437,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       case "queryResultCache":
         cacheConfig = solrConfig.queryResultCacheConfig;
         break;
-      default: //generic caches
+      default: // generic caches
         cacheConfig = solrConfig.userCacheConfigs.get(cacheName);
     }
 
@@ -444,13 +445,11 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       return null;
     }
 
-    //check overrides
-    List<Map<String, String>> overridesEntries = core.getCoreContainer().getCacheOverridesManager().getOverrides(cacheName, core.getCoreDescriptor().getCollectionName());
-    if (overridesEntries != null) {
-      for (Map<String, String> overrides : overridesEntries) {
-        cacheConfig = cacheConfig.withArgs(overrides);
-      }
-    }
+    // check overrides
+    cacheConfig =
+        core.getCoreContainer()
+            .getCacheOverridesManager()
+            .applyOverrides(cacheConfig, cacheName, core.getCoreDescriptor().getCollectionName());
 
     return (SolrCache<K, V>) cacheConfig.newInstance(core);
   }
