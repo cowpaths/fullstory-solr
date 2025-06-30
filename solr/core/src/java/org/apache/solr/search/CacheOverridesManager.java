@@ -3,18 +3,13 @@ package org.apache.solr.search;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.cloud.ZkStateReader;
 import org.apache.solr.common.util.Utils;
-import org.apache.solr.core.CoreContainer;
-import org.apache.solr.core.SolrCore;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.invoke.MethodHandles;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -26,11 +21,10 @@ import java.util.stream.Collectors;
 public class CacheOverridesManager {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private final ConcurrentMap<String, List<CacheOverrides>> overridesByCacheName = new ConcurrentHashMap<>();
-  private final CoreContainer coreContainer;
 
-  public CacheOverridesManager(SolrZkClient zkClient, CoreContainer coreContainer) {
+
+  public CacheOverridesManager(SolrZkClient zkClient) {
     byte[] clusterPropsBytes = null;
-    this.coreContainer = coreContainer;
 
     final Watcher watcher = new Watcher() {
       @Override
@@ -68,7 +62,6 @@ public class CacheOverridesManager {
   }
 
   private void processCacheOverrides(Object cacheOverridesContents) {
-    Set<String> affectedCacheNames = new HashSet<>(overridesByCacheName.keySet());
     if (cacheOverridesContents instanceof List) {
       @SuppressWarnings("unchecked")
       List<Map<String, Object>> entries = (List<Map<String, Object>>) cacheOverridesContents;
@@ -87,7 +80,6 @@ public class CacheOverridesManager {
           }
           CacheOverrides cacheOverrides = new CacheOverrides(overrides, collectionsFilter == null ? null : Set.copyOf(collectionsFilter));
           newOverridesByCacheName.computeIfAbsent(cacheName, k -> new java.util.ArrayList<>()).add(cacheOverrides);
-          affectedCacheNames.add(cacheName);
         }
       }
       synchronized(overridesByCacheName) {
@@ -100,41 +92,7 @@ public class CacheOverridesManager {
       log.info("Cleared cache overrides");
     } else {
       log.warn("Unexpected format for cacheOverrides in cluster properties: {}", cacheOverridesContents);
-      return;
     }
-
-    Class<?> sharedCacheClass = findAbstractSharedCacheClass();
-
-    if (sharedCacheClass != null) { //then there's some shared cache loaded
-      try {
-        Method evictMethod = sharedCacheClass.getDeclaredMethod("evictSharedStore", String.class);
-        for (String affectedCacheName : affectedCacheNames) {
-          try {
-            evictMethod.setAccessible(true);
-            evictMethod.invoke(null, affectedCacheName);
-          } catch (IllegalAccessException e) {
-            log.error("Error while trying to evict shared cache store for cache: " + affectedCacheName, e);
-          } catch (InvocationTargetException e) {
-            log.error("Error while trying to evict shared cache store for cache: " + affectedCacheName, e);
-          }
-        }
-      } catch (NoSuchMethodException e) {
-        log.error("Error while trying to evict shared cache store", e);
-      }
-    }
-  }
-
-  private Class<?> findAbstractSharedCacheClass() {
-    for (String loadedCoreName : coreContainer.getLoadedCoreNames()) {
-      SolrCore core = coreContainer.getCore(loadedCoreName);
-      if (core != null) {
-        try {
-          return core.getSolrConfig().getResourceLoader().findClass("mn.fs.solr.sharedcache.AbstractSharedCache", SolrCache.class);
-        } catch (Exception e) {
-        }
-      }
-    }
-    return null;
   }
 
   public List<Map<String, String>> getOverrides(String cacheName, String collection) {
