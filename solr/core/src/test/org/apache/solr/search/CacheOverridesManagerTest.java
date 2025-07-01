@@ -34,7 +34,8 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
   }
 
   @Before
-  public void setUp() {
+  public void setUp() throws Exception {
+    super.setUp();
     mockZkClient = Mockito.mock(SolrZkClient.class);
   }
 
