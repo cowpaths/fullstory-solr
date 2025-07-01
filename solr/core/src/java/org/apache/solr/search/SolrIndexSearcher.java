@@ -454,10 +454,13 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     }
 
     // check overrides
-    cacheConfig =
-        core.getCoreContainer()
-            .getCacheOverridesManager()
-            .applyOverrides(cacheConfig, cacheName, core.getCoreDescriptor().getCollectionName());
+    CacheOverridesManager cacheOverridesManager =
+        core.getCoreContainer().getCacheOverridesManager();
+    if (cacheOverridesManager != null) {
+      cacheConfig =
+          cacheOverridesManager.applyOverrides(
+              cacheConfig, cacheName, core.getCoreDescriptor().getCollectionName());
+    }
 
     return (SolrCache<K, V>) cacheConfig.newInstance(core);
   }
