@@ -43,7 +43,11 @@ import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 import org.apache.lucene.util.Accountable;
@@ -511,6 +515,18 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     return ret[0];
   }
 
+  /** An interruptible alternative to {@link CompletableFuture#join()}. */
+  private static <V> V get(CompletableFuture<V> f) {
+    try {
+      return f.get();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new CompletionException(e);
+    } catch (ExecutionException e) {
+      throw new CompletionException(e);
+    }
+  }
+
   @SuppressWarnings("unchecked")
   private V internalNestedPut(
       K key,
@@ -534,7 +550,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                   assert k != refCountingKey;
                   assert parentKey == k.parentKey;
                   ret[0] =
-                      v.join()
+                      get(v)
                           .ref
                           .get(); // don't care if this may be null, just return opportunistically
                   k.updateKnownRefCount(knownRefCount, 0);
@@ -567,7 +583,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                 } else {
                   assert k != refCountingKey;
                   assert parentKey == k.parentKey;
-                  ret[0] = v.join().ref.get(); // the extant value
+                  ret[0] = get(v).ref.get(); // the extant value
                   // first address any existing references
                   final long extantMask = ((MyCompletableFuture<V>) v).refs;
                   List<RootCache<K, V>> inScopeChildren =
@@ -624,7 +640,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                 assert k != refCountingKey;
                 assert parentKey == k.parentKey;
                 ret[0] =
-                    v.join()
+                    get(v)
                         .ref
                         .get(); // don't care if this may be null, just return opportunistically
                 k.updateKnownRefCount(knownRefCount, 0);
@@ -639,7 +655,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
               (k, v) -> {
                 assert k != refCountingKey;
                 assert parentKey == k.parentKey;
-                ret[0] = v.join().ref.get(); // the extant value
+                ret[0] = get(v).ref.get(); // the extant value
                 // address any existing references
                 final long extantMask = ((MyCompletableFuture<V>) v).refs;
                 List<RootCache<K, V>> inScopeChildren =
@@ -755,7 +771,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                 } else {
                   assert k != refCountingKey;
                   assert parentKey == k.parentKey : parentKey + " != " + k.parentKey;
-                  V extant = v.join().ref.get();
+                  V extant = get(v).ref.get();
                   if (extant == null) {
                     // this should actually be possible at the leaf.
                     // TODO: figure out how to handle the existing entry
@@ -801,7 +817,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                           k.updateKnownRefCount(knownRefCount, childMask),
                           pathToLeaf); // call but ignore return val
                   V extant;
-                  assert value == (extant = v.join().ref.get()) : value + " != " + extant;
+                  assert value == (extant = get(v).ref.get()) : value + " != " + extant;
                   ret[0] = value;
 
                   // if we had it, and our children already did too, values should be identical
@@ -923,7 +939,37 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
         throw t;
       }
     } else {
-      ret = f.join().val;
+      QueryLimits queryLimits = QueryLimits.getCurrentLimits();
+      TimeAllowedLimit timeLimit;
+      if (queryLimits != null
+          && (timeLimit =
+                  (TimeAllowedLimit)
+                      queryLimits.currentLimitValueFor(TimeAllowedLimit.class).orElse(null))
+              != null) {
+        try {
+          ret = f.get(timeLimit.nanosRemaining(), TimeUnit.NANOSECONDS).val;
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          throw new CompletionException(e);
+        } catch (TimeoutException e) {
+          throw new CompletionException(e);
+        } catch (ExecutionException e) {
+          Throwable cause = e.getCause();
+          if (cause instanceof IOException) {
+            // Computation had an IOException, likely index problems, so fail this result too
+            throw (IOException) cause;
+          }
+          if (cause instanceof CancellableCollector.QueryCancelledException) {
+            // The reserved slot that we were waiting for got cancelled, so we will compute directly
+            // If we go back to waiting for a new cache result then that can lead to thread
+            // starvation. Should we record a cache miss here?
+            return mappingFunction.apply(key);
+          }
+          throw new CompletionException(e);
+        }
+      } else {
+        ret = get(f).val;
+      }
     }
     if (child != null) {
       asyncCache
@@ -957,7 +1003,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                   if (weCompute[0]) {
                     // only `recordRamBytes()` once, and only when we're certain that the concrete
                     // value has been added to the map.
-                    ValRef<V> valRef = v.join(); // `join()` here is safe, should return immediately
+                    ValRef<V> valRef = get(v); // `join()` here is safe, should return immediately
                     assert valRef.recordedRamBytes == -1 : "should only be set once";
                     assert ret == valRef.val;
                     valRef.recordedRamBytes = recordRamBytes(key, ret);
