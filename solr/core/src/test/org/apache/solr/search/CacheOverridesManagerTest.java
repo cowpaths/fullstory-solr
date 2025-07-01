@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
+import java.nio.charset.Charset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +31,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
   }
 
   @Before
+  @Override
   public void setUp() throws Exception {
     super.setUp();
     mockZkClient = Mockito.mock(SolrZkClient.class);
@@ -64,7 +66,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
 
     // Stub a method to return a specific value
     when(mockZkClient.getData(eq(ZkStateReader.CLUSTER_PROPS), any(), any(), anyBoolean()))
-        .thenReturn(jsonString.getBytes());
+        .thenReturn(jsonString.getBytes(Charset.defaultCharset()));
 
     CacheOverridesManager cacheOverridesManager = new CacheOverridesManager(mockZkClient);
 
@@ -140,7 +142,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
             + "}";
 
     when(mockZkClient.getData(eq(ZkStateReader.CLUSTER_PROPS), any(), any(), anyBoolean()))
-        .thenReturn(jsonString.getBytes());
+        .thenReturn(jsonString.getBytes(Charset.defaultCharset()));
     watcherRef
         .get()
         .process(
@@ -176,7 +178,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
             + "}";
 
     when(mockZkClient.getData(eq(ZkStateReader.CLUSTER_PROPS), any(), any(), anyBoolean()))
-        .thenReturn(jsonString.getBytes());
+        .thenReturn(jsonString.getBytes(Charset.defaultCharset()));
     watcherRef
         .get()
         .process(
@@ -199,7 +201,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
     // emulate overrides removed from clusterprops.json
     jsonString = "{ legacyCloud : \"false\" }";
     when(mockZkClient.getData(eq(ZkStateReader.CLUSTER_PROPS), any(), any(), anyBoolean()))
-        .thenReturn(jsonString.getBytes());
+        .thenReturn(jsonString.getBytes(Charset.defaultCharset()));
     watcherRef
         .get()
         .process(
@@ -263,7 +265,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
             + " \n"
             + "}";
     when(mockZkClient.getData(eq(ZkStateReader.CLUSTER_PROPS), any(), any(), anyBoolean()))
-        .thenReturn(jsonString.getBytes());
+        .thenReturn(jsonString.getBytes(Charset.defaultCharset()));
 
     cacheOverridesManager = new CacheOverridesManager(mockZkClient);
 
