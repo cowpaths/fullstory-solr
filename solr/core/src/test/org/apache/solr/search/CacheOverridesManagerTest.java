@@ -12,17 +12,26 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.cloud.ZkStateReader;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockito.Mockito;
 
-public class CacheOverridesManagerTest {
+public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
   private SolrZkClient mockZkClient;
+
+
+  @BeforeClass
+  public static void beforeClass() throws Exception {
+    assumeWorkingMockito();
+  }
 
   @Before
   public void setUp() {
