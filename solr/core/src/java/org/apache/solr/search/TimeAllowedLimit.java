@@ -73,4 +73,8 @@ public class TimeAllowedLimit implements QueryLimit {
   public Object currentValue() {
     return nanoTime() - timingSince;
   }
+
+  public long nanosRemaining() {
+    return timeoutAt - nanoTime();
+  }
 }

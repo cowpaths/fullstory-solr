@@ -972,6 +972,21 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     return getDocSetNC(query, null);
   }
 
+  private static class OtherTimeExceededException extends RuntimeException {
+    public OtherTimeExceededException() {
+      super();
+    }
+
+    public OtherTimeExceededException(RuntimeException cause) {
+      super(cause);
+    }
+
+    @Override
+    public synchronized RuntimeException getCause() {
+      return (RuntimeException) super.getCause();
+    }
+  }
+
   /**
    * Attempt to read the query from the filter cache, if not will compute the result and insert back
    * into the cache
@@ -998,6 +1013,47 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     DocSet answer;
     QueryLimits queryLimits = QueryLimits.getCurrentLimits();
     if (queryLimits.isLimitsEnabled()) {
+      DocSet[] computed = new DocSet[1];
+      RuntimeException[] ourException = new RuntimeException[1];
+      try {
+        answer =
+            filterCache.computeIfAbsent(
+                query,
+                q -> {
+                  try {
+                    computed[0] = getDocSetNC(q, null);
+                  } catch (TimeLimitingCollector.TimeExceededException
+                      | ExitableDirectoryReader.ExitingReaderException ex) {
+                    ourException[0] = ex;
+                    // wrap in OtherTimeExceededException, for potential consumers in other threads
+                    throw new OtherTimeExceededException(ex);
+                  }
+                  if (queryLimits.shouldExit()) {
+                    // assume we have partial results, so throw for potential consumers in other
+                    // threads
+                    throw new OtherTimeExceededException();
+                  } else {
+                    // this is the normal case.
+                    return computed[0];
+                  }
+                });
+      } catch (OtherTimeExceededException ex) {
+        if (ourException[0] != null) {
+          throw ourException[0];
+        } else if (computed[0] != null) {
+          // we computed the answer successfully (possibly w/ partial results), and threw
+          // OtherTimeExceededException simply for the benefit of other consumers. Return
+          // our computed value.
+          assert ex.getCause() == null;
+          answer = computed[0];
+        } else {
+          // fallback to computing ourselves. NOTE: we may _also_ be in violation of
+          // limits at this point, but just let it throw organically.
+          answer = getDocSetNC(query, null);
+        }
+      }
+    } else if (false) {
+      answer = null;
       // If there is a possibility of timeout for this query, then don't reserve a computation slot.
       // Further, we can't naively wait for an in progress computation to finish, because if we time
       // out before it does then we won't even have partial results to provide. We could possibly
@@ -1011,7 +1067,13 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         filterCache.put(query, answer);
       }
     } else {
-      answer = filterCache.computeIfAbsent(query, q -> getDocSetNC(q, null));
+      try {
+        answer = filterCache.computeIfAbsent(query, q -> getDocSetNC(q, null));
+      } catch (OtherTimeExceededException ex) {
+        // we don't have limits, so this must have come from another thread/request.
+        // fallback to computing ourselves. This case should be rare.
+        answer = getDocSetNC(query, null);
+      }
     }
 
     assert !(answer instanceof MutableBitDocSet) : "should not be mutable";
