@@ -200,9 +200,9 @@ public class CacheConfig implements MapSerializable {
   }
 
   /**
-   * Returns a CacheConfig with the given arguments merged into the existing ones.
-   * <br>
+   * Returns a CacheConfig with the given arguments merged into the existing ones. <br>
    * The existing config should not be modified
+   *
    * @param newArgs new arguments to merge into the existing config, overrides existing values
    */
   public CacheConfig withArgs(Map<String, String> newArgs) {
