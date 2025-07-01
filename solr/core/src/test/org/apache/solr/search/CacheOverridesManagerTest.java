@@ -1,8 +1,6 @@
 package org.apache.solr.search;
 
 import static org.apache.solr.common.params.CommonParams.NAME;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
@@ -12,7 +10,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
-
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.cloud.ZkStateReader;
@@ -26,7 +23,6 @@ import org.mockito.Mockito;
 
 public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
   private SolrZkClient mockZkClient;
-
 
   @BeforeClass
   public static void beforeClass() throws Exception {
