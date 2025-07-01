@@ -148,7 +148,7 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
     }
     segMap = s.getSegmentMap();
     SolrCore core = s.getCore();
-    tierScope = core.getName();
+    tierScope = segMap != null ? segMap.id : core.getName() + "@" + s.getIndexReader().getVersion();
     if (parentCacheName != null) {
       // first try check whether the configured parent cache is available within the searcher. This
       // is load-order dependent, so atm custom caches may have built-in caches (e.g.,

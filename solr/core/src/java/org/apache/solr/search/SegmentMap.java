@@ -20,12 +20,21 @@ import java.util.AbstractMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 
 public class SegmentMap {
+
+  private static final AtomicLong IDS = new AtomicLong();
+
+  private static String mintId() {
+    long raw = IDS.getAndIncrement();
+    String inOrder = Long.toUnsignedString(raw, Character.MAX_RADIX);
+    return new StringBuilder(inOrder).reverse().toString();
+  }
 
   public static SegmentMap generateSegmentMap(SolrIndexSearcher searcher) {
     final List<LeafReaderContext> leafContexts = searcher.getLeafContexts();
@@ -50,6 +59,11 @@ public class SegmentMap {
         r.getReaderCacheHelper().getKey(), Map.ofEntries(segs), r.numDocs(), r.maxDoc());
   }
 
+  /**
+   * Uniquely identifies this {@link SegmentMap} within the context of the associated classloader.
+   */
+  public final String id;
+
   public final IndexReader.CacheKey key;
   public final Map<IndexReader.CacheKey, Segment> segments;
   public final int numDocs;
@@ -61,6 +75,7 @@ public class SegmentMap {
       Map<IndexReader.CacheKey, Segment> segments,
       int numDocs,
       int maxDoc) {
+    this.id = mintId();
     this.key = key;
     this.segments = segments;
     this.numDocs = numDocs;
