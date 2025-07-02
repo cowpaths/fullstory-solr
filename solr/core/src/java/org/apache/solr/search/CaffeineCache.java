@@ -340,6 +340,10 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     ramBytes.reset();
   }
 
+  public void cleanup() {
+    cache.cleanUp();
+  }
+
   @Override
   public int size() {
     return cache.asMap().size();

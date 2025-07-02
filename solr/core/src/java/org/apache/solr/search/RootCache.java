@@ -200,6 +200,10 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     initialRamBytes = RamUsageEstimator.shallowSizeOfInstance(asyncCache.getClass());
   }
 
+  public RootCache<K, V> getParent() {
+    return parent;
+  }
+
   Set<Map.Entry<K, String>> keySet() {
     return asyncCache.asMap().keySet().stream()
         .map((k) -> new AbstractMap.SimpleImmutableEntry<>(k.key, k.keyScope))
@@ -868,6 +872,11 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
       }
     }
     return null;
+  }
+
+  public void cleanup() {
+    pollDeferredRemovals();
+    asyncCache.synchronous().cleanUp();
   }
 
   private static class ValRef<V> {
