@@ -1264,10 +1264,14 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
   }
 
   public void clear() {
-    // NOTE: here we follow the pattern in `solr.CaffeineCache`, but perhaps we could instead, e.g.,
-    // do: `asyncCache.asMap().clear()`?
-    asyncCache.synchronous().invalidateAll();
-    ramBytes.reset();
+    // NOTE: we cannot follow what `solr.CaffeineCache` does:
+    // asyncCache.synchronous().invalidateAll();
+    // because that would trigger _removalListener_ but not _evictionListener_,
+    // and for this explicit removal we want a special-case that still notifies
+    // registered listeners.
+    for (RefCountingKey<K> k : asyncCache.synchronous().asMap().keySet()) {
+      root.rootRemove(k);
+    }
   }
 
   private void onRemoval(K key, ValRef<V> valRef, V val, RemovalCause cause) {
