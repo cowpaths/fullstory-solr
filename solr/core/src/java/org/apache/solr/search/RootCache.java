@@ -863,7 +863,12 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
       for (Map.Entry<RefCountingKey<K>, ValRef<V>> e : hottest.entrySet()) {
         K key = e.getKey().key;
         try {
-          if (!regenerate.apply(new AbstractMap.SimpleImmutableEntry<>(key, e.getValue().val))) {
+          ValRef<V> val = e.getValue();
+          V v = val.val;
+          if (v == null) {
+            v = val.ref.get();
+          }
+          if (!regenerate.apply(new AbstractMap.SimpleImmutableEntry<>(key, v))) {
             break;
           }
         } catch (Exception ex) {
