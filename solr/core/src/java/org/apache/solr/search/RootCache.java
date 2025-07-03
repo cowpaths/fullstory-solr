@@ -113,6 +113,10 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     this(maxSize, parent, tierScope, null);
   }
 
+  public RootCache(RootCache<K, V> parent, String tierScope, long maxRamBytes) {
+    this(Integer.MAX_VALUE, maxRamBytes, 0, 0, parent, tierScope, null);
+  }
+
   public RootCache(
       int maxSize,
       RootCache<K, V> parent,
