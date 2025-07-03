@@ -1247,7 +1247,8 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
   private static final long DELAY_MILLIS = 0;
   public static final long DELAY_NANOS = TimeUnit.MILLISECONDS.toNanos(DELAY_MILLIS);
 
-  private final Queue<DeferredRemoval<K>> deferRemovalQueue = DELAY_MILLIS > 0 ? new DelayQueue<>() : new ConcurrentLinkedQueue<>();
+  private final Queue<DeferredRemoval<K>> deferRemovalQueue =
+      DELAY_MILLIS > 0 ? new DelayQueue<>() : new ConcurrentLinkedQueue<>();
 
   int deferredRemaining() {
     return deferRemovalQueue.size();
