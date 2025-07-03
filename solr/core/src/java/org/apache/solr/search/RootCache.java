@@ -45,6 +45,8 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.DelayQueue;
+import java.util.concurrent.Delayed;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -1205,13 +1207,14 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     }
   }
 
-  private static final class DeferredRemoval<K> {
+  private static final class DeferredRemoval<K> implements Delayed {
     private final String keyScope;
     private final K key;
     private final RemovalCause cause;
     private final long mask;
     private final long knownRefCount;
     private final RefCountingKey<K> parentKey;
+    private final long expireAt;
 
     private DeferredRemoval(
         K key,
@@ -1226,10 +1229,25 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
       this.knownRefCount = knownRefCount;
       this.parentKey = parentKey;
       this.keyScope = keyScope;
+      this.expireAt = DELAY_NANOS == 0 ? 0 : (System.nanoTime() + DELAY_NANOS);
+    }
+
+    @Override
+    public long getDelay(TimeUnit unit) {
+      assert unit == TimeUnit.NANOSECONDS;
+      return expireAt - System.nanoTime();
+    }
+
+    @Override
+    public int compareTo(Delayed o) {
+      return Math.toIntExact(expireAt - ((DeferredRemoval<?>) o).expireAt);
     }
   }
 
-  private final Queue<DeferredRemoval<K>> deferRemovalQueue = new ConcurrentLinkedQueue<>();
+  private static final long DELAY_MILLIS = 0;
+  public static final long DELAY_NANOS = TimeUnit.MILLISECONDS.toNanos(DELAY_MILLIS);
+
+  private final Queue<DeferredRemoval<K>> deferRemovalQueue = DELAY_MILLIS > 0 ? new DelayQueue<>() : new ConcurrentLinkedQueue<>();
 
   int deferredRemaining() {
     return deferRemovalQueue.size();
