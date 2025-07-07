@@ -210,6 +210,10 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
     return parent;
   }
 
+  public String getTierScope() {
+    return tierScope;
+  }
+
   Set<Map.Entry<K, String>> keySet() {
     return asyncCache.asMap().keySet().stream()
         .map((k) -> new AbstractMap.SimpleImmutableEntry<>(k.key, k.keyScope))
