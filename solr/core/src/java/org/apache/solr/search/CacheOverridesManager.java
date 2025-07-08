@@ -19,14 +19,25 @@ import org.slf4j.LoggerFactory;
 
 /**
  * A manager that gets and subscribes to ZK clusterprops.json on field "cacheOverrides" <br>
+ * <br>
  * The value of the field defines a list of cache overrides, each override is a map with cache name
- * as key and a map of properties as value. An extra "collections" key can be used to filter apply
- * the overrides only to specific collections. <br>
+ * as key and a map of properties as value. An extra "collections" key can be used to apply the
+ * overrides only to specific collections. <br>
+ * <br>
  * The override will only be effective if the cache is re-instantiated. Therefore, some backing
- * shared cache that only instantiate on startup might only see the overrides after process restart,
- * while more transient cache such as local core cache will see the new values on searching
+ * shared caches that only instantiate on startup might only see the overrides after process
+ * restart, while some transient caches such as local core cache will see the new values on searcher
  * reopening without restart. <br>
- * Example of the override config in clusterprops.json:
+ * <br>
+ * Take note that overrides do NOT work on below properties: <br>
+ *
+ * <ol>
+ *   <li>class
+ *   <li>regenerator
+ * </ol>
+ *
+ * <br>
+ * Example of the override config in clusterprops.json: <br>
  *
  * <pre>
  *   {
@@ -55,12 +66,12 @@ import org.slf4j.LoggerFactory;
  * </pre>
  *
  * Entries will be applied as overrides according to the order declared in the array. Hence, later
- * entry overrides earlier for value overlaps
+ * entry overrides earlier for overlaps
  */
 @SuppressWarnings("unchecked")
 public class CacheOverridesManager {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-  private final ConcurrentMap<String, List<CacheOverrides>> overridesByCacheName =
+  private volatile ConcurrentMap<String, List<CacheOverrides>> overridesByCacheName =
       new ConcurrentHashMap<>();
 
   public CacheOverridesManager(SolrZkClient zkClient) {
@@ -118,7 +129,8 @@ public class CacheOverridesManager {
     if (cacheOverridesContents instanceof List) {
       @SuppressWarnings("unchecked")
       List<Map<String, Object>> entries = (List<Map<String, Object>>) cacheOverridesContents;
-      Map<String, List<CacheOverrides>> newOverridesByCacheName = new HashMap<>();
+      ConcurrentMap<String, List<CacheOverrides>> newOverridesByCacheName =
+          new ConcurrentHashMap<>();
       for (Map<String, Object> overridesMap : entries) {
         List<String> collectionsFilter = (List<String>) overridesMap.get("collections");
 
@@ -140,11 +152,10 @@ public class CacheOverridesManager {
               .add(cacheOverrides);
         }
       }
-      synchronized (overridesByCacheName) {
-        overridesByCacheName.clear();
-        overridesByCacheName.putAll(newOverridesByCacheName);
-        log.info("Cache overrides updated to {}", overridesByCacheName);
-      }
+
+      overridesByCacheName = newOverridesByCacheName;
+      log.info("Cache overrides updated to {}", overridesByCacheName);
+
     } else if (cacheOverridesContents == null) { // overrides removal
       overridesByCacheName.clear();
       log.info("Cleared cache overrides");
