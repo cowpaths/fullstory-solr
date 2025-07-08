@@ -17,7 +17,6 @@ import org.apache.solr.common.cloud.ZkStateReader;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
-import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -29,14 +28,6 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
   @BeforeClass
   public static void beforeClass() throws Exception {
     assumeWorkingMockito();
-    initCore(
-        "solrconfig-tlog.xml",
-        "schema15.xml"); // to make Solr core available to get SolrResourceLoader
-  }
-
-  @AfterClass
-  public static void afterClass() {
-    deleteCore();
   }
 
   @Before
@@ -234,7 +225,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
   }
 
   @Test
-  public void testApplyZkOverrides() throws Exception {
+  public void testApplyZkOverrides() throws InterruptedException, KeeperException {
     // test when there's no clusterprops.json in ZK
     when(mockZkClient.getData(eq(ZkStateReader.CLUSTER_PROPS), any(), any(), anyBoolean()))
         .thenThrow(new KeeperException.NoNodeException());
@@ -243,14 +234,11 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
 
     Map<String, String> args = Map.of(NAME, "filterCache", "size", "10000", "initialSize", "10");
 
-    CacheConfig config =
-        new CacheConfig(solrConfig.getResourceLoader(), CaffeineCache.class.getName(), args, null);
+    CacheConfig config = new CacheConfig(CaffeineCache.class, args, null);
     CacheConfig afterConfig =
         cacheOverridesManager.applyOverrides(config, "filterCache", "dummyCollection");
 
     assertEquals(config, afterConfig);
-    assertEquals(CaffeineCache.class, config.getCacheImplClass());
-    assertEquals(CaffeineCache.class, afterConfig.getCacheImplClass());
 
     String jsonString =
         "{\n"
@@ -269,7 +257,6 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
             + "   },\n"
             + "   {\n"
             + "     filterCache :  {\n"
-            + "       class: \"org.apache.solr.search.ThinCache\",\n"
             + "       size: 12345\n"
             + "     }\n"
             + "     collections: [ \"104H4B\" ]\n"
@@ -285,11 +272,9 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
     afterConfig = cacheOverridesManager.applyOverrides(config, "filterCache", "dummyCollection");
     assertEquals("9999", afterConfig.toMap(new HashMap<>()).get("size"));
     assertEquals("10", afterConfig.toMap(new HashMap<>()).get("initialSize")); // not overridden
-    assertEquals(CaffeineCache.class, afterConfig.getCacheImplClass());
 
     afterConfig = cacheOverridesManager.applyOverrides(config, "filterCache", "104H4B");
     assertEquals("12345", afterConfig.toMap(new HashMap<>()).get("size"));
     assertEquals("10", afterConfig.toMap(new HashMap<>()).get("initialSize")); // not overridden
-    assertEquals(ThinCache.class, afterConfig.getCacheImplClass());
   }
 }
