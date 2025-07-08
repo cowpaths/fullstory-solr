@@ -30,7 +30,6 @@ import java.lang.invoke.MethodHandles;
 import java.lang.ref.SoftReference;
 import java.time.Duration;
 import java.util.AbstractMap;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -261,9 +260,16 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
 
   // NOTE: access to assigned masks should be protected by synchronizing on `children`
   private final long[] assigned = new long[1];
-  private final List<RootCache<K, V>> unscopedChildren = new ArrayList<>();
-  private final Map<String, Map.Entry<List<RootCache<K, V>>, long[]>> scopedAssigned =
-      new HashMap<>();
+  // NOTE: we need `ConcurrentLinkedQueue` below (instead of, e.g., ArrayList) because we need safe
+  // iteration of `inScopeChildren` upon `put()`, to ensure that overwritten values propagate
+  // throughout the entire cache tree. This is admittedly problematic, and `computeIfAbsent()`
+  // should accordingly be preferred in place of `put()`.
+  // TODO: if we were to make `put()` unsupported, we could use `ArrayList` in place of
+  //  `ConcurrentLinkedQueue` (and completely remove iteration of `inScopeChildren`)
+  private final ConcurrentLinkedQueue<RootCache<K, V>> unscopedChildren =
+      new ConcurrentLinkedQueue<>();
+  private final Map<String, Map.Entry<ConcurrentLinkedQueue<RootCache<K, V>>, long[]>>
+      scopedAssigned = new HashMap<>();
 
   private static long newRegisterMask(long[] assigned) {
     long prev = assigned[0];
@@ -291,7 +297,8 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                         child.tierScope,
                         (k) -> {
                           return new AbstractMap.SimpleImmutableEntry<>(
-                              new ArrayList<>(Collections.singleton(child)), new long[1]);
+                              new ConcurrentLinkedQueue<>(Collections.singleton(child)),
+                              new long[1]);
                         })
                     .getValue());
       }
@@ -472,7 +479,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                 }
                 // first address any existing references
                 final long extantMask = ((MyCompletableFuture<V>) v).refs;
-                List<RootCache<K, V>> inScopeChildren =
+                ConcurrentLinkedQueue<RootCache<K, V>> inScopeChildren =
                     k.tierScope == null || k.tierScope.equals(tierScope)
                         ? unscopedChildren
                         : scopedAssigned.get(k.tierScope).getKey();
@@ -600,7 +607,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                   ret[0] = get(v).ref.get(); // the extant value
                   // first address any existing references
                   final long extantMask = ((MyCompletableFuture<V>) v).refs;
-                  List<RootCache<K, V>> inScopeChildren =
+                  ConcurrentLinkedQueue<RootCache<K, V>> inScopeChildren =
                       k.tierScope == null || k.tierScope.equals(tierScope)
                           ? unscopedChildren
                           : scopedAssigned.get(k.tierScope).getKey();
@@ -672,7 +679,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                 ret[0] = get(v).ref.get(); // the extant value
                 // address any existing references
                 final long extantMask = ((MyCompletableFuture<V>) v).refs;
-                List<RootCache<K, V>> inScopeChildren =
+                ConcurrentLinkedQueue<RootCache<K, V>> inScopeChildren =
                     k.tierScope == null || k.tierScope.equals(tierScope)
                         ? unscopedChildren
                         : scopedAssigned.get(k.tierScope).getKey();
