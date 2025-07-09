@@ -698,4 +698,8 @@ public class CaffeineCache<K, V> extends SolrCacheBase
   public void forEach(BiConsumer<K, V> action) {
     cache.asMap().forEach(action);
   }
+
+  public void cleanup() {
+    cache.cleanUp();
+  }
 }
