@@ -387,8 +387,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     if (cachingEnabled) {
       final ArrayList<SolrCache> clist = new ArrayList<>();
       clist.add(ordMapCache.toInternal());
-      fieldValueCache =
-          buildCache(solrConfig, "fieldValueCache", core);
+      fieldValueCache = buildCache(solrConfig, "fieldValueCache", core);
       if (fieldValueCache != null) {
         clist.add(fieldValueCache.toInternal());
       }
