@@ -1,12 +1,11 @@
 package org.apache.solr.search;
 
 import java.lang.invoke.MethodHandles;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.cloud.ZkStateReader;
@@ -71,8 +70,7 @@ import org.slf4j.LoggerFactory;
 @SuppressWarnings("unchecked")
 public class CacheOverridesManager {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-  private volatile ConcurrentMap<String, List<CacheOverrides>> overridesByCacheName =
-      new ConcurrentHashMap<>();
+  private volatile Map<String, List<CacheOverrides>> overridesByCacheName = Collections.EMPTY_MAP;
 
   public CacheOverridesManager(SolrZkClient zkClient) {
     byte[] clusterPropsBytes = null;
@@ -129,8 +127,7 @@ public class CacheOverridesManager {
     if (cacheOverridesContents instanceof List) {
       @SuppressWarnings("unchecked")
       List<Map<String, Object>> entries = (List<Map<String, Object>>) cacheOverridesContents;
-      ConcurrentMap<String, List<CacheOverrides>> newOverridesByCacheName =
-          new ConcurrentHashMap<>();
+      Map<String, List<CacheOverrides>> newOverridesByCacheName = new HashMap<>();
       for (Map<String, Object> overridesMap : entries) {
         List<String> collectionsFilter = (List<String>) overridesMap.get("collections");
 
@@ -153,11 +150,11 @@ public class CacheOverridesManager {
         }
       }
 
-      overridesByCacheName = newOverridesByCacheName;
+      overridesByCacheName = Map.copyOf(newOverridesByCacheName);
       log.info("Cache overrides updated to {}", overridesByCacheName);
 
     } else if (cacheOverridesContents == null) { // overrides removal
-      overridesByCacheName.clear();
+      overridesByCacheName = Collections.EMPTY_MAP;
       log.info("Cleared cache overrides");
     } else {
       log.warn(
@@ -184,10 +181,7 @@ public class CacheOverridesManager {
   }
 
   List<Map<String, String>> getOverrides(String cacheName, String collection) {
-    List<CacheOverrides> overrides;
-    synchronized (overridesByCacheName) {
-      overrides = overridesByCacheName.get(cacheName);
-    }
+    List<CacheOverrides> overrides = overridesByCacheName.get(cacheName);
     if (overrides == null) {
       return null;
     }
