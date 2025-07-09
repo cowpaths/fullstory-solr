@@ -70,7 +70,7 @@ import org.slf4j.LoggerFactory;
 @SuppressWarnings("unchecked")
 public class CacheOverridesManager {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-  private volatile Map<String, List<CacheOverrides>> overridesByCacheName = Collections.EMPTY_MAP;
+  private volatile Map<String, List<CacheOverrides>> overridesByCacheName = Map.of();
 
   public CacheOverridesManager(SolrZkClient zkClient) {
     byte[] clusterPropsBytes = null;
@@ -154,7 +154,7 @@ public class CacheOverridesManager {
       log.info("Cache overrides updated to {}", overridesByCacheName);
 
     } else if (cacheOverridesContents == null) { // overrides removal
-      overridesByCacheName = Collections.EMPTY_MAP;
+      overridesByCacheName = Map.of();
       log.info("Cleared cache overrides");
     } else {
       log.warn(
