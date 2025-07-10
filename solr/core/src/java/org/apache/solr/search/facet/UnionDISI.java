@@ -24,7 +24,6 @@ import org.apache.solr.search.facet.SlotAcc.CountSlotAcc;
 
 final class UnionDISI extends SweepDISI {
 
-  final int maxIdx;
   private final SubIterStruct baseSub;
   private boolean collectBase;
   private final PriorityQueue<SubIterStruct> queue;
@@ -55,7 +54,6 @@ final class UnionDISI extends SweepDISI {
       int baseIdx)
       throws IOException {
     super(size, countAccs, cacheUpdaters);
-    this.maxIdx = size - 1;
     queue =
         new PriorityQueue<>(size) {
           @Override
@@ -63,7 +61,7 @@ final class UnionDISI extends SweepDISI {
             return a.docId < b.docId;
           }
         };
-    int i = maxIdx;
+    int i = size - 1;
     SubIterStruct tmpBaseSub = null;
     do {
       final SubIterStruct subIterStruct = new SubIterStruct(subIterators[i], i);

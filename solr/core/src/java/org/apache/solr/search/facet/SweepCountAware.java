@@ -285,18 +285,20 @@ interface SweepCountAware {
   static final class SegCountPerSegCache extends SegCountPerSeg {
 
     private final CacheUpdater[] cacheUpdaters;
+    private final int maxIdx;
 
     public SegCountPerSegCache(
         int[][] allSegCounts, boolean[] seen, int segMax, int size, CacheUpdater[] cacheUpdaters) {
       super(allSegCounts, seen, segMax, size);
       this.cacheUpdaters = cacheUpdaters;
+      maxIdx = allSegCounts.length - 1;
     }
 
     @Override
     public void register(
         CountSlotAcc[] countAccs, LongValues toGlobal, int segMax, int globalMissingIdx) {
       super.register(countAccs, toGlobal, segMax, globalMissingIdx);
-      int i = cacheUpdaters.length - 1;
+      int i = maxIdx;
       do {
         if (cacheUpdaters[i] != null) {
           cacheUpdaters[i].updateLeaf(allSegCounts[i]);

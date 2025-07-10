@@ -167,7 +167,7 @@ public class DocValuesFacets {
       endTermIndex = -endTermIndex - 1;
       doMissing = false;
     } else {
-      startTermIndex = -1;
+      startTermIndex = 0;
       endTermIndex = (int) si.getValueCount();
       doMissing = true;
     }
