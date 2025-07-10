@@ -180,9 +180,13 @@ public class DocValuesFacets {
       Map<CacheKey, SegmentCacheEntry> segmentCache = null;
       if (facetCacheThreshold >= 0 && docs.size() > facetCacheThreshold) {
         @SuppressWarnings("unchecked")
-        SolrCache<FacetCacheKey, Map<CacheKey, SegmentCacheEntry>> facetCache = searcher.getCache(TermFacetCache.NAME);
+        SolrCache<FacetCacheKey, Map<CacheKey, SegmentCacheEntry>> facetCache =
+            searcher.getCache(TermFacetCache.NAME);
         if (facetCache != null) {
-          FacetCacheKey facetCacheKey = new FacetCacheKey(new QueryResultKey(null, Arrays.asList(FacetModule.getBaseFilters(rb)), null, 0), fieldName);
+          FacetCacheKey facetCacheKey =
+              new FacetCacheKey(
+                  new QueryResultKey(null, Arrays.asList(FacetModule.getBaseFilters(rb)), null, 0),
+                  fieldName);
           segmentCache = facetCache.get(facetCacheKey);
           if (segmentCache == null) {
             segmentCache = new HashMap<>();
@@ -200,7 +204,8 @@ public class DocValuesFacets {
 
       SegmentCacheEntry topLevelCacheEntry;
       CacheKey topLevelReaderKey = searcher.getIndexReader().getReaderCacheHelper().getKey();
-      if (segmentCache != null && (topLevelCacheEntry = segmentCache.get(topLevelReaderKey)) != null) {
+      if (segmentCache != null
+          && (topLevelCacheEntry = segmentCache.get(topLevelReaderKey)) != null) {
         counts = topLevelCacheEntry.topLevelCounts;
       } else {
         counts = new int[maxSlots];
@@ -212,7 +217,8 @@ public class DocValuesFacets {
             segKey = leaf.reader().getReaderCacheHelper().getKey();
             SegmentCacheEntry cacheEntry = segmentCache.get(segKey);
             if (cacheEntry != null) {
-              mergeCachedSegmentCounts(counts, cacheEntry.counts, ordinalMap.getGlobalOrds(subIndex));
+              mergeCachedSegmentCounts(
+                  counts, cacheEntry.counts, ordinalMap.getGlobalOrds(subIndex));
               continue;
             }
           }
@@ -227,16 +233,43 @@ public class DocValuesFacets {
               final SortedDocValues singleton = DocValues.unwrapSingleton(sub);
               if (singleton != null) {
                 // some codecs may optimize SORTED_SET storage for single-valued fields
-                cacheSegCounts = accumSingle(counts, doMissing, startTermIndex, singleton, disi, subIndex, ordinalMap, segmentCache != null);
+                cacheSegCounts =
+                    accumSingle(
+                        counts,
+                        doMissing,
+                        startTermIndex,
+                        singleton,
+                        disi,
+                        subIndex,
+                        ordinalMap,
+                        segmentCache != null);
               } else {
-                cacheSegCounts = accumMulti(counts, doMissing, startTermIndex, sub, disi, subIndex, ordinalMap, segmentCache != null);
+                cacheSegCounts =
+                    accumMulti(
+                        counts,
+                        doMissing,
+                        startTermIndex,
+                        sub,
+                        disi,
+                        subIndex,
+                        ordinalMap,
+                        segmentCache != null);
               }
             } else {
               SortedDocValues sub = leaf.reader().getSortedDocValues(fieldName);
               if (sub == null) {
                 sub = DocValues.emptySorted();
               }
-              cacheSegCounts = accumSingle(counts, doMissing, startTermIndex, sub, disi, subIndex, ordinalMap, segmentCache != null);
+              cacheSegCounts =
+                  accumSingle(
+                      counts,
+                      doMissing,
+                      startTermIndex,
+                      sub,
+                      disi,
+                      subIndex,
+                      ordinalMap,
+                      segmentCache != null);
             }
             if (cacheSegCounts != null) {
               segmentCache.put(segKey, new SegmentCacheEntry(cacheSegCounts));
@@ -423,7 +456,12 @@ public class DocValuesFacets {
    * ordinals as a separate step
    */
   static byte[] accumSingleSeg(
-      int counts[], SortedDocValues si, DocIdSetIterator disi, int subIndex, OrdinalMap map, boolean cachePerSeg)
+      int counts[],
+      SortedDocValues si,
+      DocIdSetIterator disi,
+      int subIndex,
+      OrdinalMap map,
+      boolean cachePerSeg)
       throws IOException {
     // First count in seg-ord space:
     final int segCounts[];
@@ -450,7 +488,8 @@ public class DocValuesFacets {
     if (!cachePerSeg) {
       return null;
     } else {
-      ByteBuffersDataOutput cachedSegCountsBuilder = new ByteBuffersDataOutput(segCounts.length * 2);
+      ByteBuffersDataOutput cachedSegCountsBuilder =
+          new ByteBuffersDataOutput(segCounts.length * 2);
       return TermFacetCache.encodeCounts(segCounts, cachedSegCountsBuilder);
     }
   }
@@ -514,7 +553,12 @@ public class DocValuesFacets {
    * ordinals as a separate step
    */
   static byte[] accumMultiSeg(
-      int counts[], SortedSetDocValues si, DocIdSetIterator disi, int subIndex, OrdinalMap map, boolean cachePerSeg)
+      int counts[],
+      SortedSetDocValues si,
+      DocIdSetIterator disi,
+      int subIndex,
+      OrdinalMap map,
+      boolean cachePerSeg)
       throws IOException {
     // First count in seg-ord space:
     final int segCounts[];
@@ -544,7 +588,8 @@ public class DocValuesFacets {
     if (!cachePerSeg) {
       return null;
     } else {
-      ByteBuffersDataOutput cachedSegCountsBuilder = new ByteBuffersDataOutput(segCounts.length * 2L);
+      ByteBuffersDataOutput cachedSegCountsBuilder =
+          new ByteBuffersDataOutput(segCounts.length * 2L);
       return TermFacetCache.encodeCounts(segCounts, cachedSegCountsBuilder);
     }
   }
@@ -554,7 +599,7 @@ public class DocValuesFacets {
     // missing count
     int ord = segCounts.length - 1;
     counts[counts.length - 1] += segCounts[ord];
-    
+
     // migrate actual ordinals
     while (ord-- > 0) {
       int count = segCounts[ord];

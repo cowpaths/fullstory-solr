@@ -98,7 +98,7 @@ public class FacetContext {
     if (append == null) {
       return base;
     } else if (base == null) {
-      return new Query[]{append};
+      return new Query[] {append};
     }
     Query[] ret = ArrayUtil.growExact(base, base.length + 1);
     ret[base.length] = append;

@@ -27,25 +27,40 @@ import org.apache.solr.search.facet.SlotAcc.CountSlotAcc;
 import org.apache.solr.search.facet.SlotAcc.SweepCoordinationPoint;
 import org.apache.solr.search.facet.SlotAcc.SweepCoordinator;
 
-//nocommit: is this implementing CacheUpdater to signal something? It's not actually updating a cache.
-final class CachedCountSlotAcc extends CountSlotAcc implements CacheUpdater, SweepCoordinationPoint {
+// nocommit: is this implementing CacheUpdater to signal something? It's not actually updating a
+// cache.
+final class CachedCountSlotAcc extends CountSlotAcc
+    implements CacheUpdater, SweepCoordinationPoint {
 
-  //nocommit: probably should make this a long[]?
+  // nocommit: probably should make this a long[]?
   private final int[] topLevelCounts;
   private final SweepCoordinator sweepCoordinator;
 
-  static SweepCountAccStruct create(QueryResultKey qKey, DocSet docs, boolean isBase, FacetFieldProcessor p, int[] topLevelCounts) {
+  static SweepCountAccStruct create(
+      QueryResultKey qKey,
+      DocSet docs,
+      boolean isBase,
+      FacetFieldProcessor p,
+      int[] topLevelCounts) {
     CachedCountSlotAcc count = new CachedCountSlotAcc(qKey, docs, isBase, p, topLevelCounts);
-    return isBase ? count.sweepCoordinator.base : new SweepCountAccStruct(docs, isBase, count, qKey, CacheState.CACHED, null, count);
+    return isBase
+        ? count.sweepCoordinator.base
+        : new SweepCountAccStruct(docs, isBase, count, qKey, CacheState.CACHED, null, count);
   }
 
-  private CachedCountSlotAcc(QueryResultKey qKey, DocSet docs, boolean isBase, FacetFieldProcessor p, int[] topLevelCounts) {
+  private CachedCountSlotAcc(
+      QueryResultKey qKey,
+      DocSet docs,
+      boolean isBase,
+      FacetFieldProcessor p,
+      int[] topLevelCounts) {
     super(p.fcontext);
     this.topLevelCounts = topLevelCounts;
     if (!isBase) {
       this.sweepCoordinator = null;
     } else {
-      SweepCountAccStruct struct = new SweepCountAccStruct(docs, isBase, this, qKey, CacheState.CACHED, null, this);
+      SweepCountAccStruct struct =
+          new SweepCountAccStruct(docs, isBase, this, qKey, CacheState.CACHED, null, this);
       this.sweepCoordinator = new SweepCoordinator(p, struct);
     }
   }
@@ -56,15 +71,17 @@ final class CachedCountSlotAcc extends CountSlotAcc implements CacheUpdater, Swe
   }
 
   /**
-   * Always populates the bucket with the current count for that slot. If the count is positive, or if
-   * <code>processEmpty==true</code>, then this method also populates the values from mapped "output" accumulators.
+   * Always populates the bucket with the current count for that slot. If the count is positive, or
+   * if <code>processEmpty==true</code>, then this method also populates the values from mapped
+   * "output" accumulators.
    *
    * @see SweepCoordinator#setSweepValues(SimpleOrderedMap, int)
    */
   @Override
   public void setValues(SimpleOrderedMap<Object> bucket, int slotNum) throws IOException {
     super.setValues(bucket, slotNum);
-    if (sweepCoordinator != null && (0 < getCount(slotNum) || fcontext.processor.freq.processEmpty)) {
+    if (sweepCoordinator != null
+        && (0 < getCount(slotNum) || fcontext.processor.freq.processEmpty)) {
       sweepCoordinator.setSweepValues(bucket, slotNum);
     }
   }
@@ -76,12 +93,12 @@ final class CachedCountSlotAcc extends CountSlotAcc implements CacheUpdater, Swe
 
   @Override
   public void updateLeaf(int[] leafCounts) {
-    //NoOp nocommit: can we change this to throw UnsupportedOperationException?
+    // NoOp nocommit: can we change this to throw UnsupportedOperationException?
   }
 
   @Override
   public void updateTopLevel() {
-    //NoOp nocommit: can we change this to throw UnsupportedOperationException?
+    // NoOp nocommit: can we change this to throw UnsupportedOperationException?
   }
 
   @Override
@@ -101,21 +118,21 @@ final class CachedCountSlotAcc extends CountSlotAcc implements CacheUpdater, Swe
 
   @Override
   public void incrementCount(int slot, long increment) {
-    //NoOp
+    // NoOp
   }
 
   @Override
   public void collect(int doc, int slot, IntFunction<SlotContext> slotContext) throws IOException {
-    //NoOp
+    // NoOp
   }
 
   @Override
   public void reset() throws IOException {
-    //NoOp
+    // NoOp
   }
 
   @Override
   public void resize(Resizer resizer) {
-    //NoOp
+    // NoOp
   }
 }

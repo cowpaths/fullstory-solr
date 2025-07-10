@@ -74,7 +74,7 @@ public class RelatednessAgg extends AggValueSource {
 
   private int fgCountCacheDf = COUNT_CACHE_DF_UNINITIALIZED;
   private int bgCountCacheDf = COUNT_CACHE_DF_UNINITIALIZED;
-  
+
   public static final String NAME = RELATEDNESS;
   private static final boolean DEFAULT_SWEEP_COLLECTION = true;
   private static final int COUNT_CACHE_DF_UNINITIALIZED = Integer.MIN_VALUE;
@@ -185,12 +185,15 @@ public class RelatednessAgg extends AggValueSource {
 
     DocSet fgSet = fcontext.searcher.getDocSet(fgFilters);
     DocSet bgSet = fcontext.searcher.getDocSet(bgQ);
-    return new SKGSlotAcc(this, fcontext, numSlots, fgSet, bgSet, fgFilters, fgCountCacheDf, bgCountCacheDf);
+    return new SKGSlotAcc(
+        this, fcontext, numSlots, fgSet, bgSet, fgFilters, fgCountCacheDf, bgCountCacheDf);
   }
 
   private static int resolveCountCacheDf(int spec, int contextDefault) {
     int tmpCountCacheDf = spec == COUNT_CACHE_DF_UNINITIALIZED ? contextDefault : spec;
-    return (tmpCountCacheDf == 0 ? TermFacetCache.DEFAULT_THRESHOLD : (tmpCountCacheDf < 0 ? Integer.MAX_VALUE : tmpCountCacheDf));
+    return (tmpCountCacheDf == 0
+        ? TermFacetCache.DEFAULT_THRESHOLD
+        : (tmpCountCacheDf < 0 ? Integer.MAX_VALUE : tmpCountCacheDf));
   }
 
   @Override
@@ -383,10 +386,26 @@ public class RelatednessAgg extends AggValueSource {
       if (!this.agg.useSweep) {
         return this;
       } else {
-        final int ctxCountCacheDf = ((FacetField)fcontext.processor.freq).countCacheDf; // safe cast b/c sweep only applicable for FacetField
-        final ReadOnlyCountSlotAcc fgCount = baseSweepingAcc.add(key + "!fg", fgSet, slotvalues.length, new QueryResultKey(null, fgFilters, null, 0), resolveCountCacheDf(fgCountCacheDf, ctxCountCacheDf));
-        final ReadOnlyCountSlotAcc bgCount = baseSweepingAcc.add(key + "!bg", bgSet, slotvalues.length, new QueryResultKey(null, Collections.singletonList(agg.bgQ), null, 0), resolveCountCacheDf(bgCountCacheDf, ctxCountCacheDf));
-        SweepSKGSlotAcc readOnlyReplacement = new SweepSKGSlotAcc(agg.min_pop, fcontext, slotvalues.length, fgSize, bgSize, fgCount, bgCount);
+        final int ctxCountCacheDf =
+            ((FacetField) fcontext.processor.freq)
+                .countCacheDf; // safe cast b/c sweep only applicable for FacetField
+        final ReadOnlyCountSlotAcc fgCount =
+            baseSweepingAcc.add(
+                key + "!fg",
+                fgSet,
+                slotvalues.length,
+                new QueryResultKey(null, fgFilters, null, 0),
+                resolveCountCacheDf(fgCountCacheDf, ctxCountCacheDf));
+        final ReadOnlyCountSlotAcc bgCount =
+            baseSweepingAcc.add(
+                key + "!bg",
+                bgSet,
+                slotvalues.length,
+                new QueryResultKey(null, Collections.singletonList(agg.bgQ), null, 0),
+                resolveCountCacheDf(bgCountCacheDf, ctxCountCacheDf));
+        SweepSKGSlotAcc readOnlyReplacement =
+            new SweepSKGSlotAcc(
+                agg.min_pop, fcontext, slotvalues.length, fgSize, bgSize, fgCount, bgCount);
         readOnlyReplacement.key = key;
         baseSweepingAcc.registerMapping(this, readOnlyReplacement);
         return null;

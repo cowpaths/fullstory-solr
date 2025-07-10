@@ -41,12 +41,10 @@ import org.apache.solr.search.BitDocSet;
 import org.apache.solr.search.DocSet;
 import org.apache.solr.search.SolrCache;
 import org.apache.solr.search.SolrIndexSearcher;
-import org.apache.solr.search.facet.SlotAcc.CacheState;
 import org.apache.solr.search.facet.SlotAcc.CountSlotAcc;
 import org.apache.solr.search.facet.SlotAcc.SlotContext;
 import org.apache.solr.search.facet.SlotAcc.SweepCoordinator;
 import org.apache.solr.search.facet.SlotAcc.SweepCountAccStruct;
-import org.apache.solr.search.facet.SlotAcc.SweepingCountSlotAcc;
 import org.apache.solr.search.facet.SweepCountAware.SegCountGlobal;
 import org.apache.solr.search.facet.SweepDocIterator.SweepIteratorAndCounts;
 import org.apache.solr.uninverting.DocTermOrds;
@@ -463,8 +461,10 @@ public class UnInvertedField extends DocTermOrds {
 
     int uniqueTerms = 0;
     final CountSlotAcc countAcc = processor.countAcc;
-    final boolean maySkipBaseSetCollection = processor.collectAcc == null && processor.allBucketsAcc == null;
-    final SweepCountAccStruct baseCountAccStruct = SweepCoordinator.baseStructOf(processor, maySkipBaseSetCollection);
+    final boolean maySkipBaseSetCollection =
+        processor.collectAcc == null && processor.allBucketsAcc == null;
+    final SweepCountAccStruct baseCountAccStruct =
+        SweepCoordinator.baseStructOf(processor, maySkipBaseSetCollection);
     final List<SweepCountAccStruct> others = SweepCoordinator.otherStructsOf(processor);
     if (FacetFieldProcessor.shortcircuit(baseCountAccStruct, others)) {
       return;

@@ -21,9 +21,9 @@ import java.util.List;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.LongValues;
+import org.apache.solr.request.TermFacetCache.CacheUpdater;
 import org.apache.solr.search.facet.SlotAcc.CountSlotAcc;
 import org.apache.solr.search.facet.SlotAcc.SweepCountAccStruct;
-import org.apache.solr.request.TermFacetCache.CacheUpdater;
 
 abstract class SweepDISI extends DocIdSetIterator implements SweepCountAware {
 
@@ -75,13 +75,23 @@ abstract class SweepDISI extends DocIdSetIterator implements SweepCountAware {
       throws IOException {
     int activeCt = 0;
     final int baseIdx;
-    if (base == null || !addAcc(base, subIterators, activeCountAccs, cacheUpdaters, subCtx, activeCt, toGlobal, maySkipBaseSetCollection)) {
+    if (base == null
+        || !addAcc(
+            base,
+            subIterators,
+            activeCountAccs,
+            cacheUpdaters,
+            subCtx,
+            activeCt,
+            toGlobal,
+            maySkipBaseSetCollection)) {
       baseIdx = -1;
     } else {
       baseIdx = activeCt++;
     }
     for (SweepCountAccStruct entry : others) {
-      if (addAcc(entry, subIterators, activeCountAccs, cacheUpdaters, subCtx, activeCt, toGlobal, true)) {
+      if (addAcc(
+          entry, subIterators, activeCountAccs, cacheUpdaters, subCtx, activeCt, toGlobal, true)) {
         activeCt++;
       }
     }
@@ -102,7 +112,12 @@ abstract class SweepDISI extends DocIdSetIterator implements SweepCountAware {
             break;
           }
         }
-        return new UnionDISI(subIterators, activeCountAccs, hasCacheUpdaters ? cacheUpdaters : null, activeCt, baseIdx);
+        return new UnionDISI(
+            subIterators,
+            activeCountAccs,
+            hasCacheUpdaters ? cacheUpdaters : null,
+            activeCt,
+            baseIdx);
     }
   }
 

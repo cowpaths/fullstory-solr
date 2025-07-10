@@ -629,7 +629,9 @@ public class SimpleFacets {
 
           // TODO do we handle debug?  Should probably already be handled by the legacy code
 
-          Object resObj = FacetRequest.parseOneFacetReq(req, jsonFacet).process(req, FacetModule.getBaseFilters(rb), docs);
+          Object resObj =
+              FacetRequest.parseOneFacetReq(req, jsonFacet)
+                  .process(req, FacetModule.getBaseFilters(rb), docs);
           // Go through the response to build the expected output for SimpleFacets
           counts = new NamedList<>();
           if (resObj != null) {

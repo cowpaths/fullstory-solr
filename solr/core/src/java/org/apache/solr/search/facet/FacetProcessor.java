@@ -243,8 +243,9 @@ public abstract class FacetProcessor<T extends FacetRequest> {
       fcontext.baseFilters = qlist.toArray(new Query[qlist.size()]);
       return qlist;
     } else if (true) {
-      //nocommit I think this block obviates the responsebuilder dependency? (see below)
-      //nocommit: this also fixes SOLR-9724 (excludeTags support in conjunction with facet domain changes)
+      // nocommit I think this block obviates the responsebuilder dependency? (see below)
+      // nocommit: this also fixes SOLR-9724 (excludeTags support in conjunction with facet domain
+      // changes)
       throw new AssertionError();
     }
 
@@ -285,7 +286,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
 
     final Query domainQuery = freq.domain.joinField.createDomainQuery(fcontext);
     fcontext.base = fcontext.searcher.getDocSet(domainQuery);
-    fcontext.baseFilters = new Query[]{domainQuery};
+    fcontext.baseFilters = new Query[] {domainQuery};
   }
 
   /** modifies the context base if there is a graph field domain change */
@@ -294,7 +295,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
 
     final Query domainQuery = freq.domain.graphField.createDomainQuery(fcontext);
     fcontext.base = fcontext.searcher.getDocSet(domainQuery);
-    fcontext.baseFilters = new Query[]{domainQuery};
+    fcontext.baseFilters = new Query[] {domainQuery};
   }
 
   // returns "true" if filters were applied to fcontext.base already
@@ -319,7 +320,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
     DocSet input = fcontext.base;
     DocSet result;
 
-    //nocommit: we're using this query for caching only; should we use for query execution as well?
+    // nocommit: we're using this query for caching only; should we use for query execution as well?
     final Query q;
     if (freq.domain.toChildren) {
       // If there are filters on this facet, then use them as acceptDocs when executing toChildren.
@@ -330,11 +331,18 @@ public abstract class FacetProcessor<T extends FacetRequest> {
       } else {
         appliedFilters = true;
       }
-      ToChildBlockJoinQuery toChildQuery = new ToChildBlockJoinQuery(collapseFilters(fcontext.baseFilters), BlockJoinParentQParser.getCachedBitSetProducer(fcontext.req, parentQuery));
+      ToChildBlockJoinQuery toChildQuery =
+          new ToChildBlockJoinQuery(
+              collapseFilters(fcontext.baseFilters),
+              BlockJoinParentQParser.getCachedBitSetProducer(fcontext.req, parentQuery));
       q = appliedFilters ? new FilteredToChildBlockJoinQuery(toChildQuery, filterQs) : toChildQuery;
       result = BlockJoin.toChildren(input, parents, acceptDocs, fcontext.qcontext);
     } else {
-      q = new ToParentBlockJoinQuery(collapseFilters(fcontext.baseFilters), BlockJoinParentQParser.getCachedBitSetProducer(fcontext.req, parentQuery), ScoreMode.None);
+      q =
+          new ToParentBlockJoinQuery(
+              collapseFilters(fcontext.baseFilters),
+              BlockJoinParentQParser.getCachedBitSetProducer(fcontext.req, parentQuery),
+              ScoreMode.None);
       result = BlockJoin.toParents(input, parents, fcontext.qcontext);
     }
 
@@ -360,7 +368,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
     @Override
     public boolean equals(Object obj) {
       if (!(obj instanceof FilteredToChildBlockJoinQuery)) return false;
-      FilteredToChildBlockJoinQuery fq = (FilteredToChildBlockJoinQuery)obj;
+      FilteredToChildBlockJoinQuery fq = (FilteredToChildBlockJoinQuery) obj;
       return this.q.equals(fq.q) && this.filterQs.equals(fq.filterQs);
     }
   }

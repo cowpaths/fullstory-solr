@@ -443,7 +443,8 @@ public abstract class FacetRequest {
    * Process this facet request against the given domain of docs. Note: this is currently used
    * externally by {@link org.apache.solr.request.SimpleFacets}.
    */
-  public final Object process(SolrQueryRequest req, Query[] baseFilters, DocSet domain) throws IOException {
+  public final Object process(SolrQueryRequest req, Query[] baseFilters, DocSet domain)
+      throws IOException {
     // TODO check for FacetDebugInfo?  and if so set on fcontext
     //  rb.req.getContext().get("FacetDebugInfo");
     // TODO should the SolrQueryRequest be held on the FacetRequest?  It was created from

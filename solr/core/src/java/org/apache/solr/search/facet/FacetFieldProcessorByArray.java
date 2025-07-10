@@ -141,7 +141,8 @@ abstract class FacetFieldProcessorByArray extends FacetFieldProcessor {
 
     maxSlots = nTerms;
 
-    // allocate slot for "missing" bucket; cheap, and we might need it for caching, regardless of freq.missing setting
+    // allocate slot for "missing" bucket; cheap, and we might need it for caching, regardless of
+    // freq.missing setting
     // only supported for DV, not UIF.
     if (this instanceof FacetFieldProcessorByArrayDV) {
       missingSlot = maxSlots++;
@@ -199,12 +200,13 @@ abstract class FacetFieldProcessorByArray extends FacetFieldProcessor {
    *
    * @see #lookupOrd
    */
-  public IntFunction<SlotContext> missingSlotContext = (slotNum) -> {
-    try {
-      Query q = getFieldMissingQuery(fcontext.searcher, sf.getName());
-      return new SlotContext(q);
-    } catch (IOException e) {
-      throw new RuntimeException(e);
-    }
-  };
+  public IntFunction<SlotContext> missingSlotContext =
+      (slotNum) -> {
+        try {
+          Query q = getFieldMissingQuery(fcontext.searcher, sf.getName());
+          return new SlotContext(q);
+        } catch (IOException e) {
+          throw new RuntimeException(e);
+        }
+      };
 }

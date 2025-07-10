@@ -69,11 +69,11 @@ interface SweepCountAware {
    * (The return value of {@link SweepCountAware#registerCounts(SegCounter)} indicates to the
    * "driver" the max "active counts" index (for domains that contain the current doc).
    *
-   * <p>If per-segment, the driver then calls {@link SegCountPerSeg#incrementCount(int, int, int)}, passing the term ord,
-   * increment amount (usually "1"), and the max "active counts" index returned from {@link
-   * SweepCountAware#registerCounts(SegCounter)} in the first phase. The "max active counts index"
-   * param is used as the limit (inclusive) to iterate count accumulation over each of the "active"
-   * domains for the current doc.
+   * <p>If per-segment, the driver then calls {@link SegCountPerSeg#incrementCount(int, int, int)},
+   * passing the term ord, increment amount (usually "1"), and the max "active counts" index
+   * returned from {@link SweepCountAware#registerCounts(SegCounter)} in the first phase. The "max
+   * active counts index" param is used as the limit (inclusive) to iterate count accumulation over
+   * each of the "active" domains for the current doc.
    *
    * @see SweepCountAware#registerCounts(SegCounter)
    */
@@ -112,11 +112,12 @@ interface SweepCountAware {
 
     /**
      * Increments counts for active domains/CountSlotAccs.
-     * 
+     *
      * @param segOrd - the seg term ord for which to increment counts
      * @param globalOrd - the global term ord for which to increment counts
      * @param inc - the amount by which to increment the count for the specified term ord
-     * @param maxIdx - the max index (inclusive) of active domains/CountSlotAccs to be incremented for the current doc
+     * @param maxIdx - the max index (inclusive) of active domains/CountSlotAccs to be incremented
+     *     for the current doc
      */
     public final void incrementCount(int segOrd, int globalOrd, int inc, int maxIdx) {
       int i = maxIdx;
@@ -130,7 +131,7 @@ interface SweepCountAware {
     }
 
     public void register() {
-      //NoOp
+      // NoOp
     }
 
     public int getSegMissingIdx() {
@@ -144,7 +145,8 @@ interface SweepCountAware {
     private final CacheUpdater[] cacheUpdaters;
     private final int segMissingIdx;
 
-    public SegCountGlobalCache(int[][] allSegCounts, int segMax, CountSlotAcc[] allCounts, CacheUpdater[] cacheUpdaters) {
+    public SegCountGlobalCache(
+        int[][] allSegCounts, int segMax, CountSlotAcc[] allCounts, CacheUpdater[] cacheUpdaters) {
       super(allCounts);
       this.allSegCounts = allSegCounts;
       this.activeSegCounts = Arrays.copyOf(this.allSegCounts, this.allSegCounts.length);
@@ -233,8 +235,10 @@ interface SweepCountAware {
      * @param segMissingIdx - index for the "missing" bucket on most recently accumulated segment
      * @param globalMissingIdx - index for the global "missing" bucket
      */
-    public void register(CountSlotAcc[] countAccs, LongValues toGlobal, int segMissingIdx, int globalMissingIdx) {
-      // NOTE: this method is optimized, with demonstrable benefits for the common "single count" use case.
+    public void register(
+        CountSlotAcc[] countAccs, LongValues toGlobal, int segMissingIdx, int globalMissingIdx) {
+      // NOTE: this method is optimized, with demonstrable benefits for the common "single count"
+      // use case.
       // Be careful of performance if modifying.
 
       // NOTE: the `countAccs` array may be oversized (e.g., in the event that one or more of the
@@ -243,7 +247,10 @@ interface SweepCountAware {
       // can (and must!) safely set `maxIdx` based on `activeSegCounts.length` (as opposed to
       // `countAccs.length`).
       int segOrd;
-      final int maxIdx = activeSegCounts.length - 1; // based on actual size -- countAccs may be oversized nocommit: until better idea of why this?
+      final int maxIdx =
+          activeSegCounts.length
+              - 1; // based on actual size -- countAccs may be oversized nocommit: until better idea
+      // of why this?
       if (segMissingIdx < 0) {
         // not tracking "missing"; segMissingIdx represents (-maxSegOrd - 1)
         segOrd = ~segMissingIdx;
@@ -266,7 +273,8 @@ interface SweepCountAware {
           do {
             final int inc = allSegCounts[i][segOrd];
             if (inc > 0) {
-              countAccs[i].incrementCount(toGlobal == null ? (segOrd) : (int)toGlobal.get(segOrd), inc);
+              countAccs[i].incrementCount(
+                  toGlobal == null ? (segOrd) : (int) toGlobal.get(segOrd), inc);
             }
           } while (i-- > 0);
         }
@@ -278,13 +286,15 @@ interface SweepCountAware {
 
     private final CacheUpdater[] cacheUpdaters;
 
-    public SegCountPerSegCache(int[][] allSegCounts, boolean[] seen, int segMax, int size, CacheUpdater[] cacheUpdaters) {
+    public SegCountPerSegCache(
+        int[][] allSegCounts, boolean[] seen, int segMax, int size, CacheUpdater[] cacheUpdaters) {
       super(allSegCounts, seen, segMax, size);
       this.cacheUpdaters = cacheUpdaters;
     }
 
     @Override
-    public void register(CountSlotAcc[] countAccs, LongValues toGlobal, int segMax, int globalMissingIdx) {
+    public void register(
+        CountSlotAcc[] countAccs, LongValues toGlobal, int segMax, int globalMissingIdx) {
       super.register(countAccs, toGlobal, segMax, globalMissingIdx);
       int i = cacheUpdaters.length - 1;
       do {

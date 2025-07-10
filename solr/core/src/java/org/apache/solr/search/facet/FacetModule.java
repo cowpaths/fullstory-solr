@@ -123,7 +123,7 @@ public class FacetModule extends SearchComponent {
     final Query mainQ = rb.getQuery();
     final List<Query> filters = rb.getFilters();
     if (filters == null) {
-      return new Query[]{mainQ};
+      return new Query[] {mainQ};
     } else {
       int lastIdx = filters.size();
       Query[] ret = filters.toArray(new Query[lastIdx + 1]);

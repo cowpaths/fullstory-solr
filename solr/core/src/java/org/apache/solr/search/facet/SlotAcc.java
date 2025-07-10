@@ -26,8 +26,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.function.IntFunction;
-import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.IndexReader.CacheKey;
+import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.queries.function.FunctionValues;
 import org.apache.lucene.queries.function.ValueSource;
 import org.apache.lucene.search.DocIdSetIterator;
@@ -629,14 +629,14 @@ public abstract class SlotAcc implements Closeable {
      * SweepingCountSlotAcc} to ensure proper placement/accessibility of the SlotAcc to be used for
      * read access.
      *
-     * <p>The replacement SlotAcc registered via {@link
-     * SweepCoordinator#registerMapping(SlotAcc, SlotAcc)} will be responsible for output via
-     * its {@link SlotAcc#setValues(SimpleOrderedMap, int)} method. An implementer of this method
-     * may register such a replacement, and also return a non-null SlotAcc to be used for normal
-     * collection (via {@link FacetFieldProcessor#collectAcc}). In this case, the implementer should
-     * take care that the returned {@link SlotAcc} is different from the {@link SlotAcc} registered
-     * for the purpose of output -- with the former overriding {@link
-     * SlotAcc#setValues(SimpleOrderedMap, int)} as a no-op, to prevent setting duplicate values.
+     * <p>The replacement SlotAcc registered via {@link SweepCoordinator#registerMapping(SlotAcc,
+     * SlotAcc)} will be responsible for output via its {@link SlotAcc#setValues(SimpleOrderedMap,
+     * int)} method. An implementer of this method may register such a replacement, and also return
+     * a non-null SlotAcc to be used for normal collection (via {@link
+     * FacetFieldProcessor#collectAcc}). In this case, the implementer should take care that the
+     * returned {@link SlotAcc} is different from the {@link SlotAcc} registered for the purpose of
+     * output -- with the former overriding {@link SlotAcc#setValues(SimpleOrderedMap, int)} as a
+     * no-op, to prevent setting duplicate values.
      *
      * @param baseSweepingAcc - never null, where the SlotAcc may register domains for sweep
      *     collection, and must register mappings of new read-access SlotAccs that result from this
@@ -665,8 +665,14 @@ public abstract class SlotAcc implements Closeable {
     final Map<CacheKey, SegmentCacheEntry> alreadyCached;
     final CacheUpdater cacheUpdater;
 
-    public SweepCountAccStruct(DocSet docSet, boolean isBase, CountSlotAcc countAcc,
-        QueryResultKey qKey, CacheState cacheState, Map<CacheKey, SegmentCacheEntry> alreadyCached, CacheUpdater cacheUpdater) {
+    public SweepCountAccStruct(
+        DocSet docSet,
+        boolean isBase,
+        CountSlotAcc countAcc,
+        QueryResultKey qKey,
+        CacheState cacheState,
+        Map<CacheKey, SegmentCacheEntry> alreadyCached,
+        CacheUpdater cacheUpdater) {
       this.docSet = docSet;
       this.isBase = isBase;
       this.countAcc = countAcc;
@@ -685,6 +691,7 @@ public abstract class SlotAcc implements Closeable {
       this.alreadyCached = t.alreadyCached;
       this.cacheUpdater = t.cacheUpdater;
     }
+
     public SweepCountAccStruct(SweepCountAccStruct t, String replaceKey) {
       this.docSet = t.docSet;
       this.isBase = t.isBase;
@@ -712,38 +719,52 @@ public abstract class SlotAcc implements Closeable {
     }
   }
 
-  static enum CacheState { DO_NOT_CACHE, NOT_CACHED, PARTIALLY_CACHED, CACHED }
+  static enum CacheState {
+    DO_NOT_CACHE,
+    NOT_CACHED,
+    PARTIALLY_CACHED,
+    CACHED
+  }
 
   private static class ShimCountSlotAcc extends CountSlotAcc {
     private final ReadOnlyCountSlotAcc backing;
+
     public ShimCountSlotAcc(ReadOnlyCountSlotAcc backing, FacetContext fcontext) {
       super(fcontext);
       this.backing = backing;
     }
+
     @Override
     public long getCount(int slot) {
       return backing.getCount(slot);
     }
+
     @Override
     public int compare(int slotA, int slotB) {
       return backing.compare(slotA, slotB);
     }
+
     @Override
     public Object getValue(int slotNum) throws IOException {
       return backing.getValue(slotNum);
     }
+
     @Override
     public void incrementCount(int slot, long count) {
       throw new UnsupportedOperationException("not supported");
     }
+
     @Override
-    public void collect(int doc, int slot, IntFunction<SlotContext> slotContext) throws IOException {
+    public void collect(int doc, int slot, IntFunction<SlotContext> slotContext)
+        throws IOException {
       throw new UnsupportedOperationException("not supported");
     }
+
     @Override
     public void reset() throws IOException {
       throw new UnsupportedOperationException("not supported");
     }
+
     @Override
     public void resize(Resizer resizer) {
       throw new UnsupportedOperationException("not supported");
@@ -769,13 +790,15 @@ public abstract class SlotAcc implements Closeable {
 
     SweepingCountSlotAcc(int numSlots, FacetFieldProcessor p, DocSet docs, QueryResultKey qKey) {
       super(p.fcontext, numSlots);
-      SweepCountAccStruct struct = new SweepCountAccStruct(docs, true, this, qKey, CacheState.DO_NOT_CACHE, null, null);
+      SweepCountAccStruct struct =
+          new SweepCountAccStruct(docs, true, this, qKey, CacheState.DO_NOT_CACHE, null, null);
       this.sweepCoordinator = new SweepCoordinator(p, struct);
     }
 
     /**
-     * Always populates the bucket with the current count for that slot. If the count is positive, or if
-     * <code>processEmpty==true</code>, then this method also populates the values from mapped "output" accumulators.
+     * Always populates the bucket with the current count for that slot. If the count is positive,
+     * or if <code>processEmpty==true</code>, then this method also populates the values from mapped
+     * "output" accumulators.
      *
      * @see SweepCoordinator#setSweepValues(SimpleOrderedMap, int)
      */
@@ -816,6 +839,7 @@ public abstract class SlotAcc implements Closeable {
         debug.add("mapped", new ArrayList<String>());
       }
     }
+
     /**
      * Called by SweepableSlotAccs to register new DocSet domains for sweep collection
      *
@@ -825,8 +849,10 @@ public abstract class SlotAcc implements Closeable {
      * @return a read-only representation of the count acc which is guaranteed to be populated after
      *     sweep count collection
      */
-    public ReadOnlyCountSlotAcc add(String key, DocSet docs, int numSlots, QueryResultKey qKey, int countCacheDf) {
-      final SweepCountAccStruct ret = p.getSweepCountAcc(key, qKey, docs, false, numSlots, countCacheDf);
+    public ReadOnlyCountSlotAcc add(
+        String key, DocSet docs, int numSlots, QueryResultKey qKey, int countCacheDf) {
+      final SweepCountAccStruct ret =
+          p.getSweepCountAcc(key, qKey, docs, false, numSlots, countCacheDf);
       if (null != debug) {
         @SuppressWarnings("unchecked")
         List<String> accsDebug = (List<String>) debug.get("accs");
@@ -893,14 +919,24 @@ public abstract class SlotAcc implements Closeable {
      * @returns struct that wraps the {@link FacetContext#base} unless the {@link
      *     FacetProcessor#countAcc} is a {@link SweepingCountSlotAcc}
      */
-    public static SweepCountAccStruct baseStructOf(FacetProcessor<?> processor, boolean maySkipBaseSetCollection) {
+    public static SweepCountAccStruct baseStructOf(
+        FacetProcessor<?> processor, boolean maySkipBaseSetCollection) {
       final SweepCoordinator sweepCoordinator;
       if (processor.countAcc instanceof SweepCoordinationPoint
-          && (sweepCoordinator = ((SweepCoordinationPoint) processor.countAcc).getSweepCoordinator()) != null) {
+          && (sweepCoordinator =
+                  ((SweepCoordinationPoint) processor.countAcc).getSweepCoordinator())
+              != null) {
         SweepCountAccStruct base = sweepCoordinator.base;
         return (maySkipBaseSetCollection && base.cacheState == CacheState.CACHED) ? null : base;
       }
-      return new SweepCountAccStruct(processor.fcontext.base, true, processor.countAcc, null, CacheState.DO_NOT_CACHE, null, null);
+      return new SweepCountAccStruct(
+          processor.fcontext.base,
+          true,
+          processor.countAcc,
+          null,
+          CacheState.DO_NOT_CACHE,
+          null,
+          null);
     }
 
     /**
@@ -913,7 +949,9 @@ public abstract class SlotAcc implements Closeable {
     public static List<SweepCountAccStruct> otherStructsOf(FacetProcessor<?> processor) {
       final SweepCoordinator sweepCoordinator;
       if (processor.countAcc instanceof SweepCoordinationPoint
-          && (sweepCoordinator = ((SweepCoordinationPoint) processor.countAcc).getSweepCoordinator()) != null) {
+          && (sweepCoordinator =
+                  ((SweepCoordinationPoint) processor.countAcc).getSweepCoordinator())
+              != null) {
         List<SweepCountAccStruct> others = sweepCoordinator.others;
         List<SweepCountAccStruct> ret = new ArrayList<>(others.size());
         for (SweepCountAccStruct other : others) {

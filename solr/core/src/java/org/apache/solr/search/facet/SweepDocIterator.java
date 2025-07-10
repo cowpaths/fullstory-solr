@@ -85,9 +85,7 @@ abstract class SweepDocIterator implements DocIterator, SweepCountAware {
     throw new UnsupportedOperationException("Not supported.");
   }
 
-  /**
-   * updates top-level caches. nocommit: flesh this out? move it to SweepCountAware?
-   */
+  /** updates top-level caches. nocommit: flesh this out? move it to SweepCountAware? */
   static void updateTopLevel(SweepCountAccStruct base, List<SweepCountAccStruct> others) {
     CacheUpdater updater;
     if (base != null && (updater = base.cacheUpdater) != null) {

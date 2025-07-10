@@ -16,6 +16,8 @@
  */
 package org.apache.solr.search.facet;
 
+import static org.apache.solr.request.TermFacetCache.mergeCachedSegmentCounts;
+
 import java.io.IOException;
 import java.util.Map;
 import java.util.function.IntFunction;
@@ -23,8 +25,6 @@ import org.apache.lucene.index.IndexReader.CacheKey;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.store.ByteBuffersDataOutput;
 import org.apache.lucene.util.LongValues;
-import static org.apache.solr.request.TermFacetCache.mergeCachedSegmentCounts;
-
 import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.request.TermFacetCache;
 import org.apache.solr.request.TermFacetCache.CacheUpdater;
@@ -37,9 +37,10 @@ import org.apache.solr.search.facet.SlotAcc.CountSlotAcc;
 import org.apache.solr.search.facet.SlotAcc.SweepCoordinationPoint;
 import org.apache.solr.search.facet.SlotAcc.SweepCoordinator;
 
-final class CacheUpdateCountSlotAcc extends CountSlotAcc implements CacheUpdater, SweepCoordinationPoint {
+final class CacheUpdateCountSlotAcc extends CountSlotAcc
+    implements CacheUpdater, SweepCoordinationPoint {
 
-  //nocommit: probably make topLevelCounts a long[]?
+  // nocommit: probably make topLevelCounts a long[]?
   private final int[] topLevelCounts;
   private final Map<CacheKey, SegmentCacheEntry> cachedSegments;
   private final ByteBuffersDataOutput dataOutput;
@@ -51,22 +52,53 @@ final class CacheUpdateCountSlotAcc extends CountSlotAcc implements CacheUpdater
   private SegmentCacheEntry cached;
   private final SweepCoordinator sweepCoordinator;
 
-  static SweepCountAccStruct create(FacetFieldProcessor p, int numSlots, Map<CacheKey, SegmentCacheEntry> cachedSegments,
-      CacheKey topLevelCacheKey, SolrCache<FacetCacheKey, Map<CacheKey, SegmentCacheEntry>> facetCache,
-      FacetCacheKey facetCacheKey, boolean includesMissingCount, QueryResultKey qKey, boolean isBase, DocSet docs, CacheState cacheState) {
-    CacheUpdateCountSlotAcc count = new CacheUpdateCountSlotAcc(p, numSlots, cachedSegments, topLevelCacheKey, facetCache, facetCacheKey,
-        includesMissingCount, qKey, isBase, docs, cacheState);
-    return isBase ? count.sweepCoordinator.base : new SweepCountAccStruct(docs, isBase, count, qKey, cacheState, cachedSegments, count);
+  static SweepCountAccStruct create(
+      FacetFieldProcessor p,
+      int numSlots,
+      Map<CacheKey, SegmentCacheEntry> cachedSegments,
+      CacheKey topLevelCacheKey,
+      SolrCache<FacetCacheKey, Map<CacheKey, SegmentCacheEntry>> facetCache,
+      FacetCacheKey facetCacheKey,
+      boolean includesMissingCount,
+      QueryResultKey qKey,
+      boolean isBase,
+      DocSet docs,
+      CacheState cacheState) {
+    CacheUpdateCountSlotAcc count =
+        new CacheUpdateCountSlotAcc(
+            p,
+            numSlots,
+            cachedSegments,
+            topLevelCacheKey,
+            facetCache,
+            facetCacheKey,
+            includesMissingCount,
+            qKey,
+            isBase,
+            docs,
+            cacheState);
+    return isBase
+        ? count.sweepCoordinator.base
+        : new SweepCountAccStruct(docs, isBase, count, qKey, cacheState, cachedSegments, count);
   }
 
-  private CacheUpdateCountSlotAcc(FacetFieldProcessor p, int numSlots, Map<CacheKey, SegmentCacheEntry> cachedSegments,
-      CacheKey topLevelCacheKey, SolrCache<FacetCacheKey, Map<CacheKey, SegmentCacheEntry>> facetCache,
-      FacetCacheKey facetCacheKey, boolean includesMissingCount,
-      QueryResultKey qKey, boolean isBase, DocSet docs, CacheState cacheState) {
+  private CacheUpdateCountSlotAcc(
+      FacetFieldProcessor p,
+      int numSlots,
+      Map<CacheKey, SegmentCacheEntry> cachedSegments,
+      CacheKey topLevelCacheKey,
+      SolrCache<FacetCacheKey, Map<CacheKey, SegmentCacheEntry>> facetCache,
+      FacetCacheKey facetCacheKey,
+      boolean includesMissingCount,
+      QueryResultKey qKey,
+      boolean isBase,
+      DocSet docs,
+      CacheState cacheState) {
     super(p.fcontext);
     this.topLevelCounts = new int[numSlots];
     this.cachedSegments = cachedSegments;
-    final int initialBackingByteArraySize = numSlots; // probably ok as a rough initial size estimate
+    final int initialBackingByteArraySize =
+        numSlots; // probably ok as a rough initial size estimate
     this.dataOutput = new ByteBuffersDataOutput(initialBackingByteArraySize);
     this.topLevelCacheKey = topLevelCacheKey;
     this.facetCache = facetCache;
@@ -75,7 +107,8 @@ final class CacheUpdateCountSlotAcc extends CountSlotAcc implements CacheUpdater
     if (!isBase) {
       this.sweepCoordinator = null;
     } else {
-      SweepCountAccStruct struct = new SweepCountAccStruct(docs, isBase, this, qKey, cacheState, cachedSegments, this);
+      SweepCountAccStruct struct =
+          new SweepCountAccStruct(docs, isBase, this, qKey, cacheState, cachedSegments, this);
       this.sweepCoordinator = new SweepCoordinator(p, struct);
     }
   }
@@ -86,15 +119,17 @@ final class CacheUpdateCountSlotAcc extends CountSlotAcc implements CacheUpdater
   }
 
   /**
-   * Always populates the bucket with the current count for that slot. If the count is positive, or if
-   * <code>processEmpty==true</code>, then this method also populates the values from mapped "output" accumulators.
+   * Always populates the bucket with the current count for that slot. If the count is positive, or
+   * if <code>processEmpty==true</code>, then this method also populates the values from mapped
+   * "output" accumulators.
    *
    * @see SweepCoordinator#setSweepValues(SimpleOrderedMap, int)
    */
   @Override
   public void setValues(SimpleOrderedMap<Object> bucket, int slotNum) throws IOException {
     super.setValues(bucket, slotNum);
-    if (sweepCoordinator != null && (0 < getCount(slotNum) || fcontext.processor.freq.processEmpty)) {
+    if (sweepCoordinator != null
+        && (0 < getCount(slotNum) || fcontext.processor.freq.processEmpty)) {
       sweepCoordinator.setSweepValues(bucket, slotNum);
     }
   }
@@ -122,12 +157,14 @@ final class CacheUpdateCountSlotAcc extends CountSlotAcc implements CacheUpdater
       return;
     }
     dataOutput.reset();
-    cachedSegments.put(leafCacheKey, new SegmentCacheEntry(TermFacetCache.encodeCounts(leafCounts, dataOutput)));
+    cachedSegments.put(
+        leafCacheKey, new SegmentCacheEntry(TermFacetCache.encodeCounts(leafCounts, dataOutput)));
   }
 
   @Override
   public void updateTopLevel() {
-    cachedSegments.put(topLevelCacheKey, new SegmentCacheEntry(topLevelCounts, includesMissingCount));
+    cachedSegments.put(
+        topLevelCacheKey, new SegmentCacheEntry(topLevelCounts, includesMissingCount));
     facetCache.put(facetCacheKey, cachedSegments);
   }
 

@@ -31,9 +31,7 @@ import org.apache.solr.search.CacheRegenerator;
 import org.apache.solr.search.SolrCache;
 import org.apache.solr.search.SolrIndexSearcher;
 
-/**
- *
- */
+/** */
 public class TermFacetCacheRegenerator implements CacheRegenerator {
   private final Map<CacheKey, Set<CacheKey>> activeSegments;
 
@@ -43,7 +41,9 @@ public class TermFacetCacheRegenerator implements CacheRegenerator {
 
   @SuppressWarnings({"rawtypes", "unchecked"})
   @Override
-  public boolean regenerateItem(SolrIndexSearcher newSearcher, SolrCache nc, SolrCache oc, Object oldKey, Object oldVal) throws IOException {
+  public boolean regenerateItem(
+      SolrIndexSearcher newSearcher, SolrCache nc, SolrCache oc, Object oldKey, Object oldVal)
+      throws IOException {
     Set<CacheKey> segmentKeys;
     CacheKey topLevelKey = newSearcher.getIndexReader().getReaderCacheHelper().getKey();
     synchronized (activeSegments) {
@@ -58,7 +58,7 @@ public class TermFacetCacheRegenerator implements CacheRegenerator {
         activeSegments.put(topLevelKey, segmentKeys);
       }
     }
-    Map<CacheKey, SegmentCacheEntry> oldSegmentCache = (Map<CacheKey, SegmentCacheEntry>)oldVal;
+    Map<CacheKey, SegmentCacheEntry> oldSegmentCache = (Map<CacheKey, SegmentCacheEntry>) oldVal;
     Map<CacheKey, SegmentCacheEntry> newSegmentCache = new HashMap<>(segmentKeys.size());
     for (Entry<CacheKey, SegmentCacheEntry> e : oldSegmentCache.entrySet()) {
       CacheKey segmentKey = e.getKey();

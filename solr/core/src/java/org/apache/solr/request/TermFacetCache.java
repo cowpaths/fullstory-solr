@@ -22,14 +22,11 @@ import org.apache.lucene.store.ByteBuffersDataOutput;
 import org.apache.lucene.util.LongValues;
 import org.apache.solr.search.QueryResultKey;
 
-/**
- *
- */
+/** */
 public class TermFacetCache {
 
   public static final String NAME = "termFacetCache";
   public static int DEFAULT_THRESHOLD = 5000; // non-final to support setting by tests
-
 
   public static final class FacetCacheKey {
 
@@ -48,10 +45,10 @@ public class TermFacetCache {
 
     @Override
     public boolean equals(Object obj) {
-      FacetCacheKey other = (FacetCacheKey)obj;
-      return fieldName.equals(other.fieldName) && (qrk == null ? other.qrk == null : qrk.equals(other.qrk));
+      FacetCacheKey other = (FacetCacheKey) obj;
+      return fieldName.equals(other.fieldName)
+          && (qrk == null ? other.qrk == null : qrk.equals(other.qrk));
     }
-
   }
 
   public static final class SegmentCacheEntry {
@@ -71,34 +68,38 @@ public class TermFacetCache {
       this.topLevelCounts = topLevelCounts;
       this.hasMissingSlot = includesMissingCount;
     }
-
   }
 
   public static interface CacheUpdater {
     boolean incrementFromCachedSegment(LongValues toGlobal);
+
     void updateLeaf(int[] leafCounts);
+
     void updateTopLevel();
   }
 
-  public static final byte[] encodeCounts(int[] segCounts, ByteBuffersDataOutput cachedSegCountsBuilder) {
+  public static final byte[] encodeCounts(
+      int[] segCounts, ByteBuffersDataOutput cachedSegCountsBuilder) {
     try {
       for (int c : segCounts) {
         cachedSegCountsBuilder.writeVInt(c);
       }
     } catch (IOException ex) {
-      throw new RuntimeException(ByteBuffersDataOutput.class + " should not throw IOException in practice", ex);
+      throw new RuntimeException(
+          ByteBuffersDataOutput.class + " should not throw IOException in practice", ex);
     }
     return cachedSegCountsBuilder.toArrayCopy();
   }
 
-  public static void mergeCachedSegmentCounts(int[] counts, byte[] cachedSegCounts, LongValues ordMap) {
+  public static void mergeCachedSegmentCounts(
+      int[] counts, byte[] cachedSegCounts, LongValues ordMap) {
     ByteArrayDataInput segCounts = new ByteArrayDataInput(cachedSegCounts);
     if (!segCounts.eof()) {
       int ord = 0;
       int count = segCounts.readVInt();
       while (!segCounts.eof()) {
         if (count != 0) {
-          counts[ordMap == null ? ord : (int)ordMap.get(ord)] += count;
+          counts[ordMap == null ? ord : (int) ordMap.get(ord)] += count;
         }
         ord++;
         count = segCounts.readVInt();
@@ -107,5 +108,4 @@ public class TermFacetCache {
       counts[counts.length - 1] += count;
     }
   }
-
 }
