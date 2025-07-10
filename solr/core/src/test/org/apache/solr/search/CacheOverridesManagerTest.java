@@ -41,6 +41,65 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
     mockZkClient = Mockito.mock(SolrZkClient.class);
   }
 
+  public void testGetOverridesInvalidConfig() throws InterruptedException, KeeperException {
+    String jsonString =
+        "{\n"
+            + " legacyCloud: \"false\",\n"
+            + " cacheOverrides :\n"
+            + "   {\n"
+            + "     filterCache :  {\n"
+            + "       size: 9999\n"
+            + "     },\n"
+            + "     documentCache : {\n"
+            + "       size: 8888    \n"
+            + "     },\n"
+            + "     fs-cache : {\n"
+            + "       maxRamMB: 7777\n"
+            + "     }\n"
+            + "   }\n"
+            + " \n"
+            + "}";
+
+    // Stub a method to return a specific value
+    when(mockZkClient.getData(eq(ZkStateReader.CLUSTER_PROPS), any(), any(), anyBoolean()))
+        .thenReturn(jsonString.getBytes(Charset.defaultCharset()));
+
+    // not an array
+    CacheOverridesManager cacheOverridesManager = new CacheOverridesManager(mockZkClient);
+
+    List<Map<String, String>> overrides;
+    overrides = cacheOverridesManager.getOverrides("filterCache", newCore("dummyCollection"));
+    assertTrue(overrides.isEmpty());
+
+    jsonString =
+        "{\n"
+            + " legacyCloud: \"false\",\n"
+            + " cacheOverrides : [ \n"
+            + "   {\n"
+            + "     filterCache :  {\n"
+            + "       size: 9999\n"
+            + "     }\n"
+            + "   },\n"
+            + "   {\n"
+            + "     filterCache :  {\n"
+            + "       size: 12345\n"
+            + "     },\n"
+            + "     collections: \"104H4B\"\n"
+            + "   }\n"
+            + " ]\n"
+            + " \n"
+            + "}";
+    when(mockZkClient.getData(eq(ZkStateReader.CLUSTER_PROPS), any(), any(), anyBoolean()))
+        .thenReturn(jsonString.getBytes(Charset.defaultCharset()));
+
+    // second entry has invalid filter collections which the value should be an array instead of
+    // string
+    cacheOverridesManager = new CacheOverridesManager(mockZkClient);
+
+    overrides = cacheOverridesManager.getOverrides("filterCache", newCore("dummyCollection"));
+    assertTrue(overrides.isEmpty()); // reject everything if any entry is invalid
+  }
+
   @Test
   public void testGetOverrides() throws InterruptedException, KeeperException {
     String jsonString =
@@ -50,10 +109,10 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
             + "   {\n"
             + "     filterCache :  {\n"
             + "       size: 9999\n"
-            + "     }\n"
+            + "     },\n"
             + "     documentCache : {\n"
             + "       size: 8888    \n"
-            + "     }\n"
+            + "     },\n"
             + "     fs-cache : {\n"
             + "       maxRamMB: 7777\n"
             + "     }\n"
@@ -61,13 +120,13 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
             + "   {\n"
             + "     filterCache :  {\n"
             + "       size: 12345\n"
-            + "     }\n"
+            + "     },\n"
             + "     collections: [ \"104H4B\" ]\n"
             + "   },\n"
             + "   {\n"
             + "     filterCache :  {\n"
             + "       size: 22222\n"
-            + "     }\n"
+            + "     },\n"
             + "     collections: [ \"104H4B\" ],\n"
             + "     nodes: [ \"solr-c91-1:8986_solr\" ]\n"
             + "   }\n"
@@ -95,7 +154,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
     assertEquals("7777", overrides.get(0).get("maxRamMB"));
 
     overrides = cacheOverridesManager.getOverrides("unknown-cache", newCore("dummyCollection"));
-    assertNull(overrides);
+    assertTrue(overrides.isEmpty());
 
     overrides = cacheOverridesManager.getOverrides("filterCache", newCore("104H4B"));
     assertEquals(2, overrides.size());
@@ -119,7 +178,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
     assertEquals("22222", overrides.get(2).get("size"));
 
     overrides = cacheOverridesManager.getOverrides("unknown-cache", newCore("dummyCollection"));
-    assertNull(overrides);
+    assertTrue(overrides.isEmpty());
   }
 
   @Test
@@ -138,7 +197,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
 
     List<Map<String, String>> overrides;
     overrides = cacheOverridesManager.getOverrides("filterCache", newCore("dummy"));
-    assertNull(overrides);
+    assertTrue(overrides.isEmpty());
 
     // emulate new clusterprops.json in ZK
     String jsonString =
@@ -153,13 +212,13 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
             + "   {\n"
             + "     filterCache :  {\n"
             + "       size: 12345\n"
-            + "     }\n"
+            + "     },\n"
             + "     collections: [ \"104H4B\" ]\n"
             + "   },\n"
             + "   {\n"
             + "     filterCache :  {\n"
             + "       size: 22222\n"
-            + "     }\n"
+            + "     },\n"
             + "     collections: [ \"104H4B\" ],\n"
             + "     nodes: [ \"solr-c91-1:8986_solr\" ]\n"
             + "   }\n"
@@ -198,13 +257,13 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
             + "   {\n"
             + "     filterCache :  {\n"
             + "       size: 1111\n"
-            + "     }\n"
+            + "     },\n"
             + "     collections: [ \"104H4B\" ]\n"
             + "   },\n"
             + "   {\n"
             + "     filterCache :  {\n"
             + "       size: 2222\n"
-            + "     }\n"
+            + "     },\n"
             + "     collections: [ \"local\" ]\n"
             + "   }\n"
             + " ]\n"
@@ -222,7 +281,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
                 ZkStateReader.CLUSTER_PROPS));
 
     overrides = cacheOverridesManager.getOverrides("filterCache", newCore("dummy"));
-    assertNull(overrides);
+    assertTrue(overrides.isEmpty());
 
     overrides = cacheOverridesManager.getOverrides("filterCache", newCore("104H4B"));
     assertEquals(1, overrides.size());
@@ -244,7 +303,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
                 Watcher.Event.KeeperState.SyncConnected,
                 ZkStateReader.CLUSTER_PROPS));
     overrides = cacheOverridesManager.getOverrides("filterCache", newCore("104H4B"));
-    assertNull(overrides);
+    assertTrue(overrides.isEmpty());
 
     // emulate clusterprops.json deleted
     watcherRef
@@ -255,7 +314,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
                 Watcher.Event.KeeperState.SyncConnected,
                 ZkStateReader.CLUSTER_PROPS));
     overrides = cacheOverridesManager.getOverrides("filterCache", newCore("104H4B"));
-    assertNull(overrides);
+    assertTrue(overrides.isEmpty());
   }
 
   @Test
@@ -281,10 +340,10 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
             + "   {\n"
             + "     filterCache :  {\n"
             + "       size: 9999\n"
-            + "     }\n"
+            + "     },\n"
             + "     documentCache : {\n"
             + "       size: 8888    \n"
-            + "     }\n"
+            + "     },\n"
             + "     fs-cache : {\n"
             + "       maxRamMB: 7777\n"
             + "     }\n"
@@ -292,13 +351,13 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
             + "   {\n"
             + "     filterCache :  {\n"
             + "       size: 12345\n"
-            + "     }\n"
+            + "     },\n"
             + "     collections: [ \"104H4B\" ]\n"
             + "   },\n"
             + "   {\n"
             + "     filterCache :  {\n"
             + "       size: 22222\n"
-            + "     }\n"
+            + "     },\n"
             + "     collections: [ \"104H4B\" ],\n"
             + "     nodes: [ \"solr-c91-1:8986_solr\" ]\n"
             + "   }\n"

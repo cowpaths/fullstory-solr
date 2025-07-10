@@ -46,7 +46,7 @@ import org.slf4j.LoggerFactory;
  *    {
  *      filterCache :  {
  *        size: 9999
- *      }
+ *      },
  *      documentCache : {
  *        size: 9999
  *      }
@@ -57,7 +57,7 @@ import org.slf4j.LoggerFactory;
  *    {
  *      filterCache :  {
  *        size: 12345
- *      }
+ *      },
  *      collections: [ "104H4B" ]
  *    }
  *  ]
@@ -164,9 +164,16 @@ public class CacheOverridesManager {
           FilterEnum filterEnum = FilterEnum.fromKey(entry.getKey());
           if (filterEnum != null) { // a filter key, not an override
             Filter filter = getFilter(filterEnum, entry.getValue());
-            if (filter != null) {
-              filters.add(filter);
+            if (filter == null) {
+              log.warn(
+                  "Ignoring cache override updates. Invalid filter configuration for key '{}': {}",
+                  entry.getKey(),
+                  entry.getValue());
+              // do not proceed with any invalid filter, reject cacheOverridesContents for any
+              // invalid input
+              return;
             }
+            filters.add(filter);
           } else {
             Map<String, String> kvOverrides = new HashMap<>();
             String cacheName = entry.getKey();
@@ -237,10 +244,8 @@ public class CacheOverridesManager {
    */
   public CacheConfig applyOverrides(CacheConfig cacheConfig, String cacheName, SolrCore core) {
     List<Map<String, String>> overridesEntries = getOverrides(cacheName, core);
-    if (overridesEntries != null) {
-      for (Map<String, String> overrides : overridesEntries) {
-        cacheConfig = cacheConfig.withArgs(overrides);
-      }
+    for (Map<String, String> overrides : overridesEntries) {
+      cacheConfig = cacheConfig.withArgs(overrides);
     }
     return cacheConfig;
   }
@@ -248,14 +253,12 @@ public class CacheOverridesManager {
   List<Map<String, String>> getOverrides(String cacheName, SolrCore core) {
     List<CacheOverrides> overrides = overridesByCacheName.get(cacheName);
     if (overrides == null) {
-      return null;
+      return List.of();
     }
-    List<Map<String, String>> result =
-        overrides.stream()
-            .map(override -> override.getOverrides(core))
-            .filter(overridesMap -> overridesMap != null && !overridesMap.isEmpty())
-            .collect(Collectors.toList());
-    return result.isEmpty() ? null : result;
+    return overrides.stream()
+        .map(cacheOverrides -> cacheOverrides.getOverridesKvsByCore(core))
+        .filter(overridesMap -> overridesMap != null && !overridesMap.isEmpty())
+        .collect(Collectors.toList());
   }
 
   static class CacheOverrides {
@@ -267,7 +270,7 @@ public class CacheOverridesManager {
       this.filters = filters;
     }
 
-    public Map<String, String> getOverrides(SolrCore core) {
+    public Map<String, String> getOverridesKvsByCore(SolrCore core) {
       for (Filter filter : filters) {
         if (!filter.apply(core)) {
           return null; // filter did not match
