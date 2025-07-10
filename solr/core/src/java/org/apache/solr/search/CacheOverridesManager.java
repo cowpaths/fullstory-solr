@@ -1,14 +1,16 @@
 package org.apache.solr.search;
 
 import java.lang.invoke.MethodHandles;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.cloud.ZkStateReader;
 import org.apache.solr.common.util.Utils;
+import org.apache.solr.core.SolrCore;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
@@ -71,6 +73,31 @@ public class CacheOverridesManager {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private volatile Map<String, List<CacheOverrides>> overridesByCacheName = Map.of();
 
+  private enum FilterEnum {
+    COLLECTIONS("collections"),
+    NODES("nodes");
+
+    private final String key;
+    private static final Map<String, FilterEnum> keyToFilter;
+
+    static {
+      keyToFilter = new HashMap<>();
+      for (FilterEnum filter : FilterEnum.values()) {
+        keyToFilter.put(filter.key, filter);
+      }
+    }
+
+    FilterEnum(String key) {
+      this.key = key;
+    }
+
+    static FilterEnum fromKey(String key) {
+      return keyToFilter.get(key);
+    }
+  }
+
+  interface Filter extends Function<SolrCore, Boolean> {}
+
   public CacheOverridesManager(SolrZkClient zkClient) {
     byte[] clusterPropsBytes = null;
 
@@ -127,22 +154,35 @@ public class CacheOverridesManager {
       @SuppressWarnings("unchecked")
       List<Map<String, Object>> entries = (List<Map<String, Object>>) cacheOverridesContents;
       Map<String, List<CacheOverrides>> newOverridesByCacheName = new HashMap<>();
-      for (Map<String, Object> overridesMap : entries) {
-        List<String> collectionsFilter = (List<String>) overridesMap.get("collections");
 
+      for (Map<String, Object> overridesMap : entries) {
+        List<Filter> filters = new ArrayList<>();
+        Map<String, Map<String, String>> kvOverridesByCacheName = new HashMap<>();
+
+        // iterate entries to collect filters and override entries
         for (Map.Entry<String, Object> entry : overridesMap.entrySet()) {
-          if ("collections".equals(entry.getKey())) { // a special case for collection filter
-            continue;
+          FilterEnum filterEnum = FilterEnum.fromKey(entry.getKey());
+          if (filterEnum != null) { // a filter key, not an override
+            Filter filter = getFilter(filterEnum, entry.getValue());
+            if (filter != null) {
+              filters.add(filter);
+            }
+          } else {
+            Map<String, String> kvOverrides = new HashMap<>();
+            String cacheName = entry.getKey();
+            for (Map.Entry<String, Object> propertyKv :
+                ((Map<String, Object>) entry.getValue()).entrySet()) {
+              kvOverrides.put(propertyKv.getKey(), String.valueOf(propertyKv.getValue()));
+            }
+            kvOverridesByCacheName.put(cacheName, kvOverrides);
           }
-          String cacheName = entry.getKey();
-          Map<String, String> overrides = new HashMap<>();
-          for (Map.Entry<String, Object> propertyKv :
-              ((Map<String, Object>) entry.getValue()).entrySet()) {
-            overrides.put(propertyKv.getKey(), String.valueOf(propertyKv.getValue()));
-          }
+        }
+
+        for (Map.Entry<String, Map<String, String>> kvOverridesWithCacheName :
+            kvOverridesByCacheName.entrySet()) {
+          String cacheName = kvOverridesWithCacheName.getKey();
           CacheOverrides cacheOverrides =
-              new CacheOverrides(
-                  overrides, collectionsFilter == null ? null : Set.copyOf(collectionsFilter));
+              new CacheOverrides(kvOverridesWithCacheName.getValue(), filters);
           newOverridesByCacheName
               .computeIfAbsent(cacheName, k -> new java.util.ArrayList<>())
               .add(cacheOverrides);
@@ -161,16 +201,42 @@ public class CacheOverridesManager {
     }
   }
 
+  private static Filter getFilter(FilterEnum filterEnum, Object filterValue) {
+    switch (filterEnum) {
+      case COLLECTIONS:
+        if (filterValue instanceof List) {
+          @SuppressWarnings("unchecked")
+          List<String> collectionsFilter = (List<String>) filterValue;
+          return new CollectionFilter(collectionsFilter);
+        } else {
+          log.warn("Expected a list for collections filter, got: {}", filterValue);
+          return null; // invalid filter value
+        }
+      case NODES:
+        if (filterValue instanceof List) {
+          @SuppressWarnings("unchecked")
+          List<String> nodesFilter = (List<String>) filterValue;
+          return new NodeFilter(nodesFilter);
+        } else {
+          log.warn("Expected a list for nodes filter, got: {}", filterValue);
+          return null; // invalid filter value
+        }
+      default:
+        log.warn("Unknown filter type: {}", filterEnum);
+        return null; // unknown filter type
+    }
+  }
+
   /**
    * Applies the overrides to the given cache configuration.
    *
    * @param cacheConfig the existing cache config
    * @param cacheName the name of the cache to apply overrides for (filterCache, documentCache etc)
-   * @param collection the collection name of this cache
+   * @param core the solr core that holds the cache
    * @return existing config if no overrides otherwise a new config with overrides applied
    */
-  public CacheConfig applyOverrides(CacheConfig cacheConfig, String cacheName, String collection) {
-    List<Map<String, String>> overridesEntries = getOverrides(cacheName, collection);
+  public CacheConfig applyOverrides(CacheConfig cacheConfig, String cacheName, SolrCore core) {
+    List<Map<String, String>> overridesEntries = getOverrides(cacheName, core);
     if (overridesEntries != null) {
       for (Map<String, String> overrides : overridesEntries) {
         cacheConfig = cacheConfig.withArgs(overrides);
@@ -179,14 +245,14 @@ public class CacheOverridesManager {
     return cacheConfig;
   }
 
-  List<Map<String, String>> getOverrides(String cacheName, String collection) {
+  List<Map<String, String>> getOverrides(String cacheName, SolrCore core) {
     List<CacheOverrides> overrides = overridesByCacheName.get(cacheName);
     if (overrides == null) {
       return null;
     }
     List<Map<String, String>> result =
         overrides.stream()
-            .map(override -> override.getOverrides(collection))
+            .map(override -> override.getOverrides(core))
             .filter(overridesMap -> overridesMap != null && !overridesMap.isEmpty())
             .collect(Collectors.toList());
     return result.isEmpty() ? null : result;
@@ -194,29 +260,68 @@ public class CacheOverridesManager {
 
   static class CacheOverrides {
     private final Map<String, String> overrides;
-    private final Set<String> matchCollections;
+    private final List<Filter> filters;
 
-    public CacheOverrides(Map<String, String> overrides, Set<String> matchCollections) {
+    public CacheOverrides(Map<String, String> overrides, List<Filter> filters) {
       this.overrides = new HashMap<>(overrides);
-      this.matchCollections = matchCollections;
+      this.filters = filters;
     }
 
-    public Map<String, String> getOverrides(String collection) {
-      if (matchCollections == null || matchCollections.contains(collection)) {
-        return overrides;
-      } else {
-        return null;
+    public Map<String, String> getOverrides(SolrCore core) {
+      for (Filter filter : filters) {
+        if (!filter.apply(core)) {
+          return null; // filter did not match
+        }
       }
+      return overrides;
     }
 
     @Override
     public String toString() {
-      return "CacheOverrides{"
-          + "overrides="
-          + overrides
-          + ", matchCollections="
-          + matchCollections
-          + '}';
+      return "CacheOverrides{" + "overrides=" + overrides + ", filters=" + filters + '}';
+    }
+  }
+
+  private static class CollectionFilter implements Filter {
+    private final List<String> collections;
+
+    private CollectionFilter(List<String> collections) {
+      this.collections = collections;
+    }
+
+    @Override
+    public Boolean apply(SolrCore core) {
+      return collections.contains(core.getCoreDescriptor().getCollectionName());
+    }
+
+    @Override
+    public String toString() {
+      return "CollectionFilter{" + "collections=" + collections + '}';
+    }
+  }
+
+  private static class NodeFilter implements Filter {
+    private final List<String> nodes;
+
+    private NodeFilter(List<String> nodes) {
+      this.nodes = nodes;
+    }
+
+    @Override
+    public Boolean apply(SolrCore core) {
+      if (core.getCoreContainer().getZkController() == null) {
+        return false;
+      }
+      String node = core.getCoreContainer().getZkController().getNodeName();
+      if (node == null) {
+        return false; // no node name, cannot apply filter
+      }
+      return nodes.contains(node);
+    }
+
+    @Override
+    public String toString() {
+      return "NodeFilter{" + "nodes=" + nodes + '}';
     }
   }
 }
