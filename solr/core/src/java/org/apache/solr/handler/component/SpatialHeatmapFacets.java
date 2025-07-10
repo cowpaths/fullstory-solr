@@ -29,6 +29,7 @@ import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.search.DocSet;
 import org.apache.solr.search.facet.FacetHeatmap;
 import org.apache.solr.search.facet.FacetMerger;
+import org.apache.solr.search.facet.FacetModule;
 import org.apache.solr.search.facet.FacetRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,7 +53,7 @@ public class SpatialHeatmapFacets {
       String fieldKey, String fieldName, ResponseBuilder rb, SolrParams params, DocSet docSet)
       throws IOException {
     final FacetRequest facetRequest = createHeatmapRequest(fieldKey, fieldName, rb, params);
-    return (NamedList<Object>) facetRequest.process(rb.req, docSet);
+    return (NamedList<Object>) facetRequest.process(rb.req, FacetModule.getBaseFilters(rb), docSet);
   }
 
   private static FacetRequest createHeatmapRequest(

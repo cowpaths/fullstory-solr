@@ -19,6 +19,7 @@ package org.apache.solr.search.facet;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -27,11 +28,16 @@ import java.util.Set;
 import java.util.function.IntFunction;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanClause.Occur;
 import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.join.ScoreMode;
+import org.apache.lucene.search.join.ToChildBlockJoinQuery;
+import org.apache.lucene.search.join.ToParentBlockJoinQuery;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.handler.component.ResponseBuilder;
+import org.apache.solr.query.FilterQuery;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.request.SolrRequestInfo;
 import org.apache.solr.schema.SchemaField;
@@ -43,6 +49,7 @@ import org.apache.solr.search.QueryUtils;
 import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.search.SyntaxError;
 import org.apache.solr.search.facet.SlotAcc.SlotContext;
+import org.apache.solr.search.join.BlockJoinParentQParser;
 
 /** Base abstraction for a class that computes facets. This is fairly internal to the module. */
 public abstract class FacetProcessor<T extends FacetRequest> {
@@ -54,6 +61,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
   // TODO: do these need to be on the context to support recomputing during multi-select?
   DocSet filter; // additional filters specified by "filter"
 
+  List<Query> filterQs;
   LinkedHashMap<String, SlotAcc> accMap;
   SlotAcc[] accs;
   protected SlotAcc.CountSlotAcc countAcc;
@@ -74,8 +82,8 @@ public abstract class FacetProcessor<T extends FacetRequest> {
 
   private void evalFilters() throws IOException {
     if (freq.domain.filters == null || freq.domain.filters.isEmpty()) return;
-    this.filter =
-        fcontext.searcher.getDocSet(evalJSONFilterQueryStruct(fcontext, freq.domain.filters));
+    this.filterQs = evalJSONFilterQueryStruct(fcontext, freq.domain.filters);
+    this.filter = fcontext.searcher.getDocSet(this.filterQs);
   }
 
   private static List<Query> evalJSONFilterQueryStruct(FacetContext fcontext, List<Object> filters)
@@ -162,6 +170,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
               "'query' domain must not evaluate to an empty list of queries");
         }
         fcontext.base = fcontext.searcher.getDocSet(domainQs);
+        fcontext.baseFilters = domainQs.toArray(new Query[domainQs.size()]);
       } catch (SolrException e) {
         throw new SolrException(
             SolrException.ErrorCode.BAD_REQUEST,
@@ -187,6 +196,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
 
     if (this.filter != null && !appliedFilters) {
       fcontext.base = fcontext.base.intersection(filter);
+      fcontext.baseFilters = FacetContext.append(fcontext.baseFilters, filterQs);
     }
   }
 
@@ -222,6 +232,22 @@ public abstract class FacetProcessor<T extends FacetRequest> {
   private List<Query> getContextQueriesWithExclusions(Set<Query> excludeSet) {
     List<Query> qlist = new ArrayList<>();
 
+    if (fcontext.baseFilters != null) {
+      for (Query q : fcontext.baseFilters) {
+        if (!excludeSet.contains(q)) {
+          qlist.add(q);
+        }
+      }
+      // recompute the base domain
+      fcontext.base = fcontext.searcher.getDocSet(qlist);
+      fcontext.baseFilters = qlist.toArray(new Query[qlist.size()]);
+      return qlist;
+    } else if (true) {
+      //nocommit I think this block obviates the responsebuilder dependency? (see below)
+      //nocommit: this also fixes SOLR-9724 (excludeTags support in conjunction with facet domain changes)
+      throw new AssertionError();
+    }
+
     // TODO: somehow remove responsebuilder dependency
     ResponseBuilder rb = SolrRequestInfo.getRequestInfo().getResponseBuilder();
 
@@ -247,6 +273,9 @@ public abstract class FacetProcessor<T extends FacetRequest> {
       }
     }
 
+    // recompute the base domain
+    fcontext.base = fcontext.searcher.getDocSet(qlist);
+    fcontext.baseFilters = qlist.toArray(new Query[qlist.size()]);
     return qlist;
   }
 
@@ -256,6 +285,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
 
     final Query domainQuery = freq.domain.joinField.createDomainQuery(fcontext);
     fcontext.base = fcontext.searcher.getDocSet(domainQuery);
+    fcontext.baseFilters = new Query[]{domainQuery};
   }
 
   /** modifies the context base if there is a graph field domain change */
@@ -264,6 +294,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
 
     final Query domainQuery = freq.domain.graphField.createDomainQuery(fcontext);
     fcontext.base = fcontext.searcher.getDocSet(domainQuery);
+    fcontext.baseFilters = new Query[]{domainQuery};
   }
 
   // returns "true" if filters were applied to fcontext.base already
@@ -288,6 +319,8 @@ public abstract class FacetProcessor<T extends FacetRequest> {
     DocSet input = fcontext.base;
     DocSet result;
 
+    //nocommit: we're using this query for caching only; should we use for query execution as well?
+    final Query q;
     if (freq.domain.toChildren) {
       // If there are filters on this facet, then use them as acceptDocs when executing toChildren.
       // We need to remember to not redundantly re-apply these filters after.
@@ -297,13 +330,47 @@ public abstract class FacetProcessor<T extends FacetRequest> {
       } else {
         appliedFilters = true;
       }
+      ToChildBlockJoinQuery toChildQuery = new ToChildBlockJoinQuery(collapseFilters(fcontext.baseFilters), BlockJoinParentQParser.getCachedBitSetProducer(fcontext.req, parentQuery));
+      q = appliedFilters ? new FilteredToChildBlockJoinQuery(toChildQuery, filterQs) : toChildQuery;
       result = BlockJoin.toChildren(input, parents, acceptDocs, fcontext.qcontext);
     } else {
+      q = new ToParentBlockJoinQuery(collapseFilters(fcontext.baseFilters), BlockJoinParentQParser.getCachedBitSetProducer(fcontext.req, parentQuery), ScoreMode.None);
       result = BlockJoin.toParents(input, parents, fcontext.qcontext);
     }
 
     fcontext.base = result;
+    fcontext.baseFilters = new Query[] {q};
     return appliedFilters;
+  }
+
+  private static class FilteredToChildBlockJoinQuery extends FilterQuery {
+
+    private final Set<Query> filterQs;
+
+    public FilteredToChildBlockJoinQuery(Query q, List<Query> filterQs) {
+      super(q);
+      this.filterQs = new HashSet<>(filterQs);
+    }
+
+    @Override
+    public int hashCode() {
+      return q.hashCode() ^ filterQs.hashCode();
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (!(obj instanceof FilteredToChildBlockJoinQuery)) return false;
+      FilteredToChildBlockJoinQuery fq = (FilteredToChildBlockJoinQuery)obj;
+      return this.q.equals(fq.q) && this.filterQs.equals(fq.filterQs);
+    }
+  }
+
+  private static BooleanQuery collapseFilters(Query[] clauses) {
+    BooleanQuery.Builder b = new BooleanQuery.Builder();
+    for (Query q : clauses) {
+      b.add(q, Occur.FILTER);
+    }
+    return b.build();
   }
 
   protected void processStats(

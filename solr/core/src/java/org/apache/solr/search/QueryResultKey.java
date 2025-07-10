@@ -66,7 +66,7 @@ public final class QueryResultKey implements Accountable {
     this.minExactCount = minExactCount;
     this.distribStatsDisabled = distribStatsDisabled;
 
-    int h = query.hashCode();
+    int h = query == null ? 0 : query.hashCode();
 
     if (filters == null) {
       this.filters = null;
@@ -121,7 +121,7 @@ public final class QueryResultKey implements Accountable {
     // check for the thing most likely to be different (and the fastest things)
     // first.
     if (this.sfields.size() != other.sfields.size()) return false;
-    if (!this.query.equals(other.query)) return false;
+    if (!Objects.equals(this.query, other.query)) return false;
     if (!unorderedCompare(this.filters, other.filters)) return false;
     if (this.minExactCount != other.minExactCount) return false;
     if (this.distribStatsDisabled != other.distribStatsDisabled) return false;

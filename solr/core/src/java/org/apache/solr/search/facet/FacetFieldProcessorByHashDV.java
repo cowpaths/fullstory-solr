@@ -263,6 +263,7 @@ class FacetFieldProcessorByHashDV extends FacetFieldProcessor {
     return super.findTopSlots(
         table.numSlots(),
         table.cardinality(),
+        -1,
         slotNum -> calc.bitsToValue(table.vals[slotNum]), // getBucketValFromSlotNum
         val -> calc.formatValue(val)); // getFieldQueryVal
   }
