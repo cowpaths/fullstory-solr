@@ -379,7 +379,7 @@ public class RelatednessAgg extends AggValueSource {
      *     relatedness
      */
     @Override
-    public SKGSlotAcc registerSweepingAccs(SweepingCountSlotAcc baseSweepingAcc) {
+    public SKGSlotAcc registerSweepingAccs(SweepCoordinator baseSweepingAcc) {
       if (!this.agg.useSweep) {
         return this;
       } else {

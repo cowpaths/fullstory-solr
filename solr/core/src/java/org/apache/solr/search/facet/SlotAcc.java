@@ -623,14 +623,14 @@ public abstract class SlotAcc implements Closeable {
      * method).
      *
      * <p>If an implementing instance chooses to replace itself with another {@link SlotAcc}, it
-     * must call {@link SweepingCountSlotAcc#registerMapping(SlotAcc, SlotAcc)} on the specified
+     * must call {@link SweepCoordinator#registerMapping(SlotAcc, SlotAcc)} on the specified
      * baseSweepingAcc to notify it of the mapping from original SlotAcc to the SlotAcc that should
      * be used for purposes of read access. It is the responsibility of the specified {@link
      * SweepingCountSlotAcc} to ensure proper placement/accessibility of the SlotAcc to be used for
      * read access.
      *
      * <p>The replacement SlotAcc registered via {@link
-     * SweepingCountSlotAcc#registerMapping(SlotAcc, SlotAcc)} will be responsible for output via
+     * SweepCoordinator#registerMapping(SlotAcc, SlotAcc)} will be responsible for output via
      * its {@link SlotAcc#setValues(SimpleOrderedMap, int)} method. An implementer of this method
      * may register such a replacement, and also return a non-null SlotAcc to be used for normal
      * collection (via {@link FacetFieldProcessor#collectAcc}). In this case, the implementer should
@@ -759,7 +759,7 @@ public abstract class SlotAcc implements Closeable {
    * how to "collect" when doing the sweep.
    *
    * <p>This class may be used by instances of {@link SweepableSlotAcc} to register DocSet domains
-   * (via {@link SweepingCountSlotAcc#add}) over which to sweep-collect facet counts.
+   * (via {@link SweepCoordinator#add}) over which to sweep-collect facet counts.
    *
    * @see SweepableSlotAcc#registerSweepingAccs
    */
@@ -845,7 +845,7 @@ public abstract class SlotAcc implements Closeable {
      * <p>It is the responsibility of this method to insure that {@link FacetFieldProcessor}
      * references to fromAcc (other than those within {@link FacetFieldProcessor#collectAcc}, which
      * are set directly by the return value of {@link
-     * SweepableSlotAcc#registerSweepingAccs(SweepingCountSlotAcc)}) are replaced by references to
+     * SweepableSlotAcc#registerSweepingAccs(SweepCoordinator)}) are replaced by references to
      * toAcc. Such references would include, e.g., {@link FacetFieldProcessor#sortAcc}.
      *
      * <p>It is also this method's responsibility to insure that read access to toAcc (via toAcc's
@@ -855,7 +855,7 @@ public abstract class SlotAcc implements Closeable {
      * @param fromAcc - the {@link SlotAcc} to be replaced (this will normally be the caller of this
      *     method).
      * @param toAcc - the replacement {@link SlotAcc}
-     * @see SweepableSlotAcc#registerSweepingAccs(SweepingCountSlotAcc)
+     * @see SweepableSlotAcc#registerSweepingAccs(SweepCoordinator)
      */
     public void registerMapping(SlotAcc fromAcc, SlotAcc toAcc) {
       assert fromAcc.key.equals(toAcc.key);
@@ -867,21 +867,6 @@ public abstract class SlotAcc implements Closeable {
         @SuppressWarnings("unchecked")
         List<String> mappedDebug = (List<String>) debug.get("mapped");
         mappedDebug.add(fromAcc.toString());
-      }
-    }
-
-    /**
-     * Always populates the bucket with the current count for that slot. If the count is positive,
-     * or if <code>processEmpty==true</code>, then this method also populates the values from mapped
-     * "output" accumulators.
-     *
-     * @see #setSweepValues
-     */
-    @Override
-    public void setValues(SimpleOrderedMap<Object> bucket, int slotNum) throws IOException {
-      super.setValues(bucket, slotNum);
-      if (0 < getCount(slotNum) || fcontext.processor.freq.processEmpty) {
-        setSweepValues(bucket, slotNum);
       }
     }
 

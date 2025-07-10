@@ -17,7 +17,7 @@
 package org.apache.solr.search.facet;
 
 import static org.apache.solr.search.facet.FacetField.FacetMethod;
-import static org.apache.solr.search.facet.SlotAcc.SweepingCountSlotAcc.SWEEP_COLLECTION_DEBUG_KEY;
+import static org.apache.solr.search.facet.SlotAcc.SweepCoordinator.SWEEP_COLLECTION_DEBUG_KEY;
 
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;

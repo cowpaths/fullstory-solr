@@ -69,7 +69,7 @@ interface SweepCountAware {
    * (The return value of {@link SweepCountAware#registerCounts(SegCounter)} indicates to the
    * "driver" the max "active counts" index (for domains that contain the current doc).
    *
-   * <p>The driver then calls {@link #incrementCount(int, int, int)}, passing the term ord,
+   * <p>If per-segment, the driver then calls {@link SegCountPerSeg#incrementCount(int, int, int)}, passing the term ord,
    * increment amount (usually "1"), and the max "active counts" index returned from {@link
    * SweepCountAware#registerCounts(SegCounter)} in the first phase. The "max active counts index"
    * param is used as the limit (inclusive) to iterate count accumulation over each of the "active"
@@ -88,16 +88,6 @@ interface SweepCountAware {
      *     accumulation) to which to map the domain/CountSlotAcc indicated by "allIdx".
      */
     void map(int allIdx, int activeIdx);
-
-    /**
-     * Increments counts for active domains/CountSlotAccs.
-     *
-     * @param ord - the term ord (either global ord per-seg) for which to increment counts
-     * @param inc - the amount by which to increment the count for the specified term ord
-     * @param maxIdx - the max index (inclusive) of active domains/CountSlotAccs to be incremented
-     *     for the current doc
-     */
-    void incrementCount(int ord, int inc, int maxIdx);
   }
 
   /**
@@ -214,6 +204,14 @@ interface SweepCountAware {
       activeSegCounts[activeIdx] = allSegCounts[allIdx];
     }
 
+    /**
+     * Increments counts for active domains/CountSlotAccs.
+     *
+     * @param segOrd - the term ord (either global ord per-seg) for which to increment counts
+     * @param inc - the amount by which to increment the count for the specified term ord
+     * @param maxIdx - the max index (inclusive) of active domains/CountSlotAccs to be incremented
+     *     for the current doc
+     */
     public final void incrementCount(int segOrd, int inc, int maxIdx) {
       seen[segOrd] = true;
       int i = maxIdx;
