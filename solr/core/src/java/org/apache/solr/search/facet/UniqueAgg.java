@@ -34,6 +34,7 @@ import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.search.Query;
 import org.apache.solr.common.util.CollectionUtil;
 import org.apache.solr.common.util.SimpleOrderedMap;
+import org.apache.solr.request.TermFacetCache;
 import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.QueryResultKey;
 import org.apache.solr.search.SolrCache;
@@ -61,12 +62,13 @@ public class UniqueAgg extends StrAggValueSource {
     if (numSlots > 1) {
       return ret;
     }
-    final int ctxCountCacheDf =
-        ((FacetField) fcontext.processor.freq)
-            .countCacheDf; // safe cast b/c sweep only applicable for FacetField
-    if (ctxCountCacheDf == -1) {
+    // safe cast b/c unique agg only applicable for FacetQuery TODO: verify this??
+    FacetRequest freq = fcontext.processor.freq;
+    if (freq.countCacheDf < 0 || numDocs < freq.countCacheDf) {
       return ret;
     }
+    final int ctxCountCacheDf =
+        freq.countCacheDf == 0 ? TermFacetCache.DEFAULT_THRESHOLD : freq.countCacheDf;
     SolrCache<?, ?> facetFunctionCache = fcontext.searcher.getCache(FACET_FUNCTION_CACHE_NAME);
     if (facetFunctionCache == null) {
       return ret;

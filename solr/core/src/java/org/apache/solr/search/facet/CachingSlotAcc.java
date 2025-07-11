@@ -34,7 +34,10 @@ public class CachingSlotAcc extends SlotAcc {
 
   public static final String FACET_FUNCTION_CACHE_NAME = "facetFunctionCache";
 
-  private boolean failsafeNoCache = false;
+  private IntFunction<SlotContext> seenSlotContext;
+  private int seenSlot = INITIAL;
+  private int collectCount;
+
   private final SlotAcc backing;
   private final Function<Query, Object> cacheKeyFunction;
   private final SolrCache<Object, CacheFuture<SimpleOrderedMap<Object>>> cache;
@@ -64,16 +67,60 @@ public class CachingSlotAcc extends SlotAcc {
     backing.setNextReader(readerContext);
   }
 
+  private static final int FAILSAFE_NO_CACHE = -1;
+  private static final int CACHED = -2;
+  private static final int INITIAL = -3;
+  private static final int BULK = -4;
+
   @Override
   public void collect(int doc, int slot, IntFunction<SlotContext> slotContext) throws IOException {
-    // we assume that collection is via bulk DocSet, so disable if this method is called directly
-    failsafeNoCache = true;
+    switch (seenSlot) {
+      case CACHED:
+        return;
+      case FAILSAFE_NO_CACHE:
+        break;
+      case INITIAL:
+        final Object cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
+        boolean[] weComputed = new boolean[1];
+        cacheVal =
+            cache.computeIfAbsent(
+                cacheKey,
+                (k) -> {
+                  weComputed[0] = true;
+                  return new CacheFuture<>();
+                });
+        if (!weComputed[0] && awaitValAvailable()) {
+          seenSlot = CACHED;
+        } else {
+          seenSlot = slot;
+          seenSlotContext = slotContext;
+          collectCount = 1;
+        }
+        break;
+      case BULK:
+        throw new IllegalStateException();
+      default:
+        if (seenSlot != slot || seenSlotContext != slotContext) {
+          seenSlot = FAILSAFE_NO_CACHE;
+        }
+        collectCount++;
+        break;
+    }
     backing.collect(doc, slot, slotContext);
   }
 
   @Override
   public int collect(DocSet docs, int slot, IntFunction<SlotContext> slotContext)
       throws IOException {
+    switch (seenSlot) {
+      case BULK:
+        break;
+      case INITIAL:
+        seenSlot = BULK;
+        break;
+      default:
+        throw new IllegalStateException();
+    }
     // TODO: `DocSet.size()` can have considerable overhead. Evaluate whether we should do
     //  something different here.
     if (docs.size() < countCacheDf) {
@@ -89,38 +136,54 @@ public class CachingSlotAcc extends SlotAcc {
               weComputed[0] = true;
               return new CacheFuture<>(ret);
             });
-    if (!weComputed[0]) {
-      // wait a nominal amount of time to avoid doing the heavy work of `collect()`
-      // just because we haven't been patient enough to wait for the values to be
-      // serialized. Worst case we just have to double-collect.
-      SimpleOrderedMap<Object> entries;
-      try {
-        entries = cacheVal.vals.get(100, TimeUnit.MILLISECONDS);
-        assert entries != null;
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw new RuntimeException(e);
-      } catch (ExecutionException e) {
-        Throwable cause = e.getCause();
-        if (cause instanceof IOException) {
-          throw (IOException) cause;
-        }
-        throw new RuntimeException(e);
-      } catch (TimeoutException e) {
-        // we still have to compute ourselves since we don't yet have vals cached
-        int collectCount = backing.collect(docs, slot, slotContext);
-        assert collectCount == cacheVal.collectCount;
-      }
+    if (!weComputed[0] && !awaitValAvailable()) {
+      // we still have to compute ourselves since we don't yet have vals cached
+      int collectCount = backing.collect(docs, slot, slotContext);
+      assert crosscheck(collectCount, cacheVal.collectCount);
+      return collectCount;
     }
-    return cacheVal.collectCount;
+    // by this point, either _we_ did the computation (in which case result is
+    // obviously ready, or cached vals are ready, which happens after collectCount
+    // is ready; either way we're safe)
+    return cacheVal.collectCount.getNow(null);
+  }
+
+  private boolean awaitValAvailable() throws IOException {
+    // wait a nominal amount of time to avoid doing the heavy work of `collect()`
+    // just because we haven't been patient enough to wait for the values to be
+    // serialized. Worst case we just have to double-collect.
+    SimpleOrderedMap<Object> entries;
+    try {
+      entries = cacheVal.vals.get(100, TimeUnit.MILLISECONDS);
+      assert entries != null;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException(e);
+    } catch (ExecutionException e) {
+      Throwable cause = e.getCause();
+      if (cause instanceof IOException) {
+        throw (IOException) cause;
+      }
+      throw new RuntimeException(e);
+    } catch (TimeoutException e) {
+      return false;
+    }
+    return true;
+  }
+
+  private static boolean crosscheck(int collectCount, CompletableFuture<Integer> cached) {
+    Integer cachedVal = cached.getNow(null);
+    return cachedVal == null || cachedVal == collectCount;
   }
 
   private static final class CacheFuture<V> {
-    private final int collectCount;
+    private final CompletableFuture<Integer> collectCount = new CompletableFuture<>();
     private final CompletableFuture<V> vals = new CompletableFuture<>();
 
+    private CacheFuture() {}
+
     private CacheFuture(int ret) {
-      this.collectCount = ret;
+      this.collectCount.complete(ret);
     }
   }
 
@@ -138,9 +201,22 @@ public class CachingSlotAcc extends SlotAcc {
   public void setValues(SimpleOrderedMap<Object> bucket, int slotNum) throws IOException {
     backing.key = key; // this is set directly, so we cannot propagate via override :-/
     SimpleOrderedMap<Object> cached;
-    if (failsafeNoCache) {
-      backing.setValues(bucket, slotNum);
-    } else if ((cached = cacheVal.vals.getNow(null)) == null) {
+    switch (seenSlot) {
+      case INITIAL: // should never happen? but just bail if it does
+      case FAILSAFE_NO_CACHE:
+        backing.setValues(bucket, slotNum);
+        return;
+      case CACHED:
+      case BULK:
+        // nothing extra to do here
+        break;
+      default:
+        // non-bulk collection; update collectCount
+        cacheVal.collectCount.complete(collectCount);
+        break;
+    }
+
+    if ((cached = cacheVal.vals.getNow(null)) == null) {
       // we must actually set vals
       bucket = new TeeMap<>(bucket); // wrap
       backing.setValues(bucket, slotNum);
@@ -152,7 +228,7 @@ public class CachingSlotAcc extends SlotAcc {
 
   @Override
   public void reset() throws IOException {
-    failsafeNoCache = false;
+    seenSlot = INITIAL;
     cacheVal = null;
     backing.reset();
   }

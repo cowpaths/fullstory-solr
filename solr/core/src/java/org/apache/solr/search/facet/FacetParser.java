@@ -503,6 +503,7 @@ public abstract class FacetParser<T extends FacetRequest> {
         if (qstring == null) {
           qstring = getString(m, "query", null);
         }
+        facet.countCacheDf = (int) getLong(m, "countCacheDf", facet.countCacheDf);
 
         // OK to parse subs before we have parsed our own query?
         // as long as subs don't need to know about it.

@@ -386,9 +386,7 @@ public class RelatednessAgg extends AggValueSource {
       if (!this.agg.useSweep) {
         return this;
       } else {
-        final int ctxCountCacheDf =
-            ((FacetField) fcontext.processor.freq)
-                .countCacheDf; // safe cast b/c sweep only applicable for FacetField
+        final int ctxCountCacheDf = fcontext.processor.freq.countCacheDf;
         final ReadOnlyCountSlotAcc fgCount =
             baseSweepingAcc.add(
                 key + "!fg",
