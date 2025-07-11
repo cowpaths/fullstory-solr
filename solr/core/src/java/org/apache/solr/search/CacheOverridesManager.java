@@ -42,23 +42,23 @@ import org.slf4j.LoggerFactory;
  * <pre>
  *   {
  * ...
- *  cacheOverrides : [
+ *  "cacheOverrides" : [
  *    {
- *      filterCache :  {
- *        size: 9999
+ *      "filterCache" :  {
+ *        "size": 9999
  *      },
- *      documentCache : {
- *        size: 9999
+ *      "documentCache" : {
+ *        "size": 9999
  *      }
- *      fs-cache : {
- *        maxRamMB: 9999
+ *      "fs-cache" : {
+ *        "maxRamMB": 9999
  *      }
  *    },
  *    {
- *      filterCache :  {
- *        size: 12345
+ *      "filterCache" :  {
+ *        "size": 12345
  *      },
- *      collections: [ "104H4B" ]
+ *      "collections": [ "104H4B" ]
  *    }
  *  ]
  *
