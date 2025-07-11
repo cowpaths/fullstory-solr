@@ -55,21 +55,31 @@ public class UniqueAgg extends StrAggValueSource {
   @Override
   public SlotAcc createSlotAcc(FacetContext fcontext, long numDocs, int numSlots)
       throws IOException {
+    // TODO: most of this method would be applicable to caching of other facet
+    //  functions. Consider refactoring out into a common method.
     SlotAcc ret = createSlotAcc0(fcontext, numDocs, numSlots);
-    SolrCache<?, ?> facetFunctionCache;
-    if (numSlots > 1
-        || (facetFunctionCache = fcontext.searcher.getCache(FACET_FUNCTION_CACHE_NAME)) == null) {
+    if (numSlots > 1) {
       return ret;
-    } else {
-      List<Query> baseFilters = Arrays.asList(fcontext.baseFilters);
-      final String name = arg;
-      return new CachingSlotAcc(
-          ret,
-          (q) -> {
-            return new CacheKey(name, new QueryResultKey(q, baseFilters, null, 0));
-          },
-          facetFunctionCache);
     }
+    final int ctxCountCacheDf =
+        ((FacetField) fcontext.processor.freq)
+            .countCacheDf; // safe cast b/c sweep only applicable for FacetField
+    if (ctxCountCacheDf == -1) {
+      return ret;
+    }
+    SolrCache<?, ?> facetFunctionCache = fcontext.searcher.getCache(FACET_FUNCTION_CACHE_NAME);
+    if (facetFunctionCache == null) {
+      return ret;
+    }
+    List<Query> baseFilters = Arrays.asList(fcontext.baseFilters);
+    final String name = arg;
+    return new CachingSlotAcc(
+        ret,
+        (q) -> {
+          return new CacheKey(name, new QueryResultKey(q, baseFilters, null, 0));
+        },
+        facetFunctionCache,
+        ctxCountCacheDf);
   }
 
   private static final class CacheKey {

@@ -38,15 +38,20 @@ public class CachingSlotAcc extends SlotAcc {
   private final SlotAcc backing;
   private final Function<Query, Object> cacheKeyFunction;
   private final SolrCache<Object, CacheFuture<SimpleOrderedMap<Object>>> cache;
+  private final int countCacheDf;
   private CacheFuture<SimpleOrderedMap<Object>> cacheVal;
 
   @SuppressWarnings("unchecked")
   public CachingSlotAcc(
-      SlotAcc backing, Function<Query, Object> cacheKeyFunction, SolrCache<?, ?> cache) {
+      SlotAcc backing,
+      Function<Query, Object> cacheKeyFunction,
+      SolrCache<?, ?> cache,
+      int countCacheDf) {
     super(backing.fcontext);
     this.backing = backing;
     this.cacheKeyFunction = cacheKeyFunction;
     this.cache = (SolrCache<Object, CacheFuture<SimpleOrderedMap<Object>>>) cache;
+    this.countCacheDf = countCacheDf;
   }
 
   @Override
@@ -69,6 +74,11 @@ public class CachingSlotAcc extends SlotAcc {
   @Override
   public int collect(DocSet docs, int slot, IntFunction<SlotContext> slotContext)
       throws IOException {
+    // TODO: `DocSet.size()` can have considerable overhead. Evaluate whether we should do
+    //  something different here.
+    if (docs.size() < countCacheDf) {
+      return backing.collect(docs, slot, slotContext);
+    }
     final Object cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
     boolean[] weComputed = new boolean[1];
     cacheVal =
