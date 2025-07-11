@@ -4505,6 +4505,50 @@ public class TestJsonFacets extends SolrTestCaseHS {
         // 5 bucket, on each shard
         assertEqualsAndReset(numShardsWithData * 5, DebugAgg.Acc.collectDocSets);
       }
+
+      // Below is a very hacky way to explicitly ensure that `unique()` caching are exercised.
+      // We'll want to fix this and get proper testing.
+      String common2 = common.replace("sum(", "unique(");
+      for (int i = 0; i < 3; i++) {
+        for (String s : sorts) {
+          client.testJQ(
+              params(
+                  "q",
+                  "*:*",
+                  "rows",
+                  "0",
+                  "json.facet",
+                  "{ foo:{ "
+                      + common2
+                      + ", limit:5, overrequest:0, "
+                      + "          prelim_sort:'count desc', sort:'"
+                      + s
+                      + "' } }"),
+              "facets=={ 'count':420, "
+                  + "  'foo':{ 'buckets':["
+                  + "    { val:foo_16, count:32, "
+                  + yz
+                  + "x:1},"
+                  + "    { val:foo_17, count:34, "
+                  + yz
+                  + "x:1},"
+                  + "    { val:foo_18, count:36, "
+                  + yz
+                  + "x:1},"
+                  + "    { val:foo_19, count:38, "
+                  + yz
+                  + "x:1},"
+                  + "    { val:foo_20, count:40, "
+                  + yz
+                  + "x:1},"
+                  + "] } }");
+          // Neither prelim_sort nor sort should need 'sum(bar_i)' to be computed for every doc
+          // only the chosen buckets should be collected (as a set) once per node...
+          assertEqualsAndReset(0, DebugAgg.Acc.collectDocs);
+          // 5 bucket, on each shard
+          assertEqualsAndReset(numShardsWithData * 5, DebugAgg.Acc.collectDocSets);
+        }
+      }
     }
   }
 

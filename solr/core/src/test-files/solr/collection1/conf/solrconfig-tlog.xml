@@ -143,6 +143,10 @@
            initialSize="200"
            autowarmCount="200"
            regenerator="solr.request.TermFacetCacheRegenerator" />
+    <cache name="facetFunctionCache"
+           enabled="${tests.termFacetCache.enabled:false}"
+           class="solr.CaffeineCache"
+           size="200" />
   </query>
 
   <initParams path="/select">

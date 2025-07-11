@@ -31,6 +31,7 @@ import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.index.SortedNumericDocValues;
+import org.apache.lucene.search.Query;
 import org.apache.solr.common.util.CollectionUtil;
 import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.schema.SchemaField;
@@ -60,12 +61,13 @@ public class UniqueAgg extends StrAggValueSource {
         || (facetFunctionCache = fcontext.searcher.getCache(FACET_FUNCTION_CACHE_NAME)) == null) {
       return ret;
     } else {
+      List<Query> baseFilters = Arrays.asList(fcontext.baseFilters);
+      final String name = arg;
       return new CachingSlotAcc(
           ret,
-          new CacheKey(
-              arg,
-              new QueryResultKey(
-                  fcontext.getFilter(), Arrays.asList(fcontext.baseFilters), null, 0)),
+          (q) -> {
+            return new CacheKey(name, new QueryResultKey(q, baseFilters, null, 0));
+          },
           facetFunctionCache);
     }
   }

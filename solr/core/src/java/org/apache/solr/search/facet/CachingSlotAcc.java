@@ -22,8 +22,10 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Function;
 import java.util.function.IntFunction;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.search.Query;
 import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.search.DocSet;
 import org.apache.solr.search.SolrCache;
@@ -32,16 +34,18 @@ public class CachingSlotAcc extends SlotAcc {
 
   public static final String FACET_FUNCTION_CACHE_NAME = "facetFunctionCache";
 
+  private boolean failsafeNoCache = false;
   private final SlotAcc backing;
-  private final Object key;
+  private final Function<Query, Object> cacheKeyFunction;
   private final SolrCache<Object, CacheFuture<SimpleOrderedMap<Object>>> cache;
-  private CacheFuture<SimpleOrderedMap<Object>> cacheFuture;
+  private CacheFuture<SimpleOrderedMap<Object>> cacheVal;
 
   @SuppressWarnings("unchecked")
-  public CachingSlotAcc(SlotAcc backing, Object key, SolrCache<?, ?> cache) {
+  public CachingSlotAcc(
+      SlotAcc backing, Function<Query, Object> cacheKeyFunction, SolrCache<?, ?> cache) {
     super(backing.fcontext);
     this.backing = backing;
-    this.key = key;
+    this.cacheKeyFunction = cacheKeyFunction;
     this.cache = (SolrCache<Object, CacheFuture<SimpleOrderedMap<Object>>>) cache;
   }
 
@@ -57,38 +61,56 @@ public class CachingSlotAcc extends SlotAcc {
 
   @Override
   public void collect(int doc, int slot, IntFunction<SlotContext> slotContext) throws IOException {
+    // we assume that collection is via bulk DocSet, so disable if this method is called directly
+    failsafeNoCache = true;
     backing.collect(doc, slot, slotContext);
   }
 
   @Override
   public int collect(DocSet docs, int slot, IntFunction<SlotContext> slotContext)
       throws IOException {
-    cacheFuture =
+    final Object cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
+    boolean[] weComputed = new boolean[1];
+    cacheVal =
         cache.computeIfAbsent(
-            key,
+            cacheKey,
             (k) -> {
               int ret = backing.collect(docs, slot, slotContext);
-              SimpleOrderedMap<Object> vals = new SimpleOrderedMap<>();
-              backing.setValues(vals, 0);
-              return new CacheFuture<>(ret, vals, backing);
+              weComputed[0] = true;
+              return new CacheFuture<>(ret);
             });
-    return cacheFuture.ret;
+    if (!weComputed[0]) {
+      // wait a nominal amount of time to avoid doing the heavy work of `collect()`
+      // just because we haven't been patient enough to wait for the values to be
+      // serialized. Worst case we just have to double-collect.
+      SimpleOrderedMap<Object> entries;
+      try {
+        entries = cacheVal.vals.get(100, TimeUnit.MILLISECONDS);
+        assert entries != null;
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new RuntimeException(e);
+      } catch (ExecutionException e) {
+        Throwable cause = e.getCause();
+        if (cause instanceof IOException) {
+          throw (IOException) cause;
+        }
+        throw new RuntimeException(e);
+      } catch (TimeoutException e) {
+        // we still have to compute ourselves since we don't yet have vals cached
+        int collectCount = backing.collect(docs, slot, slotContext);
+        assert collectCount == cacheVal.collectCount;
+      }
+    }
+    return cacheVal.collectCount;
   }
 
   private static final class CacheFuture<V> {
-    private final int ret;
-    private final WeakReference<SlotAcc> backing;
+    private final int collectCount;
     private final CompletableFuture<V> vals = new CompletableFuture<>();
 
-    private CacheFuture(int ret, SlotAcc backing) {
-      this.ret = ret;
-      this.backing = new WeakReference<>(backing);
-    }
-
-    private CacheFuture(int ret, V vals, SlotAcc backing) {
-      this.ret = ret;
-      this.backing = new WeakReference<>(backing);
-      this.vals.complete(vals);
+    private CacheFuture(int ret) {
+      this.collectCount = ret;
     }
   }
 
@@ -104,53 +126,24 @@ public class CachingSlotAcc extends SlotAcc {
 
   @Override
   public void setValues(SimpleOrderedMap<Object> bucket, int slotNum) throws IOException {
-    SlotAcc activeSlotAcc = cacheFuture.backing.get();
-    if (activeSlotAcc == backing) {
-      // we set values
-      TeeMap<Object> teeBucket = new TeeMap<>(bucket);
-      backing.setValues(teeBucket, slotNum);
-      // TODO: remove below if proactive setting works as expected
-      // cacheFuture.vals.complete(teeBucket);
+    backing.key = key; // this is set directly, so we cannot propagate via override :-/
+    SimpleOrderedMap<Object> cached;
+    if (failsafeNoCache) {
+      backing.setValues(bucket, slotNum);
+    } else if ((cached = cacheVal.vals.getNow(null)) == null) {
+      // we must actually set vals
+      bucket = new TeeMap<>(bucket); // wrap
+      backing.setValues(bucket, slotNum);
+      cacheVal.vals.complete(bucket);
     } else {
-      SimpleOrderedMap<Object> vals = cacheFuture.vals.getNow(null);
-      if (vals == null) {
-        if (activeSlotAcc != null) {
-          SimpleOrderedMap<Object> directSetValues = new SimpleOrderedMap<>();
-          activeSlotAcc.setValues(directSetValues, slotNum);
-          vals = cacheFuture.vals.getNow(null);
-          if (vals == null) {
-            // TODO: if an exception is thrown in the computing thread before completing
-            //  `cacheFuture.vals`, then `entries` being null here does not necessarily
-            //  indicate (as it normally would) that we are safe to use `directSetValues`.
-            //  Perhaps we should _always_ do `vals.get`? Really the only safe way to do
-            //  this is to proactively call `setValues()` within `collect()`.
-            //  Have done this (proactive) for now; assuming that works, we can simplify
-            //  this method considerably.
-            vals = directSetValues;
-          }
-        } else {
-          try {
-            vals = cacheFuture.vals.get(10, TimeUnit.SECONDS);
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException(e);
-          } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof IOException) {
-              throw (IOException) cause;
-            }
-            throw new RuntimeException(e);
-          } catch (TimeoutException e) {
-            throw new RuntimeException(e);
-          }
-        }
-      }
-      vals.forEach(bucket::add);
+      bucket.addAll(cached);
     }
   }
 
   @Override
   public void reset() throws IOException {
+    failsafeNoCache = false;
+    cacheVal = null;
     backing.reset();
   }
 
