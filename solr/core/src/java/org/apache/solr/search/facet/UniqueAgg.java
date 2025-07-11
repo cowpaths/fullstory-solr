@@ -16,12 +16,16 @@
  */
 package org.apache.solr.search.facet;
 
+import static org.apache.solr.search.facet.CachingSlotAcc.FACET_FUNCTION_CACHE_NAME;
+
 import com.carrotsearch.hppc.LongHashSet;
 import com.carrotsearch.hppc.LongSet;
 import com.carrotsearch.hppc.cursors.LongCursor;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.LeafReaderContext;
@@ -30,6 +34,8 @@ import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.solr.common.util.CollectionUtil;
 import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.schema.SchemaField;
+import org.apache.solr.search.QueryResultKey;
+import org.apache.solr.search.SolrCache;
 
 public class UniqueAgg extends StrAggValueSource {
   public static final String UNIQUE = "unique";
@@ -47,6 +53,49 @@ public class UniqueAgg extends StrAggValueSource {
 
   @Override
   public SlotAcc createSlotAcc(FacetContext fcontext, long numDocs, int numSlots)
+      throws IOException {
+    SlotAcc ret = createSlotAcc0(fcontext, numDocs, numSlots);
+    SolrCache<?, ?> facetFunctionCache;
+    if (numSlots > 1
+        || (facetFunctionCache = fcontext.searcher.getCache(FACET_FUNCTION_CACHE_NAME)) == null) {
+      return ret;
+    } else {
+      return new CachingSlotAcc(
+          ret,
+          new CacheKey(
+              arg,
+              new QueryResultKey(
+                  fcontext.getFilter(), Arrays.asList(fcontext.baseFilters), null, 0)),
+          facetFunctionCache);
+    }
+  }
+
+  private static final class CacheKey {
+    private static final int CLASS_HASH = CacheKey.class.hashCode();
+    private final String field;
+    private final QueryResultKey domain;
+
+    private CacheKey(String field, QueryResultKey domain) {
+      this.field = field;
+      this.domain = domain;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+      CacheKey cacheKey = (CacheKey) o;
+      return field.equals(cacheKey.field) && Objects.equals(domain, cacheKey.domain);
+    }
+
+    @Override
+    public int hashCode() {
+      int hash = CLASS_HASH ^ field.hashCode();
+      return domain == null ? hash : hash ^ domain.hashCode();
+    }
+  }
+
+  public SlotAcc createSlotAcc0(FacetContext fcontext, long numDocs, int numSlots)
       throws IOException {
     SchemaField sf = fcontext.qcontext.searcher().getSchema().getField(getArg());
     if (sf.multiValued() || sf.getType().multiValuedFieldCache()) {

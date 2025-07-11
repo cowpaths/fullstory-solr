@@ -30,13 +30,15 @@ import org.apache.solr.search.SolrCache;
 
 public class CachingSlotAcc extends SlotAcc {
 
+  public static final String FACET_FUNCTION_CACHE_NAME = "facetFunctionCache";
+
   private final SlotAcc backing;
   private final Object key;
   private final SolrCache<Object, CacheFuture<SimpleOrderedMap<Object>>> cache;
   private CacheFuture<SimpleOrderedMap<Object>> cacheFuture;
 
   @SuppressWarnings("unchecked")
-  public CachingSlotAcc(SlotAcc backing, Object key, SolrCache<Object, ?> cache) {
+  public CachingSlotAcc(SlotAcc backing, Object key, SolrCache<?, ?> cache) {
     super(backing.fcontext);
     this.backing = backing;
     this.key = key;
