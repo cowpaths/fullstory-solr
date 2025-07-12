@@ -313,7 +313,7 @@ class FacetFieldProcessorByEnumTermsStream extends FacetFieldProcessor implement
                 while ((docid = sub.postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
                   if (fastForRandomSet.get(docid + base)) {
                     c++;
-                    collect(docid, 0, slotContext);
+                    collect(accs, docid, 0, slotContext);
                   }
                 }
               }
@@ -329,7 +329,7 @@ class FacetFieldProcessorByEnumTermsStream extends FacetFieldProcessor implement
               while ((docid = postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
                 if (fastForRandomSet.get(docid)) {
                   c++;
-                  collect(docid, 0, slotContext);
+                  collect(accs, docid, 0, slotContext);
                 }
               }
             }

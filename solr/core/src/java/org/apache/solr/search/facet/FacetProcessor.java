@@ -432,7 +432,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
 
   protected long collect(DocSet docs, int slot, IntFunction<SlotContext> slotContext)
       throws IOException {
-    long count = 0;
+    long count = -1;
     SolrIndexSearcher searcher = fcontext.searcher;
 
     if (0 == docs.size()) {
@@ -444,9 +444,30 @@ public abstract class FacetProcessor<T extends FacetRequest> {
           acc.collect(docs, slot, slotContext); // NOT per-seg collectors
         }
       }
-      return count;
+      return 0;
     }
 
+    List<SlotAcc> uncached = new ArrayList<>();
+    for (SlotAcc acc : accs) {
+      if (acc instanceof CachingSlotAcc) {
+        int accCount = ((CachingSlotAcc) acc).isCached(docs, slot, slotContext);
+        if (accCount == -1) {
+          uncached.add(acc);
+        } else {
+          if (count == -1) {
+            count = accCount;
+          } else if (count != accCount) {
+            throw new RuntimeException("count mismatch; " + count + " != " + accCount);
+          }
+        }
+      } else {
+        uncached.add(acc);
+      }
+    }
+    if (uncached.isEmpty()) {
+      return count;
+    }
+    SlotAcc[] uncachedAccs = uncached.toArray(new SlotAcc[0]);
     final List<LeafReaderContext> leaves = searcher.getIndexReader().leaves();
     final Iterator<LeafReaderContext> ctxIt = leaves.iterator();
     LeafReaderContext ctx = null;
@@ -470,12 +491,13 @@ public abstract class FacetProcessor<T extends FacetRequest> {
         setNextReader(ctx);
       }
       count++;
-      collect(doc - segBase, slot, slotContext); // per-seg collectors
+      collect(uncachedAccs, doc - segBase, slot, slotContext); // per-seg collectors
     }
     return count;
   }
 
-  void collect(int segDoc, int slot, IntFunction<SlotContext> slotContext) throws IOException {
+  void collect(SlotAcc[] accs, int segDoc, int slot, IntFunction<SlotContext> slotContext)
+      throws IOException {
     if (accs != null) {
       for (SlotAcc acc : accs) {
         acc.collect(segDoc, slot, slotContext);

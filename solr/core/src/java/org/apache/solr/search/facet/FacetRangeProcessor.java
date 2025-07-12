@@ -860,7 +860,7 @@ class FacetRangeProcessor extends FacetProcessor<FacetRange> {
     FacetRangeIntervalTree.Accumulator accumulator =
         (int slot, int doc, int localDoc) -> {
           countAcc.incrementCount(slot, 1);
-          collect(localDoc, slot, getSlotContext);
+          collect(accs, localDoc, slot, getSlotContext);
           if (setBuilders != null) {
             DocSetBuilder setBuilder = setBuilders[slot];
             if (setBuilder == null) {

@@ -72,6 +72,35 @@ public class CachingSlotAcc extends SlotAcc {
   private static final int INITIAL = -3;
   private static final int BULK = -4;
 
+  public int isCached(DocSet docs, int slot, IntFunction<SlotContext> slotContext)
+      throws IOException {
+    if (seenSlot != INITIAL) {
+      throw new IllegalStateException();
+    }
+    if (docs.size() < countCacheDf) {
+      seenSlot = FAILSAFE_NO_CACHE;
+      return -1;
+    }
+    final Object cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
+    boolean[] weComputed = new boolean[1];
+    cacheVal =
+        cache.computeIfAbsent(
+            cacheKey,
+            (k) -> {
+              weComputed[0] = true;
+              return new CacheFuture<>();
+            });
+    if (!weComputed[0] && valAvailable()) {
+      seenSlot = CACHED;
+      return cacheVal.collectCount.getNow(null);
+    } else {
+      seenSlot = slot;
+      seenSlotContext = slotContext;
+      collectCount = 0;
+      return -1;
+    }
+  }
+
   @Override
   public void collect(int doc, int slot, IntFunction<SlotContext> slotContext) throws IOException {
     switch (seenSlot) {
@@ -89,7 +118,7 @@ public class CachingSlotAcc extends SlotAcc {
                   weComputed[0] = true;
                   return new CacheFuture<>();
                 });
-        if (!weComputed[0] && awaitValAvailable()) {
+        if (!weComputed[0] && valAvailable()) {
           seenSlot = CACHED;
         } else {
           seenSlot = slot;
@@ -136,7 +165,7 @@ public class CachingSlotAcc extends SlotAcc {
               weComputed[0] = true;
               return new CacheFuture<>(ret);
             });
-    if (!weComputed[0] && !awaitValAvailable()) {
+    if (!weComputed[0] && !valAvailable()) {
       // we still have to compute ourselves since we don't yet have vals cached
       int collectCount = backing.collect(docs, slot, slotContext);
       assert crosscheck(collectCount, cacheVal.collectCount);
@@ -148,7 +177,12 @@ public class CachingSlotAcc extends SlotAcc {
     return cacheVal.collectCount.getNow(null);
   }
 
-  private boolean awaitValAvailable() throws IOException {
+  private boolean valAvailable() throws IOException {
+    if (cacheVal.collectCount.getNow(null) == null) {
+      // if we don't even have the collect count yet, we could be waiting a
+      // long time, so don't bother.
+      return false;
+    }
     // wait a nominal amount of time to avoid doing the heavy work of `collect()`
     // just because we haven't been patient enough to wait for the values to be
     // serialized. Worst case we just have to double-collect.
@@ -228,6 +262,7 @@ public class CachingSlotAcc extends SlotAcc {
 
   @Override
   public void reset() throws IOException {
+    collectCount = 0;
     seenSlot = INITIAL;
     cacheVal = null;
     backing.reset();
