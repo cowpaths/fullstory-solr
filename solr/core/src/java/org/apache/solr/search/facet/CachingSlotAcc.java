@@ -48,11 +48,11 @@ public class CachingSlotAcc extends SlotAcc {
 
   private final SlotAcc backing;
   private final Function<Query, SlotCacheKey> cacheKeyFunction;
-  private final SolrCache<SlotCacheKey, CacheFuture<SimpleOrderedMap<Object>>> cache;
+  private final SolrCache<SlotCacheKey, CacheFuture<TeeMap<Object>>> cache;
   private final int funcCacheDf;
-  private CacheFuture<SimpleOrderedMap<Object>> cacheVal;
+  private CacheFuture<TeeMap<Object>>[] cacheVal;
 
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings({"unchecked", "rawtypes"})
   public CachingSlotAcc(
       SlotAcc backing,
       Function<Query, SlotCacheKey> cacheKeyFunction,
@@ -61,8 +61,9 @@ public class CachingSlotAcc extends SlotAcc {
     super(backing.fcontext);
     this.backing = backing;
     this.cacheKeyFunction = cacheKeyFunction;
-    this.cache = (SolrCache<SlotCacheKey, CacheFuture<SimpleOrderedMap<Object>>>) cache;
+    this.cache = (SolrCache<SlotCacheKey, CacheFuture<TeeMap<Object>>>) cache;
     this.funcCacheDf = funcCacheDf;
+    this.cacheVal = new CacheFuture[1];
   }
 
   @Override
@@ -91,16 +92,16 @@ public class CachingSlotAcc extends SlotAcc {
     }
     final SlotCacheKey cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
     boolean[] weComputed = new boolean[1];
-    cacheVal =
+    cacheVal[slot] =
         cache.computeIfAbsent(
             cacheKey,
             (k) -> {
               weComputed[0] = true;
               return new CacheFuture<>(k.valueRamUsageEstimate(), k.mapSizeEstimate());
             });
-    if (!weComputed[0] && valAvailable()) {
+    if (!weComputed[0] && valAvailable(cacheVal[slot])) {
       seenSlot = CACHED;
-      return cacheVal.collectCount.getNow(null);
+      return cacheVal[slot].collectCount.getNow(null);
     } else {
       seenSlot = slot;
       seenSlotContext = slotContext;
@@ -120,14 +121,14 @@ public class CachingSlotAcc extends SlotAcc {
         final SlotCacheKey cacheKey =
             cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
         boolean[] weComputed = new boolean[1];
-        cacheVal =
+        cacheVal[slot] =
             cache.computeIfAbsent(
                 cacheKey,
                 (k) -> {
                   weComputed[0] = true;
                   return new CacheFuture<>(k.valueRamUsageEstimate(), k.mapSizeEstimate());
                 });
-        if (!weComputed[0] && valAvailable()) {
+        if (!weComputed[0] && valAvailable(cacheVal[slot])) {
           seenSlot = CACHED;
         } else {
           seenSlot = slot;
@@ -166,7 +167,7 @@ public class CachingSlotAcc extends SlotAcc {
     }
     final SlotCacheKey cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
     boolean[] weComputed = new boolean[1];
-    cacheVal =
+    cacheVal[slot] =
         cache.computeIfAbsent(
             cacheKey,
             (k) -> {
@@ -174,19 +175,19 @@ public class CachingSlotAcc extends SlotAcc {
               weComputed[0] = true;
               return new CacheFuture<>(ret, k.valueRamUsageEstimate(), k.mapSizeEstimate());
             });
-    if (!weComputed[0] && !valAvailable()) {
+    if (!weComputed[0] && !valAvailable(cacheVal[slot])) {
       // we still have to compute ourselves since we don't yet have vals cached
       int collectCount = backing.collect(docs, slot, slotContext);
-      assert crosscheck(collectCount, cacheVal.collectCount);
+      assert crosscheck(collectCount, cacheVal[slot].collectCount);
       return collectCount;
     }
     // by this point, either _we_ did the computation (in which case result is
     // obviously ready, or cached vals are ready, which happens after collectCount
     // is ready; either way we're safe)
-    return cacheVal.collectCount.getNow(null);
+    return cacheVal[slot].collectCount.getNow(null);
   }
 
-  private boolean valAvailable() throws IOException {
+  private boolean valAvailable(CacheFuture<TeeMap<Object>> cacheVal) throws IOException {
     if (cacheVal.collectCount.getNow(null) == null) {
       // if we don't even have the collect count yet, we could be waiting a
       // long time, so don't bother.
@@ -246,9 +247,56 @@ public class CachingSlotAcc extends SlotAcc {
     }
   }
 
+  public interface SlotComparable {
+    boolean cached(int slot, int[] comps);
+
+    boolean cached(int slot, double[] comps);
+
+    boolean cached(int slot, long[] comps);
+  }
+
+  private final SlotComparable compFunc =
+      new SlotComparable() {
+        @Override
+        public boolean cached(int slot, int[] comps) {
+          CacheFuture<TeeMap<Object>> cv = cacheVal[slot];
+          TeeMap<Object> tm;
+          if (cv == null || (tm = cv.vals.getNow(null)) == null) {
+            return false;
+          } else {
+            comps[slot] = ((Number) tm.comp).intValue();
+            return true;
+          }
+        }
+
+        @Override
+        public boolean cached(int slot, double[] comps) {
+          CacheFuture<TeeMap<Object>> cv = cacheVal[slot];
+          TeeMap<Object> tm;
+          if (cv == null || (tm = cv.vals.getNow(null)) == null) {
+            return false;
+          } else {
+            comps[slot] = (Double) tm.comp;
+            return true;
+          }
+        }
+
+        @Override
+        public boolean cached(int slot, long[] comps) {
+          CacheFuture<TeeMap<Object>> cv = cacheVal[slot];
+          TeeMap<Object> tm;
+          if (cv == null || (tm = cv.vals.getNow(null)) == null) {
+            return false;
+          } else {
+            comps[slot] = ((Number) tm.comp).longValue();
+            return true;
+          }
+        }
+      };
+
   @Override
   public int compare(int slotA, int slotB) {
-    return backing.compare(slotA, slotB);
+    return backing.compare(slotA, slotB, compFunc);
   }
 
   @Override
@@ -271,15 +319,15 @@ public class CachingSlotAcc extends SlotAcc {
         break;
       default:
         // non-bulk collection; update collectCount
-        cacheVal.collectCount.complete(collectCount);
+        cacheVal[slotNum].collectCount.complete(collectCount);
         break;
     }
 
-    if ((cached = cacheVal.vals.getNow(null)) == null) {
+    if ((cached = cacheVal[slotNum].vals.getNow(null)) == null) {
       // we must actually set vals
-      try (TeeMap<Object> toCache = new TeeMap<>(bucket, key, cacheVal.mapSizeEstimate)) {
+      try (TeeMap<Object> toCache = new TeeMap<>(bucket, key, cacheVal[slotNum].mapSizeEstimate)) {
         backing.setValues(toCache, slotNum);
-        cacheVal.vals.complete(toCache);
+        cacheVal[slotNum].vals.complete(toCache);
       }
     } else {
       cached.forEach((k, v) -> bucket.add(SPECIAL_KEY.equals(k) ? key : k, v));
@@ -300,7 +348,9 @@ public class CachingSlotAcc extends SlotAcc {
   }
 
   @Override
+  @SuppressWarnings({"unchecked", "rawtypes"})
   public void resize(Resizer resizer) {
+    cacheVal = new CacheFuture[resizer.getNewSize()];
     backing.resize(resizer);
   }
 
@@ -314,6 +364,7 @@ public class CachingSlotAcc extends SlotAcc {
   private static final class TeeMap<V> extends SimpleOrderedMap<V> implements AutoCloseable {
     private SimpleOrderedMap<V> backing;
     private String origKey;
+    private Comparable<?> comp;
 
     private TeeMap(SimpleOrderedMap<V> backing, String origKey, int expectMapSize) {
       super(expectMapSize);
@@ -324,7 +375,11 @@ public class CachingSlotAcc extends SlotAcc {
     @Override
     public void add(String name, V val) {
       backing.add(name, val);
-      super.add(origKey.equals(name) ? SPECIAL_KEY : name, val);
+      if (origKey.equals(name)) {
+        name = SPECIAL_KEY;
+        comp = (Comparable<?>) val;
+      }
+      super.add(name, val);
     }
 
     /** Don't retain references (leak) any longer than necessary */

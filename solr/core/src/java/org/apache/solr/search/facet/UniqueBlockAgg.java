@@ -49,7 +49,7 @@ public abstract class UniqueBlockAgg extends UniqueAgg {
     }
 
     @Override
-    public void calcCounts() {
+    public void calcCounts(CachingSlotAcc.SlotComparable compFunc) {
       // noop already done
     }
 

@@ -141,18 +141,35 @@ abstract class UniqueSlotAcc extends SlotAcc {
   protected abstract BytesRef lookupOrd(int ord) throws IOException;
 
   // we only calculate all the counts when sorting by count
-  public void calcCounts() {
+  public void calcCounts(CachingSlotAcc.SlotComparable compFunc) {
     counts = new int[arr.length];
-    for (int i = 0; i < arr.length; i++) {
-      FixedBitSet bs = arr[i];
-      counts[i] = bs == null ? 0 : bs.cardinality();
+    if (compFunc == null) {
+      for (int i = 0; i < arr.length; i++) {
+        FixedBitSet bs = arr[i];
+        counts[i] = bs == null ? 0 : bs.cardinality();
+      }
+    } else {
+      for (int i = 0; i < arr.length; i++) {
+        if (!compFunc.cached(i, counts)) {
+          FixedBitSet bs = arr[i];
+          counts[i] = bs == null ? 0 : bs.cardinality();
+        }
+      }
     }
+  }
+
+  @Override
+  public int compare(int slotA, int slotB, CachingSlotAcc.SlotComparable compFunc) {
+    if (counts == null) { // TODO: a more efficient way to do this?  prepareSort?
+      calcCounts(compFunc);
+    }
+    return counts[slotA] - counts[slotB];
   }
 
   @Override
   public int compare(int slotA, int slotB) {
     if (counts == null) { // TODO: a more efficient way to do this?  prepareSort?
-      calcCounts();
+      calcCounts(null);
     }
     return counts[slotA] - counts[slotB];
   }

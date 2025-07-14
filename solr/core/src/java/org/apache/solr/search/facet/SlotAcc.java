@@ -137,6 +137,10 @@ public abstract class SlotAcc implements Closeable {
     return count;
   }
 
+  public int compare(int slotA, int slotB, CachingSlotAcc.SlotComparable compFunc) {
+    return compare(slotA, slotB);
+  }
+
   public abstract int compare(int slotA, int slotB);
 
   public abstract Object getValue(int slotNum) throws IOException;
