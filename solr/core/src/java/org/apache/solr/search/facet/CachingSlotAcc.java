@@ -17,7 +17,6 @@
 package org.apache.solr.search.facet;
 
 import java.io.IOException;
-import java.lang.ref.WeakReference;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -252,11 +251,12 @@ public class CachingSlotAcc extends SlotAcc {
 
     if ((cached = cacheVal.vals.getNow(null)) == null) {
       // we must actually set vals
-      bucket = new TeeMap<>(bucket); // wrap
-      backing.setValues(bucket, slotNum);
-      cacheVal.vals.complete(bucket);
+      try (TeeMap<Object> toCache = new TeeMap<>(bucket, key)) {
+        backing.setValues(toCache, slotNum);
+        cacheVal.vals.complete(toCache);
+      }
     } else {
-      bucket.addAll(cached);
+      cached.forEach((k, v) -> bucket.add(SPECIAL_KEY.equals(k) ? key : k, v));
     }
   }
 
@@ -283,19 +283,28 @@ public class CachingSlotAcc extends SlotAcc {
     backing.close();
   }
 
-  private static final class TeeMap<V> extends SimpleOrderedMap<V> {
-    private final WeakReference<SimpleOrderedMap<V>> backing;
+  private static final String SPECIAL_KEY = "\0\0\0\0";
 
-    private TeeMap(SimpleOrderedMap<V> backing) {
-      this.backing = new WeakReference<>(backing);
+  private static final class TeeMap<V> extends SimpleOrderedMap<V> implements AutoCloseable {
+    private SimpleOrderedMap<V> backing;
+    private String origKey;
+
+    private TeeMap(SimpleOrderedMap<V> backing, String origKey) {
+      this.backing = backing;
+      this.origKey = origKey;
     }
 
     @Override
     public void add(String name, V val) {
-      SimpleOrderedMap<V> backing = this.backing.get();
-      assert backing != null;
       backing.add(name, val);
-      super.add(name, val);
+      super.add(origKey.equals(name) ? SPECIAL_KEY : name, val);
+    }
+
+    /** Don't retain references (leak) any longer than necessary */
+    @Override
+    public void close() {
+      backing = null;
+      origKey = null;
     }
   }
 }
