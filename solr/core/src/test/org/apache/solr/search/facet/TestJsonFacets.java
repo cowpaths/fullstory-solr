@@ -4025,7 +4025,7 @@ public class TestJsonFacets extends SolrTestCaseHS {
                 || FacetField.FacetMethod.DEFAULT_METHOD.equals(FacetField.FacetMethod.ENUM));
 
     final String common =
-        "refine:true, type:field, field:'foo_s', facet: { "
+        "refine:true, type:field, field:'foo_s', countCacheDf:1, facet: { "
             + "x: 'debug(wrap,sum(bar_i))' "
             + (extraAgg ? ", y:'min(bar_i)'" : "")
             + (extraSubFacet ? ", z:{type:query, q:'bar_i:0'}" : "")

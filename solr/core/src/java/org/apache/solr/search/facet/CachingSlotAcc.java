@@ -17,6 +17,7 @@
 package org.apache.solr.search.facet;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -25,6 +26,8 @@ import java.util.function.Function;
 import java.util.function.IntFunction;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.util.Accountable;
+import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.search.DocSet;
 import org.apache.solr.search.SolrCache;
@@ -33,26 +36,32 @@ public class CachingSlotAcc extends SlotAcc {
 
   public static final String FACET_FUNCTION_CACHE_NAME = "facetFunctionCache";
 
+  public interface SlotCacheKey extends Accountable {
+    long valueRamUsageEstimate();
+
+    int mapSizeEstimate();
+  }
+
   private IntFunction<SlotContext> seenSlotContext;
   private int seenSlot = INITIAL;
   private int collectCount;
 
   private final SlotAcc backing;
-  private final Function<Query, Object> cacheKeyFunction;
-  private final SolrCache<Object, CacheFuture<SimpleOrderedMap<Object>>> cache;
+  private final Function<Query, SlotCacheKey> cacheKeyFunction;
+  private final SolrCache<SlotCacheKey, CacheFuture<SimpleOrderedMap<Object>>> cache;
   private final int countCacheDf;
   private CacheFuture<SimpleOrderedMap<Object>> cacheVal;
 
   @SuppressWarnings("unchecked")
   public CachingSlotAcc(
       SlotAcc backing,
-      Function<Query, Object> cacheKeyFunction,
+      Function<Query, SlotCacheKey> cacheKeyFunction,
       SolrCache<?, ?> cache,
       int countCacheDf) {
     super(backing.fcontext);
     this.backing = backing;
     this.cacheKeyFunction = cacheKeyFunction;
-    this.cache = (SolrCache<Object, CacheFuture<SimpleOrderedMap<Object>>>) cache;
+    this.cache = (SolrCache<SlotCacheKey, CacheFuture<SimpleOrderedMap<Object>>>) cache;
     this.countCacheDf = countCacheDf;
   }
 
@@ -80,14 +89,14 @@ public class CachingSlotAcc extends SlotAcc {
       seenSlot = FAILSAFE_NO_CACHE;
       return -1;
     }
-    final Object cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
+    final SlotCacheKey cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
     boolean[] weComputed = new boolean[1];
     cacheVal =
         cache.computeIfAbsent(
             cacheKey,
             (k) -> {
               weComputed[0] = true;
-              return new CacheFuture<>();
+              return new CacheFuture<>(k.valueRamUsageEstimate(), k.mapSizeEstimate());
             });
     if (!weComputed[0] && valAvailable()) {
       seenSlot = CACHED;
@@ -108,14 +117,15 @@ public class CachingSlotAcc extends SlotAcc {
       case FAILSAFE_NO_CACHE:
         break;
       case INITIAL:
-        final Object cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
+        final SlotCacheKey cacheKey =
+            cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
         boolean[] weComputed = new boolean[1];
         cacheVal =
             cache.computeIfAbsent(
                 cacheKey,
                 (k) -> {
                   weComputed[0] = true;
-                  return new CacheFuture<>();
+                  return new CacheFuture<>(k.valueRamUsageEstimate(), k.mapSizeEstimate());
                 });
         if (!weComputed[0] && valAvailable()) {
           seenSlot = CACHED;
@@ -154,7 +164,7 @@ public class CachingSlotAcc extends SlotAcc {
     if (docs.size() < countCacheDf) {
       return backing.collect(docs, slot, slotContext);
     }
-    final Object cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
+    final SlotCacheKey cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
     boolean[] weComputed = new boolean[1];
     cacheVal =
         cache.computeIfAbsent(
@@ -162,7 +172,7 @@ public class CachingSlotAcc extends SlotAcc {
             (k) -> {
               int ret = backing.collect(docs, slot, slotContext);
               weComputed[0] = true;
-              return new CacheFuture<>(ret);
+              return new CacheFuture<>(ret, k.valueRamUsageEstimate(), k.mapSizeEstimate());
             });
     if (!weComputed[0] && !valAvailable()) {
       // we still have to compute ourselves since we don't yet have vals cached
@@ -209,14 +219,30 @@ public class CachingSlotAcc extends SlotAcc {
     return cachedVal == null || cachedVal == collectCount;
   }
 
-  private static final class CacheFuture<V> {
+  private static final class CacheFuture<V> implements Accountable {
+    private static final long BASE_RAM_BYTES =
+        RamUsageEstimator.shallowSizeOfInstance(CacheFuture.class)
+            + (RamUsageEstimator.shallowSizeOfInstance(CompletableFuture.class) << 1)
+            + RamUsageEstimator.shallowSizeOfInstance(Integer.class);
     private final CompletableFuture<Integer> collectCount = new CompletableFuture<>();
     private final CompletableFuture<V> vals = new CompletableFuture<>();
+    private final long ramUsageEstimate;
+    private final int mapSizeEstimate;
 
-    private CacheFuture() {}
+    private CacheFuture(long valRamUsageEstimate, int mapSizeEstimate) {
+      this.ramUsageEstimate = BASE_RAM_BYTES + valRamUsageEstimate;
+      this.mapSizeEstimate = mapSizeEstimate;
+    }
 
-    private CacheFuture(int ret) {
+    private CacheFuture(int ret, long ramUsageEstimate, int mapSizeEstimate) {
+      this.ramUsageEstimate = ramUsageEstimate;
+      this.mapSizeEstimate = mapSizeEstimate;
       this.collectCount.complete(ret);
+    }
+
+    @Override
+    public long ramBytesUsed() {
+      return ramUsageEstimate;
     }
   }
 
@@ -251,7 +277,7 @@ public class CachingSlotAcc extends SlotAcc {
 
     if ((cached = cacheVal.vals.getNow(null)) == null) {
       // we must actually set vals
-      try (TeeMap<Object> toCache = new TeeMap<>(bucket, key)) {
+      try (TeeMap<Object> toCache = new TeeMap<>(bucket, key, cacheVal.mapSizeEstimate)) {
         backing.setValues(toCache, slotNum);
         cacheVal.vals.complete(toCache);
       }
@@ -289,7 +315,8 @@ public class CachingSlotAcc extends SlotAcc {
     private SimpleOrderedMap<V> backing;
     private String origKey;
 
-    private TeeMap(SimpleOrderedMap<V> backing, String origKey) {
+    private TeeMap(SimpleOrderedMap<V> backing, String origKey, int expectMapSize) {
+      super(expectMapSize);
       this.backing = backing;
       this.origKey = origKey;
     }
@@ -306,5 +333,17 @@ public class CachingSlotAcc extends SlotAcc {
       backing = null;
       origKey = null;
     }
+  }
+
+  private static final long TEE_MAP_BASE_RAM_BYTES =
+      RamUsageEstimator.shallowSizeOfInstance(TeeMap.class)
+          + RamUsageEstimator.shallowSizeOfInstance(ArrayList.class);
+
+  public static long slotCacheEntryBaseSize(int size) {
+    int listSize = size << 1; // name _and_ value
+    return TEE_MAP_BASE_RAM_BYTES
+        + RamUsageEstimator.alignObjectSize(
+            (long) RamUsageEstimator.NUM_BYTES_ARRAY_HEADER
+                + (long) RamUsageEstimator.NUM_BYTES_OBJECT_REF * listSize);
   }
 }

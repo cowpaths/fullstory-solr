@@ -32,6 +32,7 @@ import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.common.util.CollectionUtil;
 import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.request.TermFacetCache;
@@ -62,9 +63,8 @@ public class UniqueAgg extends StrAggValueSource {
     if (numSlots > 1) {
       return ret;
     }
-    // safe cast b/c unique agg only applicable for FacetQuery TODO: verify this??
     FacetRequest freq = fcontext.processor.freq;
-    if (freq.countCacheDf < 0 || numDocs < freq.countCacheDf) {
+    if (freq.countCacheDf < 0 || (numDocs >= 0 && numDocs < freq.countCacheDf)) {
       return ret;
     }
     final int ctxCountCacheDf =
@@ -84,7 +84,13 @@ public class UniqueAgg extends StrAggValueSource {
         ctxCountCacheDf);
   }
 
-  private static final class CacheKey {
+  private static final class CacheKey implements CachingSlotAcc.SlotCacheKey {
+    private static final long BASE_RAM_BYTES =
+        RamUsageEstimator.shallowSizeOfInstance(CacheKey.class);
+    private static final int EXPECT_MAP_SIZE = 1;
+    private static final long VALUE_RAM_BYTES =
+        CachingSlotAcc.slotCacheEntryBaseSize(EXPECT_MAP_SIZE)
+            + RamUsageEstimator.shallowSizeOfInstance(Long.class);
     private static final int CLASS_HASH = CacheKey.class.hashCode();
     private final String field;
     private final QueryResultKey domain;
@@ -106,6 +112,21 @@ public class UniqueAgg extends StrAggValueSource {
     public int hashCode() {
       int hash = CLASS_HASH ^ field.hashCode();
       return domain == null ? hash : hash ^ domain.hashCode();
+    }
+
+    @Override
+    public long ramBytesUsed() {
+      return BASE_RAM_BYTES + RamUsageEstimator.sizeOf(field) + domain.ramBytesUsed();
+    }
+
+    @Override
+    public long valueRamUsageEstimate() {
+      return VALUE_RAM_BYTES;
+    }
+
+    @Override
+    public int mapSizeEstimate() {
+      return EXPECT_MAP_SIZE;
     }
   }
 
