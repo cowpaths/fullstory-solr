@@ -504,6 +504,7 @@ public abstract class FacetParser<T extends FacetRequest> {
           qstring = getString(m, "query", null);
         }
         facet.countCacheDf = (int) getLong(m, "countCacheDf", facet.countCacheDf);
+        facet.funcCacheDf = (int) getLong(m, "funcCacheDf", facet.funcCacheDf);
 
         // OK to parse subs before we have parsed our own query?
         // as long as subs don't need to know about it.
@@ -567,6 +568,7 @@ public abstract class FacetParser<T extends FacetRequest> {
         facet.method = FacetField.FacetMethod.fromString(getString(m, "method", null));
         facet.cacheDf = (int) getLong(m, "cacheDf", facet.cacheDf);
         facet.countCacheDf = (int) getLong(m, "countCacheDf", facet.countCacheDf);
+        facet.funcCacheDf = (int) getLong(m, "funcCacheDf", facet.funcCacheDf);
 
         // TODO: pull up to higher level?
         facet.refine = FacetRequest.RefineMethod.fromObj(m.get("refine"));

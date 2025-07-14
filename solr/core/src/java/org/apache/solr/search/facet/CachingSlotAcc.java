@@ -49,7 +49,7 @@ public class CachingSlotAcc extends SlotAcc {
   private final SlotAcc backing;
   private final Function<Query, SlotCacheKey> cacheKeyFunction;
   private final SolrCache<SlotCacheKey, CacheFuture<SimpleOrderedMap<Object>>> cache;
-  private final int countCacheDf;
+  private final int funcCacheDf;
   private CacheFuture<SimpleOrderedMap<Object>> cacheVal;
 
   @SuppressWarnings("unchecked")
@@ -57,12 +57,12 @@ public class CachingSlotAcc extends SlotAcc {
       SlotAcc backing,
       Function<Query, SlotCacheKey> cacheKeyFunction,
       SolrCache<?, ?> cache,
-      int countCacheDf) {
+      int funcCacheDf) {
     super(backing.fcontext);
     this.backing = backing;
     this.cacheKeyFunction = cacheKeyFunction;
     this.cache = (SolrCache<SlotCacheKey, CacheFuture<SimpleOrderedMap<Object>>>) cache;
-    this.countCacheDf = countCacheDf;
+    this.funcCacheDf = funcCacheDf;
   }
 
   @Override
@@ -85,7 +85,7 @@ public class CachingSlotAcc extends SlotAcc {
     if (seenSlot != INITIAL) {
       throw new IllegalStateException();
     }
-    if (docs.size() < countCacheDf) {
+    if (docs.size() < funcCacheDf) {
       seenSlot = FAILSAFE_NO_CACHE;
       return -1;
     }
@@ -161,7 +161,7 @@ public class CachingSlotAcc extends SlotAcc {
     }
     // TODO: `DocSet.size()` can have considerable overhead. Evaluate whether we should do
     //  something different here.
-    if (docs.size() < countCacheDf) {
+    if (docs.size() < funcCacheDf) {
       return backing.collect(docs, slot, slotContext);
     }
     final SlotCacheKey cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());

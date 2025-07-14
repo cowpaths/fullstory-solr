@@ -47,6 +47,7 @@ import org.apache.solr.util.RTimer;
 public abstract class FacetRequest {
 
   int countCacheDf;
+  int funcCacheDf;
 
   /** Simple structure for encapsulating a sort variable and a direction */
   public static final class FacetSort {

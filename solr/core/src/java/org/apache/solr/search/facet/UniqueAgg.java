@@ -64,11 +64,17 @@ public class UniqueAgg extends StrAggValueSource {
       return ret;
     }
     FacetRequest freq = fcontext.processor.freq;
-    if (freq.countCacheDf < 0 || (numDocs >= 0 && numDocs < freq.countCacheDf)) {
+    int funcCacheDf = freq.funcCacheDf;
+    if (funcCacheDf == 0) {
+      // default to `countCacheDf`
+      funcCacheDf = freq.countCacheDf;
+      if (funcCacheDf == 0) {
+        funcCacheDf = TermFacetCache.DEFAULT_THRESHOLD;
+      }
+    }
+    if (funcCacheDf < 0 || (numDocs >= 0 && numDocs < funcCacheDf)) {
       return ret;
     }
-    final int ctxCountCacheDf =
-        freq.countCacheDf == 0 ? TermFacetCache.DEFAULT_THRESHOLD : freq.countCacheDf;
     SolrCache<?, ?> facetFunctionCache = fcontext.searcher.getCache(FACET_FUNCTION_CACHE_NAME);
     if (facetFunctionCache == null) {
       return ret;
@@ -81,7 +87,7 @@ public class UniqueAgg extends StrAggValueSource {
           return new CacheKey(name, new QueryResultKey(q, baseFilters, null, 0));
         },
         facetFunctionCache,
-        ctxCountCacheDf);
+        funcCacheDf);
   }
 
   private static final class CacheKey implements CachingSlotAcc.SlotCacheKey {
