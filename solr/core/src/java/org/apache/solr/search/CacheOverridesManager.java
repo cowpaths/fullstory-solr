@@ -7,13 +7,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.cloud.ZkStateReader;
-import org.apache.solr.common.util.Utils;
 import org.apache.solr.core.SolrCore;
-import org.apache.zookeeper.KeeperException;
-import org.apache.zookeeper.WatchedEvent;
-import org.apache.zookeeper.Watcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -98,55 +93,12 @@ public class CacheOverridesManager {
 
   interface Filter extends Function<SolrCore, Boolean> {}
 
-  public CacheOverridesManager(SolrZkClient zkClient) {
-    byte[] clusterPropsBytes = null;
-
-    final Watcher watcher =
-        new Watcher() {
-          @Override
-          public void process(WatchedEvent event) {
-            try {
-              if (event.getType() == Event.EventType.NodeDataChanged
-                  || event.getType() == Event.EventType.NodeCreated) {
-                // Fetch the updated cluster properties
-                byte[] data = zkClient.getData(event.getPath(), this, null, true);
-                if (data != null) {
-                  Map<String, Object> clusterPropsJson = (Map<String, Object>) Utils.fromJSON(data);
-                  // Process the cache overrides from cluster properties
-                  processCacheOverrides(clusterPropsJson.get("cacheOverrides"));
-                } else {
-                  processCacheOverrides(null);
-                }
-              } else if (event.getType() == Event.EventType.NodeDeleted) {
-                zkClient.exists(event.getPath(), this, true);
-                processCacheOverrides(null);
-              } else {
-                // just re-install watcher
-                zkClient.exists(event.getPath(), this, true);
-              }
-            } catch (Exception e) {
-              log.warn("Error processing cache overrides from ZooKeeper", e);
-            }
-          }
-        };
-
-    try {
-      clusterPropsBytes = zkClient.getData(ZkStateReader.CLUSTER_PROPS, watcher, null, true);
-    } catch (KeeperException.NoNodeException e) {
-      try {
-        zkClient.exists(ZkStateReader.CLUSTER_PROPS, watcher, true); // still install a watcher
-      } catch (Exception ex) {
-        log.warn("Error installing exist watcher on cluster properties from ZooKeeper", e);
-      }
-    } catch (Exception e) {
-      log.warn("Error fetching cluster properties from ZooKeeper", e);
-    }
-
-    if (clusterPropsBytes != null) {
-      Map<String, String> clusterPropsJson =
-          (Map<String, String>) Utils.fromJSON(clusterPropsBytes);
-      processCacheOverrides(clusterPropsJson.get("cacheOverrides"));
-    }
+  public CacheOverridesManager(ZkStateReader zkStateReader) {
+    zkStateReader.registerClusterPropertiesListener(
+        (Map<String, Object> properties) -> {
+          processCacheOverrides(properties.get("cacheOverrides"));
+          return false;
+        });
   }
 
   private void processCacheOverrides(Object cacheOverridesContents) {
