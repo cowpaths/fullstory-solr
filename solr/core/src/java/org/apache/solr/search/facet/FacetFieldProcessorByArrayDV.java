@@ -165,6 +165,9 @@ class FacetFieldProcessorByArrayDV extends FacetFieldProcessorByArray {
       if (disi == null) {
         continue;
       }
+      for (CountSlotAcc acc : disi.countAccs) {
+        acc.setNextReader(subCtx);
+      }
       final boolean hasBase = disi.hasBase();
       updateTopLevelCache |= disi.cacheUpdaters != null;
 
