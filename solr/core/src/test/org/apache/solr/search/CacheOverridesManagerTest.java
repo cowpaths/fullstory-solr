@@ -170,6 +170,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
     assertTrue(overrides.isEmpty());
   }
 
+  @SuppressWarnings("unchecked")
   @Test
   public void testOverridesZkChanges() throws InterruptedException, KeeperException {
     // start with no clusterprops.json in ZK
