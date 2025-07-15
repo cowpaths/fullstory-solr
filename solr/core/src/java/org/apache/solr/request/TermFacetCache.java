@@ -19,7 +19,9 @@ package org.apache.solr.request;
 import java.io.IOException;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBuffersDataOutput;
+import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.LongValues;
+import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.search.QueryResultKey;
 
 /** */
@@ -28,7 +30,10 @@ public class TermFacetCache {
   public static final String NAME = "termFacetCache";
   public static int DEFAULT_THRESHOLD = 5000; // non-final to support setting by tests
 
-  public static final class FacetCacheKey {
+  public static final class FacetCacheKey implements Accountable {
+
+    private static final long BASE_RAM_BYTES =
+        RamUsageEstimator.shallowSizeOfInstance(FacetCacheKey.class);
 
     private final QueryResultKey qrk;
     private final String fieldName;
@@ -49,9 +54,17 @@ public class TermFacetCache {
       return fieldName.equals(other.fieldName)
           && (qrk == null ? other.qrk == null : qrk.equals(other.qrk));
     }
+
+    @Override
+    public long ramBytesUsed() {
+      return BASE_RAM_BYTES + RamUsageEstimator.sizeOf(fieldName) + qrk.ramBytesUsed();
+    }
   }
 
-  public static final class SegmentCacheEntry {
+  public static final class SegmentCacheEntry implements Accountable {
+
+    private static final long BASE_RAM_BYTES =
+        RamUsageEstimator.shallowSizeOfInstance(SegmentCacheEntry.class);
 
     public final byte[] counts;
     public final int[] topLevelCounts;
@@ -67,6 +80,13 @@ public class TermFacetCache {
       this.counts = null;
       this.topLevelCounts = topLevelCounts;
       this.hasMissingSlot = includesMissingCount;
+    }
+
+    @Override
+    public long ramBytesUsed() {
+      return BASE_RAM_BYTES
+          + (counts == null ? 0 : RamUsageEstimator.sizeOf(counts))
+          + (topLevelCounts == null ? 0 : RamUsageEstimator.sizeOf(topLevelCounts));
     }
   }
 
