@@ -17,6 +17,7 @@
 package org.apache.solr.request;
 
 import java.io.IOException;
+import java.util.Objects;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBuffersDataOutput;
 import org.apache.lucene.util.Accountable;
@@ -50,9 +51,9 @@ public class TermFacetCache {
 
     @Override
     public boolean equals(Object obj) {
+      if (!(obj instanceof FacetCacheKey)) return false;
       FacetCacheKey other = (FacetCacheKey) obj;
-      return fieldName.equals(other.fieldName)
-          && (qrk == null ? other.qrk == null : qrk.equals(other.qrk));
+      return fieldName.equals(other.fieldName) && Objects.equals(qrk, other.qrk);
     }
 
     @Override
@@ -90,7 +91,7 @@ public class TermFacetCache {
     }
   }
 
-  public static interface CacheUpdater {
+  public interface CacheUpdater {
     boolean incrementFromCachedSegment(LongValues toGlobal);
 
     void updateLeaf(int[] leafCounts);
@@ -98,8 +99,7 @@ public class TermFacetCache {
     void updateTopLevel();
   }
 
-  public static final byte[] encodeCounts(
-      int[] segCounts, ByteBuffersDataOutput cachedSegCountsBuilder) {
+  public static byte[] encodeCounts(int[] segCounts, ByteBuffersDataOutput cachedSegCountsBuilder) {
     try {
       for (int c : segCounts) {
         cachedSegCountsBuilder.writeVInt(c);
