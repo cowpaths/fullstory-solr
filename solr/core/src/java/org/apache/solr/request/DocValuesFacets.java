@@ -285,7 +285,7 @@ public class DocValuesFacets {
         }
         if (facetCacheKey != null) {
           assert segmentCache != null;
-          facetCache.computeIfAbsent(facetCacheKey, (k) -> Map.copyOf(segmentCache));
+          facetCache.put(facetCacheKey, Map.copyOf(segmentCache));
         }
       }
 
