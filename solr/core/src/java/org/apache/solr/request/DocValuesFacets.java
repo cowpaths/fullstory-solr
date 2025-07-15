@@ -177,22 +177,25 @@ public class DocValuesFacets {
     int missingCount = -1;
     final CharsRefBuilder charsRef = new CharsRefBuilder();
     if (nTerms > 0 && docs.size() >= mincount) {
-      Map<CacheKey, SegmentCacheEntry> segmentCache = null;
-      if (facetCacheThreshold >= 0 && docs.size() > facetCacheThreshold) {
-        @SuppressWarnings("unchecked")
-        SolrCache<FacetCacheKey, Map<CacheKey, SegmentCacheEntry>> facetCache =
-            searcher.getCache(TermFacetCache.NAME);
-        if (facetCache != null) {
-          FacetCacheKey facetCacheKey =
-              new FacetCacheKey(
-                  new QueryResultKey(null, Arrays.asList(FacetModule.getBaseFilters(rb)), null, 0),
-                  fieldName);
-          segmentCache = facetCache.get(facetCacheKey);
-          if (segmentCache == null) {
-            segmentCache = new HashMap<>();
-            facetCache.put(facetCacheKey, segmentCache);
-          }
+      final Map<CacheKey, SegmentCacheEntry> segmentCache;
+      @SuppressWarnings("unchecked")
+      SolrCache<FacetCacheKey, Map<CacheKey, SegmentCacheEntry>> facetCache =
+          searcher.getCache(TermFacetCache.NAME);
+      FacetCacheKey facetCacheKey = null;
+      if (facetCache != null && facetCacheThreshold >= 0 && docs.size() > facetCacheThreshold) {
+        facetCacheKey =
+            new FacetCacheKey(
+                new QueryResultKey(null, Arrays.asList(FacetModule.getBaseFilters(rb)), null, 0),
+                fieldName);
+        Map<CacheKey, SegmentCacheEntry> cached = facetCache.get(facetCacheKey);
+        if (cached == null) {
+          segmentCache = new HashMap<>();
+        } else {
+          segmentCache = cached;
+          facetCacheKey = null; // we don't need it again
         }
+      } else {
+        segmentCache = null;
       }
 
       // count collection array only needs to be as big as the number of terms we are
@@ -279,6 +282,10 @@ public class DocValuesFacets {
 
         if (segmentCache != null) {
           segmentCache.put(topLevelReaderKey, new SegmentCacheEntry(counts, doMissing));
+        }
+        if (facetCacheKey != null) {
+          assert segmentCache != null;
+          facetCache.computeIfAbsent(facetCacheKey, (k) -> Map.copyOf(segmentCache));
         }
       }
 

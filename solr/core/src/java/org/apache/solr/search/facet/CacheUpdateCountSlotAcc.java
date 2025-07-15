@@ -165,7 +165,7 @@ final class CacheUpdateCountSlotAcc extends CountSlotAcc
   public void updateTopLevel() {
     cachedSegments.put(
         topLevelCacheKey, new SegmentCacheEntry(topLevelCounts, includesMissingCount));
-    facetCache.put(facetCacheKey, cachedSegments);
+    facetCache.put(facetCacheKey, Map.copyOf(cachedSegments));
   }
 
   @Override
