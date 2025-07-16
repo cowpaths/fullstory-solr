@@ -16,7 +16,9 @@
  */
 package org.apache.solr.search.facet;
 
+import static org.apache.solr.search.facet.CachingSlotAcc.ExtractCacheValueFunction;
 import static org.apache.solr.search.facet.CachingSlotAcc.FACET_FUNCTION_CACHE_NAME;
+import static org.apache.solr.search.facet.CachingSlotAcc.TeeMap;
 
 import com.carrotsearch.hppc.LongHashSet;
 import com.carrotsearch.hppc.LongSet;
@@ -90,10 +92,11 @@ public class UniqueAgg extends StrAggValueSource {
         funcCacheDf);
   }
 
+  private static final int EXPECT_MAP_SIZE = 1;
+
   private static final class CacheKey implements CachingSlotAcc.SlotCacheKey {
     private static final long BASE_RAM_BYTES =
         RamUsageEstimator.shallowSizeOfInstance(CacheKey.class);
-    private static final int EXPECT_MAP_SIZE = 1;
     private static final long VALUE_RAM_BYTES =
         CachingSlotAcc.slotCacheEntryBaseSize(EXPECT_MAP_SIZE)
             + RamUsageEstimator.shallowSizeOfInstance(Long.class);
@@ -131,10 +134,19 @@ public class UniqueAgg extends StrAggValueSource {
     }
 
     @Override
-    public int mapSizeEstimate() {
-      return EXPECT_MAP_SIZE;
+    public ExtractCacheValueFunction extractValueFunction() {
+      return EXTRACT_VALUE_FUNCTION;
     }
   }
+
+  private static final ExtractCacheValueFunction EXTRACT_VALUE_FUNCTION =
+      (bucket, backing, slotNum, valFuture) -> {
+        try (TeeMap<Object> toCache = new TeeMap<>(bucket, backing.key, EXPECT_MAP_SIZE)) {
+          backing.setValues(toCache, slotNum);
+          valFuture.complete(toCache);
+          return toCache;
+        }
+      };
 
   public SlotAcc createSlotAcc0(FacetContext fcontext, long numDocs, int numSlots)
       throws IOException {
