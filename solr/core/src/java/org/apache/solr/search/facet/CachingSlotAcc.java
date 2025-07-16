@@ -175,7 +175,7 @@ public class CachingSlotAcc extends SlotAcc {
     }
     // TODO: `DocSet.size()` can have considerable overhead. Evaluate whether we should do
     //  something different here.
-    if (docs.size() < funcCacheDf) {
+    if (docs.approximateSize() < funcCacheDf) {
       return backing.collect(docs, slot, slotContext);
     }
     final SlotCacheKey cacheKey = cacheKeyFunction.apply(slotContext.apply(slot).getSlotQuery());
@@ -336,7 +336,9 @@ public class CachingSlotAcc extends SlotAcc {
     }
 
     CacheFuture<SlotCacheValue> cacheFuture = cacheVal[slotNum];
-    if ((cached = cacheFuture.vals.getNow(null)) == null) {
+    if (cacheFuture == null) {
+      backing.setValues(bucket, slotNum);
+    } else if ((cached = cacheFuture.vals.getNow(null)) == null) {
       // we must actually set vals
       cacheFuture.extractCacheValueFunction.extract(bucket, backing, slotNum, cacheFuture.vals);
     } else {

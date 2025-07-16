@@ -63,6 +63,7 @@ class MutableBitDocSet extends BitDocSet {
     // We need to reset size since we are changing the cardinality of the underlying bits and size
     // is typically cached. This forces size to be recomputed as needed.
     this.size = -1;
+    this.approximateSize = -1;
   }
 
   @Override

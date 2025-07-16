@@ -51,6 +51,11 @@ public abstract class DocSet implements Accountable, Cloneable /* extends Collec
   /** Returns the number of documents in the set. */
   public abstract int size();
 
+  /** Returns the (possibly approximate) number of documents in the set. */
+  public int approximateSize() {
+    return size();
+  }
+
   /**
    * Returns true if a document is in the DocSet. If you want to be guaranteed fast random access,
    * use {@link #getBits()} instead.

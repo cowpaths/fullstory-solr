@@ -42,6 +42,7 @@ public class BitDocSet extends DocSet {
 
   private final FixedBitSet bits;
   int size; // number of docs in the set (cached for perf)
+  int approximateSize; // number of docs in the set (cached for perf)
 
   public BitDocSet() {
     bits = new FixedBitSet(64);
@@ -51,6 +52,7 @@ public class BitDocSet extends DocSet {
   public BitDocSet(FixedBitSet bits) {
     this.bits = bits;
     size = -1;
+    approximateSize = -1;
   }
 
   /**
@@ -118,7 +120,14 @@ public class BitDocSet extends DocSet {
   @Override
   public int size() {
     if (size != -1) return size;
-    return size = bits.cardinality();
+    return size = approximateSize = bits.cardinality();
+  }
+
+  @Override
+  public int approximateSize() {
+    if (size != -1) return size;
+    if (approximateSize != -1) return approximateSize;
+    return approximateSize = bits.approximateCardinality();
   }
 
   /**
