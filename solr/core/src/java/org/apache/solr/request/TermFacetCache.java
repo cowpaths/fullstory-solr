@@ -61,6 +61,10 @@ public class TermFacetCache {
     public long ramBytesUsed() {
       return BASE_RAM_BYTES + RamUsageEstimator.sizeOf(fieldName) + qrk.ramBytesUsed();
     }
+
+    public boolean isCrossDoc() {
+      return qrk.isCrossDoc();
+    }
   }
 
   public static final class SegmentCacheEntry implements Accountable {

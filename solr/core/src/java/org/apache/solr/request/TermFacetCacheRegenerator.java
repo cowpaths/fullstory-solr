@@ -34,6 +34,11 @@ public class TermFacetCacheRegenerator implements CacheRegenerator {
   public boolean regenerateItem(
       SolrIndexSearcher newSearcher, SolrCache nc, SolrCache oc, Object oldKey, Object oldVal)
       throws IOException {
+    if (((TermFacetCache.FacetCacheKey) oldKey).isCrossDoc()) {
+      // domain is defined by cross-doc queries (e.g., {!join}), so per-seg entries
+      // cannot be carried over.
+      return true;
+    }
     Map<CacheKey, SegmentCacheEntry> oldSegmentCache = (Map<CacheKey, SegmentCacheEntry>) oldVal;
     Map<CacheKey, SegmentMap.Segment> newSegments = newSearcher.getSegmentMap().segments;
     Map<CacheKey, SegmentCacheEntry> newSegmentCache =

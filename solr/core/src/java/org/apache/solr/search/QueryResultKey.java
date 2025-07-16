@@ -200,4 +200,16 @@ public final class QueryResultKey implements Accountable {
   public long ramBytesUsed() {
     return ramBytesUsed;
   }
+
+  public boolean isCrossDoc() {
+    if (query != null && KeepAliveRegenerator.isCrossDoc(query)) {
+      return true;
+    }
+    for (Query q : filters) {
+      if (KeepAliveRegenerator.isCrossDoc(q)) {
+        return true;
+      }
+    }
+    return false;
+  }
 }
