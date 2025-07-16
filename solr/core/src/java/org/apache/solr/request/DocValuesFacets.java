@@ -209,9 +209,9 @@ public class DocValuesFacets {
       CacheKey topLevelReaderKey = searcher.getIndexReader().getReaderCacheHelper().getKey();
       if (segmentCache != null
           && (topLevelCacheEntry = segmentCache.get(topLevelReaderKey)) != null) {
-        counts = topLevelCacheEntry.topLevelCounts;
+        counts = topLevelCacheEntry.topLevelCounts();
       } else {
-        counts = new int[maxSlots];
+        counts = new int[doMissing ? maxSlots : (maxSlots + 1)]; // always allocate a "missing" slot
         List<LeafReaderContext> leaves = searcher.getTopReaderContext().leaves();
         for (int subIndex = 0; subIndex < leaves.size(); subIndex++) {
           LeafReaderContext leaf = leaves.get(subIndex);
@@ -496,8 +496,8 @@ public class DocValuesFacets {
       return null;
     } else {
       ByteBuffersDataOutput cachedSegCountsBuilder =
-          new ByteBuffersDataOutput(segCounts.length * 2);
-      return TermFacetCache.encodeCounts(segCounts, cachedSegCountsBuilder);
+          new ByteBuffersDataOutput((long) segCounts.length << 1);
+      return TermFacetCache.encodeCounts(segCounts, cachedSegCountsBuilder, segCounts.length);
     }
   }
 
@@ -596,8 +596,8 @@ public class DocValuesFacets {
       return null;
     } else {
       ByteBuffersDataOutput cachedSegCountsBuilder =
-          new ByteBuffersDataOutput(segCounts.length * 2L);
-      return TermFacetCache.encodeCounts(segCounts, cachedSegCountsBuilder);
+          new ByteBuffersDataOutput((long) segCounts.length << 1);
+      return TermFacetCache.encodeCounts(segCounts, cachedSegCountsBuilder, segCounts.length);
     }
   }
 

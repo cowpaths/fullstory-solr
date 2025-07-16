@@ -17,57 +17,35 @@
 package org.apache.solr.request;
 
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Set;
-import java.util.WeakHashMap;
 import org.apache.lucene.index.IndexReader.CacheKey;
-import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.util.CollectionUtil;
 import org.apache.solr.request.TermFacetCache.SegmentCacheEntry;
 import org.apache.solr.search.CacheRegenerator;
+import org.apache.solr.search.SegmentMap;
 import org.apache.solr.search.SolrCache;
 import org.apache.solr.search.SolrIndexSearcher;
 
 /** */
 public class TermFacetCacheRegenerator implements CacheRegenerator {
-  private final Map<CacheKey, Set<CacheKey>> activeSegments;
-
-  public TermFacetCacheRegenerator() {
-    activeSegments = new WeakHashMap<>();
-  }
-
   @SuppressWarnings({"rawtypes", "unchecked"})
   @Override
   public boolean regenerateItem(
       SolrIndexSearcher newSearcher, SolrCache nc, SolrCache oc, Object oldKey, Object oldVal)
       throws IOException {
-    Set<CacheKey> segmentKeys;
-    CacheKey topLevelKey = newSearcher.getIndexReader().getReaderCacheHelper().getKey();
-    synchronized (activeSegments) {
-      segmentKeys = activeSegments.get(topLevelKey);
-      if (segmentKeys == null) {
-        List<LeafReaderContext> leaves = newSearcher.getTopReaderContext().leaves();
-        segmentKeys = new HashSet<>(leaves.size());
-        for (LeafReaderContext leaf : leaves) {
-          segmentKeys.add(leaf.reader().getReaderCacheHelper().getKey());
-        }
-        activeSegments.clear();
-        activeSegments.put(topLevelKey, segmentKeys);
-      }
-    }
     Map<CacheKey, SegmentCacheEntry> oldSegmentCache = (Map<CacheKey, SegmentCacheEntry>) oldVal;
-    Map<CacheKey, SegmentCacheEntry> newSegmentCache = new HashMap<>(segmentKeys.size());
+    Map<CacheKey, SegmentMap.Segment> newSegments = newSearcher.getSegmentMap().segments;
+    Map<CacheKey, SegmentCacheEntry> newSegmentCache =
+        CollectionUtil.newHashMap(newSegments.size());
     for (Entry<CacheKey, SegmentCacheEntry> e : oldSegmentCache.entrySet()) {
       CacheKey segmentKey = e.getKey();
-      if (segmentKeys.contains(segmentKey)) {
+      if (newSegments.containsKey(segmentKey)) {
         newSegmentCache.put(segmentKey, e.getValue());
       }
     }
     if (!newSegmentCache.isEmpty()) {
-      nc.put(oldKey, newSegmentCache);
+      nc.put(oldKey, Map.copyOf(newSegmentCache));
     }
     return true;
   }

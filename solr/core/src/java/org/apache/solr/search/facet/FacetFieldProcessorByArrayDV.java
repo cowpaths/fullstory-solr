@@ -250,13 +250,11 @@ class FacetFieldProcessorByArrayDV extends FacetFieldProcessorByArray {
     final int valueCount = singleDv.getValueCount();
     final boolean doMissing = missingSlot >= 0;
     final int missingIdx;
-    final int segMax;
+    final int segMax = valueCount + 1; // always allocate space for "missing", whether used or not
     if (doMissing) {
       missingIdx = valueCount;
-      segMax = valueCount + 1;
     } else {
       missingIdx = -valueCount; // (-maxSegOrd - 1)
-      segMax = valueCount;
     }
     final SegCountPerSeg segCounter = getSegCountPerSeg(disi, segMax);
 
@@ -324,7 +322,7 @@ class FacetFieldProcessorByArrayDV extends FacetFieldProcessorByArray {
     if (disi.cacheUpdaters == null) {
       return new SegCountGlobal(disi.countAccs);
     } else {
-      int segMax = dv.getValueCount();
+      int segMax = dv.getValueCount() + 1;
       return new SegCountGlobalCache(
           getSegmentCountArrays(segMax, disi.cacheUpdaters),
           segMax,
@@ -337,7 +335,7 @@ class FacetFieldProcessorByArrayDV extends FacetFieldProcessorByArray {
     if (disi.cacheUpdaters == null) {
       return new SegCountGlobal(disi.countAccs);
     } else {
-      int segMax = (int) dv.getValueCount();
+      int segMax = (int) dv.getValueCount() + 1;
       return new SegCountGlobalCache(
           getSegmentCountArrays(segMax, disi.cacheUpdaters),
           segMax,
@@ -351,13 +349,11 @@ class FacetFieldProcessorByArrayDV extends FacetFieldProcessorByArray {
     final int valueCount = (int) multiDv.getValueCount();
     final boolean doMissing = missingSlot >= 0;
     final int missingIdx;
-    final int segMax;
+    final int segMax = valueCount + 1; // always allocate space for "missing", whether used or not
     if (doMissing) {
       missingIdx = valueCount;
-      segMax = valueCount + 1;
     } else {
       missingIdx = -valueCount; // (-maxSegOrd - 1)
-      segMax = valueCount;
     }
     final SegCountPerSeg segCounter = getSegCountPerSeg(disi, segMax);
 

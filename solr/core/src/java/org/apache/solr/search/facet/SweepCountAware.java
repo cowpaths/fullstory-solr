@@ -173,7 +173,7 @@ interface SweepCountAware {
       int i = allSegCounts.length - 1;
       do {
         if (cacheUpdaters[i] != null) {
-          cacheUpdaters[i].updateLeaf(allSegCounts[i]);
+          cacheUpdaters[i].updateLeaf(allSegCounts[i], segMissingIdx + 1);
         }
       } while (i-- > 0);
     }
@@ -296,12 +296,12 @@ interface SweepCountAware {
 
     @Override
     public void register(
-        CountSlotAcc[] countAccs, LongValues toGlobal, int segMax, int globalMissingIdx) {
-      super.register(countAccs, toGlobal, segMax, globalMissingIdx);
+        CountSlotAcc[] countAccs, LongValues toGlobal, int segMissingIdx, int globalMissingIdx) {
+      super.register(countAccs, toGlobal, segMissingIdx, globalMissingIdx);
       int i = maxIdx;
       do {
         if (cacheUpdaters[i] != null) {
-          cacheUpdaters[i].updateLeaf(allSegCounts[i]);
+          cacheUpdaters[i].updateLeaf(allSegCounts[i], segMissingIdx);
         }
       } while (i-- > 0);
     }

@@ -17,6 +17,7 @@
 package org.apache.solr.request;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Objects;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBuffersDataOutput;
@@ -68,7 +69,7 @@ public class TermFacetCache {
         RamUsageEstimator.shallowSizeOfInstance(SegmentCacheEntry.class);
 
     public final byte[] counts;
-    public final int[] topLevelCounts;
+    private final byte[] topLevelCounts;
     public final boolean hasMissingSlot;
 
     public SegmentCacheEntry(byte[] counts) {
@@ -79,8 +80,16 @@ public class TermFacetCache {
 
     public SegmentCacheEntry(int[] topLevelCounts, boolean includesMissingCount) {
       this.counts = null;
-      this.topLevelCounts = topLevelCounts;
+      this.topLevelCounts =
+          TermFacetCache.encodeCounts(
+              topLevelCounts,
+              new ByteBuffersDataOutput(((long) topLevelCounts.length) << 1),
+              topLevelCounts.length);
       this.hasMissingSlot = includesMissingCount;
+    }
+
+    public int[] topLevelCounts() {
+      return TermFacetCache.decodeCounts(topLevelCounts);
     }
 
     @Override
@@ -94,15 +103,21 @@ public class TermFacetCache {
   public interface CacheUpdater {
     boolean incrementFromCachedSegment(LongValues toGlobal);
 
-    void updateLeaf(int[] leafCounts);
+    void updateLeaf(int[] leafCounts, int segMissingIdx);
 
     void updateTopLevel();
   }
 
-  public static byte[] encodeCounts(int[] segCounts, ByteBuffersDataOutput cachedSegCountsBuilder) {
+  public static byte[] encodeCounts(
+      int[] segCounts, ByteBuffersDataOutput cachedSegCountsBuilder, int limit) {
     try {
-      for (int c : segCounts) {
-        cachedSegCountsBuilder.writeVInt(c);
+      cachedSegCountsBuilder.writeVInt(limit);
+      int last = segCounts[limit - 1];
+      cachedSegCountsBuilder.writeVInt(last);
+      for (int i = limit - 2; i >= 0; i--) {
+        int val = segCounts[i];
+        cachedSegCountsBuilder.writeZInt(val - last);
+        last = val;
       }
     } catch (IOException ex) {
       throw new RuntimeException(
@@ -111,21 +126,39 @@ public class TermFacetCache {
     return cachedSegCountsBuilder.toArrayCopy();
   }
 
+  public static int[] decodeCounts(byte[] encoded) {
+    ByteArrayDataInput in = new ByteArrayDataInput(encoded);
+    try {
+      final int len = in.readVInt();
+      final int[] ret = new int[len];
+      int val = in.readVInt();
+      ret[len - 1] = val;
+      for (int i = len - 2; i >= 0; i--) {
+        ret[i] = (val += in.readZInt());
+      }
+      assert in.eof();
+      return ret;
+    } catch (IOException ex) {
+      throw new UncheckedIOException(ex);
+    }
+  }
+
   public static void mergeCachedSegmentCounts(
       int[] counts, byte[] cachedSegCounts, LongValues ordMap) {
     ByteArrayDataInput segCounts = new ByteArrayDataInput(cachedSegCounts);
-    if (!segCounts.eof()) {
-      int ord = 0;
-      int count = segCounts.readVInt();
-      while (!segCounts.eof()) {
-        if (count != 0) {
-          counts[ordMap == null ? ord : (int) ordMap.get(ord)] += count;
+    try {
+      final int len = segCounts.readVInt();
+      int val = segCounts.readVInt(); // "missing" count
+      counts[len - 1] += val;
+      for (int i = len - 2; i >= 0; i--) {
+        val += segCounts.readZInt();
+        if (val != 0) {
+          counts[ordMap == null ? i : (int) ordMap.get(i)] += val;
         }
-        ord++;
-        count = segCounts.readVInt();
       }
-      // missing count
-      counts[counts.length - 1] += count;
+      assert segCounts.eof();
+    } catch (IOException ex) {
+      throw new UncheckedIOException(ex);
     }
   }
 }

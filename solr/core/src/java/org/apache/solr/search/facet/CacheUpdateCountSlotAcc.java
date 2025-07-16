@@ -151,14 +151,25 @@ final class CacheUpdateCountSlotAcc extends CountSlotAcc
   }
 
   @Override
-  public void updateLeaf(int[] leafCounts) {
+  public void updateLeaf(int[] leafCounts, int segMissingIdx) {
     if (cached != null) {
       // we don't need to update this leaf
       return;
     }
+    final int limit;
+    if (segMissingIdx < 0) {
+      // not doing "missing", so invert to get highest actual seg ord --
+      // then +1 for (unused) "missing" ord, and +1 for the limit.
+      limit = ~segMissingIdx + 2;
+    } else {
+      // _are_ doing "missing", so this directly represents the "missing"
+      // ord. +1 for the limit.
+      limit = segMissingIdx + 1;
+    }
     dataOutput.reset();
     cachedSegments.put(
-        leafCacheKey, new SegmentCacheEntry(TermFacetCache.encodeCounts(leafCounts, dataOutput)));
+        leafCacheKey,
+        new SegmentCacheEntry(TermFacetCache.encodeCounts(leafCounts, dataOutput, segMissingIdx)));
   }
 
   @Override

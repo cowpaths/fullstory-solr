@@ -17,6 +17,7 @@
 
 package org.apache.solr.search.facet;
 
+import static org.apache.lucene.util.CollectionUtil.newHashMap;
 import static org.apache.solr.search.facet.FacetContext.SKIP_FACET;
 
 import com.carrotsearch.hppc.IntObjectHashMap;
@@ -219,7 +220,9 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
       trackSweepCountAccs.put(size, extantSameSize);
     }
     final CountSlotAccFactory factory;
-    if (cachingCountSlotAccFactory == null || size < countCacheDf) {
+    if (cachingCountSlotAccFactory == null || freq.allBuckets || size < countCacheDf) {
+      // `allBuckets` messes w/ assumptions about number of slots, so for now just ignore
+      // it for the purpose of caching.
       factory = DEFAULT_COUNT_ACC_FACTORY;
     } else {
       factory = cachingCountSlotAccFactory;
@@ -1348,7 +1351,7 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
       if (segmentCache == null) {
         // no cache presence; initialize.
         cacheState = CacheState.NOT_CACHED;
-        newSegmentCache = new HashMap<>(fcontext.searcher.getIndexReader().leaves().size() + 1);
+        newSegmentCache = newHashMap(fcontext.searcher.getIndexReader().leaves().size() + 1);
       } else if (segmentCache.containsKey(topLevelKey)) {
         topLevelEntry = segmentCache.get(topLevelKey);
         if (includeMissingCount && !topLevelEntry.hasMissingSlot) {
@@ -1357,15 +1360,17 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
           // has been requested, it's far simpler to simply re-initialize the cache entry to include
           // "missing" count.
           cacheState = CacheState.NOT_CACHED;
-          newSegmentCache = new HashMap<>(fcontext.searcher.getIndexReader().leaves().size() + 1);
+          newSegmentCache = newHashMap(fcontext.searcher.getIndexReader().leaves().size() + 1);
         } else {
           return CachedCountSlotAcc.create(
-              qKey, docs, isBase, processor, topLevelEntry.topLevelCounts);
+              qKey, docs, isBase, processor, topLevelEntry.topLevelCounts());
         }
       } else {
         // defensive copy, since cache entries are shared across threads
         cacheState = CacheState.PARTIALLY_CACHED;
-        newSegmentCache = new HashMap<>(fcontext.searcher.getIndexReader().leaves().size() + 1);
+        newSegmentCache = newHashMap(fcontext.searcher.getIndexReader().leaves().size() + 1);
+
+        // `putAll()` is ok here, since regen will have removed any stale entries
         newSegmentCache.putAll(segmentCache);
       }
       return CacheUpdateCountSlotAcc.create(

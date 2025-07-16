@@ -92,7 +92,7 @@ final class CachedCountSlotAcc extends CountSlotAcc
   }
 
   @Override
-  public void updateLeaf(int[] leafCounts) {
+  public void updateLeaf(int[] leafCounts, int segMissingIdx) {
     // NoOp nocommit: can we change this to throw UnsupportedOperationException?
   }
 
