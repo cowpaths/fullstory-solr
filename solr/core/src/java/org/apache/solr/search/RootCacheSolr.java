@@ -60,22 +60,22 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
 
   // SolrCache
   @Override
-  @SuppressWarnings("rawtypes")
-  public Object init(Map args, Object persistence, CacheRegenerator regenerator) {
+  public Object init(Map<String, String> args, Object persistence, CacheRegenerator regenerator) {
+    super.init(args, regenerator);
     tierScope = null; // core name -- initialized in `initWithSearcher()`
     parent = null; // parent cache -- initialized in `initWithSearcher()`
-    parentCacheName = (String) args.get(PARENT_PARAM_NAME);
-    String str = (String) args.get(SIZE_PARAM);
+    parentCacheName = args.get(PARENT_PARAM_NAME);
+    String str = args.get(SIZE_PARAM);
     maxSize = (str == null) ? 1024 : Integer.parseInt(str);
-    str = (String) args.get(INITIAL_SIZE_PARAM);
+    str = args.get(INITIAL_SIZE_PARAM);
     initialSize = Math.min((str == null) ? 1024 : Integer.parseInt(str), maxSize);
-    str = (String) args.get(MAX_IDLE_TIME_PARAM);
+    str = args.get(MAX_IDLE_TIME_PARAM);
     if (str == null) {
       maxIdleTimeSec = -1;
     } else {
       maxIdleTimeSec = Integer.parseInt(str);
     }
-    str = (String) args.get(MAX_RAM_MB_PARAM);
+    str = args.get(MAX_RAM_MB_PARAM);
     int maxRamMB = str == null ? -1 : Double.valueOf(str).intValue();
     maxRamBytes = maxRamMB < 0 ? Long.MAX_VALUE : maxRamMB * 1024L * 1024L;
     description = generateDescription(maxSize, initialSize);
@@ -309,7 +309,7 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
     return name() + (cacheMap != null ? cacheMap.getValue().toString() : "");
   }
 
-  private CacheStats priorStats;
+  private CacheStats priorStats = CacheStats.empty();
   private long priorLookups;
   private long priorHits;
   private long priorInserts;

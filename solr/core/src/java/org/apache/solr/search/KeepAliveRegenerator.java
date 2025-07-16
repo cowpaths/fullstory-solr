@@ -115,7 +115,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     return (segMap, v) -> (M) new KeepAliveSegAwareValue(segMap, v, partialHits, partialHitsRatio);
   }
 
-  private static boolean isCrossDoc(Query q) {
+  static boolean isCrossDoc(Query q) {
     boolean[] ret = new boolean[1];
     q.visit(
         new QueryVisitor() {

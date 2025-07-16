@@ -2599,7 +2599,14 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
    */
   public void bootstrapFirstSearcher() {
     for (SolrCache<?, ?> solrCache : cacheList) {
-      solrCache.initialSearcher(this);
+      try {
+        solrCache.initialSearcher(this);
+      } catch (Throwable e) {
+        log.error("Exception registering searcher with cache {}", solrCache, e);
+        if (e instanceof Error) {
+          throw e;
+        }
+      }
     }
   }
 

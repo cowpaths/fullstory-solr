@@ -775,6 +775,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
       RefCountingKey<K> parentKey,
       long knownRefCount,
       Iterator<RootCache<K, V>> pathToLeaf) {
+    asyncLookups.increment();
     final V[] ret = (V[]) new Object[1];
     if (isLeaf) {
       RefCountingKey<K> refCountingKey = new RefCountingKey<>(null, key, parentKey, knownRefCount);
@@ -787,6 +788,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                 if (v == null) {
                   assert k == refCountingKey;
                   ret[0] = value;
+                  inserts.increment();
                   return new MyCompletableFuture<>(
                       0, ValRef.soft(value, recordRamBytes(key, value)));
                 } else {
@@ -797,8 +799,10 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                     // this should actually be possible at the leaf.
                     // TODO: figure out how to handle the existing entry
                     ret[0] = value;
+                    inserts.increment();
                   } else {
                     ret[0] = extant;
+                    asyncHits.increment();
                   }
                   k.updateKnownRefCount(knownRefCount, 0);
                   return v;
@@ -821,11 +825,14 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                   ret[0] = value;
                   V fromNestedPut =
                       child.internalNestedPutIfAbsent(k.key, value, k, knownRefCount, pathToLeaf);
-                  assert fromNestedPut
-                      == value; // if we didn't have it, none of our children should have either
+
+                  // if we didn't have it, none of our children should have either
+                  assert fromNestedPut == value;
+
                   innerRet =
                       new MyCompletableFuture<>(
                           childMask, ValRef.soft(value, recordRamBytes(key, value)));
+                  inserts.increment();
                 } else {
                   assert k != refCountingKey;
                   assert parentKey == k.parentKey : parentKey + " != " + k.parentKey;
@@ -845,6 +852,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
                   assert fromNestedPut == value;
 
                   innerRet = v;
+                  asyncHits.increment();
                 }
                 return innerRet;
               });
@@ -925,6 +933,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
       Iterator<RootCache<K, V>> pathToLeaf,
       String leafKeyScope)
       throws IOException {
+    asyncLookups.increment();
     boolean[] weCompute = new boolean[1];
     final RootCache<K, V> child;
     final long childMask;
@@ -962,6 +971,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
       try {
         ret = mappingFunction.apply(key);
         f.complete(ValRef.strong(ret, -1));
+        inserts.increment();
       } catch (Throwable t) {
         f.completeExceptionally(t);
         throw t;
@@ -998,6 +1008,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
       } else {
         ret = get(f).val;
       }
+      asyncHits.increment();
     }
     if (child != null) {
       asyncCache
