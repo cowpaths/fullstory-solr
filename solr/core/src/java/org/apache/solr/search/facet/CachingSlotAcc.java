@@ -51,10 +51,8 @@ public class CachingSlotAcc extends SlotAcc {
         throws IOException;
   }
 
-  public interface SlotCacheValue {
+  public interface SlotCacheValue extends SlotComparable {
     void update(SimpleOrderedMap<Object> bucket, String key);
-
-    Comparable<?> comp();
   }
 
   private IntFunction<SlotContext> seenSlotContext;
@@ -281,8 +279,7 @@ public class CachingSlotAcc extends SlotAcc {
           if (cv == null || (tm = cv.vals.getNow(null)) == null) {
             return false;
           } else {
-            comps[slot] = ((Number) tm.comp()).intValue();
-            return true;
+            return tm.cached(slot, comps);
           }
         }
 
@@ -293,8 +290,7 @@ public class CachingSlotAcc extends SlotAcc {
           if (cv == null || (tm = cv.vals.getNow(null)) == null) {
             return false;
           } else {
-            comps[slot] = ((Number) tm.comp()).doubleValue();
-            return true;
+            return tm.cached(slot, comps);
           }
         }
 
@@ -305,8 +301,7 @@ public class CachingSlotAcc extends SlotAcc {
           if (cv == null || (tm = cv.vals.getNow(null)) == null) {
             return false;
           } else {
-            comps[slot] = ((Number) tm.comp()).longValue();
-            return true;
+            return tm.cached(slot, comps);
           }
         }
       };
@@ -411,8 +406,21 @@ public class CachingSlotAcc extends SlotAcc {
     }
 
     @Override
-    public Comparable<?> comp() {
-      return comp;
+    public boolean cached(int slot, int[] comps) {
+      comps[slot] = ((Number) comp).intValue();
+      return true;
+    }
+
+    @Override
+    public boolean cached(int slot, double[] comps) {
+      comps[slot] = ((Number) comp).doubleValue();
+      return true;
+    }
+
+    @Override
+    public boolean cached(int slot, long[] comps) {
+      comps[slot] = ((Number) comp).longValue();
+      return true;
     }
   }
 

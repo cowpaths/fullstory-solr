@@ -34,6 +34,7 @@ import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.common.util.CollectionUtil;
 import org.apache.solr.common.util.SimpleOrderedMap;
@@ -97,9 +98,6 @@ public class UniqueAgg extends StrAggValueSource {
   private static final class CacheKey implements CachingSlotAcc.SlotCacheKey {
     private static final long BASE_RAM_BYTES =
         RamUsageEstimator.shallowSizeOfInstance(CacheKey.class);
-    private static final long VALUE_RAM_BYTES =
-        CachingSlotAcc.slotCacheEntryBaseSize(EXPECT_MAP_SIZE)
-            + RamUsageEstimator.shallowSizeOfInstance(Long.class);
     private static final int CLASS_HASH = CacheKey.class.hashCode();
     private final String field;
     private final QueryResultKey domain;
@@ -130,7 +128,7 @@ public class UniqueAgg extends StrAggValueSource {
 
     @Override
     public long valueRamUsageEstimate() {
-      return VALUE_RAM_BYTES;
+      return UniqueAggCacheValue.RAM_BYTES_USED;
     }
 
     @Override
@@ -143,10 +141,55 @@ public class UniqueAgg extends StrAggValueSource {
       (bucket, backing, slotNum, valFuture) -> {
         try (TeeMap<Object> toCache = new TeeMap<>(bucket, backing.key, EXPECT_MAP_SIZE)) {
           backing.setValues(toCache, slotNum);
-          valFuture.complete(toCache);
+          valFuture.complete(new UniqueAggCacheValue(toCache));
           return toCache;
         }
       };
+
+  private static final class UniqueAggCacheValue
+      implements CachingSlotAcc.SlotCacheValue, Accountable {
+
+    private static final long RAM_BYTES_USED =
+        RamUsageEstimator.shallowSizeOfInstance(UniqueAggCacheValue.class);
+
+    private final int val;
+
+    private UniqueAggCacheValue(TeeMap<Object> val) {
+      long[] v = new long[1];
+      if (!val.cached(0, v)) {
+        throw new IllegalStateException();
+      }
+      this.val = Math.toIntExact(v[0]);
+    }
+
+    @Override
+    public long ramBytesUsed() {
+      return RAM_BYTES_USED;
+    }
+
+    @Override
+    public void update(SimpleOrderedMap<Object> bucket, String key) {
+      bucket.add(key, (long) val);
+    }
+
+    @Override
+    public boolean cached(int slot, int[] comps) {
+      comps[slot] = val;
+      return true;
+    }
+
+    @Override
+    public boolean cached(int slot, double[] comps) {
+      comps[slot] = val;
+      return true;
+    }
+
+    @Override
+    public boolean cached(int slot, long[] comps) {
+      comps[slot] = val;
+      return true;
+    }
+  }
 
   public SlotAcc createSlotAcc0(FacetContext fcontext, long numDocs, int numSlots)
       throws IOException {
