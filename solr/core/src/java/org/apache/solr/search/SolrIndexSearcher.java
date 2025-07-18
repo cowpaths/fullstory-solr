@@ -966,7 +966,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     }
 
     if (doCache) {
-      return getAndCacheDocSet(query);
+      return getAndCacheDocSet(query, filterCache);
     }
 
     return getDocSetNC(query, null);
@@ -1001,9 +1001,10 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
    * @param query the query to compute.
    * @return the DocSet answer
    */
-  private DocSet getAndCacheDocSet(Query query) throws IOException {
+  public final DocSet getAndCacheDocSet(Query query, SolrCache<Query, DocSet> cache)
+      throws IOException {
     assert !(query instanceof WrappedQuery) : "should have unwrapped";
-    assert filterCache != null : "must check for caching before calling this method";
+    assert cache != null : "must check for caching before calling this method";
 
     if (query instanceof MatchAllDocsQuery) {
       // bypass the filterCache for MatchAllDocsQuery
@@ -1017,7 +1018,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       RuntimeException[] ourException = new RuntimeException[1];
       try {
         answer =
-            filterCache.computeIfAbsent(
+            cache.computeIfAbsent(
                 query,
                 q -> {
                   try {
@@ -1059,16 +1060,16 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       // out before it does then we won't even have partial results to provide. We could possibly
       // wait for the query to finish in parallel with our own results and if they complete first
       // use that instead, but we'll leave that to implement later.
-      answer = filterCache.get(query);
+      answer = cache.get(query);
 
       // Not found in the cache so compute and put in the cache
       if (answer == null) {
         answer = getDocSetNC(query, null);
-        filterCache.put(query, answer);
+        cache.put(query, answer);
       }
     } else {
       try {
-        answer = filterCache.computeIfAbsent(query, q -> getDocSetNC(q, null));
+        answer = cache.computeIfAbsent(query, q -> getDocSetNC(q, null));
       } catch (OtherTimeExceededException ex) {
         // we don't have limits, so this must have come from another thread/request.
         // fallback to computing ourselves. This case should be rare.
@@ -1524,7 +1525,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     Query absQ = QueryUtils.getAbs(query);
     boolean positive = Objects.equals(absQ, query);
 
-    DocSet absAnswer = getAndCacheDocSet(absQ);
+    DocSet absAnswer = getAndCacheDocSet(absQ, filterCache);
 
     if (filter == null) {
       return positive ? absAnswer : getLiveDocSet().andNot(absAnswer);
