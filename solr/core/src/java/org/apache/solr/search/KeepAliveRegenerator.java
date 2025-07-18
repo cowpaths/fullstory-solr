@@ -237,14 +237,20 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
         AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> witness =
             this.ref.compareAndExchange(ref, newRef);
         if (witness == ref) {
+          SegmentMap oldSegMap;
+          if (SolrIndexSearcher.SUPERFLUOUS_SOFT_COMMIT_WITHIN == -1) {
+            oldSegMap = ref.getKey();
+          } else {
+            oldSegMap = ref.getKey().ignoreSegmentsOneIn(10);
+          }
           // we compute
           Query frankenstein =
               new SegAwareDocSetCache.FrankensteinQuery(
-                  key, ref.getKey().segments, ref.getValue().get());
+                  key, oldSegMap.segments, ref.getValue().get());
           DocSet computed = mappingFunction.apply(frankenstein);
           f.complete(computed);
           partialHits.increment();
-          partialHitsRatio.add(ref.getKey().getOverlap(segMap.key));
+          partialHitsRatio.add(segMap.registerOverlap(oldSegMap));
           return computed;
         } else if (witness.getKey() == segMap) {
           return witness.getValue().get();
@@ -335,17 +341,26 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     SolrCache<Query, KeepAliveSegAwareValue> c =
         (SolrCache<Query, KeepAliveSegAwareValue>) newCache;
 
-    if (metaEntry.ref.get().getKey().registerOverlap(newSearcher.getSegmentMap()) < overlapThreshold
-        || isCrossDoc(query)) {
+    SegmentMap newSegMap = newSearcher.getSegmentMap();
+
+    AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> ref =
+        metaEntry.ref.get();
+    SegmentMap oldSegMap;
+    if (SolrIndexSearcher.SUPERFLUOUS_SOFT_COMMIT_WITHIN != -1) {
+      oldSegMap = ref.getKey().ignoreSegmentsOneIn(10);
+    } else {
+      oldSegMap = ref.getKey();
+    }
+
+    if (newSegMap.registerOverlap(oldSegMap) < overlapThreshold || isCrossDoc(query)) {
       if (lastAccessAgo < eagerKeepAliveNanos) {
         // if we meet the criterion for eager warming, do it here (not leveraging segment-aware)
         c.computeIfAbsent(
             query,
             (q) -> {
-              SegmentMap segMap = newSearcher.getSegmentMap();
               DocSet docSet = newSearcher.getDocSetNC(query, null);
               return new KeepAliveSegAwareValue(
-                  segMap, docSet, extantTimestamp, partialHits, partialHitsRatio);
+                  newSegMap, docSet, extantTimestamp, partialHits, partialHitsRatio);
             });
       }
       return true;
@@ -357,13 +372,11 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
       c.computeIfAbsent(
           query,
           (q) -> {
-            AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> ref =
-                metaEntry.ref.get();
             Query frankenstein;
             try {
               frankenstein =
                   new SegAwareDocSetCache.FrankensteinQuery(
-                      query, ref.getKey().segments, ref.getValue().get());
+                      query, oldSegMap.segments, ref.getValue().get());
             } catch (InterruptedException e) {
               Thread.currentThread().interrupt();
               throw new RuntimeException(e);
@@ -377,11 +390,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
             }
             DocSet docSet = newSearcher.getDocSetNC(frankenstein, null);
             return new KeepAliveSegAwareValue(
-                newSearcher.getSegmentMap(),
-                docSet,
-                extantTimestamp,
-                partialHits,
-                partialHitsRatio);
+                newSegMap, docSet, extantTimestamp, partialHits, partialHitsRatio);
           });
       return true;
     }

@@ -17,8 +17,10 @@
 package org.apache.solr.search;
 
 import java.util.AbstractMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.lucene.index.DirectoryReader;
@@ -82,19 +84,35 @@ public class SegmentMap {
     this.maxDoc = maxDoc;
   }
 
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  public SegmentMap ignoreSegmentsOneIn(int denominator) {
+    List<Map.Entry<IndexReader.CacheKey, Segment>> segs = new ArrayList<>(segments.size());
+    Random r = new Random();
+    for (Map.Entry<IndexReader.CacheKey, Segment> e : segments.entrySet()) {
+      if (r.nextInt(denominator) != 0) {
+        segs.add(e);
+      }
+    }
+    return new SegmentMap(null, Map.ofEntries(segs.toArray(new Map.Entry[0])), numDocs, maxDoc);
+  }
+
   public double registerOverlap(SegmentMap other) {
-    return overlap.computeIfAbsent(
-        other.key,
-        (k) -> {
-          int count = 0;
-          final Map<IndexReader.CacheKey, Segment> otherSegments = other.segments;
-          for (Segment s : segments.values()) {
-            if (otherSegments.containsKey(s.coreKey)) {
-              count += s.maxDoc;
-            }
-          }
-          return (double) count / other.maxDoc;
-        });
+    if (other.key == null) {
+      return computeOverlap(other);
+    } else {
+      return overlap.computeIfAbsent(other.key, (k) -> computeOverlap(other));
+    }
+  }
+
+  private double computeOverlap(SegmentMap other) {
+    int count = 0;
+    final Map<IndexReader.CacheKey, Segment> otherSegments = other.segments;
+    for (Segment s : segments.values()) {
+      if (otherSegments.containsKey(s.coreKey)) {
+        count += s.maxDoc;
+      }
+    }
+    return (double) count / other.maxDoc;
   }
 
   public double getOverlap(IndexReader.CacheKey newSearcher) {
