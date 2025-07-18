@@ -2393,6 +2393,7 @@ public class SolrCore implements SolrInfoBean, Closeable {
             return newestSearcher;
 
           } else if (newestSearcher.get().isCachingEnabled()
+              && SolrIndexSearcher.SUPERFLUOUS_SOFT_COMMIT_WITHIN == -1
               && newestSearcher.get().getSchema() == getLatestSchema()) {
             // absolutely nothing has changed, can use the same searcher
             // but log a message about it to minimize confusion

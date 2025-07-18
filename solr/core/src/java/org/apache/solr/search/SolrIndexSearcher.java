@@ -93,6 +93,7 @@ import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.util.CollectionUtil;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ObjectReleaseTracker;
 import org.apache.solr.core.DirectoryFactory;
 import org.apache.solr.core.DirectoryFactory.DirContext;
@@ -733,8 +734,14 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     }
   }
 
+  public static final int SUPERFLUOUS_SOFT_COMMIT_WITHIN =
+      EnvUtils.getPropertyAsInteger("solr.superfluousSoftCommitWithin", -1);
+
   /** Primary entrypoint for searching, using a {@link QueryCommand}. */
   public QueryResult search(QueryCommand cmd) throws IOException {
+    if (SUPERFLUOUS_SOFT_COMMIT_WITHIN != -1) {
+      core.getUpdateHandler().active(SUPERFLUOUS_SOFT_COMMIT_WITHIN);
+    }
     return search(new QueryResult(), cmd);
   }
 
