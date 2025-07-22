@@ -24,12 +24,14 @@ import com.github.benmanes.caffeine.cache.Policy;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.lang.invoke.MethodHandles;
 import java.lang.ref.SoftReference;
 import java.time.Duration;
 import java.util.AbstractMap;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -54,13 +56,14 @@ import java.util.stream.Collectors;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.CollectionUtil;
+import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.util.IOFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 @SuppressWarnings("ReferenceEquality")
-public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
+public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Closeable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -175,7 +178,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
         pathFromRootArr = ArrayUtil.growExact(pathToParent, pathToParent.length + 1);
         pathFromRootArr[pathToParent.length] = this;
       }
-      pathFromRoot = List.of(pathFromRootArr);
+      pathFromRoot = Arrays.asList(pathFromRootArr);
       this.mask = parent.addChild(this);
       parentRemovalListener =
           (key, value, cause) -> {
@@ -740,18 +743,17 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
   private final LongAdder asyncHits = new LongAdder();
   private final LongAdder asyncLookups = new LongAdder();
   private final LongAdder inserts = new LongAdder();
-  private CacheStats discountStats;
+  private CacheStats offsetSyncStats = CacheStats.empty();
 
   public void resetStats() {
     asyncHits.reset();
     asyncLookups.reset();
     inserts.reset();
-    discountStats = asyncCache.synchronous().stats();
+    offsetSyncStats = asyncCache.synchronous().stats();
   }
 
   public CacheStats stats() {
-    CacheStats raw = asyncCache.synchronous().stats();
-    return discountStats == null ? raw : raw.minus(discountStats);
+    return asyncCache.synchronous().stats().minus(offsetSyncStats);
   }
 
   public long size() {
@@ -1288,13 +1290,14 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
   }
 
   @SuppressWarnings("rawtypes")
-  public void close() {
+  @Override
+  public void close() throws IOException {
     if (parent != null) {
       parent.unregister(
           parentRemovalListener, !Objects.equals(parent.tierScope, tierScope) ? tierScope : null);
       parent.removeChild(this);
     }
-    List<RootCache<?, ?>> childrenToClose;
+    RootCache<?, ?>[] childrenToClose;
     synchronized (children) {
       if (children.isEmpty()) {
         return;
@@ -1303,11 +1306,9 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable {
       //  always be closed explicitly before parents are closed?
       //  children cannot exist without parents, so if we are closing all our children must
       //  close also.
-      childrenToClose = List.of(children.keySet().toArray(new RootCache[0]));
+      childrenToClose = children.keySet().toArray(new RootCache[0]);
     }
-    for (RootCache<?, ?> child : childrenToClose) {
-      child.close();
-    }
+    IOUtils.close(childrenToClose);
   }
 
   public void clear() {

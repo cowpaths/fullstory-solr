@@ -91,6 +91,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
   private LongAdder hits;
   private LongAdder inserts;
   private LongAdder lookups;
+  private CacheStats offsetSyncStats = CacheStats.empty();
   private Cache<K, V> cache;
   private AsyncCache<K, V> asyncCache;
   private long warmupTime;
@@ -454,16 +455,35 @@ public class CaffeineCache<K, V> extends SolrCacheBase
       }
     }
 
-    hits.reset();
-    inserts.reset();
-    lookups.reset();
-    CacheStats oldStats = other.cache.stats();
+    CacheStats oldStats = other.syncStats();
     priorStats = oldStats.plus(other.priorStats);
     priorHits = oldStats.hitCount() + other.hits.sum() + other.priorHits;
     priorInserts = other.inserts.sum() + other.priorInserts;
     priorLookups = oldStats.requestCount() + other.lookups.sum() + other.priorLookups;
     warmupTime =
         TimeUnit.MILLISECONDS.convert(System.nanoTime() - warmingStartTime, TimeUnit.NANOSECONDS);
+  }
+
+  /**
+   * The last thing {@link SolrIndexSearcher} does before initializing metrics and making a cache
+   * available for "real" use is call {@code setState(State.LIVE)}.
+   */
+  @Override
+  public void setState(State state) {
+    if (state == State.LIVE && getState() != State.LIVE) {
+      hits.reset();
+      inserts.reset();
+      lookups.reset();
+
+      // offset/compensate for any synchronous stats that may have accumulated before the cache was
+      // set to LIVE.
+      offsetSyncStats = cache.stats();
+    }
+    super.setState(state);
+  }
+
+  private CacheStats syncStats() {
+    return cache.stats().minus(offsetSyncStats);
   }
 
   /** Returns the description of this cache. */
@@ -520,7 +540,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
         new MetricsMap(
             map -> {
               if (cache != null) {
-                CacheStats stats = cache.stats();
+                CacheStats stats = syncStats();
                 long hitCount = stats.hitCount() + hits.sum();
                 long insertCount = inserts.sum();
                 long lookupCount = stats.requestCount() + lookups.sum();

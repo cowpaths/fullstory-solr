@@ -225,7 +225,6 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
       }
     }
 
-    rootCache.resetStats();
     CacheStats oldStats = other.rootCache.stats();
     priorStats = oldStats.plus(other.priorStats);
     priorHits = oldStats.hitCount() + other.rootCache.asyncHits() + other.priorHits;
@@ -233,6 +232,18 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
     priorLookups = oldStats.requestCount() + other.rootCache.asyncLookups() + other.priorLookups;
     warmupTime =
         TimeUnit.MILLISECONDS.convert(System.nanoTime() - warmingStartTime, TimeUnit.NANOSECONDS);
+  }
+
+  /**
+   * The last thing {@link SolrIndexSearcher} does before initializing metrics and making a cache
+   * available for "real" use is call {@code setState(State.LIVE)}.
+   */
+  @Override
+  public void setState(State state) {
+    if (state == State.LIVE && getState() != State.LIVE) {
+      rootCache.resetStats();
+    }
+    super.setState(state);
   }
 
   @Override
