@@ -245,7 +245,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
           // Should we record a cache miss here?
           return mappingFunction.apply(key);
         }
-        throw new CompletionException(e);
+        throw new CompletionException(cause);
       }
     }
     try {

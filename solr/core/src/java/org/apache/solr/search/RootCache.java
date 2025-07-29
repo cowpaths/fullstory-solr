@@ -1005,7 +1005,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
             // starvation. Should we record a cache miss here?
             return mappingFunction.apply(key);
           }
-          throw new CompletionException(e);
+          throw new CompletionException(cause);
         }
       } else {
         ret = get(f).val;
