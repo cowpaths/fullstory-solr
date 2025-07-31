@@ -207,7 +207,13 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
       AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> entry =
           template.ref.get();
       ref = new AtomicReference<>(template.ref.get());
-      ramBytesUsed = BASE_RAM_BYTES_USED + entry.getValue().getNow(null).ramBytesUsed();
+      DocSet val = entry.getValue().getNow(null);
+      if (val == null) {
+        // warming a value that's not yet loaded; just use the old `ramBytesUsed`
+        ramBytesUsed = template.ramBytesUsed();
+      } else {
+        ramBytesUsed = BASE_RAM_BYTES_USED + val.ramBytesUsed();
+      }
       this.accessTimestampNanos = template.accessTimestampNanos;
       this.partialHits = partialHits;
       this.partialHitsRatio = partialHitsRatio;
