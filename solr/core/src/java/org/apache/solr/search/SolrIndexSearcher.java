@@ -171,6 +171,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   // map of generic caches - not synchronized since it's read-only after the constructor.
   private final Map<String, SolrCache<?, ?>> cacheMap;
 
+  private final int dither = dither(this);
+
   // list of all caches associated with this searcher.
   @SuppressWarnings({"rawtypes"})
   private final SolrCache[] cacheList;
@@ -761,10 +763,34 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   public static final int SUPERFLUOUS_SOFT_COMMIT_WITHIN =
       EnvUtils.getPropertyAsInteger("solr.superfluousSoftCommitWithin", -1);
 
+  private static final int MAX_DEVIATION;
+  private static final int MAX_DEVIATION_MOD;
+
+  static {
+    if (SUPERFLUOUS_SOFT_COMMIT_WITHIN < 3) {
+      MAX_DEVIATION = 0;
+      MAX_DEVIATION_MOD = 1;
+    } else {
+      MAX_DEVIATION = SUPERFLUOUS_SOFT_COMMIT_WITHIN / 3;
+      MAX_DEVIATION_MOD = MAX_DEVIATION << 1;
+    }
+  }
+
+  private static int dither(Object o) {
+    if (MAX_DEVIATION == 0) {
+      return 0;
+    }
+    int hc = System.identityHashCode(o);
+    if (hc < 0) {
+      hc = ~hc;
+    }
+    return (hc % MAX_DEVIATION_MOD) - MAX_DEVIATION;
+  }
+
   /** Primary entrypoint for searching, using a {@link QueryCommand}. */
   public QueryResult search(QueryCommand cmd) throws IOException {
     if (SUPERFLUOUS_SOFT_COMMIT_WITHIN != -1) {
-      core.getUpdateHandler().active(SUPERFLUOUS_SOFT_COMMIT_WITHIN);
+      core.getUpdateHandler().active(SUPERFLUOUS_SOFT_COMMIT_WITHIN + dither);
     }
     return search(new QueryResult(), cmd);
   }
