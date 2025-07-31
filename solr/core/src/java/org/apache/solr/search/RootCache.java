@@ -1292,6 +1292,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
   @SuppressWarnings("rawtypes")
   @Override
   public void close() throws IOException {
+    clear();
     if (parent != null) {
       parent.unregister(
           parentRemovalListener, !Objects.equals(parent.tierScope, tierScope) ? tierScope : null);
