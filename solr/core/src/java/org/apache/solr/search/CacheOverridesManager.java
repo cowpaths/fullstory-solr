@@ -7,7 +7,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-
 import org.apache.solr.common.cloud.ClusterProperties;
 import org.apache.solr.common.cloud.ZkStateReader;
 import org.apache.solr.core.SolrCore;
@@ -67,7 +66,8 @@ import org.slf4j.LoggerFactory;
  */
 @SuppressWarnings("unchecked")
 public class CacheOverridesManager {
-  public static final String CACHE_OVERRIDE_KEY = ClusterProperties.EXT_PROPRTTY_PREFIX + "cacheOverrides";
+  public static final String CACHE_OVERRIDE_KEY =
+      ClusterProperties.EXT_PROPRTTY_PREFIX + "cacheOverrides";
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private volatile Map<String, List<CacheOverrides>> overridesByCacheName = Map.of();
 
