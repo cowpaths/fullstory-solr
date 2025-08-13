@@ -89,6 +89,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
   private LongAdder hits;
   private LongAdder inserts;
   private LongAdder lookups;
+  private final CacheStats[] offsetSyncStats = new CacheStats[] {CacheStats.empty()};
   private Cache<K, V> cache;
   private AsyncCache<K, V> asyncCache;
   private long warmupTime;
@@ -387,10 +388,16 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     }
   }
 
-  protected void adjustMetrics(long hitsAdjust, long insertsAdjust, long lookupsAdjust) {
+  public void adjustMetrics(
+      long hitsAdjust, long insertsAdjust, long lookupsAdjust, CacheStats stats) {
     hits.add(-hitsAdjust);
     inserts.add(-insertsAdjust);
     lookups.add(-lookupsAdjust);
+    if (stats != null) {
+      synchronized (offsetSyncStats) {
+        offsetSyncStats[0] = offsetSyncStats[0].plus(stats);
+      }
+    }
   }
 
   @Override
@@ -418,16 +425,65 @@ public class CaffeineCache<K, V> extends SolrCacheBase
       }
     }
 
-    hits.reset();
-    inserts.reset();
-    lookups.reset();
-    CacheStats oldStats = other.cache.stats();
+    CacheStats oldStats = other.syncStats();
     priorStats = oldStats.plus(other.priorStats);
     priorHits = oldStats.hitCount() + other.hits.sum() + other.priorHits;
     priorInserts = other.inserts.sum() + other.priorInserts;
     priorLookups = oldStats.requestCount() + other.lookups.sum() + other.priorLookups;
     warmupTime =
         TimeUnit.MILLISECONDS.convert(System.nanoTime() - warmingStartTime, TimeUnit.NANOSECONDS);
+  }
+
+  /**
+   * The last thing {@link SolrIndexSearcher} does before initializing metrics and making a cache
+   * available for "real" use is call {@code setState(State.LIVE)}.
+   */
+  @Override
+  public void setState(State state) {
+    setState(state, NOOP_METRICS_OFFSETTER);
+  }
+
+  private static final MetricsOffsetter NOOP_METRICS_OFFSETTER = (a, b, c, d) -> {};
+
+  public interface MetricsOffsetter {
+    void offset(long hits, long inserts, long lookups, CacheStats stats);
+  }
+
+  public void setState(State state, MetricsOffsetter offsetter) {
+    if (state == State.LIVE && getState() != State.LIVE) {
+      long hits = this.hits.sumThenReset();
+      long inserts = this.inserts.sumThenReset();
+      long lookups = this.lookups.sumThenReset();
+
+      // offset/compensate for any synchronous stats that may have accumulated before the cache was
+      // set to LIVE.
+      CacheStats stats = cache.stats();
+      offsetSyncStats[0] = stats;
+      offsetter.offset(hits, inserts, lookups, stats);
+    }
+    super.setState(state);
+  }
+
+  /**
+   * In a "shared cache" situation, we want to be able to propagate/offset hit, miss, and load
+   * information, but <i>not</i> evictions (which are scoped to a specific cache.
+   *
+   * <p>This method returns a copy of the input {@link CacheStats}, but without any eviction
+   * information.
+   */
+  public static CacheStats stripEvictionStats(CacheStats stats) {
+    return CacheStats.of(
+        stats.hitCount(),
+        stats.missCount(),
+        stats.loadSuccessCount(),
+        stats.loadFailureCount(),
+        stats.totalLoadTime(),
+        0L,
+        0L);
+  }
+
+  private CacheStats syncStats() {
+    return cache.stats().minus(offsetSyncStats[0]);
   }
 
   /** Returns the description of this cache. */
@@ -479,7 +535,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
         new MetricsMap(
             map -> {
               if (cache != null) {
-                CacheStats stats = cache.stats();
+                CacheStats stats = syncStats();
                 long hitCount = stats.hitCount() + hits.sum();
                 long insertCount = inserts.sum();
                 long lookupCount = stats.requestCount() + lookups.sum();
