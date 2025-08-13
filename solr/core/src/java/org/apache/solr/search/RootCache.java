@@ -743,17 +743,51 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
   private final LongAdder asyncHits = new LongAdder();
   private final LongAdder asyncLookups = new LongAdder();
   private final LongAdder inserts = new LongAdder();
-  private CacheStats offsetSyncStats = CacheStats.empty();
+  private final CacheStats[] offsetSyncStats = new CacheStats[] {CacheStats.empty()};
 
   public void resetStats() {
-    asyncHits.reset();
-    asyncLookups.reset();
-    inserts.reset();
-    offsetSyncStats = asyncCache.synchronous().stats();
+    assert isLeaf;
+    long hits = asyncHits.sumThenReset();
+    long lookups = asyncLookups.sumThenReset();
+    long inserts = this.inserts.sumThenReset();
+    CacheStats stats = asyncCache.synchronous().stats();
+    offsetSyncStats[0] = stats;
+    stats = stripEvictionStats(stats);
+    if (parent != null) {
+      // adjust all ancestors accordingly
+      RootCache<K, V> parent = this.parent;
+      do {
+        parent.asyncHits.add(-hits);
+        parent.asyncLookups.add(-lookups);
+        parent.inserts.add(-inserts);
+        CacheStats[] parentOffsetSyncStats = parent.offsetSyncStats;
+        synchronized (parentOffsetSyncStats) {
+          parentOffsetSyncStats[0] = parentOffsetSyncStats[0].plus(stats);
+        }
+      } while ((parent = parent.parent) != null);
+    }
+  }
+
+  /**
+   * In a "shared cache" situation, we want to be able to propagate/offset hit, miss, and load
+   * information, but <i>not</i> evictions (which are scoped to a specific cache.
+   *
+   * <p>This method returns a copy of the input {@link CacheStats}, but without any eviction
+   * information.
+   */
+  public static CacheStats stripEvictionStats(CacheStats stats) {
+    return CacheStats.of(
+        stats.hitCount(),
+        stats.missCount(),
+        stats.loadSuccessCount(),
+        stats.loadFailureCount(),
+        stats.totalLoadTime(),
+        0L,
+        0L);
   }
 
   public CacheStats stats() {
-    return asyncCache.synchronous().stats().minus(offsetSyncStats);
+    return asyncCache.synchronous().stats().minus(offsetSyncStats[0]);
   }
 
   public long size() {

@@ -91,7 +91,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
   private LongAdder hits;
   private LongAdder inserts;
   private LongAdder lookups;
-  private CacheStats offsetSyncStats = CacheStats.empty();
+  private final CacheStats[] offsetSyncStats = new CacheStats[] {CacheStats.empty()};
   private Cache<K, V> cache;
   private AsyncCache<K, V> asyncCache;
   private long warmupTime;
@@ -411,10 +411,16 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     }
   }
 
-  protected void adjustMetrics(long hitsAdjust, long insertsAdjust, long lookupsAdjust) {
+  public void adjustMetrics(
+      long hitsAdjust, long insertsAdjust, long lookupsAdjust, CacheStats stats) {
     hits.add(-hitsAdjust);
     inserts.add(-insertsAdjust);
     lookups.add(-lookupsAdjust);
+    if (stats != null) {
+      synchronized (offsetSyncStats) {
+        offsetSyncStats[0] = offsetSyncStats[0].plus(stats);
+      }
+    }
   }
 
   private SegmentMap segMap;
@@ -470,20 +476,32 @@ public class CaffeineCache<K, V> extends SolrCacheBase
    */
   @Override
   public void setState(State state) {
+    setState(state, NOOP_METRICS_OFFSETTER);
+  }
+
+  private static final MetricsOffsetter NOOP_METRICS_OFFSETTER = (a, b, c, d) -> {};
+
+  public interface MetricsOffsetter {
+    void offset(long hits, long inserts, long lookups, CacheStats stats);
+  }
+
+  public void setState(State state, MetricsOffsetter offsetter) {
     if (state == State.LIVE && getState() != State.LIVE) {
-      hits.reset();
-      inserts.reset();
-      lookups.reset();
+      long hits = this.hits.sumThenReset();
+      long inserts = this.inserts.sumThenReset();
+      long lookups = this.lookups.sumThenReset();
 
       // offset/compensate for any synchronous stats that may have accumulated before the cache was
       // set to LIVE.
-      offsetSyncStats = cache.stats();
+      CacheStats stats = cache.stats();
+      offsetSyncStats[0] = stats;
+      offsetter.offset(hits, inserts, lookups, stats);
     }
     super.setState(state);
   }
 
   private CacheStats syncStats() {
-    return cache.stats().minus(offsetSyncStats);
+    return cache.stats().minus(offsetSyncStats[0]);
   }
 
   /** Returns the description of this cache. */
