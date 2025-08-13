@@ -35,16 +35,21 @@ import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiConsumer;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricsContext;
+import org.apache.solr.request.SolrQueryRequest;
+import org.apache.solr.request.SolrRequestInfo;
 import org.apache.solr.util.IOFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -210,10 +215,43 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     if (result != null) {
       try {
         // Another thread is already working on this computation, wait for them to finish
-        V value = result.join();
+        QueryLimits queryLimits = QueryLimits.getCurrentLimits();
+        // TODO: below respects `TimeAllowedLimit` for the calling thread, but in order to
+        //  support query limits more generically, we would need to poll `queryLimits.shouldExit()`
+        //  in a loop in conjunction with `result.get(long, TimeUnit)`.
+        //  NOTE: the only other currently available limit is `CpuAllowedLimit`, which in the
+        //  case of a thread blocking on a result to be made available from another thread's
+        //  computation, should be a non-issue in practice.
+        Long nanosElapsed;
+        V value;
+        if (queryLimits != null
+            && (nanosElapsed =
+                    (Long) queryLimits.currentLimitValueFor(TimeAllowedLimit.class).orElse(null))
+                != null) {
+          SolrRequestInfo requestInfo = SolrRequestInfo.getRequestInfo();
+          assert requestInfo != null
+              : "non-null QueryLimits should guarantee non-null SolrRequestInfo";
+          SolrQueryRequest req = requestInfo.getReq();
+          assert req != null
+              : "TimeAllowedLimit is set from request, so non-null TimeAllowedLimit implies non-null req";
+          long timeAllowedMillis = req.getParams().getLong(CommonParams.TIME_ALLOWED, -1L);
+          assert timeAllowedMillis >= 0 : "TimeAllowedLimit implies timeAllowed >= 0";
+          long nanosRemaining = TimeUnit.MILLISECONDS.toNanos(timeAllowedMillis) - nanosElapsed;
+          value = result.get(nanosRemaining, TimeUnit.NANOSECONDS);
+        } else {
+          value = result.get(); // prefer `get()`, since `join()` is uninterruptible
+        }
         hits.increment();
         return value;
-      } catch (CompletionException e) {
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new CompletionException(e);
+      } catch (TimeoutException e) {
+        // we are almost certainly in violation of `TimeAllowedLimit`, but the easiest thing to
+        // do is attempt to compute the result ourselves and allow (e.g.) ExitingDirectoryReader
+        // to handle appropriately.
+        return mappingFunction.apply(key);
+      } catch (ExecutionException e) {
         Throwable cause = e.getCause();
         if (cause instanceof IOException) {
           // Computation had an IOException, likely index problems, so fail this result too
@@ -225,7 +263,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
           // Should we record a cache miss here?
           return mappingFunction.apply(key);
         }
-        throw e;
+        throw new CompletionException(cause);
       }
     }
     try {
