@@ -42,6 +42,7 @@ import org.apache.lucene.search.QueryVisitor;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.automaton.ByteRunAutomaton;
 import org.apache.solr.common.MapWriter;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.core.SolrConfig;
 import org.apache.solr.search.SolrCache.MetaEntry;
 import org.apache.solr.util.IOFunction;
@@ -49,6 +50,20 @@ import org.apache.solr.util.IOFunction;
 /** Cache regenerator that builds OrdinalMap instances against the new searcher. */
 public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     extends MetaCacheRegenerator<Query, DocSet, M> {
+
+  /**
+   * In order to simulate {@code openSearcher} and index mutations (without the side-effects of
+   * <i>actual</i> index mutations), we support ignoring one out of every {@code N} segments, across
+   * different searcher instances (over the same index).
+   *
+   * <p>Note that because {@link KeepAliveRegenerator} determines segment equivalence irrespective
+   * of deletes, in practice the index should mutate in relatively very small ways (hence a large
+   * setting for this value -- perhaps {@code 100} -- is likely appropriate).
+   *
+   * <p>See also {@link SolrIndexSearcher#SUPERFLUOUS_SOFT_COMMIT_WITHIN}.
+   */
+  public static final int IGNORE_SEGMENTS_ONE_IN =
+      EnvUtils.getPropertyAsInteger("solr.ignoreSegmentsOneIn", 100);
 
   private static final int DEFAULT_REGEN_KEEPALIVE_MINUTES = 2;
   private static final long DEFAULT_REGEN_KEEPALIVE_NANOS =
@@ -247,7 +262,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
           if (SolrIndexSearcher.SUPERFLUOUS_SOFT_COMMIT_WITHIN == -1) {
             oldSegMap = ref.getKey();
           } else {
-            oldSegMap = ref.getKey().ignoreSegmentsOneIn(10);
+            oldSegMap = ref.getKey().ignoreSegmentsOneIn(IGNORE_SEGMENTS_ONE_IN);
           }
           // we compute
           Query frankenstein =
@@ -353,7 +368,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
         metaEntry.ref.get();
     SegmentMap oldSegMap;
     if (SolrIndexSearcher.SUPERFLUOUS_SOFT_COMMIT_WITHIN != -1) {
-      oldSegMap = ref.getKey().ignoreSegmentsOneIn(10);
+      oldSegMap = ref.getKey().ignoreSegmentsOneIn(IGNORE_SEGMENTS_ONE_IN);
     } else {
       oldSegMap = ref.getKey();
     }
