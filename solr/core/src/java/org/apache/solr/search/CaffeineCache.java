@@ -430,6 +430,10 @@ public class CaffeineCache<K, V> extends SolrCacheBase
       }
     }
 
+    // NOTE: metrics are reset (to avoid reporting warming-related activity as end-user cache
+    // metrics) upon invocation of `setState(State.LIVE)`. This coordinates the lifecycle of all
+    // caches, and prevents warming-related activity crosstalk from other caches influencing
+    // end-user cache metrics for this cache.
     CacheStats oldStats = other.syncStats();
     priorStats = oldStats.plus(other.priorStats);
     priorHits = oldStats.hitCount() + other.hits.sum() + other.priorHits;
@@ -437,11 +441,6 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     priorLookups = oldStats.requestCount() + other.lookups.sum() + other.priorLookups;
     warmupTime =
         TimeUnit.MILLISECONDS.convert(System.nanoTime() - warmingStartTime, TimeUnit.NANOSECONDS);
-
-    // NOTE: metrics are reset (to avoid reporting warming-related activity as end-user cache
-    // metrics) upon invocation of `setState(State.LIVE)`. This coordinates the lifecycle of all
-    // caches, and prevents warming-related activity crosstalk from other caches influencing
-    // end-user cache metrics for this cache.
   }
 
   /**
