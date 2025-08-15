@@ -437,6 +437,11 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     priorLookups = oldStats.requestCount() + other.lookups.sum() + other.priorLookups;
     warmupTime =
         TimeUnit.MILLISECONDS.convert(System.nanoTime() - warmingStartTime, TimeUnit.NANOSECONDS);
+
+    // NOTE: metrics are reset (to avoid reporting warming-related activity as end-user cache
+    // metrics) upon invocation of `setState(State.LIVE)`. This coordinates the lifecycle of all
+    // caches, and prevents warming-related activity crosstalk from other caches influencing
+    // end-user cache metrics for this cache.
   }
 
   /**
@@ -454,6 +459,21 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     void offset(long hits, long inserts, long lookups, CacheStats stats);
   }
 
+  /**
+   * Here we use {@link #setState(State)} to mark the start of collection of "real" metrics (and
+   * report out any adjustments made).
+   *
+   * <p>The main benefit of resetting metrics here (as opposed to at the end of {@link
+   * #warm(SolrIndexSearcher, SolrCache)}) is that this clearly separates the lifecycle phases of
+   * all caches, avoiding crosstalk from the warming of other caches being reflected in the end-user
+   * metrics of this cache.
+   *
+   * <p>NOTE: {@link #setState(State)} is not well documented; but in practice atm it is updated
+   * exactly once: from its initial value of {@link SolrCache.State#CREATED} to its final value of
+   * {@link SolrCache.State#LIVE} (set immediately before the cache begins to serve user queries).
+   * We should follow up and document/formalize the semantics and contract of {@link
+   * #setState(State)}, but in the meantime we will rely on the de facto semantics and usage.
+   */
   public void setState(State state, MetricsOffsetter offsetter) {
     if (state == State.LIVE && getState() != State.LIVE) {
       long hits = this.hits.sumThenReset();
