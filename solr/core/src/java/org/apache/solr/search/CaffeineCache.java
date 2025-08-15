@@ -90,7 +90,13 @@ public class CaffeineCache<K, V> extends SolrCacheBase
   private LongAdder hits;
   private LongAdder inserts;
   private LongAdder lookups;
-  private final AtomicReference<CacheStats> offsetSyncStats = new AtomicReference<>(CacheStats.empty());
+
+  /**
+   * Sum of stats to be ignored for external metrics reporting (e.g., associated with autowarming).
+   */
+  private final AtomicReference<CacheStats> offsetSyncStats =
+      new AtomicReference<>(CacheStats.empty());
+
   private Cache<K, V> cache;
   private AsyncCache<K, V> asyncCache;
   private long warmupTime;
@@ -481,6 +487,11 @@ public class CaffeineCache<K, V> extends SolrCacheBase
         0L);
   }
 
+  /**
+   * Stats for synchronous operations against the backing {@link Cache} are tracked in {@link
+   * CacheStats}. This method returns a {@link CacheStats} instance that represents synchronous ops
+   * since this cache was marked as {@link SolrCache.State#LIVE} via {@link #setState(State)}.
+   */
   private CacheStats syncStats() {
     return cache.stats().minus(offsetSyncStats.get());
   }
