@@ -39,6 +39,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiConsumer;
 import org.apache.lucene.util.Accountable;
@@ -89,7 +90,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
   private LongAdder hits;
   private LongAdder inserts;
   private LongAdder lookups;
-  private final CacheStats[] offsetSyncStats = new CacheStats[] {CacheStats.empty()};
+  private final AtomicReference<CacheStats> offsetSyncStats = new AtomicReference<>(CacheStats.empty());
   private Cache<K, V> cache;
   private AsyncCache<K, V> asyncCache;
   private long warmupTime;
@@ -394,9 +395,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     inserts.add(-insertsAdjust);
     lookups.add(-lookupsAdjust);
     if (stats != null) {
-      synchronized (offsetSyncStats) {
-        offsetSyncStats[0] = offsetSyncStats[0].plus(stats);
-      }
+      offsetSyncStats.updateAndGet((extant) -> extant.plus(stats));
     }
   }
 
@@ -458,7 +457,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
       // offset/compensate for any synchronous stats that may have accumulated before the cache was
       // set to LIVE.
       CacheStats stats = cache.stats();
-      offsetSyncStats[0] = stats;
+      offsetSyncStats.set(stats);
       offsetter.offset(hits, inserts, lookups, stats);
     }
     super.setState(state);
@@ -483,7 +482,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
   }
 
   private CacheStats syncStats() {
-    return cache.stats().minus(offsetSyncStats[0]);
+    return cache.stats().minus(offsetSyncStats.get());
   }
 
   /** Returns the description of this cache. */
