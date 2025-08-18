@@ -695,6 +695,12 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
           });
     }
 
+    if (solrConfig.ordMapCacheConfig != null
+        && solrConfig.ordMapCacheConfig.getRegenerator() == null) {
+      solrConfig.ordMapCacheConfig.setRegenerator(
+          new OrdMapRegenerator<>(solrConfig, solrConfig.ordMapCacheConfig));
+    }
+
     if (solrConfig.filterCacheConfig != null
         && solrConfig.filterCacheConfig.getRegenerator() == null) {
       solrConfig.filterCacheConfig.setRegenerator(
