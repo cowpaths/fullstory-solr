@@ -38,8 +38,7 @@ public abstract class SolrCacheBase implements SolrMetricProducer {
   protected AutoWarmCountRef autowarm;
 
   static boolean autowarmOn(CacheConfig config) {
-    return new SolrCacheBase.AutoWarmCountRef(
-        (String) config.toMap(Map.of()).get("autowarmCount"))
+    return new SolrCacheBase.AutoWarmCountRef((String) config.toMap(Map.of()).get("autowarmCount"))
         .isAutoWarmingOn();
   }
 

@@ -330,9 +330,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     ramBytes.reset();
   }
 
-  /**
-   * Execute any pending cleanup ops; for getting predictable/exact metrics.
-   */
+  /** Execute any pending cleanup ops; for getting predictable/exact metrics. */
   @VisibleForTesting
   public void cleanup() {
     cache.cleanUp();
