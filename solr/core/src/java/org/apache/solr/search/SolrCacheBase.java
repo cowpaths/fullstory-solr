@@ -37,6 +37,12 @@ public abstract class SolrCacheBase implements SolrMetricProducer {
 
   protected AutoWarmCountRef autowarm;
 
+  static boolean autowarmOn(CacheConfig config) {
+    return new SolrCacheBase.AutoWarmCountRef(
+        (String) config.toMap(Map.of()).get("autowarmCount"))
+        .isAutoWarmingOn();
+  }
+
   /** Decides how many things to autowarm based on the size of another cache */
   public static class AutoWarmCountRef {
 
