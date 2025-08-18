@@ -17,6 +17,8 @@
 
 package org.apache.solr.search;
 
+import static org.apache.solr.search.CaffeineCache.stripEvictionStats;
+
 import com.github.benmanes.caffeine.cache.AsyncCache;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -766,24 +768,6 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
         }
       } while ((parent = parent.parent) != null);
     }
-  }
-
-  /**
-   * In a "shared cache" situation, we want to be able to propagate/offset hit, miss, and load
-   * information, but <i>not</i> evictions (which are scoped to a specific cache.
-   *
-   * <p>This method returns a copy of the input {@link CacheStats}, but without any eviction
-   * information.
-   */
-  public static CacheStats stripEvictionStats(CacheStats stats) {
-    return CacheStats.of(
-        stats.hitCount(),
-        stats.missCount(),
-        stats.loadSuccessCount(),
-        stats.loadFailureCount(),
-        stats.totalLoadTime(),
-        0L,
-        0L);
   }
 
   public CacheStats stats() {
