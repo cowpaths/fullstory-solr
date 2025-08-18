@@ -406,8 +406,21 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     }
   }
 
+  private SegmentMap segMap;
+
+  @Override
+  public SegmentMap getSegmentMap() {
+    return segMap;
+  }
+
+  @Override
+  public void initialSearcher(SolrIndexSearcher initialSearcher) {
+    segMap = initialSearcher == null ? null : initialSearcher.getSegmentMap();
+  }
+
   @Override
   public void warm(SolrIndexSearcher searcher, SolrCache<K, V> old) {
+    segMap = searcher == null ? null : searcher.getSegmentMap();
     long warmingStartTime = System.nanoTime();
     Map<K, V> hottest = Collections.emptyMap();
     CaffeineCache<K, V> other = (CaffeineCache<K, V>) old;

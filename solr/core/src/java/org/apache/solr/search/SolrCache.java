@@ -230,6 +230,15 @@ public interface SolrCache<K, V> extends SolrInfoBean {
   }
 
   /**
+   * Returns the segmentMap for the searcher over which this cache is valid (cache is informed of
+   * this via {@link #initialSearcher(SolrIndexSearcher)} or {@link #warm(SolrIndexSearcher,
+   * SolrCache)}).
+   */
+  default SegmentMap getSegmentMap() {
+    return null;
+  }
+
+  /**
    * Intended for use as a cache value that wraps a raw value of type <code>V</code> in a {@link
    * MetaEntry} for tracking additional per-entry metadata.
    */
