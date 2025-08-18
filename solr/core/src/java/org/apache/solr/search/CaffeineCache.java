@@ -108,6 +108,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
   private boolean async;
 
   private MetricsMap cacheMap;
+  private SolrMetricsContext solrMetricsContext;
 
   private long initialRamBytes = 0;
   private final LongAdder ramBytes = new LongAdder();
@@ -549,6 +550,11 @@ public class CaffeineCache<K, V> extends SolrCacheBase
   }
 
   @Override
+  public SolrMetricsContext getSolrMetricsContext() {
+    return solrMetricsContext;
+  }
+
+  @Override
   public String toString() {
     return name() + (cacheMap != null ? cacheMap.getValue().toString() : "");
   }
@@ -559,7 +565,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
 
   @Override
   public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
-    super.initializeMetrics(parentContext, scope);
+    solrMetricsContext = parentContext.getChildContext(this);
     cacheMap =
         new MetricsMap(
             map -> {
