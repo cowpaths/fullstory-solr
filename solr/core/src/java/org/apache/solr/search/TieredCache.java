@@ -68,12 +68,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 @SuppressWarnings("ReferenceEquality")
-public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Closeable {
+public class TieredCache<K, V> implements RemovalListener<K, V>, Accountable, Closeable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private static final long BASE_RAM_BYTES_USED =
-      RamUsageEstimator.shallowSizeOfInstance(RootCache.class)
+      RamUsageEstimator.shallowSizeOfInstance(TieredCache.class)
           + RamUsageEstimator.shallowSizeOfInstance(CacheStats.class)
           + 2 * RamUsageEstimator.shallowSizeOfInstance(LongAdder.class);
 
@@ -85,16 +85,16 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
   private final String tierScope;
   private AsyncCache<RefCountingKey<K>, ValRef<V>> asyncCache;
 
-  private final RootCache<K, V> parent;
+  private final TieredCache<K, V> parent;
 
-  private final RootCache<K, V> root;
+  private final TieredCache<K, V> root;
 
   private final long mask;
 
   private final RemovalListenerRegistry<RefCountingKey<K>, V> removalListeners =
       new RemovalListenerRegistry<>();
 
-  private final IdentityHashMap<RootCache<K, V>, RemovalListener<RefCountingKey<K>, V>> children =
+  private final IdentityHashMap<TieredCache<K, V>, RemovalListener<RefCountingKey<K>, V>> children =
       new IdentityHashMap<>();
 
   private boolean isLeaf = true;
@@ -103,9 +103,9 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
 
   private RemovalListenerParityChecker<RefCountingKey<K>, ValRef<V>> removalListenerParityChecker;
 
-  private final RootCache<K, V>[] pathFromRootArr;
+  private final TieredCache<K, V>[] pathFromRootArr;
 
-  private final Iterable<RootCache<K, V>> pathFromRoot;
+  private final Iterable<TieredCache<K, V>> pathFromRoot;
 
   private int maxSize;
   private long maxRamBytes;
@@ -118,29 +118,29 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
 
   private final RemovalListener<RefCountingKey<K>, ValRef<V>> rawEvictionListener;
 
-  public RootCache(int maxSize, RootCache<K, V> parent, String tierScope) {
+  public TieredCache(int maxSize, TieredCache<K, V> parent, String tierScope) {
     this(maxSize, parent, tierScope, null);
   }
 
-  public RootCache(RootCache<K, V> parent, String tierScope, long maxRamBytes) {
+  public TieredCache(TieredCache<K, V> parent, String tierScope, long maxRamBytes) {
     this(Integer.MAX_VALUE, maxRamBytes, 0, 0, parent, tierScope, null);
   }
 
-  public RootCache(
+  public TieredCache(
       int maxSize,
-      RootCache<K, V> parent,
+      TieredCache<K, V> parent,
       String tierScope,
       RemovalListener<K, V> externalListener) {
     this(maxSize, Long.MAX_VALUE, 0, 0, parent, tierScope, externalListener);
   }
 
   @SuppressWarnings({"unchecked", "rawtypes"})
-  public RootCache(
+  public TieredCache(
       int maxSize,
       long maxRamBytes,
       int initialSize,
       int maxIdleTimeSec,
-      RootCache<K, V> parent,
+      TieredCache<K, V> parent,
       String tierScope,
       RemovalListener<K, V> externalListener) {
     this.externalListener = externalListener;
@@ -176,9 +176,9 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
       parentRemovalListener = null;
     } else {
       root = parent.root;
-      RootCache<K, V>[] pathToParent = parent.pathFromRootArr;
+      TieredCache<K, V>[] pathToParent = parent.pathFromRootArr;
       if (pathToParent == null) {
-        pathFromRootArr = new RootCache[] {this};
+        pathFromRootArr = new TieredCache[] {this};
       } else {
         pathFromRootArr = ArrayUtil.growExact(pathToParent, pathToParent.length + 1);
         pathFromRootArr[pathToParent.length] = this;
@@ -213,7 +213,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
     initialRamBytes = RamUsageEstimator.shallowSizeOfInstance(asyncCache.getClass());
   }
 
-  public RootCache<K, V> getParent() {
+  public TieredCache<K, V> getParent() {
     return parent;
   }
 
@@ -253,7 +253,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
     } else {
       int[] childrenEmpty = new int[1];
       Set<K> mergedChildren = CollectionUtil.newHashSet(ordered.size());
-      for (RootCache<K, V> child : children.keySet()) {
+      for (TieredCache<K, V> child : children.keySet()) {
         mergedChildren.addAll(child.validate(prefix.concat("  "), childrenEmpty, ps));
       }
       if (orderedSize > 0 && childrenEmpty[0] > 0 && ps != null) {
@@ -274,9 +274,9 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
   // should accordingly be preferred in place of `put()`.
   // TODO: if we were to make `put()` unsupported, we could use `ArrayList` in place of
   //  `ConcurrentLinkedQueue` (and completely remove iteration of `inScopeChildren`)
-  private final ConcurrentLinkedQueue<RootCache<K, V>> unscopedChildren =
+  private final ConcurrentLinkedQueue<TieredCache<K, V>> unscopedChildren =
       new ConcurrentLinkedQueue<>();
-  private final Map<String, Map.Entry<ConcurrentLinkedQueue<RootCache<K, V>>, long[]>>
+  private final Map<String, Map.Entry<ConcurrentLinkedQueue<TieredCache<K, V>>, long[]>>
       scopedAssigned = new HashMap<>();
 
   private static long newRegisterMask(long[] assigned) {
@@ -290,7 +290,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
   }
 
   // TODO: test/verify the thread-safety of `addChild()`, etc...
-  public long addChild(RootCache<K, V> child) {
+  public long addChild(TieredCache<K, V> child) {
     isLeaf = false;
     final long childMask;
     synchronized (children) {
@@ -324,7 +324,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
     return childMask;
   }
 
-  public void removeChild(RootCache<K, V> child) {
+  public void removeChild(TieredCache<K, V> child) {
     synchronized (children) {
       RemovalListener<RefCountingKey<K>, V> childRemovalListener = children.remove(child);
       if (Objects.equals(tierScope, child.tierScope)) {
@@ -426,7 +426,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
     // any value, so we can loop from leaf to root without any locking
     RefCountingKey<K> key = new RefCountingKey<>(tierScope, rawKey);
     V ret = null;
-    RootCache<K, V> c = this;
+    TieredCache<K, V> c = this;
     for (; ; ) {
       // always consult at every level so that we get accurate stats and eviction policy operation
       CompletableFuture<ValRef<V>> f = c.asyncCache.getIfPresent(key);
@@ -452,9 +452,9 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
   }
 
   @SuppressWarnings("unchecked")
-  private V rootPut(K key, V value, Iterator<RootCache<K, V>> pathToLeaf, String leafKeyScope) {
+  private V rootPut(K key, V value, Iterator<TieredCache<K, V>> pathToLeaf, String leafKeyScope) {
     final V[] ret = (V[]) new Object[1];
-    final RootCache<K, V> child = pathToLeaf.next();
+    final TieredCache<K, V> child = pathToLeaf.next();
     final long childMask = child.mask;
     RefCountingKey<K> refCountingKey =
         new RefCountingKey<>(leafKeyScope, child.tierScope, key, childMask);
@@ -487,11 +487,11 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
                 }
                 // first address any existing references
                 final long extantMask = ((MyCompletableFuture<V>) v).refs;
-                ConcurrentLinkedQueue<RootCache<K, V>> inScopeChildren =
+                ConcurrentLinkedQueue<TieredCache<K, V>> inScopeChildren =
                     k.tierScope == null || k.tierScope.equals(tierScope)
                         ? unscopedChildren
                         : scopedAssigned.get(k.tierScope).getKey();
-                for (RootCache<K, V> c : inScopeChildren) {
+                for (TieredCache<K, V> c : inScopeChildren) {
                   if (c != child && (c.mask & extantMask) != 0) {
                     V fromNestedUpdate =
                         c.internalNestedUpdate(
@@ -562,7 +562,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
       V value,
       RefCountingKey<K> parentKey,
       long knownRefCount,
-      Iterator<RootCache<K, V>> pathToLeaf) {
+      Iterator<TieredCache<K, V>> pathToLeaf) {
     final V[] ret = (V[]) new Object[1];
     if (isLeaf) {
       RefCountingKey<K> refCountingKey = new RefCountingKey<>(null, key, parentKey, knownRefCount);
@@ -588,7 +588,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
                 return new MyCompletableFuture<>(0, ValRef.soft(value, recordRamBytes(key, value)));
               });
     } else {
-      final RootCache<K, V> child = pathToLeaf.next();
+      final TieredCache<K, V> child = pathToLeaf.next();
       final long childMask = child.mask;
       RefCountingKey<K> refCountingKey =
           new RefCountingKey<>(child.tierScope, key, parentKey, knownRefCount, childMask);
@@ -615,11 +615,11 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
                   ret[0] = get(v).ref.get(); // the extant value
                   // first address any existing references
                   final long extantMask = ((MyCompletableFuture<V>) v).refs;
-                  ConcurrentLinkedQueue<RootCache<K, V>> inScopeChildren =
+                  ConcurrentLinkedQueue<TieredCache<K, V>> inScopeChildren =
                       k.tierScope == null || k.tierScope.equals(tierScope)
                           ? unscopedChildren
                           : scopedAssigned.get(k.tierScope).getKey();
-                  for (RootCache<K, V> c : inScopeChildren) {
+                  for (TieredCache<K, V> c : inScopeChildren) {
                     if (c != child && (c.mask & extantMask) != 0) {
                       V fromNestedUpdate =
                           c.internalNestedUpdate(
@@ -687,11 +687,11 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
                 ret[0] = get(v).ref.get(); // the extant value
                 // address any existing references
                 final long extantMask = ((MyCompletableFuture<V>) v).refs;
-                ConcurrentLinkedQueue<RootCache<K, V>> inScopeChildren =
+                ConcurrentLinkedQueue<TieredCache<K, V>> inScopeChildren =
                     k.tierScope == null || k.tierScope.equals(tierScope)
                         ? unscopedChildren
                         : scopedAssigned.get(k.tierScope).getKey();
-                for (RootCache<K, V> c : inScopeChildren) {
+                for (TieredCache<K, V> c : inScopeChildren) {
                   if ((c.mask & extantMask) != 0) {
                     V fromNestedUpdate =
                         c.internalNestedUpdate(
@@ -760,7 +760,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
     stats = stripEvictionStats(stats);
     if (parent != null) {
       // adjust all ancestors accordingly
-      RootCache<K, V> parent = this.parent;
+      TieredCache<K, V> parent = this.parent;
       do {
         parent.asyncHits.add(-hits);
         parent.asyncLookups.add(-lookups);
@@ -797,7 +797,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
       V value,
       RefCountingKey<K> parentKey,
       long knownRefCount,
-      Iterator<RootCache<K, V>> pathToLeaf) {
+      Iterator<TieredCache<K, V>> pathToLeaf) {
     asyncLookups.increment();
     final V[] ret = (V[]) new Object[1];
     if (isLeaf) {
@@ -832,7 +832,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
                 }
               });
     } else {
-      final RootCache<K, V> child = pathToLeaf.next();
+      final TieredCache<K, V> child = pathToLeaf.next();
       final long childMask = child.mask;
       RefCountingKey<K> refCountingKey =
           new RefCountingKey<>(child.tierScope, key, parentKey, knownRefCount, childMask);
@@ -953,12 +953,12 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
   private V rootComputeIfAbsent(
       K key,
       IOFunction<? super K, ? extends V> mappingFunction,
-      Iterator<RootCache<K, V>> pathToLeaf,
+      Iterator<TieredCache<K, V>> pathToLeaf,
       String leafKeyScope)
       throws IOException {
     asyncLookups.increment();
     boolean[] weCompute = new boolean[1];
-    final RootCache<K, V> child;
+    final TieredCache<K, V> child;
     final long childMask;
     final String childTierScope;
     if (isLeaf) {
@@ -1337,7 +1337,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
           parentRemovalListener, !Objects.equals(parent.tierScope, tierScope) ? tierScope : null);
       parent.removeChild(this);
     }
-    RootCache<?, ?>[] childrenToClose;
+    TieredCache<?, ?>[] childrenToClose;
     synchronized (children) {
       if (children.isEmpty()) {
         return;
@@ -1346,7 +1346,7 @@ public class RootCache<K, V> implements RemovalListener<K, V>, Accountable, Clos
       //  always be closed explicitly before parents are closed?
       //  children cannot exist without parents, so if we are closing all our children must
       //  close also.
-      childrenToClose = children.keySet().toArray(new RootCache[0]);
+      childrenToClose = children.keySet().toArray(new TieredCache[0]);
     }
     IOUtils.close(childrenToClose);
   }

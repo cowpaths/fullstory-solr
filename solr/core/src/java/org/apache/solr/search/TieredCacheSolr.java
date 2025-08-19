@@ -37,7 +37,7 @@ import org.apache.solr.util.IOFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class RootCacheSolr<K, V> extends SolrCacheBase
+public class TieredCacheSolr<K, V> extends SolrCacheBase
     implements SolrCache<K, V>, RemovalListener<K, V>, Accountable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
@@ -45,12 +45,12 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
   private static final String PARENT_PARAM_NAME = "parent";
 
   private static final long BASE_RAM_BYTES_USED =
-      RamUsageEstimator.shallowSizeOfInstance(RootCacheSolr.class);
-  private RootCache<K, V> rootCache = null;
+      RamUsageEstimator.shallowSizeOfInstance(TieredCacheSolr.class);
+  private TieredCache<K, V> tieredCache = null;
 
   private String tierScope;
   private String parentCacheName;
-  private RootCache<K, V> parent;
+  private TieredCache<K, V> parent;
   private int maxSize;
   private long maxRamBytes;
   private int initialSize;
@@ -83,7 +83,7 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
     if (parentCacheName == null) {
       // only init here if there's no parent cache specified.
       // if there's a parent cache, we know we'll have to re-init later, so don't bother yet
-      initRootCache();
+      initTieredCache();
     }
     return persistence;
   }
@@ -92,7 +92,7 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
   private String generateDescription(int limit, int initialSize) {
     return String.format(
         Locale.ROOT,
-        "Root Cache Solr(maxSize=%d, initialSize=%d%s)",
+        "Tiered Cache Solr(maxSize=%d, initialSize=%d%s)",
         limit,
         initialSize,
         isAutowarmingOn() ? (", " + getAutowarmDescription()) : "");
@@ -100,38 +100,39 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
 
   @Override
   public int size() {
-    return (int) rootCache.size();
+    return (int) tieredCache.size();
   }
 
   @Override
   public V put(K key, V value) {
-    return rootCache.put(key, value);
+    return tieredCache.put(key, value);
   }
 
   @Override
   public V get(K key) {
-    return rootCache.get(key);
+    return tieredCache.get(key);
   }
 
   @Override
   public V remove(K key) {
-    return rootCache.remove(key);
+    return tieredCache.remove(key);
   }
 
   @Override
   public V computeIfAbsent(K key, IOFunction<? super K, ? extends V> mappingFunction)
       throws IOException {
-    return rootCache.computeIfAbsent(key, mappingFunction);
+    return tieredCache.computeIfAbsent(key, mappingFunction);
   }
 
   @Override
   public void clear() {
-    rootCache.clear();
+    tieredCache.clear();
   }
 
-  private void initRootCache() {
-    rootCache =
-        new RootCache<>(maxSize, maxRamBytes, initialSize, maxIdleTimeSec, parent, tierScope, this);
+  private void initTieredCache() {
+    tieredCache =
+        new TieredCache<>(
+            maxSize, maxRamBytes, initialSize, maxIdleTimeSec, parent, tierScope, this);
   }
 
   private SegmentMap segMap;
@@ -154,19 +155,19 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
       // is load-order dependent, so atm custom caches may have built-in caches (e.g.,
       // `filterCache`) as parent, but not vice-versa, and custom caches may have earlier-declared
       // custom caches as parent, but not vice-versa.
-      RootCacheSolr<K, V> parentSolrCache;
+      TieredCacheSolr<K, V> parentSolrCache;
       switch (parentCacheName) {
         case "filterCache":
-          parentSolrCache = (RootCacheSolr<K, V>) s.getFilterCache();
+          parentSolrCache = (TieredCacheSolr<K, V>) s.getFilterCache();
           break;
         case "fieldValueCache":
-          parentSolrCache = (RootCacheSolr<K, V>) s.getFieldValueCache();
+          parentSolrCache = (TieredCacheSolr<K, V>) s.getFieldValueCache();
           break;
         case "ordMapCache":
-          parentSolrCache = (RootCacheSolr<K, V>) s.getOrdMapCache();
+          parentSolrCache = (TieredCacheSolr<K, V>) s.getOrdMapCache();
           break;
         default:
-          parentSolrCache = (RootCacheSolr<K, V>) s.getCache(parentCacheName);
+          parentSolrCache = (TieredCacheSolr<K, V>) s.getCache(parentCacheName);
           break;
         case "queryResultCache":
         case "documentCache":
@@ -176,16 +177,16 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
       if (parentSolrCache == null) {
         // fallback to the (presumably more common) case where parent cache is scoped to the core
         // container.
-        parentSolrCache = (RootCacheSolr<K, V>) core.getCoreContainer().getCache(parentCacheName);
+        parentSolrCache = (TieredCacheSolr<K, V>) core.getCoreContainer().getCache(parentCacheName);
         if (parentSolrCache == null) {
           throw new IllegalArgumentException("parent cache not found: " + parentSolrCache);
         }
       }
-      RootCache<K, V> parent = parentSolrCache.rootCache;
+      TieredCache<K, V> parent = parentSolrCache.tieredCache;
       if (parent != this.parent) {
         this.parent = parent;
-        // parent was changed (set), so we must re-init the root cache
-        initRootCache();
+        // parent was changed (set), so we must re-init the tiered cache
+        initTieredCache();
       } else if (parent == null) {
         // see above comment about parent dependencies being load-order dependent
         throw new IllegalArgumentException("parent cache not yet initialized: " + parentSolrCache);
@@ -206,13 +207,13 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
     }
 
     long warmingStartTime = System.nanoTime();
-    RootCacheSolr<K, V> other = (RootCacheSolr<K, V>) old;
+    TieredCacheSolr<K, V> other = (TieredCacheSolr<K, V>) old;
 
     // warm entries
     if (isAutowarmingOn()) {
       int size = autowarm.getWarmCount(other.size());
       Map.Entry<K, Exception> ex =
-          other.rootCache.forEachTopEntry(
+          other.tieredCache.forEachTopEntry(
               size,
               (entry) -> {
                 return regenerator.regenerateItem(
@@ -225,11 +226,11 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
       }
     }
 
-    CacheStats oldStats = other.rootCache.stats();
+    CacheStats oldStats = other.tieredCache.stats();
     priorStats = oldStats.plus(other.priorStats);
-    priorHits = oldStats.hitCount() + other.rootCache.asyncHits() + other.priorHits;
-    priorInserts = other.rootCache.inserts() + other.priorInserts;
-    priorLookups = oldStats.requestCount() + other.rootCache.asyncLookups() + other.priorLookups;
+    priorHits = oldStats.hitCount() + other.tieredCache.asyncHits() + other.priorHits;
+    priorInserts = other.tieredCache.inserts() + other.priorInserts;
+    priorLookups = oldStats.requestCount() + other.tieredCache.asyncLookups() + other.priorLookups;
     warmupTime =
         TimeUnit.MILLISECONDS.convert(System.nanoTime() - warmingStartTime, TimeUnit.NANOSECONDS);
   }
@@ -241,14 +242,14 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
   @Override
   public void setState(State state) {
     if (state == State.LIVE && getState() != State.LIVE) {
-      rootCache.resetStats();
+      tieredCache.resetStats();
     }
     super.setState(state);
   }
 
   @Override
   public void close() throws IOException {
-    rootCache.close();
+    tieredCache.close();
     SolrCache.super.close();
   }
 
@@ -263,7 +264,7 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
       return;
     }
     this.maxSize = maxSize;
-    int adjustInitialSize = rootCache.setMaxSize(maxSize);
+    int adjustInitialSize = tieredCache.setMaxSize(maxSize);
     if (adjustInitialSize != -1) {
       initialSize = adjustInitialSize;
       description = generateDescription(this.maxSize, initialSize);
@@ -280,7 +281,7 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
     long newMaxRamBytes = maxRamMB < 0 ? Long.MAX_VALUE : maxRamMB * 1024L * 1024L;
     if (newMaxRamBytes != maxRamBytes) {
       maxRamBytes = newMaxRamBytes;
-      if (rootCache.setMaxRamMB(newMaxRamBytes)) {
+      if (tieredCache.setMaxRamMB(newMaxRamBytes)) {
         description = generateDescription(this.maxSize, initialSize);
         initialRamBytes = RamUsageEstimator.sizeOfObject(description);
       }
@@ -289,14 +290,14 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
 
   //////////////////////// SolrInfoBean methods //////////////////////
 
-  private String description = "Root Cache Solr";
+  private String description = "Tiered Cache Solr";
   private Set<String> metricNames = ConcurrentHashMap.newKeySet();
   private MetricsMap cacheMap;
   private SolrMetricsContext solrMetricsContext;
 
   @Override
   public String getName() {
-    return RootCacheSolr.class.getName();
+    return TieredCacheSolr.class.getName();
   }
 
   @Override
@@ -332,18 +333,18 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
     cacheMap =
         new MetricsMap(
             map -> {
-              if (rootCache != null) {
-                CacheStats stats = rootCache.stats();
-                long hitCount = stats.hitCount() + rootCache.asyncHits();
-                long insertCount = rootCache.inserts();
-                long lookupCount = stats.requestCount() + rootCache.asyncLookups();
+              if (tieredCache != null) {
+                CacheStats stats = tieredCache.stats();
+                long hitCount = stats.hitCount() + tieredCache.asyncHits();
+                long insertCount = tieredCache.inserts();
+                long lookupCount = stats.requestCount() + tieredCache.asyncLookups();
 
                 map.put(LOOKUPS_PARAM, lookupCount);
                 map.put(HITS_PARAM, hitCount);
                 map.put(HIT_RATIO_PARAM, hitRate(hitCount, lookupCount));
                 map.put(INSERTS_PARAM, insertCount);
                 map.put(EVICTIONS_PARAM, stats.evictionCount());
-                map.put(SIZE_PARAM, rootCache.size());
+                map.put(SIZE_PARAM, tieredCache.size());
                 map.put("warmupTime", warmupTime);
                 map.put(RAM_BYTES_USED_PARAM, ramBytesUsed());
                 map.put(MAX_RAM_MB_PARAM, getMaxRamMB());
@@ -369,7 +370,7 @@ public class RootCacheSolr<K, V> extends SolrCacheBase
   public long ramBytesUsed() {
     return BASE_RAM_BYTES_USED
         + initialRamBytes
-        + (rootCache == null ? 0 : rootCache.ramBytesUsed());
+        + (tieredCache == null ? 0 : tieredCache.ramBytesUsed());
   }
 
   @Override

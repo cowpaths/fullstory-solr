@@ -42,7 +42,7 @@ import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.metrics.SolrMetricManager;
 import org.junit.Test;
 
-/** Test for {@link org.apache.solr.search.RootCache}. */
+/** Test for {@link TieredCache}. */
 @LuceneTestCase.SuppressSysoutChecks(bugUrl = "")
 public class TestTieredCache extends SolrTestCase {
 
@@ -62,10 +62,10 @@ public class TestTieredCache extends SolrTestCase {
   }
 
   private static final class CacheStruct {
-    final RootCache<Integer, String> cache;
-    final RootCache<Integer, String> parent;
+    final TieredCache<Integer, String> cache;
+    final TieredCache<Integer, String> parent;
 
-    private CacheStruct(RootCache<Integer, String> cache, RootCache<Integer, String> parent) {
+    private CacheStruct(TieredCache<Integer, String> cache, TieredCache<Integer, String> parent) {
       this.cache = cache;
       this.parent = parent;
     }
@@ -78,7 +78,7 @@ public class TestTieredCache extends SolrTestCase {
         realisticSizing ? maxSizeExclusive - 1 : r.nextInt(maxSizeExclusive - minSize) + minSize;
     int nonRootMaxSizeExclusive =
         realisticSizing ? Math.max(minSize + 1, maxSizeExclusive / 10) : maxSizeExclusive;
-    RootCache<Integer, String> root = new RootCache<>(rootSize, null, null);
+    TieredCache<Integer, String> root = new TieredCache<>(rootSize, null, null);
     CacheStruct[] cachesPreviousTier = new CacheStruct[] {new CacheStruct(root, null)};
     caches[0] = cachesPreviousTier;
     ArrayList<CacheStruct> leafNodes = new ArrayList<>();
@@ -92,11 +92,11 @@ public class TestTieredCache extends SolrTestCase {
       if (ensureBalanced) {
         do {
           // ensure that each parent has at least one child
-          RootCache<Integer, String> parentCache = cachesPreviousTier[j].cache;
+          TieredCache<Integer, String> parentCache = cachesPreviousTier[j].cache;
           previousTierHasChildren[j] = true;
           String tierScope = atTier <= Long.SIZE ? null : i + "-" + j;
-          RootCache<Integer, String> cache =
-              new RootCache<>(
+          TieredCache<Integer, String> cache =
+              new TieredCache<>(
                   r.nextInt(nonRootMaxSizeExclusive - minSize) + minSize, parentCache, tierScope);
           cachesAtTier[j] = new CacheStruct(cache, parentCache);
         } while (++j < cachesPreviousTier.length);
@@ -105,11 +105,11 @@ public class TestTieredCache extends SolrTestCase {
         do {
           // randomly assign a parent to each remaining child cache
           final int parentIdx = r.nextInt(cachesPreviousTier.length);
-          RootCache<Integer, String> parentCache = cachesPreviousTier[parentIdx].cache;
+          TieredCache<Integer, String> parentCache = cachesPreviousTier[parentIdx].cache;
           previousTierHasChildren[parentIdx] = true;
           String tierScope = atTier <= Long.SIZE ? null : i + "-" + j;
-          RootCache<Integer, String> cache =
-              new RootCache<>(
+          TieredCache<Integer, String> cache =
+              new TieredCache<>(
                   r.nextInt(nonRootMaxSizeExclusive - minSize) + minSize, parentCache, tierScope);
           cachesAtTier[j] = new CacheStruct(cache, parentCache);
         } while (++j < atTier);
@@ -184,7 +184,7 @@ public class TestTieredCache extends SolrTestCase {
                 () -> {
                   for (int j = 0; j < ct && !shortcircuit.get(); j++) {
                     int cacheIdx = j % selectCacheLimit;
-                    RootCache<Integer, String> c = leafCaches[cacheIdx].cache;
+                    TieredCache<Integer, String> c = leafCaches[cacheIdx].cache;
                     int key = (int) (threadRandom.nextGaussian() * stdDev);
                     switch (threadRandom.nextInt(4)) {
                       case 0:
@@ -240,11 +240,11 @@ public class TestTieredCache extends SolrTestCase {
     final int MAX_TIERS = 5;
     final int MAX_LEAF_CACHES = 10;
     Random r = random();
-    RootCache<Integer, String> root = new RootCache<>(20, null, null);
-    RootCache<Integer, String> leaf1 = new RootCache<>(18, root, "one");
-    RootCache<Integer, String> leaf2 = new RootCache<>(4, root, "two");
+    TieredCache<Integer, String> root = new TieredCache<>(20, null, null);
+    TieredCache<Integer, String> leaf1 = new TieredCache<>(18, root, "one");
+    TieredCache<Integer, String> leaf2 = new TieredCache<>(4, root, "two");
     @SuppressWarnings({"unchecked", "rawtypes"})
-    RootCache<Integer, String>[] leafCaches = new RootCache[] {leaf1, leaf2};
+    TieredCache<Integer, String>[] leafCaches = new TieredCache[] {leaf1, leaf2};
     ExecutorService executor =
         new ExecutorUtil.MDCAwareThreadPoolExecutor(
             N_THREADS,
@@ -279,7 +279,7 @@ public class TestTieredCache extends SolrTestCase {
                 () -> {
                   for (int j = 0; j < ct && !shortcircuit.get(); j++) {
                     int cacheIdx = j % leafCaches.length;
-                    RootCache<Integer, String> c = leafCaches[cacheIdx];
+                    TieredCache<Integer, String> c = leafCaches[cacheIdx];
                     int key = (int) (threadRandom.nextGaussian() * stdDev);
                     c.computeIfAbsent(key, (k) -> k + "-" + threadRandom.nextInt());
                   }
@@ -320,11 +320,11 @@ public class TestTieredCache extends SolrTestCase {
     final int MAX_TIERS = 5;
     final int MAX_LEAF_CACHES = 10;
     Random r = random();
-    RootCache<Integer, String> root = new RootCache<>(100, null, null);
-    RootCache<Integer, String> node = new RootCache<>(100, root, null);
-    RootCache<Integer, String> leaf = new RootCache<>(100, node, null);
+    TieredCache<Integer, String> root = new TieredCache<>(100, null, null);
+    TieredCache<Integer, String> node = new TieredCache<>(100, root, null);
+    TieredCache<Integer, String> leaf = new TieredCache<>(100, node, null);
     @SuppressWarnings("unchecked")
-    RootCache<Integer, String>[] leafCaches = new RootCache[] {leaf};
+    TieredCache<Integer, String>[] leafCaches = new TieredCache[] {leaf};
     ExecutorService executor =
         new ExecutorUtil.MDCAwareThreadPoolExecutor(
             N_THREADS,
@@ -359,7 +359,7 @@ public class TestTieredCache extends SolrTestCase {
                 () -> {
                   for (int j = 0; j < ct && !shortcircuit.get(); j++) {
                     int cacheIdx = j % leafCaches.length;
-                    RootCache<Integer, String> c = leafCaches[cacheIdx];
+                    TieredCache<Integer, String> c = leafCaches[cacheIdx];
                     int key = (int) (threadRandom.nextGaussian() * stdDev);
                     c.computeIfAbsent(key, (k) -> k + "-" + threadRandom.nextInt());
                   }
@@ -375,7 +375,7 @@ public class TestTieredCache extends SolrTestCase {
           root.keySet().stream().map(Map.Entry::getKey).collect(Collectors.toSet());
       Set<Integer> merged = new HashSet<>(rootKeySet.size());
       merged.addAll(leaf.keySet().stream().map(Map.Entry::getKey).collect(Collectors.toSet()));
-      print(root, new RootCache[] {node, leafCaches[0]});
+      print(root, new TieredCache[] {node, leafCaches[0]});
       List<Integer> sortedRootKeys = rootKeySet.stream().sorted().collect(Collectors.toList());
       List<Integer> sortedMergedKeys = merged.stream().sorted().collect(Collectors.toList());
       System.err.println("root:   " + sortedRootKeys);
@@ -387,7 +387,7 @@ public class TestTieredCache extends SolrTestCase {
     }
   }
 
-  private static void print(RootCache<?, ?> root, RootCache<?, ?>[] leaves) {
+  private static void print(TieredCache<?, ?> root, TieredCache<?, ?>[] leaves) {
     System.err.println("deferred removals remaining: " + root.deferredRemaining());
     Set<?> rootKeys = root.keySet().stream().map(Map.Entry::getKey).collect(Collectors.toSet());
     assertTrue(root.verifyRemovalCounts());
