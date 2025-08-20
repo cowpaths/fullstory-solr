@@ -44,6 +44,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiConsumer;
+import org.apache.lucene.index.ExitableDirectoryReader;
+import org.apache.lucene.search.TimeLimitingCollector;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.common.params.CommonParams;
@@ -265,10 +267,12 @@ public class CaffeineCache<K, V> extends SolrCacheBase
           // Computation had an IOException, likely index problems, so fail this result too
           throw (IOException) cause;
         }
-        if (cause instanceof CancellableCollector.QueryCancelledException) {
-          // The reserved slot that we were waiting for got cancelled, so we will compute directly
-          // If we go back to waiting for a new cache result then that can lead to thread starvation
-          // Should we record a cache miss here?
+        if (cause == REQUEST_SCOPED_EXCEPTION) {
+          // The reserved slot that we were waiting for failed for a reason associated with the
+          // computing thread, rather than the computation _per se_, so we fallback to compute
+          // directly. If we go back to waiting for a new cache result then that can lead to thread
+          // starvation.
+          // We implicitly "record" a cache miss here (by not incrementing `hits`).
           return mappingFunction.apply(key);
         }
         throw new CompletionException(cause);
@@ -281,10 +285,25 @@ public class CaffeineCache<K, V> extends SolrCacheBase
       recordRamBytes(key, null, value);
       inserts.increment();
       return value;
+    } catch (TimeLimitingCollector.TimeExceededException
+        | CancellableCollector.QueryCancelledException
+        | ExitableDirectoryReader.ExitingReaderException e) {
+      // These exceptions are related to the calling thread, so are "recoverable" from other threads
+      // that might be waiting for our computation to complete.
+      future.completeExceptionally(REQUEST_SCOPED_EXCEPTION);
+      throw e;
     } catch (Error | RuntimeException | IOException e) {
-      // TimeExceeded exception is runtime and will bubble up from here
       future.completeExceptionally(e); // This will remove the future from the cache
       throw e;
+    }
+  }
+
+  private static final RuntimeException REQUEST_SCOPED_EXCEPTION = new RequestScopedException();
+
+  private static final class RequestScopedException extends RuntimeException {
+    @Override
+    public synchronized Throwable fillInStackTrace() {
+      return this; // just for signalling; we don't care
     }
   }
 
