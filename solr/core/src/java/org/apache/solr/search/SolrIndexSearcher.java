@@ -1011,8 +1011,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
    * @param query the query to compute.
    * @return the DocSet answer
    */
-  public final DocSet getAndCacheDocSet(Query query, SolrCache<Query, DocSet> cache)
-      throws IOException {
+  public DocSet getAndCacheDocSet(Query query, SolrCache<Query, DocSet> cache) throws IOException {
     assert !(query instanceof WrappedQuery) : "should have unwrapped";
     assert cache != null : "must check for caching before calling this method";
 
