@@ -52,12 +52,28 @@ public class MetaSolrCache<K, V, M extends MetaEntry<K, V, M>> implements SolrCa
     this.regen = regen;
   }
 
-  /** Returns the associated backing cache. */
+  /** Returns a shim wrapper around the associated backing cache. */
   @Override
   public SolrCache<?, ?> toInternal() {
     return new InternalMetaSolrCache<>(backing, this, regen);
   }
 
+  /**
+   * Shim that is returned from {@link MetaSolrCache#toInternal()}. We could <i>almost</i> directly
+   * return {@link MetaSolrCache#backing}, but we need to intercept calls to {@link
+   * #initializeMetrics(SolrMetricsContext, String)} and {@link #warm(SolrIndexSearcher,
+   * SolrCache)}, in order to:
+   *
+   * <ul>
+   *   <li>incorporate regenerator-managed metrics in cache metrics; this is necessary because the
+   *       internal/external shimming of the cache (and metrics derived from metadata cache entry
+   *       value wrappers) are entirely managed by the regenerator, with no knowledge of the backing
+   *       cache
+   *   <li>add lifecycle hooks for the regenerator via {@link MetaCacheRegenerator#postWarm()} --
+   *       otherwise the regenerator just sees one entry at a time (this is used to modify regen
+   *       metrics -- see above -- in sync with the cache lifecycle).
+   * </ul>
+   */
   private static final class InternalMetaSolrCache<K, V, M extends MetaEntry<K, V, M>>
       implements SolrCache<K, M> {
 
@@ -137,9 +153,7 @@ public class MetaSolrCache<K, V, M extends MetaEntry<K, V, M>> implements SolrCa
 
     @Override
     public void warm(SolrIndexSearcher searcher, SolrCache<K, M> old) {
-      @SuppressWarnings("unchecked")
-      InternalMetaSolrCache<K, V, M> other = (InternalMetaSolrCache<K, V, M>) old;
-      backing.warm(searcher, other.backing);
+      backing.warm(searcher, ((InternalMetaSolrCache<K, V, M>) old).backing);
       regen.postWarm();
     }
 
@@ -234,9 +248,15 @@ public class MetaSolrCache<K, V, M extends MetaEntry<K, V, M>> implements SolrCa
           new MetricsMap(
               (map) -> {
                 backingMetrics.writeMap(map);
+                // here append directly to the cache gauge metrics that are managed
+                // by the regenerator -- e.g., cache-scoped metrics that depend on
+                // metadata that only the regenerator is aware of.
                 regen.appendMetrics(map);
               });
       solrMetricsContext.gauge(cacheMap, true, scope, getCategory().toString());
+
+      // allow regenerator to append metrics as a separate gauge in the cache's
+      // `solrMetricsContext`.
       regen.initializeMetrics(solrMetricsContext, scope, this);
     }
 

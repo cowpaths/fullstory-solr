@@ -227,7 +227,8 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>> implements
     return ret;
   }
 
-  public void initializeMetrics(SolrMetricsContext context, String scope, SolrCache<K, M> cache) {
+  public final void initializeMetrics(
+      SolrMetricsContext context, String scope, SolrCache<K, M> cache) {
     if (metaType != null) {
       MetricsMap metricsMap = new MetricsMap(mapWriterFunction.apply(cache));
       context.gauge(metricsMap, true, scope.concat(metaType), cache.getCategory().toString());
