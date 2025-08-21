@@ -153,7 +153,9 @@ public class MetaSolrCache<K, V, M extends MetaEntry<K, V, M>> implements SolrCa
 
     @Override
     public void warm(SolrIndexSearcher searcher, SolrCache<K, M> old) {
-      backing.warm(searcher, ((InternalMetaSolrCache<K, V, M>) old).backing);
+      @SuppressWarnings("unchecked")
+      InternalMetaSolrCache<K, V, M> other = (InternalMetaSolrCache<K, V, M>) old;
+      backing.warm(searcher, other.backing);
       regen.postWarm();
     }
 
