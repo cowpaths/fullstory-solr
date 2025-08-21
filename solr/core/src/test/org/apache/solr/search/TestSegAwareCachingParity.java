@@ -199,12 +199,26 @@ public class TestSegAwareCachingParity extends SolrTestCaseJ4 {
     return wrapped;
   }
 
+  /**
+   * This test forces a ton of new searchers to open (indexing the same pool of doc ids, so
+   * overwriting, lots of deletes on segments, lots of merging, etc.). At the same time it runs a
+   * fixed pool of queries from multiple querying threads, validating cached vs. uncached {@link
+   * DocSet}s.
+   *
+   * <p>Runs heavily for N seconds (20 atm), checks for parity repeatedly, and if no errors, the
+   * test passes.
+   */
   @Test
   @SuppressWarnings("try")
-  public void testCoreReloads() throws Exception {
+  public void testParity() throws Exception {
     Random r = random();
     h.reload();
-    final int nQueries = r.nextInt(NUM_DOCS) + 3;
+
+    // larger number of queries gets lower non-partial hit count, thus higher
+    // relative partial hit count. Setting nQueries same as `NUM_DOCS` strikes
+    // a reasonable balance.
+    final int nQueries = NUM_DOCS;
+
     Query[] queries = new Query[nQueries];
 
     // special-case queries
