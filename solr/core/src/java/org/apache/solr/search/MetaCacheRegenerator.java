@@ -181,6 +181,11 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>> implements
     this.mapWriterFunction = mapWriterFunction;
   }
 
+  /**
+   * After warming, associated caches should call this method to inform this regenerator. Doing so
+   * allows the regenerator to manage its cache-scoped metrics in a way that's roughly in sync with
+   * associated caches (e.g., per-cache vs. cumulative metrics).
+   */
   public void postWarm() {
     // no-op default implementation
   }
