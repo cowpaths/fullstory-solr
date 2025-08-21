@@ -185,6 +185,11 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>> implements
     // no-op default implementation
   }
 
+  /**
+   * Allows this regenerator to append metrics directly to the map entry writer for associated
+   * caches. e.g., for cache-scoped metrics that depend on metadata that only the regenerator is
+   * aware of
+   */
   public void appendMetrics(MapWriter.EntryWriter map) throws IOException {}
 
   @Override
@@ -227,6 +232,12 @@ public class MetaCacheRegenerator<K, V, M extends MetaEntry<K, V, M>> implements
     return ret;
   }
 
+  /**
+   * Allows this regenerator to add separate metrics under an associated cache's metrics context.
+   * The handling here is a bit unusual: since we want the added regen metrics to follow the
+   * lifecycle of the associated cache, we <i>don't</i> to treat the specified context as a "parent
+   * context", nor register ourselves as the owner of any contexts.
+   */
   public final void initializeMetrics(
       SolrMetricsContext context, String scope, SolrCache<K, M> cache) {
     if (metaType != null) {
