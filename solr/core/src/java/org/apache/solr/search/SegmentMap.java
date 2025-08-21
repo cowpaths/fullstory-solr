@@ -49,12 +49,11 @@ public class SegmentMap {
    * ids, it's preferable that ids vary in their <i>lower</i> indexes (to avoid having to compare
    * many character indexes). {@link Character#MAX_RADIX} and reversing the string accomplishes
    * this.
-   *
-   * <p>TODO: could we just use
-   * SolrIndexSearcher.getTopReaderContext().reader().getReaderCacheHelper().getKey() and use simple
-   * {@link Object} for scoping instead? ... and perhaps fallback to String when such is not
-   * available?
    */
+  // TODO: could we just use
+  //  SolrIndexSearcher.getTopReaderContext().reader().getReaderCacheHelper().getKey() and use
+  //  simple {@link Object} for scoping instead? ... and perhaps fallback to String when such is
+  //  not available?
   private static String mintId() {
     long raw = IDS.getAndIncrement();
     String inOrder = Long.toUnsignedString(raw, Character.MAX_RADIX);
