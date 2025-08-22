@@ -35,10 +35,12 @@ import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiConsumer;
@@ -108,6 +110,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
   private boolean async;
 
   private MetricsMap cacheMap;
+  private SolrMetricsContext solrMetricsContext;
 
   private long initialRamBytes = 0;
   private final LongAdder ramBytes = new LongAdder();
@@ -218,10 +221,26 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     if (result != null) {
       try {
         // Another thread is already working on this computation, wait for them to finish
-        V value = result.join();
+        QueryLimits queryLimits = QueryLimits.getCurrentLimits();
+        TimeAllowedLimit timeLimit;
+        V value;
+        if (queryLimits != null
+            && (timeLimit =
+                    (TimeAllowedLimit)
+                        queryLimits.currentLimitValueFor(TimeAllowedLimit.class).orElse(null))
+                != null) {
+          value = result.get(timeLimit.nanosRemaining(), TimeUnit.NANOSECONDS);
+        } else {
+          value = result.get(); // prefer `get()`, since `join()` is uninterruptible
+        }
         hits.increment();
         return value;
-      } catch (CompletionException e) {
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new CompletionException(e);
+      } catch (TimeoutException e) {
+        throw new CompletionException(e);
+      } catch (ExecutionException e) {
         Throwable cause = e.getCause();
         if (cause instanceof IOException) {
           // Computation had an IOException, likely index problems, so fail this result too
@@ -233,7 +252,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
           // Should we record a cache miss here?
           return mappingFunction.apply(key);
         }
-        throw e;
+        throw new CompletionException(cause);
       }
     }
     try {
@@ -329,6 +348,10 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     ramBytes.reset();
   }
 
+  public void cleanup() {
+    cache.cleanUp();
+  }
+
   @Override
   public int size() {
     return cache.asMap().size();
@@ -405,8 +428,21 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     }
   }
 
+  private SegmentMap segMap;
+
+  @Override
+  public SegmentMap getSegmentMap() {
+    return segMap;
+  }
+
+  @Override
+  public void initialSearcher(SolrIndexSearcher initialSearcher) {
+    segMap = initialSearcher == null ? null : initialSearcher.getSegmentMap();
+  }
+
   @Override
   public void warm(SolrIndexSearcher searcher, SolrCache<K, V> old) {
+    segMap = searcher == null ? null : searcher.getSegmentMap();
     long warmingStartTime = System.nanoTime();
     Map<K, V> hottest = Collections.emptyMap();
     CaffeineCache<K, V> other = (CaffeineCache<K, V>) old;
@@ -549,6 +585,11 @@ public class CaffeineCache<K, V> extends SolrCacheBase
   }
 
   @Override
+  public SolrMetricsContext getSolrMetricsContext() {
+    return solrMetricsContext;
+  }
+
+  @Override
   public String toString() {
     return name() + (cacheMap != null ? cacheMap.getValue().toString() : "");
   }
@@ -559,7 +600,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
 
   @Override
   public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
-    super.initializeMetrics(parentContext, scope);
+    solrMetricsContext = parentContext.getChildContext(this);
     cacheMap =
         new MetricsMap(
             map -> {

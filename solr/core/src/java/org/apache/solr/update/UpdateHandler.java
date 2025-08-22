@@ -212,6 +212,14 @@ public abstract class UpdateHandler implements SolrInfoBean {
 
   public abstract int addDoc(AddUpdateCommand cmd) throws IOException;
 
+  /**
+   * May be used to report any activity. This can be used to ensure periodic commit events, e.g. for
+   * testing openSearcher events without actually sending updates.
+   */
+  public void active(int softCommitWithin) {
+    // no-op default impl
+  }
+
   public abstract void delete(DeleteUpdateCommand cmd) throws IOException;
 
   public abstract void deleteByQuery(DeleteUpdateCommand cmd) throws IOException;

@@ -93,6 +93,7 @@ import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.util.CollectionUtil;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ObjectReleaseTracker;
 import org.apache.solr.core.DirectoryFactory;
 import org.apache.solr.core.DirectoryFactory.DirContext;
@@ -169,6 +170,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
   // map of generic caches - not synchronized since it's read-only after the constructor.
   private final Map<String, SolrCache<?, ?>> cacheMap;
+
+  private final int dither = dither(this);
 
   // list of all caches associated with this searcher.
   @SuppressWarnings({"rawtypes"})
@@ -757,8 +760,38 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     }
   }
 
+  public static final int SUPERFLUOUS_SOFT_COMMIT_WITHIN =
+      EnvUtils.getPropertyAsInteger("solr.superfluousSoftCommitWithin", -1);
+
+  private static final int MAX_DEVIATION;
+  private static final int MAX_DEVIATION_MOD;
+
+  static {
+    if (SUPERFLUOUS_SOFT_COMMIT_WITHIN < 3) {
+      MAX_DEVIATION = 0;
+      MAX_DEVIATION_MOD = 1;
+    } else {
+      MAX_DEVIATION = SUPERFLUOUS_SOFT_COMMIT_WITHIN / 3;
+      MAX_DEVIATION_MOD = MAX_DEVIATION << 1;
+    }
+  }
+
+  private static int dither(Object o) {
+    if (MAX_DEVIATION == 0) {
+      return 0;
+    }
+    int hc = System.identityHashCode(o);
+    if (hc < 0) {
+      hc = ~hc;
+    }
+    return (hc % MAX_DEVIATION_MOD) - MAX_DEVIATION;
+  }
+
   /** Primary entrypoint for searching, using a {@link QueryCommand}. */
   public QueryResult search(QueryCommand cmd) throws IOException {
+    if (SUPERFLUOUS_SOFT_COMMIT_WITHIN != -1) {
+      core.getUpdateHandler().active(SUPERFLUOUS_SOFT_COMMIT_WITHIN + dither);
+    }
     return search(new QueryResult(), cmd);
   }
 
@@ -996,6 +1029,21 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     return getDocSetNC(query, null);
   }
 
+  private static class OtherTimeExceededException extends RuntimeException {
+    public OtherTimeExceededException() {
+      super();
+    }
+
+    public OtherTimeExceededException(RuntimeException cause) {
+      super(cause);
+    }
+
+    @Override
+    public synchronized RuntimeException getCause() {
+      return (RuntimeException) super.getCause();
+    }
+  }
+
   /**
    * Attempt to read the query from the filter cache, if not will compute the result and insert back
    * into the cache
@@ -1011,7 +1059,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
    * @param query the query to compute.
    * @return the DocSet answer
    */
-  public DocSet getAndCacheDocSet(Query query, SolrCache<Query, DocSet> cache) throws IOException {
+  public final DocSet getAndCacheDocSet(Query query, SolrCache<Query, DocSet> cache)
+      throws IOException {
     assert !(query instanceof WrappedQuery) : "should have unwrapped";
     assert cache != null : "must check for caching before calling this method";
 
@@ -1023,6 +1072,47 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     DocSet answer;
     QueryLimits queryLimits = QueryLimits.getCurrentLimits();
     if (queryLimits.isLimitsEnabled()) {
+      DocSet[] computed = new DocSet[1];
+      RuntimeException[] ourException = new RuntimeException[1];
+      try {
+        answer =
+            cache.computeIfAbsent(
+                query,
+                q -> {
+                  try {
+                    computed[0] = getDocSetNC(q, null);
+                  } catch (TimeLimitingCollector.TimeExceededException
+                      | ExitableDirectoryReader.ExitingReaderException ex) {
+                    ourException[0] = ex;
+                    // wrap in OtherTimeExceededException, for potential consumers in other threads
+                    throw new OtherTimeExceededException(ex);
+                  }
+                  if (queryLimits.shouldExit()) {
+                    // assume we have partial results, so throw for potential consumers in other
+                    // threads
+                    throw new OtherTimeExceededException();
+                  } else {
+                    // this is the normal case.
+                    return computed[0];
+                  }
+                });
+      } catch (OtherTimeExceededException ex) {
+        if (ourException[0] != null) {
+          throw ourException[0];
+        } else if (computed[0] != null) {
+          // we computed the answer successfully (possibly w/ partial results), and threw
+          // OtherTimeExceededException simply for the benefit of other consumers. Return
+          // our computed value.
+          assert ex.getCause() == null;
+          answer = computed[0];
+        } else {
+          // fallback to computing ourselves. NOTE: we may _also_ be in violation of
+          // limits at this point, but just let it throw organically.
+          answer = getDocSetNC(query, null);
+        }
+      }
+    } else if (false) {
+      answer = null;
       // If there is a possibility of timeout for this query, then don't reserve a computation slot.
       // Further, we can't naively wait for an in progress computation to finish, because if we time
       // out before it does then we won't even have partial results to provide. We could possibly
@@ -1036,7 +1126,13 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         cache.put(query, answer);
       }
     } else {
-      answer = cache.computeIfAbsent(query, q -> getDocSetNC(q, null));
+      try {
+        answer = cache.computeIfAbsent(query, q -> getDocSetNC(q, null));
+      } catch (OtherTimeExceededException ex) {
+        // we don't have limits, so this must have come from another thread/request.
+        // fallback to computing ourselves. This case should be rare.
+        answer = getDocSetNC(query, null);
+      }
     }
 
     assert !(answer instanceof MutableBitDocSet) : "should not be mutable";
@@ -1670,7 +1766,9 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
       if ((flags & NO_SET_QCACHE) == 0) {
         // handle 0 special case as well as avoid idiv in the common case.
-        if (maxDocRequested < queryResultWindowSize) {
+        if (cmd.getLen() == 0) {
+          supersetMaxDoc = 0;
+        } else if (maxDocRequested < queryResultWindowSize) {
           supersetMaxDoc = queryResultWindowSize;
         } else {
           supersetMaxDoc =
@@ -1690,12 +1788,12 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     // - the sort doesn't contain score
     // - we don't want score returned.
 
-    // check if we should try and use the filter cache
+    // check if we should try and use the filter cache for the query itself
     final boolean needSort;
-    final boolean useFilterCache;
+    final boolean useFilterCacheForQuery;
     if ((flags & (GET_SCORES | NO_CHECK_FILTERCACHE)) != 0 || filterCache == null) {
-      needSort = true; // this value should be irrelevant when `useFilterCache=false`
-      useFilterCache = false;
+      needSort = true; // this value should be irrelevant when `useFilterCacheForQuery=false`
+      useFilterCacheForQuery = false;
     } else if (q instanceof MatchAllDocsQuery
         || (useFilterForSortedQuery && QueryUtils.isConstantScoreQuery(q))) {
       // special-case MatchAllDocsQuery: implicit default useFilterForSortedQuery=true;
@@ -1707,7 +1805,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       final Sort sort = cmd.getSort();
       needSort = cmd.getLen() > 0 && sortIncludesOtherThanScore(sort);
       if (!needSort) {
-        useFilterCache = true;
+        useFilterCacheForQuery = true;
       } else {
         /*
         NOTE: if `sort:score` is specified, it will have no effect, so we really _could_ in
@@ -1716,16 +1814,16 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         expects `score` to be present ... so just make the optimization contingent on the absence
         of `score` in the requested sort.
          */
-        useFilterCache =
+        useFilterCacheForQuery =
             Arrays.stream(sort.getSort()).noneMatch((sf) -> sf.getType() == SortField.Type.SCORE);
       }
     } else {
       // for non-constant-score queries, must sort unless no docs requested
       needSort = cmd.getLen() > 0;
-      useFilterCache = useFilterCacheForDynamicScoreQuery(needSort, cmd);
+      useFilterCacheForQuery = useFilterCacheForDynamicScoreQuery(needSort, cmd);
     }
 
-    if (useFilterCache) {
+    if (useFilterCacheForQuery) {
       // now actually use the filter cache.
       // for large filters that match few documents, this may be
       // slower than simply re-executing the query.
@@ -1740,7 +1838,6 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       // the filters instead of anding them first...
       // perhaps there should be a multi-docset-iterator
       if (needSort) {
-        fullSortCount.increment();
         sortDocSet(qr, cmd);
       } else {
         skipSortCount.increment();
@@ -1758,7 +1855,6 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         }
       }
     } else {
-      fullSortCount.increment();
       // do it the normal way...
       if ((flags & GET_DOCSET) != 0) {
         // this currently conflates returning the docset for the base query vs
@@ -1864,6 +1960,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
    */
   TopDocsCollector<? extends ScoreDoc> buildTopDocsCollector(int len, QueryCommand cmd)
       throws IOException {
+    fullSortCount.increment();
     int minNumFound = cmd.getMinExactCount();
     Query q = cmd.getQuery();
     if (q instanceof RankQuery) {
@@ -2546,6 +2643,14 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     return a.intersects(getDocSet(deState));
   }
 
+  private SegmentMap cachedSegMap;
+
+  public SegmentMap getSegmentMap() {
+    return cachedSegMap != null
+        ? cachedSegMap
+        : (cachedSegMap = SegmentMap.generateSegmentMap(this));
+  }
+
   /**
    * Called on the initial searcher for each core, immediately before <code>firstSearcherListeners
    * </code> are called for the searcher. This provides the opportunity to perform initialization on
@@ -2554,7 +2659,14 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
    */
   public void bootstrapFirstSearcher() {
     for (SolrCache<?, ?> solrCache : cacheList) {
-      solrCache.initialSearcher(this);
+      try {
+        solrCache.initialSearcher(this);
+      } catch (Throwable e) {
+        log.error("Exception registering searcher with cache {}", solrCache, e);
+        if (e instanceof Error) {
+          throw e;
+        }
+      }
     }
   }
 

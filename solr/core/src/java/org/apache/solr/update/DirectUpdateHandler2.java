@@ -341,6 +341,12 @@ public class DirectUpdateHandler2 extends UpdateHandler
     }
   }
 
+  @Override
+  public void active(int softCommitWithin) {
+    commitTracker.addedDocument(-1, this::getCurrentTLogSize);
+    softCommitTracker.addedDocument(softCommitWithin);
+  }
+
   /**
    * This is the implementation of {@link #addDoc(AddUpdateCommand)}. It is factored out to allow an
    * exception handler to decorate RuntimeExceptions with information about the document being
