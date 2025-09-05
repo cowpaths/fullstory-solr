@@ -47,7 +47,9 @@ public class SimpleQueryRegenerator implements CacheRegenerator {
       });
       return true;
     } else {
-      log.info("Not regenerating item as key should be a Query and val a DocSet, but found key of class {} and val of class {}", oldKey != null ? oldKey.getClass().getName() : "null", oldVal != null ? oldVal.getClass().getName() : "null");
+      if (log.isWarnEnabled()) {
+        log.warn("Not regenerating item as key should be a Query and val a DocSet, but found key of class {} and val of class {}", oldKey != null ? oldKey.getClass().getName() : "null", oldVal != null ? oldVal.getClass().getName() : "null");
+      }
       return false;
     }
   }
