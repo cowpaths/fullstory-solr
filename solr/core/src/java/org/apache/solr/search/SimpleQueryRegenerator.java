@@ -34,8 +34,9 @@ public class SimpleQueryRegenerator implements CacheRegenerator {
           K oldKey,
           V oldVal)
           throws IOException {
-    if (oldKey instanceof Query) {
-      newSearcher.cacheDocSet((Query) oldKey, null, false);
+    if (oldKey instanceof Query && oldVal instanceof DocSet) {
+      DocSet docSet = newSearcher.getDocSet((Query) oldKey);
+      newCache.put(oldKey, (V) docSet);
       return true;
     } else {
       log.info("Not regenerating item as key is not a Query, found class {}", oldKey != null ? oldKey.getClass().getName() : "null");

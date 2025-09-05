@@ -780,7 +780,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
                             V oldVal)
                             throws IOException {
                       if (oldKey instanceof Query) {
-                        newSearcher.cacheDocSet((Query) oldKey, null, false);
+                        DocSet docSet = newSearcher.getDocSet((Query) oldKey);
+                        newCache.put(oldKey, (V)docSet);
                         return true;
                       } else {
                         log.info("Not regenerating item with user cache {}, as key is not a Query, found class {}", cacheName, oldKey != null ? oldKey.getClass().getName() : "null");
