@@ -39,9 +39,12 @@ public class SimpleQueryRegenerator implements CacheRegenerator {
           V oldVal)
           throws IOException {
     if (oldKey instanceof Query && oldVal instanceof DocSet) {
-      ExtendedQuery noCache = new WrappedQuery((Query) oldKey);
-      noCache.setCache(false);
-      newCache.computeIfAbsent((K) noCache, (k) -> (V) newSearcher.getDocSet((Query) k));
+      newCache.computeIfAbsent(oldKey, (k) -> {
+        ExtendedQuery noCache = new WrappedQuery((Query) oldKey);
+        noCache.setCache(false);
+
+        return (V) newSearcher.getDocSet((Query) noCache);
+      });
       return true;
     } else {
       log.info("Not regenerating item as key should be a Query and val a DocSet, but found key of class {} and val of class {}", oldKey != null ? oldKey.getClass().getName() : "null", oldVal != null ? oldVal.getClass().getName() : "null");
