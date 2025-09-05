@@ -26,6 +26,7 @@ import java.lang.invoke.MethodHandles;
 public class SimpleQueryRegenerator implements CacheRegenerator {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
+  @SuppressWarnings("unchecked")
   @Override
   public <K, V> boolean regenerateItem(
           SolrIndexSearcher newSearcher,

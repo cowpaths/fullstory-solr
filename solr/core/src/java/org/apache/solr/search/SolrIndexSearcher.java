@@ -771,6 +771,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
           log.info("No default regenerator for user cache: {}", cacheName);
           userCacheConfig.setRegenerator(
                   new CacheRegenerator() {
+                    @SuppressWarnings("unchecked")
                     @Override
                     public <K, V> boolean regenerateItem(
                             SolrIndexSearcher newSearcher,
