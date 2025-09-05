@@ -23,6 +23,9 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 
+/**
+ * A simple cache regenerator that computes the new value by executing the Query keys from old cache on the new Searcher
+ */
 public class SimpleQueryRegenerator implements CacheRegenerator {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -36,8 +39,9 @@ public class SimpleQueryRegenerator implements CacheRegenerator {
           V oldVal)
           throws IOException {
     if (oldKey instanceof Query && oldVal instanceof DocSet) {
-      DocSet docSet = newSearcher.getDocSet((Query) oldKey);
-      newCache.put(oldKey, (V) docSet);
+      ExtendedQuery noCache = new WrappedQuery((Query) oldKey);
+      noCache.setCache(false);
+      newCache.computeIfAbsent((K) noCache, (k) -> (V) newSearcher.getDocSet((Query) k));
       return true;
     } else {
       log.info("Not regenerating item as key is not a Query, found class {}", oldKey != null ? oldKey.getClass().getName() : "null");
