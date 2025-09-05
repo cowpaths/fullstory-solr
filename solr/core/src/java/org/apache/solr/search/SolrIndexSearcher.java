@@ -762,32 +762,33 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
           });
     }
 
-
-    for (Map.Entry<String, CacheConfig> entry : solrConfig.userCacheConfigs.entrySet()) {
-      String cacheName = entry.getKey();
-      CacheConfig userCacheConfig = entry.getValue();
-      if (userCacheConfig != null && userCacheConfig.getRegenerator() == null) {
-        // no default regenerator for user caches yet
-        log.info("No default regenerator for user cache: {}", cacheName);
-        userCacheConfig.setRegenerator(
-                new CacheRegenerator() {
-                  @Override
-                  public <K, V> boolean regenerateItem(
-                          SolrIndexSearcher newSearcher,
-                          SolrCache<K, V> newCache,
-                          SolrCache<K, V> oldCache,
-                          K oldKey,
-                          V oldVal)
-                          throws IOException {
-                    if (oldKey instanceof Query) {
-                      newSearcher.cacheDocSet((Query) oldKey, null, false);
-                      return true;
-                    } else {
-                      log.info("Not regenerating item with user cache {}, as key is not a Query, found class {}", cacheName, oldKey != null ? oldKey.getClass().getName() : "null");
-                      return false;
+    if (solrConfig.userCacheConfigs != null) {
+      for (Map.Entry<String, CacheConfig> entry : solrConfig.userCacheConfigs.entrySet()) {
+        String cacheName = entry.getKey();
+        CacheConfig userCacheConfig = entry.getValue();
+        if (userCacheConfig != null && userCacheConfig.getRegenerator() == null) {
+          // no default regenerator for user caches yet
+          log.info("No default regenerator for user cache: {}", cacheName);
+          userCacheConfig.setRegenerator(
+                  new CacheRegenerator() {
+                    @Override
+                    public <K, V> boolean regenerateItem(
+                            SolrIndexSearcher newSearcher,
+                            SolrCache<K, V> newCache,
+                            SolrCache<K, V> oldCache,
+                            K oldKey,
+                            V oldVal)
+                            throws IOException {
+                      if (oldKey instanceof Query) {
+                        newSearcher.cacheDocSet((Query) oldKey, null, false);
+                        return true;
+                      } else {
+                        log.info("Not regenerating item with user cache {}, as key is not a Query, found class {}", cacheName, oldKey != null ? oldKey.getClass().getName() : "null");
+                        return false;
+                      }
                     }
-                  }
-                });
+                  });
+        }
       }
     }
   }
