@@ -344,8 +344,6 @@ public class SolrConfig implements MapSerializable {
       dataDir = get("dataDir").txt();
       if (dataDir != null && dataDir.length() == 0) dataDir = null;
 
-      org.apache.solr.search.SolrIndexSearcher.initRegenerators(this);
-
       if (get("jmx").exists()) {
         log.warn(
             "solrconfig.xml: <jmx> is no longer supported, use solr.xml:/metrics/reporter section instead");
@@ -367,6 +365,8 @@ public class SolrConfig implements MapSerializable {
         }
       }
       this.userCacheConfigs = Collections.unmodifiableMap(userCacheConfigs);
+
+      org.apache.solr.search.SolrIndexSearcher.initRegenerators(this);
 
       final var requestParsersNode = get("requestDispatcher").get("requestParsers");
 
