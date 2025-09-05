@@ -16,15 +16,15 @@
  */
 package org.apache.solr.search;
 
+import java.io.IOException;
+import java.lang.invoke.MethodHandles;
 import org.apache.lucene.search.Query;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.lang.invoke.MethodHandles;
-
 /**
- * A simple cache regenerator that computes the new value by executing the Query keys from old cache on the new Searcher
+ * A simple cache regenerator that computes the new value by executing the Query keys from old cache
+ * on the new Searcher
  */
 public class SimpleQueryRegenerator implements CacheRegenerator {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
@@ -32,22 +32,29 @@ public class SimpleQueryRegenerator implements CacheRegenerator {
   @SuppressWarnings("unchecked")
   @Override
   public <K, V> boolean regenerateItem(
-          SolrIndexSearcher newSearcher,
-          SolrCache<K, V> newCache,
-          SolrCache<K, V> oldCache,
-          K oldKey,
-          V oldVal)
-          throws IOException {
+      SolrIndexSearcher newSearcher,
+      SolrCache<K, V> newCache,
+      SolrCache<K, V> oldCache,
+      K oldKey,
+      V oldVal)
+      throws IOException {
     if (oldKey instanceof Query && oldVal instanceof DocSet) {
-      newCache.computeIfAbsent(oldKey, (k) -> {
-        ExtendedQuery noCache = new WrappedQuery((Query) oldKey);
-        noCache.setCache(false);
+      newCache.computeIfAbsent(
+          oldKey,
+          (k) -> {
+            ExtendedQuery noCache = new WrappedQuery((Query) oldKey);
+            noCache.setCache(false);
 
-        return (V) newSearcher.getDocSet((Query) noCache);
-      });
+            return (V) newSearcher.getDocSet((Query) noCache);
+          });
       return true;
     } else {
-      log.info("Not regenerating item as key should be a Query and val a DocSet, but found key of class {} and val of class {}", oldKey != null ? oldKey.getClass().getName() : "null", oldVal != null ? oldVal.getClass().getName() : "null");
+      if (log.isWarnEnabled()) {
+        log.warn(
+            "Not regenerating item as key should be a Query and val a DocSet, but found key of class {} and val of class {}",
+            oldKey != null ? oldKey.getClass().getName() : "null",
+            oldVal != null ? oldVal.getClass().getName() : "null");
+      }
       return false;
     }
   }
