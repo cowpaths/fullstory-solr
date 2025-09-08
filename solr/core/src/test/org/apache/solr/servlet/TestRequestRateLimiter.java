@@ -729,6 +729,81 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
   }
 
   @Test
+  public void testPriorityBasedRateLimiterWithDifferentBackgroundLimit() throws Exception {
+    RateLimitManager rateLimitManager = new RateLimitManager("localhost", solrMetricsContext);
+
+    RateLimiterConfig rateLimiterConfig =
+        new RateLimiterConfig(
+            SolrRequest.SolrRequestType.QUERY,
+            true,
+            1,
+            10,
+            5 /* allowedRequests */,
+            true /* isSlotBorrowing */,
+            true,
+            2 /* allowedBackgroundRequests */);
+
+    PriorityBasedRateLimiter requestRateLimiter =
+        new PriorityBasedRateLimiter(rateLimiterConfig, solrMetricsContext);
+
+    rateLimitManager.registerRequestRateLimiter(
+        requestRateLimiter, SolrRequest.SolrRequestType.PRIORITY_BASED);
+
+    HttpServletRequest backgroundRequest =
+        new DummyRequest(null, SolrRequest.SolrRequestType.PRIORITY_BASED.name(), "BACKGROUND");
+    HttpServletRequest foregroundRequest =
+        new DummyRequest(null, SolrRequest.SolrRequestType.PRIORITY_BASED.name(), "FOREGROUND");
+
+    RequestRateLimiter.SlotReservation background1 = rateLimitManager.handleRequest(backgroundRequest);
+    assertNotNull(background1);
+    assertEquals(1, requestRateLimiter.getRequestsAllowed());
+
+    RequestRateLimiter.SlotReservation background2 = rateLimitManager.handleRequest(backgroundRequest);
+    assertNotNull(background2);
+    assertEquals(2, requestRateLimiter.getRequestsAllowed());
+
+    // We have reached the background limit
+    RequestRateLimiter.SlotReservation background3 = rateLimitManager.handleRequest(backgroundRequest);
+    assertNull(background3);
+    assertEquals(2, requestRateLimiter.getRequestsAllowed());
+
+    // But foreground requests are still allowed
+    RequestRateLimiter.SlotReservation foreground1 = rateLimitManager.handleRequest(foregroundRequest);
+    assertNotNull(foreground1);
+    assertEquals(3, requestRateLimiter.getRequestsAllowed());
+
+    RequestRateLimiter.SlotReservation foreground2 = rateLimitManager.handleRequest(foregroundRequest);
+    assertNotNull(foreground2);
+    assertEquals(4, requestRateLimiter.getRequestsAllowed());
+
+    RequestRateLimiter.SlotReservation foreground3 = rateLimitManager.handleRequest(foregroundRequest);
+    assertNotNull(foreground3);
+    assertEquals(5, requestRateLimiter.getRequestsAllowed());
+
+    // We have reached the total limit
+    RequestRateLimiter.SlotReservation foreground4 = rateLimitManager.handleRequest(foregroundRequest);
+    assertNull(foreground4);
+    assertEquals(5, requestRateLimiter.getRequestsAllowed());
+
+    // Release a background slot
+    background1.close();
+    assertEquals(4, requestRateLimiter.getRequestsAllowed());
+
+    // A new background request should now be admitted
+    background3 = rateLimitManager.handleRequest(backgroundRequest);
+    assertNotNull(background3);
+    assertEquals(5, requestRateLimiter.getRequestsAllowed());
+
+    background2.close();
+    background3.close();
+    foreground1.close();
+    foreground2.close();
+    foreground3.close();
+
+    assertEquals(0, requestRateLimiter.getRequestsAllowed());
+  }
+
+  @Test
   public void testPriorityBasedRateLimiterTimeout() throws Exception {
     RateLimitManager rateLimitManager = new RateLimitManager("localhost", solrMetricsContext);
 

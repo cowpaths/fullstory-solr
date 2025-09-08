@@ -32,6 +32,7 @@ public class RateLimiterConfig {
   public final int allowedRequests;
   public final boolean isSlotBorrowingEnabled;
   public final int guaranteedSlotsThreshold;
+  public final int allowedBackgroundRequests;
   public final boolean priorityBasedEnabled;
 
   /**
@@ -51,7 +52,8 @@ public class RateLimiterConfig {
       long waitForSlotAcquisition,
       int allowedRequests,
       boolean isSlotBorrowingEnabled,
-      boolean priorityBasedEnabled) {
+      boolean priorityBasedEnabled,
+      int allowedBackgroundRequests) {
     this(
         requestType,
         makePayload(
@@ -60,7 +62,8 @@ public class RateLimiterConfig {
             waitForSlotAcquisition,
             allowedRequests,
             isSlotBorrowingEnabled,
-            priorityBasedEnabled));
+            priorityBasedEnabled,
+            allowedBackgroundRequests));
   }
 
   private static RateLimiterPayload makePayload(
@@ -69,7 +72,8 @@ public class RateLimiterConfig {
       long waitForSlotAcquisition,
       int allowedRequests,
       boolean isSlotBorrowingEnabled,
-      boolean priorityBasedEnabled) {
+      boolean priorityBasedEnabled,
+      int allowedBackgroundRequests) {
     RateLimiterPayload ret = new RateLimiterPayload();
     ret.enabled = isEnabled;
     ret.allowedRequests = allowedRequests;
@@ -77,6 +81,7 @@ public class RateLimiterConfig {
     ret.slotBorrowingEnabled = isSlotBorrowingEnabled;
     ret.slotAcquisitionTimeoutInMS = Math.toIntExact(waitForSlotAcquisition);
     ret.priorityBasedEnabled = priorityBasedEnabled;
+    ret.allowedBackgroundRequests = allowedBackgroundRequests;
     return ret;
   }
 
@@ -106,6 +111,11 @@ public class RateLimiterConfig {
     priorityBasedEnabled =
         definition.priorityBasedEnabled == null ? false : definition.priorityBasedEnabled;
 
+    allowedBackgroundRequests =
+        definition.allowedBackgroundRequests == null
+            ? this.allowedRequests
+            : definition.allowedBackgroundRequests;
+
     this.definition = definition;
   }
 
@@ -134,6 +144,7 @@ public class RateLimiterConfig {
     sb.append(", borrowEnabled=").append(isSlotBorrowingEnabled);
     sb.append(", waitForSlotMillis=").append(waitForSlotAcquisition);
     sb.append(", priorityBasedEnabled=").append(priorityBasedEnabled);
+    sb.append(", allowedBackgroundRequests=").append(allowedBackgroundRequests);
     return sb.append('}').toString();
   }
 }
