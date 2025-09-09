@@ -33,7 +33,7 @@ public class RateLimiterPayload implements ReflectMapWriter {
 
   @JsonProperty public Integer slotAcquisitionTimeoutInMS;
 
-  @JsonProperty public Integer allowedBackgroundRequests;
+  @JsonProperty public Integer backgroundRequestAdmitThreshold;
 
   @JsonProperty public Boolean priorityBasedEnabled = false;
 
@@ -47,7 +47,7 @@ public class RateLimiterPayload implements ReflectMapWriter {
     result.allowedRequests = allowedRequests;
     result.slotBorrowingEnabled = slotBorrowingEnabled;
     result.slotAcquisitionTimeoutInMS = slotAcquisitionTimeoutInMS;
-    result.allowedBackgroundRequests = allowedBackgroundRequests;
+    result.backgroundRequestAdmitThreshold = backgroundRequestAdmitThreshold;
     result.priorityBasedEnabled = priorityBasedEnabled;
     result.nodesEnabled = nodesEnabled;
     return result;
@@ -62,7 +62,8 @@ public class RateLimiterPayload implements ReflectMapWriter {
           && Objects.equals(this.allowedRequests, that.allowedRequests)
           && Objects.equals(this.slotBorrowingEnabled, that.slotBorrowingEnabled)
           && Objects.equals(this.slotAcquisitionTimeoutInMS, that.slotAcquisitionTimeoutInMS)
-          && Objects.equals(this.allowedBackgroundRequests, that.allowedBackgroundRequests)
+          && Objects.equals(
+              this.backgroundRequestAdmitThreshold, that.backgroundRequestAdmitThreshold)
           && Objects.equals(this.priorityBasedEnabled, that.priorityBasedEnabled);
     }
     return false;
@@ -76,7 +77,7 @@ public class RateLimiterPayload implements ReflectMapWriter {
         allowedRequests,
         slotBorrowingEnabled,
         slotAcquisitionTimeoutInMS,
-        allowedBackgroundRequests,
+        backgroundRequestAdmitThreshold,
         priorityBasedEnabled);
   }
 

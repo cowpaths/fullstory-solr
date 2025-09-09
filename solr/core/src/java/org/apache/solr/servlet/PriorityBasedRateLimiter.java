@@ -26,7 +26,7 @@ public class PriorityBasedRateLimiter extends RequestRateLimiter implements Solr
 
   private final int totalAllowedRequests;
 
-  private final int allowedBackgroundRequests;
+  private final int backgroundRequestAdmitThreshold;
 
   private final LinkedBlockingQueue<CountDownLatch> waitingList = new LinkedBlockingQueue<>();
 
@@ -42,7 +42,7 @@ public class PriorityBasedRateLimiter extends RequestRateLimiter implements Solr
     super(rateLimiterConfig);
     this.numRequestsAllowed = new Semaphore(rateLimiterConfig.allowedRequests, true);
     this.totalAllowedRequests = rateLimiterConfig.allowedRequests;
-    this.allowedBackgroundRequests = rateLimiterConfig.allowedBackgroundRequests;
+    this.backgroundRequestAdmitThreshold = rateLimiterConfig.backgroundRequestAdmitThreshold;
     this.waitTimeoutInNanos = rateLimiterConfig.waitForSlotAcquisition * 1000000l;
     this.initializeMetrics(solrMetricsContext, null);
   }
@@ -78,7 +78,7 @@ public class PriorityBasedRateLimiter extends RequestRateLimiter implements Solr
     if (priority.equals(RequestPriorities.FOREGROUND)) {
       return nextInQueue(this.waitTimeoutInNanos);
     } else if (priority.equals(RequestPriorities.BACKGROUND)) {
-      if (this.activeRequests.get() < this.allowedBackgroundRequests) {
+      if (this.activeRequests.get() < this.backgroundRequestAdmitThreshold) {
         return nextInQueue(this.waitTimeoutInNanos);
       } else {
         CountDownLatch wait = new CountDownLatch(1);
@@ -114,7 +114,7 @@ public class PriorityBasedRateLimiter extends RequestRateLimiter implements Solr
 
   private void release() {
     this.exitFromQueue();
-    if (this.activeRequests.get() < this.allowedBackgroundRequests) {
+    if (this.activeRequests.get() < this.backgroundRequestAdmitThreshold) {
       // next priority
       CountDownLatch waiter = this.waitingList.poll();
       if (waiter != null) {
