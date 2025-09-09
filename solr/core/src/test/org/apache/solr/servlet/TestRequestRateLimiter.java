@@ -101,7 +101,8 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
               DEFAULT_SLOT_ACQUISITION_TIMEOUT_MS,
               5 /* allowedRequests */,
               true /* isSlotBorrowing */,
-              false);
+              false,
+              5);
 
       List<RateLimitManager> rateLimitManagers = new ArrayList<>(solrDispatchFilters.size());
 
@@ -166,7 +167,8 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
             slotAcqTimeMillis,
             slotLimit /* allowedRequests */,
             true /* isSlotBorrowing */,
-            false);
+            false,
+            slotLimit);
     // set allowed/guaranteed to the same, and very low, to force it to mainly borrow. It would also
     // be theoretically possible to optimize a single-request-type config to bypass slot-borrowing
     // logic altogether, so configuring a second ratelimiter eliminates the possibility that at
@@ -179,7 +181,8 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
             slotAcqTimeMillis,
             1 /* allowedRequests */,
             true /* isSlotBorrowing */,
-            false);
+            false,
+            1);
     mgr.registerRequestRateLimiter(
         new RequestRateLimiter(queryConfig), SolrRequest.SolrRequestType.QUERY);
     mgr.registerRequestRateLimiter(
@@ -370,7 +373,8 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
               DEFAULT_SLOT_ACQUISITION_TIMEOUT_MS,
               5 /* allowedRequests */,
               true /* isSlotBorrowing */,
-              false);
+              false,
+              5);
       RateLimiterConfig indexRateLimiterConfig =
           new RateLimiterConfig(
               SolrRequest.SolrRequestType.UPDATE,
@@ -379,7 +383,8 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
               DEFAULT_SLOT_ACQUISITION_TIMEOUT_MS,
               5 /* allowedRequests */,
               true /* isSlotBorrowing */,
-              false);
+              false,
+              5);
       // We are fine with a null FilterConfig here since we ensure that MockBuilder never invokes
       // its parent
       RateLimitManager.Builder builder =
@@ -566,7 +571,8 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
             20,
             allowed /* allowedRequests */,
             true /* isSlotBorrowing */,
-            false);
+            false,
+            allowed);
     RequestRateLimiter limiter = new RequestRateLimiter(config);
     ExecutorService exec = ExecutorUtil.newMDCAwareCachedThreadPool("tests");
     try (Closeable c = () -> ExecutorUtil.shutdownAndAwaitTermination(exec)) {
@@ -670,7 +676,8 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
                 20,
                 allowed /* allowedRequests */,
                 true /* isSlotBorrowing */,
-                false);
+                false,
+                allowed);
         limiter = new RequestRateLimiter(config);
       }
     }
@@ -689,7 +696,8 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
             DEFAULT_SLOT_ACQUISITION_TIMEOUT_MS,
             5 /* allowedRequests */,
             true /* isSlotBorrowing */,
-            true);
+            true,
+            5);
 
     PriorityBasedRateLimiter requestRateLimiter =
         new PriorityBasedRateLimiter(rateLimiterConfig, solrMetricsContext);
@@ -737,7 +745,7 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
             SolrRequest.SolrRequestType.QUERY,
             true,
             1,
-            10,
+            2,
             5 /* allowedRequests */,
             true /* isSlotBorrowing */,
             true,
@@ -754,34 +762,41 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
     HttpServletRequest foregroundRequest =
         new DummyRequest(null, SolrRequest.SolrRequestType.PRIORITY_BASED.name(), "FOREGROUND");
 
-    RequestRateLimiter.SlotReservation background1 = rateLimitManager.handleRequest(backgroundRequest);
+    RequestRateLimiter.SlotReservation background1 =
+        rateLimitManager.handleRequest(backgroundRequest);
     assertNotNull(background1);
     assertEquals(1, requestRateLimiter.getRequestsAllowed());
 
-    RequestRateLimiter.SlotReservation background2 = rateLimitManager.handleRequest(backgroundRequest);
+    RequestRateLimiter.SlotReservation background2 =
+        rateLimitManager.handleRequest(backgroundRequest);
     assertNotNull(background2);
     assertEquals(2, requestRateLimiter.getRequestsAllowed());
 
     // We have reached the background limit
-    RequestRateLimiter.SlotReservation background3 = rateLimitManager.handleRequest(backgroundRequest);
+    RequestRateLimiter.SlotReservation background3 =
+        rateLimitManager.handleRequest(backgroundRequest);
     assertNull(background3);
     assertEquals(2, requestRateLimiter.getRequestsAllowed());
 
     // But foreground requests are still allowed
-    RequestRateLimiter.SlotReservation foreground1 = rateLimitManager.handleRequest(foregroundRequest);
+    RequestRateLimiter.SlotReservation foreground1 =
+        rateLimitManager.handleRequest(foregroundRequest);
     assertNotNull(foreground1);
     assertEquals(3, requestRateLimiter.getRequestsAllowed());
 
-    RequestRateLimiter.SlotReservation foreground2 = rateLimitManager.handleRequest(foregroundRequest);
+    RequestRateLimiter.SlotReservation foreground2 =
+        rateLimitManager.handleRequest(foregroundRequest);
     assertNotNull(foreground2);
     assertEquals(4, requestRateLimiter.getRequestsAllowed());
 
-    RequestRateLimiter.SlotReservation foreground3 = rateLimitManager.handleRequest(foregroundRequest);
+    RequestRateLimiter.SlotReservation foreground3 =
+        rateLimitManager.handleRequest(foregroundRequest);
     assertNotNull(foreground3);
     assertEquals(5, requestRateLimiter.getRequestsAllowed());
 
     // We have reached the total limit
-    RequestRateLimiter.SlotReservation foreground4 = rateLimitManager.handleRequest(foregroundRequest);
+    RequestRateLimiter.SlotReservation foreground4 =
+        rateLimitManager.handleRequest(foregroundRequest);
     assertNull(foreground4);
     assertEquals(5, requestRateLimiter.getRequestsAllowed());
 
@@ -789,16 +804,24 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
     background1.close();
     assertEquals(4, requestRateLimiter.getRequestsAllowed());
 
-    // A new background request should now be admitted
+    // Still background request should not be admitted as FRs's are running
     background3 = rateLimitManager.handleRequest(backgroundRequest);
-    assertNotNull(background3);
-    assertEquals(5, requestRateLimiter.getRequestsAllowed());
+    assertNull(background3);
 
-    background2.close();
-    background3.close();
     foreground1.close();
     foreground2.close();
     foreground3.close();
+
+    assertEquals(1, requestRateLimiter.getRequestsAllowed());
+
+    // now new BG request should be allowed
+    background3 = rateLimitManager.handleRequest(backgroundRequest);
+    assertNotNull(background3);
+
+    assertEquals(2, requestRateLimiter.getRequestsAllowed());
+
+    background2.close();
+    background3.close();
 
     assertEquals(0, requestRateLimiter.getRequestsAllowed());
   }
@@ -816,7 +839,8 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
             10,
             1 /* allowedRequests */,
             true /* isSlotBorrowing */,
-            true);
+            true,
+            1);
 
     PriorityBasedRateLimiter requestRateLimiter =
         new PriorityBasedRateLimiter(rateLimiterConfig, solrMetricsContext);
@@ -864,7 +888,8 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
             10,
             1 /* allowedRequests */,
             true /* isSlotBorrowing */,
-            false);
+            false,
+            1);
 
     QueryRateLimiter requestRateLimiter = new QueryRateLimiter(rateLimiterConfig);
 
@@ -907,7 +932,8 @@ public class TestRequestRateLimiter extends SolrCloudTestCase {
             10,
             1 /* allowedRequests */,
             true /* isSlotBorrowing */,
-            false);
+            false,
+            1);
 
     QueryRateLimiter requestRateLimiter = new QueryRateLimiter(rateLimiterConfig);
 
