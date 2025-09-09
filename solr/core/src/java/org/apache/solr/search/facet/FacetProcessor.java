@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.IntFunction;
+
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
@@ -44,7 +45,9 @@ import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.search.SyntaxError;
 import org.apache.solr.search.facet.SlotAcc.SlotContext;
 
-/** Base abstraction for a class that computes facets. This is fairly internal to the module. */
+/**
+ * Base abstraction for a class that computes facets. This is fairly internal to the module.
+ */
 public abstract class FacetProcessor<T extends FacetRequest> {
   protected SimpleOrderedMap<Object> response;
   protected FacetContext fcontext;
@@ -56,6 +59,8 @@ public abstract class FacetProcessor<T extends FacetRequest> {
 
   LinkedHashMap<String, SlotAcc> accMap;
   SlotAcc[] accs;
+  LinkedHashMap<String, SortedSlotAcc> sortedAccMap;
+  SortedSlotAcc[] sortedAccs;
   protected SlotAcc.CountSlotAcc countAcc;
 
   public FacetProcessor(FacetContext fcontext, T freq) {
@@ -250,7 +255,9 @@ public abstract class FacetProcessor<T extends FacetRequest> {
     return qlist;
   }
 
-  /** modifies the context base if there is a join field domain change */
+  /**
+   * modifies the context base if there is a join field domain change
+   */
   private void handleJoinField() throws IOException {
     if (null == freq.domain.joinField) return;
 
@@ -258,7 +265,9 @@ public abstract class FacetProcessor<T extends FacetRequest> {
     fcontext.base = fcontext.searcher.getDocSet(domainQuery);
   }
 
-  /** modifies the context base if there is a graph field domain change */
+  /**
+   * modifies the context base if there is a graph field domain change
+   */
   private void handleGraphField() throws IOException {
     if (null == freq.domain.graphField) return;
 
@@ -328,6 +337,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
 
   protected void createAccs(long docCount, int slotCount) throws IOException {
     accMap = new LinkedHashMap<>();
+    sortedAccMap = new LinkedHashMap<>();
 
     // allow a custom count acc to be used
     if (countAcc == null) {
@@ -337,13 +347,23 @@ public abstract class FacetProcessor<T extends FacetRequest> {
     for (Map.Entry<String, AggValueSource> entry : freq.getFacetStats().entrySet()) {
       SlotAcc acc = entry.getValue().createSlotAcc(fcontext, docCount, slotCount);
       acc.key = entry.getKey();
-      accMap.put(acc.key, acc);
+      if (acc instanceof SortedSlotAcc) {
+        sortedAccMap.put(acc.key, (SortedSlotAcc) acc);
+      } else {
+        accMap.put(acc.key, acc);
+      }
     }
 
     accs = new SlotAcc[accMap.size()];
     int i = 0;
     for (SlotAcc acc : accMap.values()) {
       accs[i++] = acc;
+    }
+
+    sortedAccs = new SortedSlotAcc[sortedAccMap.size()];
+    i = 0;
+    for (SortedSlotAcc sortedAcc : sortedAccMap.values()) {
+      sortedAccs[i++] = sortedAcc;
     }
   }
 
@@ -352,6 +372,9 @@ public abstract class FacetProcessor<T extends FacetRequest> {
     countAcc.reset();
     for (SlotAcc acc : accs) {
       acc.reset();
+    }
+    for (SortedSlotAcc sortedAcc : sortedAccs) {
+      sortedAcc.reset();
     }
   }
 
@@ -370,6 +393,14 @@ public abstract class FacetProcessor<T extends FacetRequest> {
         }
       }
       return count;
+    }
+
+    long sortedCount = 0;
+    if (sortedAccs.length > 0) {
+      sortedCount = FacetProcessorCollect.collectSorted(searcher, docs, slot, slotContext, sortedAccs);
+    }
+    if (accs.length == 0) {
+      return sortedCount;
     }
 
     final List<LeafReaderContext> leaves = searcher.getIndexReader().leaves();
@@ -397,6 +428,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
       count++;
       collect(doc - segBase, slot, slotContext); // per-seg collectors
     }
+    assert sortedAccs.length == 0 || sortedCount == count;
     return count;
   }
 
@@ -421,6 +453,9 @@ public abstract class FacetProcessor<T extends FacetRequest> {
     if (count > 0 || freq.processEmpty) {
       for (SlotAcc acc : accs) {
         acc.setValues(target, slotNum);
+      }
+      for (SortedSlotAcc sortedAcc : sortedAccs) {
+        sortedAcc.setValues(target, slotNum);
       }
     }
   }

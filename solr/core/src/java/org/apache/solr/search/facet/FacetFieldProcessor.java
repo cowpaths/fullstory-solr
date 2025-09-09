@@ -126,6 +126,9 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
     if (accMap == null) {
       accMap = new LinkedHashMap<>();
     }
+    if (sortedAccMap == null) {
+      sortedAccMap = new LinkedHashMap<>();
+    }
 
     // allow a custom count acc to be used
     if (countAcc == null) {
@@ -138,10 +141,11 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
         acc.reset();
         acc.resize(new FlatteningResizer(slotCount));
       }
-      return;
+      return; // TODO(clay)
     } else {
       accs = new SlotAcc[freq.getFacetStats().size()];
     }
+    // TODO(clay)
 
     int accIdx = 0;
     for (Map.Entry<String, AggValueSource> entry : freq.getFacetStats().entrySet()) {

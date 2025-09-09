@@ -24,6 +24,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.queries.function.FunctionScoreQuery;
@@ -97,6 +98,7 @@ import org.apache.solr.search.facet.StddevAgg;
 import org.apache.solr.search.facet.SumAgg;
 import org.apache.solr.search.facet.SumsqAgg;
 import org.apache.solr.search.facet.UniqueAgg;
+import org.apache.solr.search.facet.UniqueAggSorted;
 import org.apache.solr.search.facet.UniqueBlockFieldAgg;
 import org.apache.solr.search.facet.UniqueBlockQueryAgg;
 import org.apache.solr.search.facet.VarianceAgg;
@@ -125,13 +127,19 @@ import org.locationtech.spatial4j.distance.DistanceUtils;
  * pluggable, named functions for use in function queries.
  */
 public abstract class ValueSourceParser implements NamedListInitializedPlugin {
-  /** Parse the user input into a ValueSource. */
+  /**
+   * Parse the user input into a ValueSource.
+   */
   public abstract ValueSource parse(FunctionQParser fp) throws SyntaxError;
 
-  /** standard functions supported by default, filled in static class initialization */
+  /**
+   * standard functions supported by default, filled in static class initialization
+   */
   private static final Map<String, ValueSourceParser> standardVSParsers = new HashMap<>();
 
-  /** standard functions supported by default */
+  /**
+   * standard functions supported by default
+   */
   public static final Map<String, ValueSourceParser> standardValueSourceParsers =
       Collections.unmodifiableMap(standardVSParsers);
 
@@ -1189,6 +1197,16 @@ public abstract class ValueSourceParser implements NamedListInitializedPlugin {
         });
 
     addParser(
+        "agg_uniqueSorted",
+        new ValueSourceParser() {
+          @Override
+          public ValueSource parse(FunctionQParser fp) throws SyntaxError {
+            String field = fp.parseArg();
+            return new UniqueAggSorted(field);
+          }
+        });
+
+    addParser(
         "agg_uniqueBlock",
         new ValueSourceParser() {
           @Override
@@ -1786,7 +1804,8 @@ public abstract class ValueSourceParser implements NamedListInitializedPlugin {
 
       @Override
       public void createWeight(Map<Object, Object> context, IndexSearcher searcher)
-          throws IOException {}
+          throws IOException {
+      }
 
       @Override
       public int hashCode() {
