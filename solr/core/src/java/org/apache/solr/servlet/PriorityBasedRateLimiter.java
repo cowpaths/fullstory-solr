@@ -114,7 +114,7 @@ public class PriorityBasedRateLimiter extends RequestRateLimiter implements Solr
 
   private void release() {
     this.exitFromQueue();
-    if (this.activeRequests.get() < this.totalAllowedRequests) {
+    if (this.activeRequests.get() < this.allowedBackgroundRequests) {
       // next priority
       CountDownLatch waiter = this.waitingList.poll();
       if (waiter != null) {
