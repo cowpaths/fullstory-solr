@@ -143,7 +143,7 @@ public final class CommitTracker implements Runnable {
   private void _scheduleCommitWithin(long commitMaxTime) {
     if (commitMaxTime <= 0) return;
     synchronized (this) {
-      long drift = core.getCoreDescriptor().getCollectionName().hashCode() % commitMaxTime;
+      long drift = Math.abs(core.getCoreDescriptor().getCollectionName().hashCode()) % commitMaxTime;
       long currentTime = System.currentTimeMillis();
       commitMaxTime = drift + commitMaxTime - (currentTime % commitMaxTime);
 
