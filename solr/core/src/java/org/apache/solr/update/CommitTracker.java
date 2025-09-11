@@ -17,6 +17,10 @@
 package org.apache.solr.update;
 
 import java.lang.invoke.MethodHandles;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -134,9 +138,15 @@ public final class CommitTracker implements Runnable {
     }
   }
 
+  private static DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS z");
+
   private void _scheduleCommitWithin(long commitMaxTime) {
     if (commitMaxTime <= 0) return;
     synchronized (this) {
+      long drift = core.getCoreDescriptor().getCollectionName().hashCode() % commitMaxTime;
+      long currentTime = System.currentTimeMillis();
+      commitMaxTime = drift + commitMaxTime - (currentTime % commitMaxTime);
+
       if (pending != null && pending.getDelay(TimeUnit.MILLISECONDS) <= commitMaxTime) {
         // There is already a pending commit that will happen first, so
         // nothing else to do here.
@@ -162,6 +172,9 @@ public final class CommitTracker implements Runnable {
 
       // log.info("###scheduling for " + commitMaxTime);
 
+      ZonedDateTime zonedDateTime = Instant.ofEpochMilli(currentTime + commitMaxTime)
+              .atZone(ZoneId.systemDefault());
+      log.info("###scheduling {} with delay of {}ms drift {}ms. Target time will be {}", name, commitMaxTime, drift, zonedDateTime.format(formatter));
       // schedule our new commit
       pending = scheduler.schedule(this, commitMaxTime, TimeUnit.MILLISECONDS);
     }
