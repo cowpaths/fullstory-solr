@@ -152,7 +152,11 @@ public final class CommitTracker implements Runnable {
     if (commitMaxTime <= 0) return;
     synchronized (this) {
       if (shouldAlignCommitTime()) {
-        commitMaxTime = alignCommitMaxTime(core, commitMaxTime);
+        commitMaxTime =
+            alignCommitMaxTime(
+                core.getCoreDescriptor().getCollectionName(),
+                commitMaxTime,
+                System.currentTimeMillis());
       }
 
       if (pending != null && pending.getDelay(TimeUnit.MILLISECONDS) <= commitMaxTime) {
@@ -193,18 +197,16 @@ public final class CommitTracker implements Runnable {
    *   <li>Jitter the time per collection, adding a value up to commitMaxTime
    * </ol>
    *
-   * @param core
-   * @param commitMaxTime
    * @return the adjusted commit max time to be used for scheduling
    */
-  private static long alignCommitMaxTime(SolrCore core, long commitMaxTime) {
-    int collectionHash = core.getCoreDescriptor().getCollectionName().hashCode() & 0x7FFFFFFF;
+  static long alignCommitMaxTime(String collection, long commitMaxTime, long currentTimeMillis) {
+    int collectionHash = collection.hashCode() & 0x7FFFFFFF;
     long jitter =
         collectionHash
             % commitMaxTime; // a positive jitter less than commitMaxTime, so different collections
     // will spread out their commits
     long msSinceCommitPoint =
-        System.currentTimeMillis()
+        currentTimeMillis
             % commitMaxTime; // time since the last possible commit point, for example if
     // commitMaxTime is 1min, then it's how many millisec since the start
     // of the minute etc
