@@ -311,51 +311,56 @@ public final class CommitTracker implements Runnable {
   /** This is the worker part for the ScheduledFuture * */
   @Override
   public void run() {
-    synchronized (this) {
-      if (openSearcher) {
-        log.info("###start commit that openSearcher. pending=null");
-      }
-      pending = null; // allow a new commit to be scheduled
-    }
-
-    MDCLoggingContext.setCore(core);
-    RTimer timer = timeUpperBound > 0 ? new RTimer() : null;
-    try (SolrQueryRequest req = new LocalSolrQueryRequest(core, new ModifiableSolrParams())) {
-      CommitUpdateCommand command = new CommitUpdateCommand(req, false);
-      command.openSearcher = openSearcher;
-      command.waitSearcher = WAIT_SEARCHER;
-      command.softCommit = softCommit;
-      command.autoCommit = true;
-      if (core.getCoreDescriptor().getCloudDescriptor() != null
-          && core.getCoreDescriptor().getCloudDescriptor().isLeader()
-          && !softCommit) {
-        command.version = core.getUpdateHandler().getUpdateLog().getVersionInfo().getNewClock();
-      }
-      // no need for command.maxOptimizeSegments = 1; since it is not optimizing
-
-      // we increment this *before* calling commit because it was causing a race
-      // in the tests (the new searcher was registered and the test proceeded
-      // to check the commit count before we had incremented it.)
-      autoCommitCount.incrementAndGet();
-
-      core.getUpdateHandler().commit(command);
-    } catch (Exception e) {
-      log.error("auto commit error...", e);
-    } finally {
-      if (timer != null) {
-        long elapsed = (long) timer.stop();
-        if (timeUpperBound > 0 && elapsed > timeUpperBound) {
-          log.warn(
-              "Spent {} millisec on {} auto-commit, which is longer than the configured commit interval of {} millisec",
-              elapsed,
-              softCommit ? "soft" : "hard",
-              timeUpperBound);
+    try {
+      MDCLoggingContext.setCore(core);
+      synchronized (this) {
+        if (openSearcher) {
+          log.info("###start commit that openSearcher. pending=null");
         }
+        pending = null; // allow a new commit to be scheduled
       }
+
+      MDCLoggingContext.setCore(core);
+      RTimer timer = timeUpperBound > 0 ? new RTimer() : null;
+      try (SolrQueryRequest req = new LocalSolrQueryRequest(core, new ModifiableSolrParams())) {
+        CommitUpdateCommand command = new CommitUpdateCommand(req, false);
+        command.openSearcher = openSearcher;
+        command.waitSearcher = WAIT_SEARCHER;
+        command.softCommit = softCommit;
+        command.autoCommit = true;
+        if (core.getCoreDescriptor().getCloudDescriptor() != null
+                && core.getCoreDescriptor().getCloudDescriptor().isLeader()
+                && !softCommit) {
+          command.version = core.getUpdateHandler().getUpdateLog().getVersionInfo().getNewClock();
+        }
+        // no need for command.maxOptimizeSegments = 1; since it is not optimizing
+
+        // we increment this *before* calling commit because it was causing a race
+        // in the tests (the new searcher was registered and the test proceeded
+        // to check the commit count before we had incremented it.)
+        autoCommitCount.incrementAndGet();
+
+        core.getUpdateHandler().commit(command);
+      } catch (Exception e) {
+        log.error("auto commit error...", e);
+      } finally {
+        if (timer != null) {
+          long elapsed = (long) timer.stop();
+          if (timeUpperBound > 0 && elapsed > timeUpperBound) {
+            log.warn(
+                    "Spent {} millisec on {} auto-commit, which is longer than the configured commit interval of {} millisec",
+                    elapsed,
+                    softCommit ? "soft" : "hard",
+                    timeUpperBound);
+          }
+        }
+        MDCLoggingContext.clear();
+      }
+      if (openSearcher) {
+        log.info("###done committing with openSearcher");
+      }
+    } finally {
       MDCLoggingContext.clear();
-    }
-    if (openSearcher) {
-      log.info("###done committing with openSearcher");
     }
   }
 
