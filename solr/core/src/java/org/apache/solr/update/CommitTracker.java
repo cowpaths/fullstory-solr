@@ -22,7 +22,6 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
-import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -30,7 +29,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
-
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.util.SolrNamedThreadFactory;
@@ -60,6 +58,7 @@ public final class CommitTracker implements Runnable {
   // scheduler delay for maxSize-triggered autocommits
   public static final int SIZE_COMMIT_DELAY_MS = 1;
   private final ZkController zkController;
+  private final boolean alignCommitTime;
 
   // settings, not final so we can change them in testing
   private int docsUpperBound;
@@ -91,7 +90,8 @@ public final class CommitTracker implements Runnable {
       int timeUpperBound,
       long tLogFileSizeUpperBound,
       boolean openSearcher,
-      boolean softCommit) {
+      boolean softCommit,
+      boolean alignCommitTime) {
     this.core = core;
     this.zkController = core.getCoreContainer().getZkController();
     this.name = name;
@@ -103,6 +103,7 @@ public final class CommitTracker implements Runnable {
 
     this.softCommit = softCommit;
     this.openSearcher = openSearcher;
+    this.alignCommitTime = alignCommitTime;
 
     log.info("{} AutoCommit: {}", name, this);
   }
@@ -143,13 +144,26 @@ public final class CommitTracker implements Runnable {
     }
   }
 
-  private static DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS z");
+  private static DateTimeFormatter formatter =
+      DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS z");
+
+  private boolean isAlignCommitTime() {
+    if (!openSearcher) { // only align commit time for cache/searcher refresh
+      return false;
+    }
+    Boolean override = CommitTrackerManager.getAlignCommitTimeOverride();
+    if (override != null) {
+      return override;
+    }
+    return alignCommitTime;
+  }
 
   private void _scheduleCommitWithin(long commitMaxTime) {
     if (commitMaxTime <= 0) return;
     synchronized (this) {
-      if (openSearcher && CommitTrackerManager.isAdjustCommitTime()) {
-        commitMaxTime = adjustCommitMaxTime(core, commitMaxTime);
+      boolean alignCommitTime = isAlignCommitTime();
+      if (alignCommitTime) {
+        commitMaxTime = alignCommitMaxTime(core, commitMaxTime);
       }
 
       if (pending != null && pending.getDelay(TimeUnit.MILLISECONDS) <= commitMaxTime) {
@@ -177,24 +191,37 @@ public final class CommitTracker implements Runnable {
 
       // log.info("###scheduling for " + commitMaxTime);
 
-      ZonedDateTime zonedDateTime = Instant.ofEpochMilli(System.currentTimeMillis() + commitMaxTime)
+      ZonedDateTime zonedDateTime =
+          Instant.ofEpochMilli(System.currentTimeMillis() + commitMaxTime)
               .atZone(ZoneId.systemDefault());
       // schedule our new commit
-      if (openSearcher) {
-        log.info("###scheduling {} with commitMaxTime {}. Target commit execution time will be {}", name, commitMaxTime, zonedDateTime.format(formatter));
+      if (log.isInfoEnabled() && alignCommitTime) {
+        log.info(
+            "###scheduling {} with commitMaxTime {}. Target commit execution time will be {}",
+            name,
+            commitMaxTime,
+            zonedDateTime.format(formatter));
       }
       pending = scheduler.schedule(this, commitMaxTime, TimeUnit.MILLISECONDS);
     }
   }
 
-  private static long adjustCommitMaxTime(SolrCore core, long commitMaxTime) {
+  private static long alignCommitMaxTime(SolrCore core, long commitMaxTime) {
     int collectionHash = core.getCoreDescriptor().getCollectionName().hashCode() & 0x7FFFFFFF;
-    long jitter = collectionHash % commitMaxTime; // a positive jitter less than commitMaxTime, so different collections will spread out their commits
-    long msSinceCommitPoint = System.currentTimeMillis() % commitMaxTime; //time since the last possible commit point, for example if commitMaxTime is 1min, then it's how many millisec since the start of the minute etc
+    long jitter =
+        collectionHash
+            % commitMaxTime; // a positive jitter less than commitMaxTime, so different collections
+    // will spread out their commits
+    long msSinceCommitPoint =
+        System.currentTimeMillis()
+            % commitMaxTime; // time since the last possible commit point, for example if
+    // commitMaxTime is 1min, then it's how many millisec since the start
+    // of the minute etc
 
-    return commitMaxTime - msSinceCommitPoint + jitter; // deduct by msSinceCommitPoint to align to previous commit point, then add jitter
+    return commitMaxTime
+        - msSinceCommitPoint
+        + jitter; // deduct by msSinceCommitPoint to align to previous commit point, then add jitter
   }
-
 
   /**
    * Indicate that documents have been added
@@ -280,7 +307,6 @@ public final class CommitTracker implements Runnable {
       docsSinceCommit.set(0);
     }
   }
-
 
   /** This is the worker part for the ScheduledFuture * */
   @Override

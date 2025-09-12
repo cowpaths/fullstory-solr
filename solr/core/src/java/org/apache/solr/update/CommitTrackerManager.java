@@ -1,29 +1,25 @@
 package org.apache.solr.update;
 
+import java.util.Map;
 import org.apache.solr.common.cloud.ClusterProperties;
 import org.apache.solr.common.cloud.ZkStateReader;
 
-import java.util.Map;
-import java.util.Objects;
-import java.util.concurrent.atomic.AtomicBoolean;
-
 public class CommitTrackerManager {
-  public static final String ADJUST_COMMIT_TIME =
-          ClusterProperties.EXT_PROPRTTY_PREFIX + "adjustCommitTime";
-  private static final boolean DEFAULT_ADJUST_COMMIT_TIME = true; //adjust by default
-  private static final AtomicBoolean adjustCommitTime = new AtomicBoolean(DEFAULT_ADJUST_COMMIT_TIME);
-  private CommitTrackerManager() {
-  }
+  public static final String ALIGN_COMMIT_TIME =
+      ClusterProperties.EXT_PROPRTTY_PREFIX + "alignCommitTime";
+  private static volatile Boolean alignCommitTimeOverride;
+
+  private CommitTrackerManager() {}
+
   public static void init(ZkStateReader zkStateReader) {
-    zkStateReader.registerClusterPropertiesListener((Map<String, Object> properties) -> {
-      Boolean val = (Boolean) properties.get(ADJUST_COMMIT_TIME);
-      adjustCommitTime.set(Objects.requireNonNullElse(val, DEFAULT_ADJUST_COMMIT_TIME));
-      return false;
-    });
+    zkStateReader.registerClusterPropertiesListener(
+        (Map<String, Object> properties) -> {
+          alignCommitTimeOverride = (Boolean) properties.get(ALIGN_COMMIT_TIME);
+          return false;
+        });
   }
 
-  public static boolean isAdjustCommitTime() {
-    return adjustCommitTime.get();
+  public static Boolean getAlignCommitTimeOverride() {
+    return alignCommitTimeOverride;
   }
-
 }
