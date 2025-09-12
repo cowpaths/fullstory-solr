@@ -143,7 +143,9 @@ public final class CommitTracker implements Runnable {
   private void _scheduleCommitWithin(long commitMaxTime) {
     if (commitMaxTime <= 0) return;
     synchronized (this) {
-      long drift = core.getCoreDescriptor().getCollectionName().hashCode() & 0x7FFFFFFF % commitMaxTime;
+      int collectionHash = core.getCoreDescriptor().getCollectionName().hashCode() & 0x7FFFFFFF;
+      long originalCommitMaxTime = commitMaxTime;
+      long drift = collectionHash % commitMaxTime;
       long currentTime = System.currentTimeMillis();
       commitMaxTime = drift + commitMaxTime - (currentTime % commitMaxTime);
 
@@ -174,7 +176,7 @@ public final class CommitTracker implements Runnable {
 
       ZonedDateTime zonedDateTime = Instant.ofEpochMilli(currentTime + commitMaxTime)
               .atZone(ZoneId.systemDefault());
-      log.info("###scheduling {} with delay of {}ms drift {}ms. Target time will be {}", name, commitMaxTime, drift, zonedDateTime.format(formatter));
+      log.info("###scheduling {} with delay of {}ms drift {}ms, collection hash {}, ori. commitMaxTime {}. Target time will be {}", name, commitMaxTime, drift, collectionHash, originalCommitMaxTime, zonedDateTime.format(formatter));
       // schedule our new commit
       pending = scheduler.schedule(this, commitMaxTime, TimeUnit.MILLISECONDS);
     }
