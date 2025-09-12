@@ -877,7 +877,7 @@ public class SolrConfig implements MapSerializable {
       this.aggregateNodeLevelMetricsEnabled =
           updateHandler.boolAttr("aggregateNodeLevelMetricsEnabled", false);
       this.alignCommitTime =
-          updateHandler.get("autoSoftCommit").get("alignCommitTime").boolVal(false);
+          updateHandler.get("alignCommitTime").boolVal(false);
     }
 
     @Override
