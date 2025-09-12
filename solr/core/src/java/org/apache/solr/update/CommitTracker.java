@@ -143,11 +143,9 @@ public final class CommitTracker implements Runnable {
   private void _scheduleCommitWithin(long commitMaxTime) {
     if (commitMaxTime <= 0) return;
     synchronized (this) {
-      int collectionHash = core.getCoreDescriptor().getCollectionName().hashCode() & 0x7FFFFFFF;
-      long originalCommitMaxTime = commitMaxTime;
-      long drift = collectionHash % commitMaxTime;
-      long currentTime = System.currentTimeMillis();
-      commitMaxTime = drift + commitMaxTime - (currentTime % commitMaxTime);
+      if (openSearcher) {
+        commitMaxTime = adjustCommitMaxTime(core, commitMaxTime);
+      }
 
       if (pending != null && pending.getDelay(TimeUnit.MILLISECONDS) <= commitMaxTime) {
         // There is already a pending commit that will happen first, so
@@ -174,13 +172,24 @@ public final class CommitTracker implements Runnable {
 
       // log.info("###scheduling for " + commitMaxTime);
 
-      ZonedDateTime zonedDateTime = Instant.ofEpochMilli(currentTime + commitMaxTime)
+      ZonedDateTime zonedDateTime = Instant.ofEpochMilli(System.currentTimeMillis() + commitMaxTime)
               .atZone(ZoneId.systemDefault());
-      log.info("###scheduling {} with delay of {}ms drift {}ms, collection hash {}, ori. commitMaxTime {}. Target time will be {}", name, commitMaxTime, drift, collectionHash, originalCommitMaxTime, zonedDateTime.format(formatter));
       // schedule our new commit
+      if (openSearcher) {
+        log.info("###scheduling {} with commitMaxTime {}. Target commit execution time will be {}", name, commitMaxTime, zonedDateTime.format(formatter));
+      }
       pending = scheduler.schedule(this, commitMaxTime, TimeUnit.MILLISECONDS);
     }
   }
+
+  private static long adjustCommitMaxTime(SolrCore core, long commitMaxTime) {
+    int collectionHash = core.getCoreDescriptor().getCollectionName().hashCode() & 0x7FFFFFFF;
+    long jitter = collectionHash % commitMaxTime; // a positive jitter less than commitMaxTime, so different collections will spread out their commits
+    long msSinceCommitPoint = System.currentTimeMillis() % commitMaxTime; //time since the last possible commit point, for example if commitMaxTime is 1min, then it's how many millisec since the start of the minute etc
+
+    return commitMaxTime - msSinceCommitPoint + jitter; // deduct by msSinceCommitPoint to align to previous commit point, then add jitter
+  }
+
 
   /**
    * Indicate that documents have been added
