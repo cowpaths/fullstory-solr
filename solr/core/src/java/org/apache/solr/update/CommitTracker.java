@@ -280,7 +280,7 @@ public final class CommitTracker implements Runnable {
   @Override
   public void run() {
     synchronized (this) {
-      // log.info("###start commit. pending=null");
+      log.info("###start commit. pending=null");
       pending = null; // allow a new commit to be scheduled
     }
 
@@ -320,7 +320,7 @@ public final class CommitTracker implements Runnable {
       }
       MDCLoggingContext.clear();
     }
-    // log.info("###done committing");
+     log.info("###done committing");
   }
 
   // to facilitate testing: blocks if called during commit
