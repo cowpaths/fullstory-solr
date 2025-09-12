@@ -7,6 +7,10 @@ import org.apache.solr.common.cloud.ZkStateReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * De-couple the commit tracker config management logic from CommitTracker instance. <br>
+ * This only tracks and manage the ext.alignCommitTime override property for now.
+ */
 public class CommitTrackerManager {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   public static final String ALIGN_COMMIT_TIME_KEY =
@@ -19,7 +23,10 @@ public class CommitTrackerManager {
     zkStateReader.registerClusterPropertiesListener(
         (Map<String, Object> properties) -> {
           alignCommitTimeOverride = (Boolean) properties.get(ALIGN_COMMIT_TIME_KEY);
-          log.info("{} change detected serving alignCommitTimeOverride: {}", ALIGN_COMMIT_TIME_KEY, alignCommitTimeOverride);
+          log.info(
+              "{} change detected serving alignCommitTimeOverride: {}",
+              ALIGN_COMMIT_TIME_KEY,
+              alignCommitTimeOverride);
           return false;
         });
   }

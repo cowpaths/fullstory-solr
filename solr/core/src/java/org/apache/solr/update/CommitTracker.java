@@ -17,10 +17,6 @@
 package org.apache.solr.update;
 
 import java.lang.invoke.MethodHandles;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -29,7 +25,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
-import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.util.SolrNamedThreadFactory;
 import org.apache.solr.core.SolrCore;
@@ -57,7 +52,6 @@ public final class CommitTracker implements Runnable {
   public static final int DOC_COMMIT_DELAY_MS = 1;
   // scheduler delay for maxSize-triggered autocommits
   public static final int SIZE_COMMIT_DELAY_MS = 1;
-  private final ZkController zkController;
   private final boolean alignCommitTime;
 
   // settings, not final so we can change them in testing
@@ -93,7 +87,6 @@ public final class CommitTracker implements Runnable {
       boolean softCommit,
       boolean alignCommitTime) {
     this.core = core;
-    this.zkController = core.getCoreContainer().getZkController();
     this.name = name;
     pending = null;
 
@@ -144,9 +137,6 @@ public final class CommitTracker implements Runnable {
     }
   }
 
-  private static DateTimeFormatter formatter =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS z");
-
   private boolean shouldAlignCommitTime() {
     if (!openSearcher) { // only align commit time for cache/searcher refresh
       return false;
@@ -161,8 +151,7 @@ public final class CommitTracker implements Runnable {
   private void _scheduleCommitWithin(long commitMaxTime) {
     if (commitMaxTime <= 0) return;
     synchronized (this) {
-      boolean alignCommitTime = shouldAlignCommitTime();
-      if (alignCommitTime) {
+      if (shouldAlignCommitTime()) {
         commitMaxTime = alignCommitMaxTime(core, commitMaxTime);
       }
 
@@ -191,21 +180,23 @@ public final class CommitTracker implements Runnable {
 
       // log.info("###scheduling for " + commitMaxTime);
 
-      ZonedDateTime zonedDateTime =
-          Instant.ofEpochMilli(System.currentTimeMillis() + commitMaxTime)
-              .atZone(ZoneId.systemDefault());
       // schedule our new commit
-      if (log.isInfoEnabled() && alignCommitTime) {
-        log.info(
-            "###scheduling {} with commitMaxTime {}. Target commit execution time will be {}",
-            name,
-            commitMaxTime,
-            zonedDateTime.format(formatter));
-      }
       pending = scheduler.schedule(this, commitMaxTime, TimeUnit.MILLISECONDS);
     }
   }
 
+  /**
+   * Aligns the commit time with 2 policies:
+   *
+   * <ol>
+   *   <li>Align the commit time by "padding" to the next commit point based on commitMaxTime
+   *   <li>Jitter the time per collection, adding a value up to commitMaxTime
+   * </ol>
+   *
+   * @param core
+   * @param commitMaxTime
+   * @return the adjusted commit max time to be used for scheduling
+   */
   private static long alignCommitMaxTime(SolrCore core, long commitMaxTime) {
     int collectionHash = core.getCoreDescriptor().getCollectionName().hashCode() & 0x7FFFFFFF;
     long jitter =
@@ -311,57 +302,48 @@ public final class CommitTracker implements Runnable {
   /** This is the worker part for the ScheduledFuture * */
   @Override
   public void run() {
-    try {
-      MDCLoggingContext.setCore(core);
-      synchronized (this) {
-        if (openSearcher) {
-          log.info("###start commit that openSearcher. pending=null");
-        }
-        pending = null; // allow a new commit to be scheduled
-      }
+    synchronized (this) {
+      // log.info("###start commit. pending=null");
+      pending = null; // allow a new commit to be scheduled
+    }
 
-      MDCLoggingContext.setCore(core);
-      RTimer timer = timeUpperBound > 0 ? new RTimer() : null;
-      try (SolrQueryRequest req = new LocalSolrQueryRequest(core, new ModifiableSolrParams())) {
-        CommitUpdateCommand command = new CommitUpdateCommand(req, false);
-        command.openSearcher = openSearcher;
-        command.waitSearcher = WAIT_SEARCHER;
-        command.softCommit = softCommit;
-        command.autoCommit = true;
-        if (core.getCoreDescriptor().getCloudDescriptor() != null
-                && core.getCoreDescriptor().getCloudDescriptor().isLeader()
-                && !softCommit) {
-          command.version = core.getUpdateHandler().getUpdateLog().getVersionInfo().getNewClock();
-        }
-        // no need for command.maxOptimizeSegments = 1; since it is not optimizing
-
-        // we increment this *before* calling commit because it was causing a race
-        // in the tests (the new searcher was registered and the test proceeded
-        // to check the commit count before we had incremented it.)
-        autoCommitCount.incrementAndGet();
-
-        core.getUpdateHandler().commit(command);
-      } catch (Exception e) {
-        log.error("auto commit error...", e);
-      } finally {
-        if (timer != null) {
-          long elapsed = (long) timer.stop();
-          if (timeUpperBound > 0 && elapsed > timeUpperBound) {
-            log.warn(
-                    "Spent {} millisec on {} auto-commit, which is longer than the configured commit interval of {} millisec",
-                    elapsed,
-                    softCommit ? "soft" : "hard",
-                    timeUpperBound);
-          }
-        }
-        MDCLoggingContext.clear();
+    MDCLoggingContext.setCore(core);
+    RTimer timer = timeUpperBound > 0 ? new RTimer() : null;
+    try (SolrQueryRequest req = new LocalSolrQueryRequest(core, new ModifiableSolrParams())) {
+      CommitUpdateCommand command = new CommitUpdateCommand(req, false);
+      command.openSearcher = openSearcher;
+      command.waitSearcher = WAIT_SEARCHER;
+      command.softCommit = softCommit;
+      command.autoCommit = true;
+      if (core.getCoreDescriptor().getCloudDescriptor() != null
+          && core.getCoreDescriptor().getCloudDescriptor().isLeader()
+          && !softCommit) {
+        command.version = core.getUpdateHandler().getUpdateLog().getVersionInfo().getNewClock();
       }
-      if (openSearcher) {
-        log.info("###done committing with openSearcher");
-      }
+      // no need for command.maxOptimizeSegments = 1; since it is not optimizing
+
+      // we increment this *before* calling commit because it was causing a race
+      // in the tests (the new searcher was registered and the test proceeded
+      // to check the commit count before we had incremented it.)
+      autoCommitCount.incrementAndGet();
+
+      core.getUpdateHandler().commit(command);
+    } catch (Exception e) {
+      log.error("auto commit error...", e);
     } finally {
+      if (timer != null) {
+        long elapsed = (long) timer.stop();
+        if (timeUpperBound > 0 && elapsed > timeUpperBound) {
+          log.warn(
+              "Spent {} millisec on {} auto-commit, which is longer than the configured commit interval of {} millisec",
+              elapsed,
+              softCommit ? "soft" : "hard",
+              timeUpperBound);
+        }
+      }
       MDCLoggingContext.clear();
     }
+    // log.info("###done committing");
   }
 
   // to facilitate testing: blocks if called during commit
