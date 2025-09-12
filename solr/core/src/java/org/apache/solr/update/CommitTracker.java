@@ -147,7 +147,7 @@ public final class CommitTracker implements Runnable {
   private static DateTimeFormatter formatter =
       DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS z");
 
-  private boolean isAlignCommitTime() {
+  private boolean shouldAlignCommitTime() {
     if (!openSearcher) { // only align commit time for cache/searcher refresh
       return false;
     }
@@ -161,7 +161,7 @@ public final class CommitTracker implements Runnable {
   private void _scheduleCommitWithin(long commitMaxTime) {
     if (commitMaxTime <= 0) return;
     synchronized (this) {
-      boolean alignCommitTime = isAlignCommitTime();
+      boolean alignCommitTime = shouldAlignCommitTime();
       if (alignCommitTime) {
         commitMaxTime = alignCommitMaxTime(core, commitMaxTime);
       }
