@@ -22,6 +22,7 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -29,6 +30,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
+
+import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.util.SolrNamedThreadFactory;
 import org.apache.solr.core.SolrCore;
@@ -56,6 +59,7 @@ public final class CommitTracker implements Runnable {
   public static final int DOC_COMMIT_DELAY_MS = 1;
   // scheduler delay for maxSize-triggered autocommits
   public static final int SIZE_COMMIT_DELAY_MS = 1;
+  private final ZkController zkController;
 
   // settings, not final so we can change them in testing
   private int docsUpperBound;
@@ -89,6 +93,7 @@ public final class CommitTracker implements Runnable {
       boolean openSearcher,
       boolean softCommit) {
     this.core = core;
+    this.zkController = core.getCoreContainer().getZkController();
     this.name = name;
     pending = null;
 
@@ -143,7 +148,7 @@ public final class CommitTracker implements Runnable {
   private void _scheduleCommitWithin(long commitMaxTime) {
     if (commitMaxTime <= 0) return;
     synchronized (this) {
-      if (openSearcher) {
+      if (openSearcher && CommitTrackerManager.isAdjustCommitTime()) {
         commitMaxTime = adjustCommitMaxTime(core, commitMaxTime);
       }
 
@@ -276,11 +281,14 @@ public final class CommitTracker implements Runnable {
     }
   }
 
+
   /** This is the worker part for the ScheduledFuture * */
   @Override
   public void run() {
     synchronized (this) {
-      log.info("###start commit. pending=null");
+      if (openSearcher) {
+        log.info("###start commit that openSearcher. pending=null");
+      }
       pending = null; // allow a new commit to be scheduled
     }
 
@@ -320,7 +328,9 @@ public final class CommitTracker implements Runnable {
       }
       MDCLoggingContext.clear();
     }
-     log.info("###done committing");
+    if (openSearcher) {
+      log.info("###done committing with openSearcher");
+    }
   }
 
   // to facilitate testing: blocks if called during commit
