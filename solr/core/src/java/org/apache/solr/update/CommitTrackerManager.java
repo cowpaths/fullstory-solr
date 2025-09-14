@@ -15,7 +15,13 @@ public class CommitTrackerManager {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   public static final String ALIGN_COMMIT_TIME_KEY =
       ClusterProperties.EXT_PROPRTTY_PREFIX + "alignCommitTime";
+  public static final String SOFT_COMMIT_MAX_TIME_KEY =
+          ClusterProperties.EXT_PROPRTTY_PREFIX + "softAutoCommit.maxTime";
+  public static final String HARD_COMMIT_MAX_TIME_KEY =
+          ClusterProperties.EXT_PROPRTTY_PREFIX + "autoCommit.maxTime";
   private static volatile Boolean alignCommitTimeOverride;
+  private static volatile Long hardCommitMaxTimeOverride;
+  private static volatile Long softCommitMaxTimeOverride;
 
   private CommitTrackerManager() {}
 
@@ -27,11 +33,29 @@ public class CommitTrackerManager {
               "{} change detected serving alignCommitTimeOverride: {}",
               ALIGN_COMMIT_TIME_KEY,
               alignCommitTimeOverride);
+
+          hardCommitMaxTimeOverride = (Long) properties.get(HARD_COMMIT_MAX_TIME_KEY);
+          log.info(
+                  "{} change detected serving hardCommitMaxTimeOverride: {}",
+                  HARD_COMMIT_MAX_TIME_KEY,
+                  hardCommitMaxTimeOverride);
+
+          softCommitMaxTimeOverride = (Long) properties.get(SOFT_COMMIT_MAX_TIME_KEY);
+          log.info(
+                  "{} change detected serving softCommitMaxTimeOverride: {}",
+                  SOFT_COMMIT_MAX_TIME_KEY,
+                  softCommitMaxTimeOverride);
           return false;
         });
   }
 
   public static Boolean getAlignCommitTimeOverride() {
     return alignCommitTimeOverride;
+  }
+  public static Long getHardCommitMaxTimeOverride() {
+    return hardCommitMaxTimeOverride;
+  }
+  public static Long getSoftCommitMaxTimeOverride() {
+    return softCommitMaxTimeOverride;
   }
 }
