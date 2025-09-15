@@ -155,9 +155,7 @@ public final class CommitTracker implements Runnable {
       if (shouldAlignCommitTime()) {
         commitMaxTime =
             alignCommitMaxTime(
-                core.getCoreDescriptor().getCollectionName(),
-                commitMaxTime,
-                new Date().getTime());
+                core.getCoreDescriptor().getCollectionName(), commitMaxTime, new Date().getTime());
       }
 
       if (pending != null && pending.getDelay(TimeUnit.MILLISECONDS) <= commitMaxTime) {
@@ -203,18 +201,24 @@ public final class CommitTracker implements Runnable {
   static long alignCommitMaxTime(String collection, long commitMaxTime, long currentTimeMillis) {
     int collectionHash = collection.hashCode() & 0x7FFFFFFF;
     long jitter =
-        collectionHash
-            % commitMaxTime; // a positive jitter less than commitMaxTime, so different collections
-    // will spread out their commits
-    long msSinceCommitPoint =
-        currentTimeMillis
-            % commitMaxTime; // time since the last possible commit point, for example if
-    // commitMaxTime is 1min, then it's how many millisec since the start
-    // of the minute etc
+        collectionHash % commitMaxTime; // a positive jitter to spread out commits per collection
 
-    return commitMaxTime
-        - msSinceCommitPoint
-        + jitter; // deduct by msSinceCommitPoint to align to previous commit point, then add jitter
+    /*
+     * An adjustment to be used to re-align the commit time to the absolute commit time frame
+     * (without jitter) then apply the jitter.
+     *
+     * For example, if commitMaxTime is 60000, currentTimeMillis % commitMaxTime will align the time
+     * back to the beginning of a minute, then we add the jitter and % commitMaxTime the whole
+     * adjustment to ensure such adjustment is within the range of 0 to commitMaxTime.
+     */
+    long adjustment = (currentTimeMillis + jitter) % commitMaxTime;
+
+    /*
+     * The adjustment is then subtracted from commitMaxTime * 3 / 2 to ensure the returned
+     * commitMaxTime is always within 0.5 * commitMaxTime to 1.5 * commitMaxTime, so commits are
+     * batched together as far as they are within half the commitMaxTime.
+     */
+    return commitMaxTime * 3 / 2 - adjustment;
   }
 
   /**

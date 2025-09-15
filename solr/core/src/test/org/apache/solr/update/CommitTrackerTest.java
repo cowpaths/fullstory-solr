@@ -17,6 +17,7 @@
 package org.apache.solr.update;
 
 import java.lang.invoke.MethodHandles;
+import java.util.Random;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.util.LogLevel;
 import org.junit.Test;
@@ -30,18 +31,44 @@ public class CommitTrackerTest extends SolrTestCaseJ4 {
 
   @Test
   public void testAlignCommitTime() {
-    long time1 = CommitTracker.alignCommitMaxTime("A", 60000, 0);
-    assertTrue(time1 >= 0 && time1 < 60000 * 2); // at most jitter a whole commitMaxTime
-    long time2 = CommitTracker.alignCommitMaxTime("A", 60000, 1000);
-    assertTrue(time2 >= 0 && time2 < 60000 * 2); // at most jitter a whole commitMaxTime
-    // jitter should be same for same collection now 1sec has past hence adjusted time should be
-    // 1sec less (wait for 1 less sec)
-    assertEquals(time1 - 1000, time2);
-    long time3 = CommitTracker.alignCommitMaxTime("A", 60000, 60000);
-    assertEquals(time1, time3); // after 1 commitMaxTime, should be the same wait time
+    long commitMaxTime = 60000;
 
-    long time4 = CommitTracker.alignCommitMaxTime("B", 60000, 0);
-    assertTrue(time4 >= 0 && time4 < 60000 * 2); // at most jitter a whole commitMaxTime
-    assertNotEquals(time1, time4); // different collection different jitter
+    long time1 = CommitTracker.alignCommitMaxTime("A", commitMaxTime, 0);
+    assertTrue(time1 >= commitMaxTime / 2 && time1 < commitMaxTime * 3 / 2);
+    long time2 = CommitTracker.alignCommitMaxTime("A", commitMaxTime, 1000);
+    assertTrue(time2 >= commitMaxTime / 2 && time2 < commitMaxTime * 3 / 2);
+    // jitter should be same for same collection now 1sec has past hence adjusted time should be
+    // 1sec less (wait for 1 less sec when in the same commit frame)
+    // This COULD fail if the jitter is > 59 sec, but we know that's not the case for "A"
+    assertEquals(time1 - 1000, time2);
+
+    long time3 = CommitTracker.alignCommitMaxTime("B", commitMaxTime, 0);
+    assertTrue(time3 >= commitMaxTime / 2 && time3 < commitMaxTime * 3 / 2);
+    assertNotEquals(time1, time3); // different collection different jitter
+
+    for (int i = 0; i < 1000; i++) {
+      String coll = generateRandomString();
+      long waitTime = CommitTracker.alignCommitMaxTime(coll, commitMaxTime, 0);
+      assertTrue(waitTime >= commitMaxTime / 2 && waitTime < commitMaxTime * 3 / 2);
+      long nextWaitTime =
+          CommitTracker.alignCommitMaxTime(
+              coll,
+              commitMaxTime,
+              waitTime); // right at the commit point, it should ask to wait for full 60sec again
+      assertEquals(commitMaxTime, nextWaitTime);
+    }
+  }
+
+  private static String generateRandomString() {
+    int length = 10;
+    Random random = new Random();
+    StringBuilder sb = new StringBuilder(length);
+
+    for (int i = 0; i < length; i++) {
+      char randomChar = (char) ('a' + random.nextInt(26));
+      sb.append(randomChar);
+    }
+
+    return sb.toString();
   }
 }
