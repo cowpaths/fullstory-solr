@@ -116,7 +116,7 @@ public final class CommitTracker implements Runnable {
 
   /** schedule individual commits */
   public void scheduleCommitWithin(long commitMaxTime) {
-    _scheduleCommitWithin(commitMaxTime);
+    _scheduleCommitWithin(commitMaxTime, true);
   }
 
   public void cancelPendingCommit() {
@@ -134,7 +134,7 @@ public final class CommitTracker implements Runnable {
     long ctime = (commitWithin > 0) ? commitWithin : timeUpperBound;
 
     if (ctime > 0) {
-      _scheduleCommitWithin(ctime);
+      _scheduleCommitWithin(ctime, true);
     }
   }
 
@@ -149,10 +149,10 @@ public final class CommitTracker implements Runnable {
     return alignCommitTime;
   }
 
-  private void _scheduleCommitWithin(long commitMaxTime) {
+  private void _scheduleCommitWithin(long commitMaxTime, boolean allowAlign) {
     if (commitMaxTime <= 0) return;
     synchronized (this) {
-      if (shouldAlignCommitTime()) {
+      if (allowAlign && shouldAlignCommitTime()) {
         commitMaxTime =
             alignCommitMaxTime(
                 core.getCoreDescriptor().getCollectionName(), commitMaxTime, new Date().getTime());
@@ -261,7 +261,7 @@ public final class CommitTracker implements Runnable {
       if (docs == docsUpperBound + 1) {
         // reset the count here instead of run() so we don't miss other documents being added
         docsSinceCommit.set(0);
-        _scheduleCommitWithin(DOC_COMMIT_DELAY_MS);
+        _scheduleCommitWithin(DOC_COMMIT_DELAY_MS, false);
       }
     }
   }
@@ -290,7 +290,7 @@ public final class CommitTracker implements Runnable {
   private void _scheduleMaxSizeTriggeredCommitIfNeeded(LongSupplier currentTlogSize) {
     if (tLogFileSizeUpperBound > 0 && currentTlogSize.getAsLong() > tLogFileSizeUpperBound) {
       docsSinceCommit.set(0);
-      _scheduleCommitWithin(SIZE_COMMIT_DELAY_MS);
+      _scheduleCommitWithin(SIZE_COMMIT_DELAY_MS, false);
     }
   }
 
