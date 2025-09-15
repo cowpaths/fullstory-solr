@@ -152,6 +152,13 @@ public final class CommitTracker implements Runnable {
   private void _scheduleCommitWithin(long commitMaxTime) {
     if (commitMaxTime <= 0) return;
     synchronized (this) {
+      Long commitMaxTimeOverride = softCommit ? CommitTrackerManager.getSoftCommitMaxTimeOverride() :
+          CommitTrackerManager.getHardCommitMaxTimeOverride();
+
+      if (commitMaxTimeOverride != null) {
+        commitMaxTime = commitMaxTimeOverride;
+      }
+
       if (shouldAlignCommitTime()) {
         commitMaxTime =
             alignCommitMaxTime(
