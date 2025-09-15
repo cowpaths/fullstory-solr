@@ -189,14 +189,16 @@ public final class CommitTracker implements Runnable {
   }
 
   /**
-   * Aligns the commit time with 2 policies:
+   * Aligns the commit time per collection with 2 policies:
    *
    * <ol>
-   *   <li>Align the commit time by "padding" to the next commit point based on commitMaxTime
-   *   <li>Jitter the time per collection, adding a value up to commitMaxTime
+   *   <li>Adjust the commit time by aligning to absolute commit point based on commitMaxTime. For
+   *       example if commitMaxTime is 60000 (60sec), then absolute commit point will be at the
+   *       start of every minute
+   *   <li>Jitter the time per collection up to commitMaxTime
    * </ol>
    *
-   * @return the adjusted commit max time to be used for scheduling
+   * @return the adjusted commit max time to be used for scheduling aligned commits
    */
   static long alignCommitMaxTime(String collection, long commitMaxTime, long currentTimeMillis) {
     int collectionHash = collection.hashCode() & 0x7FFFFFFF;
