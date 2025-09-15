@@ -17,6 +17,7 @@
 package org.apache.solr.update;
 
 import java.lang.invoke.MethodHandles;
+import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -163,7 +164,7 @@ public final class CommitTracker implements Runnable {
             alignCommitMaxTime(
                 core.getCoreDescriptor().getCollectionName(),
                 commitMaxTime,
-                System.currentTimeMillis());
+                new Date().getTime());
       }
 
       if (pending != null && pending.getDelay(TimeUnit.MILLISECONDS) <= commitMaxTime) {
