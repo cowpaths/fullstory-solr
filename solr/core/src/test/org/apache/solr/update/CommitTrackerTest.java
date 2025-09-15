@@ -16,6 +16,7 @@
  */
 package org.apache.solr.update;
 
+import com.carrotsearch.randomizedtesting.RandomizedContext;
 import java.lang.invoke.MethodHandles;
 import java.util.Random;
 import org.apache.solr.SolrTestCaseJ4;
@@ -61,9 +62,8 @@ public class CommitTrackerTest extends SolrTestCaseJ4 {
 
   private static String generateRandomString() {
     int length = 10;
-    Random random = new Random();
+    Random random = RandomizedContext.current().getRandom();
     StringBuilder sb = new StringBuilder(length);
-
     for (int i = 0; i < length; i++) {
       char randomChar = (char) ('a' + random.nextInt(26));
       sb.append(randomChar);
