@@ -207,6 +207,9 @@ public class CacheOverridesManager {
 
   List<Map<String, String>> getOverrides(String cacheName, SolrCore core) {
     List<CacheOverrides> overrides = overridesByCacheName.get(cacheName);
+
+    log.info("Getting overrides for cache '{}' on core '{}': {}", cacheName, core.getName(), overrides);
+
     if (overrides == null) {
       return List.of();
     }
@@ -227,10 +230,13 @@ public class CacheOverridesManager {
 
     public Map<String, String> getOverridesKvsByCore(SolrCore core) {
       for (Filter filter : filters) {
+        log.info("Applying filter {} on core {}", filter, core.getName());
         if (!filter.apply(core)) {
+          log.info("Filter {} on core {} not match! No overrides retrun", filter, core.getName());
           return null; // filter did not match
         }
       }
+      log.info("All Filters on core {} match!", core.getName());
       return overrides;
     }
 
@@ -249,6 +255,12 @@ public class CacheOverridesManager {
 
     @Override
     public Boolean apply(SolrCore core) {
+      log.info(
+          "Collection Filter {} match {}, on core {} with collection {}",
+          this,
+          collections.contains(core.getCoreDescriptor().getCollectionName()),
+          core.getName(),
+          core.getCoreDescriptor().getCollectionName());
       return collections.contains(core.getCoreDescriptor().getCollectionName());
     }
 
@@ -274,6 +286,8 @@ public class CacheOverridesManager {
       if (node == null) {
         return false; // no node name, cannot apply filter
       }
+
+      log.info("Node Filter {} match {}, on core {} with node {}", this, nodes.contains(node), core.getName(), node);
       return nodes.contains(node);
     }
 
