@@ -298,6 +298,7 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     }
   }
 
+  @SuppressWarnings("StaticAssignmentOfThrowable")
   private static final RuntimeException REQUEST_SCOPED_EXCEPTION = new RequestScopedException();
 
   private static final class RequestScopedException extends RuntimeException {
