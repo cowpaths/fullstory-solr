@@ -215,7 +215,7 @@ public class CacheConfig implements MapSerializable {
    * The existing config should not be modified
    *
    * @param newArgs new arguments to merge into the existing config, overrides existing values
-   * @param core  the core to create the cache for
+   * @param core the core to create the cache for
    */
   public CacheConfig withArgs(Map<String, String> newArgs, SolrCore core) {
     if (newArgs == null || newArgs.isEmpty()) {
@@ -226,15 +226,26 @@ public class CacheConfig implements MapSerializable {
     Class<? extends SolrCache> cacheClass;
     String classOverride = newArgs.get("class");
 
-    //compare against the explicitly configured value first, it could be the shortened class name (not fully qualified class name)
-    String previousClassName = (this.args != null && this.args.get("class") != null) ? this.args.get("class") : this.cacheImpl;
+    // compare against the explicitly configured value first, it could be the shortened class name
+    // (not fully qualified class name)
+    String previousClassName =
+        (this.args != null && this.args.get("class") != null)
+            ? this.args.get("class")
+            : this.cacheImpl;
     boolean classChanged = classOverride != null && !classOverride.equals(previousClassName);
     if (classChanged) {
-      log.info("Cache class overridden from {} to {}, loading the new class", previousClassName, classOverride);
-      cacheClass = core.getResourceLoader().findClass(
-              new PluginInfo("cache", Collections.singletonMap("class", classOverride)),
-              SolrCache.class,
-              true);
+      if (log.isDebugEnabled()) {
+        log.debug(
+            "Cache class overridden from {} to {}, loading the new class",
+            previousClassName,
+            classOverride);
+      }
+      cacheClass =
+          core.getResourceLoader()
+              .findClass(
+                  new PluginInfo("cache", Collections.singletonMap("class", classOverride)),
+                  SolrCache.class,
+                  true);
     } else {
       cacheClass = this.clazz.get();
     }
