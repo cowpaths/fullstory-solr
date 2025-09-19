@@ -109,7 +109,7 @@ public class CacheConfig implements MapSerializable {
     return getConfig(solrConfig.getResourceLoader(), solrConfig, nodeName, attrs, xpath);
   }
 
-  public static CacheConfig getConfig(
+  static CacheConfig getConfig(
       SolrResourceLoader loader,
       SolrConfig solrConfig,
       String nodeName,
@@ -215,17 +215,36 @@ public class CacheConfig implements MapSerializable {
    * The existing config should not be modified
    *
    * @param newArgs new arguments to merge into the existing config, overrides existing values
+   * @param core  the core to create the cache for
    */
-  public CacheConfig withArgs(Map<String, String> newArgs) {
+  public CacheConfig withArgs(Map<String, String> newArgs, SolrCore core) {
     if (newArgs == null || newArgs.isEmpty()) {
       return this;
     }
+
+    @SuppressWarnings({"rawtypes"})
+    Class<? extends SolrCache> cacheClass;
+    String classOverride = newArgs.get("class");
+
+    //compare against the explicitly configured value first, it could be the shortened class name (not fully qualified class name)
+    String previousClassName = (this.args != null && this.args.get("class") != null) ? this.args.get("class") : this.cacheImpl;
+    boolean classChanged = classOverride != null && !classOverride.equals(previousClassName);
+    if (classChanged) {
+      log.info("Cache class overridden from {} to {}, loading the new class", previousClassName, classOverride);
+      cacheClass = core.getResourceLoader().findClass(
+              new PluginInfo("cache", Collections.singletonMap("class", classOverride)),
+              SolrCache.class,
+              true);
+    } else {
+      cacheClass = this.clazz.get();
+    }
+
     if (this.args == null) {
-      return new CacheConfig(this.clazz.get(), new HashMap<>(newArgs), this.regenerator);
+      return new CacheConfig(cacheClass, new HashMap<>(newArgs), this.regenerator);
     } else {
       Map<String, String> finalArgs = new HashMap<>(this.args);
       finalArgs.putAll(newArgs);
-      return new CacheConfig(this.clazz.get(), finalArgs, this.regenerator);
+      return new CacheConfig(cacheClass, finalArgs, this.regenerator);
     }
   }
 
