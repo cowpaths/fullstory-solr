@@ -212,7 +212,7 @@ public class TransactionLog implements Closeable {
           readHeader(null);
         }
         os = outputStreamOpener.open(channel, start);
-        fos = new FastOutputStream(os, new byte[65536], 0);
+        fos = new FastOutputStream(os, new byte[8192], 0);
         if (start > 0) {
           channel.position(start);
           setWrittenCount(start);
@@ -232,7 +232,7 @@ public class TransactionLog implements Closeable {
                 StandardOpenOption.WRITE,
                 StandardOpenOption.CREATE_NEW);
         os = outputStreamOpener.open(channel, 0);
-        fos = new FastOutputStream(os, new byte[65536], 0);
+        fos = new FastOutputStream(os, new byte[8192], 0);
 
         addGlobalStrings(globalStrings);
       }
