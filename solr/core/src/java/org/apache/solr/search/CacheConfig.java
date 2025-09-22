@@ -71,7 +71,10 @@ public class CacheConfig implements MapSerializable {
 
   @SuppressWarnings({"rawtypes"})
   private CacheConfig(
-          Class<? extends SolrCache> clazz, Map<String, String> args, CacheRegenerator regenerator, Object[] persistence) {
+      Class<? extends SolrCache> clazz,
+      Map<String, String> args,
+      CacheRegenerator regenerator,
+      Object[] persistence) {
     this.clazz = () -> clazz;
     this.cacheImpl = clazz.getName();
     this.args = args;
@@ -258,7 +261,8 @@ public class CacheConfig implements MapSerializable {
     }
 
     if (this.args == null) {
-      return new CacheConfig(cacheClass, new HashMap<>(newArgs), this.regenerator, this.persistence);
+      return new CacheConfig(
+          cacheClass, new HashMap<>(newArgs), this.regenerator, this.persistence);
     } else {
       Map<String, String> finalArgs = new HashMap<>(this.args);
       finalArgs.putAll(newArgs);
