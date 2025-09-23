@@ -1253,7 +1253,9 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
 
           PrometheusMetric metric =
               new PrometheusMetric(
-                  coreMetric.metricName + "_" + collection,
+                  // use lower case collection name otherwise the transformed collection name
+                  // could have _ inserted between upper case letters
+                  coreMetric.metricName + "_" + collection.toLowerCase(),
                   coreMetric.metricType,
                   coreMetric.desc + "(collection " + collection + ")",
                   accumulativeVal);
