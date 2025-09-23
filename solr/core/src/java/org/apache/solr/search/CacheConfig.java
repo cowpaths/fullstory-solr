@@ -66,7 +66,7 @@ public class CacheConfig implements MapSerializable {
   @SuppressWarnings({"rawtypes"})
   public CacheConfig(
       Class<? extends SolrCache> clazz, Map<String, String> args, CacheRegenerator regenerator) {
-    this(clazz, args, regenerator, null);
+    this(clazz, args, regenerator, new Object[1]);
   }
 
   @SuppressWarnings({"rawtypes"})
@@ -74,13 +74,13 @@ public class CacheConfig implements MapSerializable {
       Class<? extends SolrCache> clazz,
       Map<String, String> args,
       CacheRegenerator regenerator,
-      Object persistenceObj) {
+      Object[] persistence) {
     this.clazz = () -> clazz;
     this.cacheImpl = clazz.getName();
     this.args = args;
     this.regenerator = regenerator;
     this.nodeName = args.get(NAME);
-    this.persistence[0] = persistenceObj;
+    this.persistence = persistence;
   }
 
   public CacheRegenerator getRegenerator() {
@@ -222,7 +222,10 @@ public class CacheConfig implements MapSerializable {
 
   /**
    * Returns a CacheConfig with the given arguments merged into the existing ones. <br>
-   * The existing config should not be modified
+   * The existing config should not be modified.
+   * <p>
+   * Take note that the cloned config should only be used to instantiate the same "cache type"
+   * (filterCache, queryResultCache etc.) of this config
    *
    * @param newArgs new arguments to merge into the existing config, overrides existing values
    * @param core the core to create the cache for
@@ -262,11 +265,11 @@ public class CacheConfig implements MapSerializable {
 
     if (this.args == null) {
       return new CacheConfig(
-          cacheClass, new HashMap<>(newArgs), this.regenerator, this.persistence[0]);
+          cacheClass, new HashMap<>(newArgs), this.regenerator, this.persistence);
     } else {
       Map<String, String> finalArgs = new HashMap<>(this.args);
       finalArgs.putAll(newArgs);
-      return new CacheConfig(cacheClass, finalArgs, this.regenerator, this.persistence[0]);
+      return new CacheConfig(cacheClass, finalArgs, this.regenerator, this.persistence);
     }
   }
 
