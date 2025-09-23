@@ -223,8 +223,8 @@ public class CacheConfig implements MapSerializable {
   /**
    * Returns a CacheConfig with the given arguments merged into the existing ones. <br>
    * The existing config should not be modified.
-   * <p>
-   * Take note that the cloned config should only be used to instantiate the same "cache type"
+   *
+   * <p>Take note that the cloned config should only be used to instantiate the same "cache type"
    * (filterCache, queryResultCache etc.) of this config
    *
    * @param newArgs new arguments to merge into the existing config, overrides existing values
