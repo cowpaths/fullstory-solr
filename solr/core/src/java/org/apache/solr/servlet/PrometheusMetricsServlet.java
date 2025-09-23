@@ -33,6 +33,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -50,6 +51,7 @@ import javax.servlet.http.HttpServletRequestWrapper;
 import javax.servlet.http.HttpServletResponse;
 import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.cloud.ZkController;
+import org.apache.solr.common.cloud.ClusterProperties;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.core.CoreContainer;
@@ -80,7 +82,8 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         new StatusCodeMetricsApiCaller(),
         new NodeMetricsApiCaller(),
         new AggregateMetricsApiCaller(),
-        new CoresMetricsApiCaller());
+        new CoresMetricsApiCaller(),
+        new CollectionCacheMetricsApiCaller());
   }
 
   private final Map<String, PrometheusMetricType> cacheMetricTypes =
@@ -1095,6 +1098,116 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
     }
   }
 
+  /**
+   * Aggregates and reports cache metrics grouped by collections configured as
+   * `ext.cacheMetricsCollections` in clusterprops.json in zk
+   */
+  static class CollectionCacheMetricsApiCaller extends MetricsApiCaller {
+    private static final String CLUSTER_PROP_KEY =
+        ClusterProperties.EXT_PROPRTTY_PREFIX + "cacheMetricsCollections";
+    List<CoreMetric> cacheCoreMetrics =
+        List.of(
+            CoreMetric.CUMULATIVE_QUERY_RESULT_CACHE_LOCAL_EVICTION,
+            CoreMetric.CUMULATIVE_DOCUMENT_CACHE_LOCAL_EVICTION,
+            CoreMetric.CUMULATIVE_FILTER_CACHE_LOCAL_EVICTION,
+            CoreMetric.CUMULATIVE_FCACHE_DOCS_HOT_LOCAL_EVICTION);
+
+    @Override
+    protected String buildQueryString(ResultContext resultContext) {
+      throw new UnsupportedOperationException("Should call buildQueryString with CoreContainer");
+    }
+
+    @Override
+    protected String buildQueryString(ResultContext resultContext, CoreContainer coreContainer) {
+      // fetch the configured collections
+      if (coreContainer.getZkController() == null) {
+        return null;
+      }
+      List<String> configuredCollections =
+          coreContainer
+              .getZkController()
+              .getZkStateReader()
+              .getClusterProperty(CLUSTER_PROP_KEY, null);
+      if (configuredCollections == null || configuredCollections.isEmpty()) {
+        return null;
+      }
+
+      List<String> prefixes = new ArrayList<>();
+      List<String> properties = new ArrayList<>();
+
+      for (CoreMetric targetMetric : cacheCoreMetrics) {
+        prefixes.add(targetMetric.key);
+        if (targetMetric.property != null) {
+          properties.add(targetMetric.property);
+        }
+      }
+
+      String propertyClause =
+          properties.stream()
+              .distinct()
+              .map(p -> "&property=" + URLEncoder.encode(p, StandardCharsets.UTF_8))
+              .collect(Collectors.joining());
+
+      String groupVal =
+          configuredCollections.stream()
+              .map(c -> "solr.core." + c)
+              .collect(Collectors.joining(","));
+      return String.format(
+          Locale.ROOT,
+          "wt=json&indent=false&compact=true&group=%s&prefix=%s%s",
+          groupVal,
+          URLEncoder.encode(String.join(",", prefixes), StandardCharsets.UTF_8),
+          propertyClause);
+    }
+
+    @Override
+    protected void handle(ResultContext resultContext, JsonNode metrics) throws IOException {
+      List<PrometheusMetric> results = resultContext.resultMetrics;
+      Map<String, Map<CoreMetric, Long>> accumulativeByCollection = new LinkedHashMap<>();
+      for (CoreMetric cacheMetricEntry : cacheCoreMetrics) {
+        Iterator<Map.Entry<String, JsonNode>> fields = metrics.fields();
+        while (fields.hasNext()) {
+          Map.Entry<String, JsonNode> coreEntry =
+              fields.next(); // each entry with key as the core name and value as various cache type
+          // metrics within such core
+          JsonNode coreMetricNode = coreEntry.getValue();
+          String coreKey = coreEntry.getKey();
+          String collection = coreKey.substring("solr.core.".length()).split("\\.", 2)[0];
+
+          Number val =
+              cacheMetricEntry.property != null
+                  ? getNumber(coreMetricNode, cacheMetricEntry.key, cacheMetricEntry.property)
+                  : getNumber(coreMetricNode, cacheMetricEntry.key);
+          if (!val.equals(INVALID_NUMBER)) {
+            Map<CoreMetric, Long> accumulative =
+                accumulativeByCollection.computeIfAbsent(collection, k -> new LinkedHashMap<>());
+            accumulative.put(
+                cacheMetricEntry,
+                accumulative.getOrDefault(cacheMetricEntry, 0L) + val.longValue());
+          }
+        }
+      }
+
+      for (Map.Entry<String, Map<CoreMetric, Long>> entry : accumulativeByCollection.entrySet()) {
+        String collection = entry.getKey();
+        Map<CoreMetric, Long> accumulativeOfCollection = entry.getValue();
+        for (Map.Entry<CoreMetric, Long> coreMetricEntry : accumulativeOfCollection.entrySet()) {
+          CoreMetric coreMetric = coreMetricEntry.getKey();
+          Long accumulativeVal = coreMetricEntry.getValue();
+
+          PrometheusMetric metric =
+              new PrometheusMetric(
+                  coreMetric.metricName + "_" + collection,
+                  coreMetric.metricType,
+                  coreMetric.desc + "(collection " + collection + ")",
+                  accumulativeVal);
+
+          results.add(metric);
+        }
+      }
+    }
+  }
+
   enum PrometheusMetricType {
     COUNTER("counter"),
     GAUGE("gauge");
@@ -1183,8 +1296,11 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         throws IOException, UnavailableException {
       SolrDispatchFilter filter = getSolrDispatchFilter(originalRequest);
       CoreContainer cores = filter.getCores();
-      HttpServletRequest request =
-          new MetricsApiRequest(originalRequest, buildQueryString(resultContext));
+      String queryString = buildQueryString(resultContext, cores);
+      if (queryString == null) {
+        return; // nothing to query for this caller - skipping
+      }
+      HttpServletRequest request = new MetricsApiRequest(originalRequest, queryString);
       MetricsApiResponse response = new MetricsApiResponse();
       SolrDispatchFilter.Action action =
           new HttpSolrCall(filter, cores, request, response, false).call();
@@ -1212,6 +1328,10 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
     }
 
     abstract void handle(ResultContext resultContext, JsonNode metrics) throws IOException;
+
+    String buildQueryString(ResultContext resultContext, CoreContainer cores) {
+      return buildQueryString(resultContext); // by default just ignore cores
+    }
 
     abstract String buildQueryString(ResultContext resultContext);
   }
