@@ -1253,9 +1253,8 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
 
           PrometheusMetric metric =
               new PrometheusMetric(
-                  // use lower case collection name otherwise the transformed collection name
-                  // could have _ inserted between upper case letters
-                  coreMetric.metricName + "_" + collection.toLowerCase(Locale.ROOT),
+                  coreMetric.metricName,
+                  Map.of("collection", collection),
                   coreMetric.metricType,
                   coreMetric.desc + "(collection " + collection + ")",
                   accumulativeVal);
@@ -1287,9 +1286,20 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
     private final String type;
     private final String description;
     private final Number value;
+    private final Map<String, String> labels;
 
     PrometheusMetric(String name, PrometheusMetricType type, String description, Number value) {
+      this(name, null, type, description, value);
+    }
+
+    PrometheusMetric(
+        String name,
+        Map<String, String> labels,
+        PrometheusMetricType type,
+        String description,
+        Number value) {
       this.name = normalize(name);
+      this.labels = labels;
       this.type = type.getDisplayName();
       this.description = description;
       this.value = value;
@@ -1298,7 +1308,16 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
     void write(PrintWriter writer) throws IOException {
       writer.append("# HELP ").append(name).append(' ').append(description).println();
       writer.append("# TYPE ").append(name).append(' ').append(type).println();
-      writer.append(name).append(' ').append(value.toString()).println();
+
+      String labelsVal = "";
+      if (labels != null && !labels.isEmpty()) {
+        labelsVal =
+            labels.entrySet().stream()
+                .map(e -> e.getKey() + "=\"" + e.getValue() + "\"")
+                .collect(Collectors.joining(",", "{", "}"));
+      }
+
+      writer.append(name).append(labelsVal).append(' ').append(value.toString()).println();
     }
 
     static String normalize(String name) {
