@@ -1253,7 +1253,8 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
 
           PrometheusMetric metric =
               new PrometheusMetric(
-                  coreMetric.metricName,
+                  coreMetric.metricName
+                      + "_by_collection", // so to distinguish it from whole node metrics
                   Map.of("collection", collection),
                   coreMetric.metricType,
                   coreMetric.desc + "(collection " + collection + ")",
