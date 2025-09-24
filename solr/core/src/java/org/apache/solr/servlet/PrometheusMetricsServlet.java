@@ -864,75 +864,99 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
     CUMULATIVE_DOCUMENT_CACHE_LOCAL_HITS(
         "CACHE.searcher.documentCache",
         "document_cache_store_local_hits",
-        "Cumulative hits from the per core local document cache store (vs backing shared cache store)",
+        "Cumulative hits from local document cache store (vs backing shared cache store)",
         "cumulative_hits",
         PrometheusMetricType.COUNTER),
     CUMULATIVE_FILTER_CACHE_LOCAL_HITS(
         "CACHE.searcher.filterCache",
         "filter_cache_store_local_hits",
-        "Cumulative hits from the per core local filter cache store (vs backing shared cache store)",
+        "Cumulative hits from local filter cache store (vs backing shared cache store)",
         "cumulative_hits",
         PrometheusMetricType.COUNTER),
     CUMULATIVE_QUERY_RESULT_CACHE_LOCAL_HITS(
         "CACHE.searcher.queryResultCache",
         "query_result_cache_store_local_hits",
-        "Cumulative hits from the per core local query result cache store (vs backing shared cache store)",
+        "Cumulative hits from local query result cache store (vs backing shared cache store)",
         "cumulative_hits",
         PrometheusMetricType.COUNTER),
     CUMULATIVE_FCACHE_DOCS_HOT_LOCAL_HITS(
         "CACHE.searcher.fcache-docs-hot",
         "fcache_docs_hot_local_hits",
-        "Cumulative hits from the per core local fcache-docs-hot cache store (vs backing shared cache store)",
+        "Cumulative hits from local fcache-docs-hot cache store (vs backing shared cache store)",
         "cumulative_hits",
         PrometheusMetricType.COUNTER),
     CUMULATIVE_DOCUMENT_CACHE_LOCAL_LOOKUPS(
         "CACHE.searcher.documentCache",
         "document_cache_store_local_lookups",
-        "Cumulative lookups from the per core local document cache store (vs backing shared cache store)",
+        "Cumulative lookups from local document cache store (vs backing shared cache store)",
         "cumulative_lookups",
         PrometheusMetricType.COUNTER),
     CUMULATIVE_FILTER_CACHE_LOCAL_LOOKUPS(
         "CACHE.searcher.filterCache",
         "filter_cache_store_local_lookups",
-        "Cumulative lookups from the per core local filter cache store (vs backing shared cache store)",
+        "Cumulative lookups from local filter cache store (vs backing shared cache store)",
         "cumulative_lookups",
         PrometheusMetricType.COUNTER),
     CUMULATIVE_QUERY_RESULT_CACHE_LOCAL_LOOKUPS(
         "CACHE.searcher.queryResultCache",
         "query_result_cache_store_local_lookups",
-        "Cumulative lookups from the per core local query result cache store (vs backing shared cache store)",
+        "Cumulative lookups from local query result cache store (vs backing shared cache store)",
         "cumulative_lookups",
         PrometheusMetricType.COUNTER),
     CUMULATIVE_FCACHE_DOCS_HOT_LOCAL_LOOKUPS(
         "CACHE.searcher.fcache-docs-hot",
         "fcache_docs_hot_local_lookups",
-        "Cumulative lookups from the per core local fcache-docs-hot cache store (vs backing shared cache store)",
+        "Cumulative lookups from local fcache-docs-hot cache store (vs backing shared cache store)",
         "cumulative_lookups",
         PrometheusMetricType.COUNTER),
     CUMULATIVE_DOCUMENT_CACHE_LOCAL_EVICTION(
         "CACHE.searcher.documentCache",
         "document_cache_store_local_eviction",
-        "Cumulative evictions from the per core local document cache store (vs backing shared cache store)",
+        "Cumulative evictions from local document cache store (vs backing shared cache store)",
         "cumulative_evictions",
         PrometheusMetricType.COUNTER),
     CUMULATIVE_FILTER_CACHE_LOCAL_EVICTION(
         "CACHE.searcher.filterCache",
         "filter_cache_store_local_eviction",
-        "Cumulative evictions from the per core local filter cache store (vs backing shared cache store)",
+        "Cumulative evictions from local filter cache store (vs backing shared cache store)",
         "cumulative_evictions",
         PrometheusMetricType.COUNTER),
     CUMULATIVE_QUERY_RESULT_CACHE_LOCAL_EVICTION(
         "CACHE.searcher.queryResultCache",
         "query_result_cache_store_local_eviction",
-        "Cumulative evictions from the per core local query result cache store (vs backing shared cache store)",
+        "Cumulative evictions from local query result cache store (vs backing shared cache store)",
         "cumulative_evictions",
         PrometheusMetricType.COUNTER),
     CUMULATIVE_FCACHE_DOCS_HOT_LOCAL_EVICTION(
         "CACHE.searcher.fcache-docs-hot",
         "fcache_docs_hot_local_eviction",
-        "Cumulative evictions from the per core local fcache-docs-hot cache store (vs backing shared cache store)",
+        "Cumulative evictions from local fcache-docs-hot cache store (vs backing shared cache store)",
         "cumulative_evictions",
-        PrometheusMetricType.COUNTER);
+        PrometheusMetricType.COUNTER),
+    DOCUMENT_CACHE_LOCAL_BYTES_USED(
+        "CACHE.searcher.documentCache",
+        "document_cache_store_local_bytes_used",
+        "Bytes used from local document cache store (vs backing shared cache store)",
+        "bytesUsed",
+        PrometheusMetricType.GAUGE),
+    FILTER_CACHE_LOCAL_BYTES_USED(
+        "CACHE.searcher.filterCache",
+        "filter_cache_store_local_bytes_used",
+        "Bytes used from local filter cache store (vs backing shared cache store)",
+        "bytesUsed",
+        PrometheusMetricType.GAUGE),
+    QUERY_RESULT_CACHE_LOCAL_BYTES_USED(
+        "CACHE.searcher.queryResultCache",
+        "query_result_cache_store_local_bytes_used",
+        "Bytes used from local query result cache store (vs backing shared cache store)",
+        "bytesUsed",
+        PrometheusMetricType.GAUGE),
+    FCACHE_DOCS_HOT_LOCAL_BYTES_USED(
+        "CACHE.searcher.fcache-docs-hot",
+        "fcache_docs_hot_local_bytes_used",
+        "Bytes used from local fcache-docs-hot cache store (vs backing shared cache store)",
+        "bytesUsed",
+        PrometheusMetricType.GAUGE);
     final String key, metricName, desc, property;
     private final PrometheusMetricType metricType;
     private static final Map<String, CoreMetric> lookup = new HashMap<>();
@@ -1166,7 +1190,11 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
             CoreMetric.CUMULATIVE_QUERY_RESULT_CACHE_LOCAL_EVICTION,
             CoreMetric.CUMULATIVE_DOCUMENT_CACHE_LOCAL_EVICTION,
             CoreMetric.CUMULATIVE_FILTER_CACHE_LOCAL_EVICTION,
-            CoreMetric.CUMULATIVE_FCACHE_DOCS_HOT_LOCAL_EVICTION);
+            CoreMetric.CUMULATIVE_FCACHE_DOCS_HOT_LOCAL_EVICTION,
+            CoreMetric.QUERY_RESULT_CACHE_LOCAL_BYTES_USED,
+            CoreMetric.DOCUMENT_CACHE_LOCAL_BYTES_USED,
+            CoreMetric.FILTER_CACHE_LOCAL_BYTES_USED,
+            CoreMetric.FCACHE_DOCS_HOT_LOCAL_BYTES_USED);
 
     @Override
     protected String buildQueryString(ResultContext resultContext) {
