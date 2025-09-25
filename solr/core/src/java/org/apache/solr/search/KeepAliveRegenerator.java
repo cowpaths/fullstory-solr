@@ -16,8 +16,8 @@
  */
 package org.apache.solr.search;
 
-import static org.apache.solr.search.OrdMapRegenerator.getRegenKeepAliveNanos;
 import static org.apache.solr.search.DocSetUtil.copyBitRange;
+import static org.apache.solr.search.OrdMapRegenerator.getRegenKeepAliveNanos;
 
 import java.io.IOException;
 import java.util.AbstractMap;
@@ -476,7 +476,8 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
         //  the effort (incl. having to add special handling for choosing DocSet type, etc.)
         return DocSetUtil.createDocSetGeneric(searcher, this);
       } else {
-        final Weight backingWeight = backing.createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, 1f);
+        final Weight backingWeight =
+            backing.createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, 1f);
         final long[] staleBits;
         if (stale instanceof BitDocSet) {
           staleBits = ((BitDocSet) stale).getBits().getBits();

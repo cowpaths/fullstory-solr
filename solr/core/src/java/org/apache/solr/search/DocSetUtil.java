@@ -345,16 +345,17 @@ public class DocSetUtil {
   }
 
   /**
-   * Analogous to {@link System#arraycopy(Object, int, Object, int, int)}, but copies {@code long[]} of
-   * the format that is used to back {@link FixedBitSet}, e.g., with offset and length args specified in
-   * terms of <i>bit</i> index, not {@code long} word (array index).
+   * Analogous to {@link System#arraycopy(Object, int, Object, int, int)}, but copies {@code long[]}
+   * of the format that is used to back {@link FixedBitSet}, e.g., with offset and length args
+   * specified in terms of <i>bit</i> index, not {@code long} word (array index).
    *
-   * <p>This method is optimized to avoid inspecting individual bits, instead issuing far fewer instructions
-   * and bit-shifting "words" as necessary to align with potentially different word boundaries in the
-   * destination array. It is vastly more efficient than analogous bit-by-bit operations -- on the order of
-   * ~100x.
+   * <p>This method is optimized to avoid inspecting individual bits, instead issuing far fewer
+   * instructions and bit-shifting "words" as necessary to align with potentially different word
+   * boundaries in the destination array. It is vastly more efficient than analogous bit-by-bit
+   * operations -- on the order of ~100x.
    */
-  public static void copyBitRange(final long[] src, final int srcIdx, final long[] dest, final int destIdx, final int len) {
+  public static void copyBitRange(
+      final long[] src, final int srcIdx, final long[] dest, final int destIdx, final int len) {
     if (len == 0) return;
     int srcOuterOffset = srcIdx >> 6;
     int destOuterOffset = destIdx >> 6;
