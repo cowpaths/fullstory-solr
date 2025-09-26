@@ -493,8 +493,10 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
               segs.get(context.reader().getCoreCacheHelper().getKey());
           if (segment == null) {
             Scorer scorer = backingWeight.scorer(context);
-            TwoPhaseIterator tpi = scorer.twoPhaseIterator();
-            if (tpi == null) {
+            TwoPhaseIterator tpi;
+            if (scorer == null) {
+              continue; // nothing to do for this segment
+            } else if ((tpi = scorer.twoPhaseIterator()) == null) {
               DocIdSetIterator iter = scorer.iterator();
               int doc;
               while ((doc = iter.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
