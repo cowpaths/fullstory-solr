@@ -67,7 +67,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private NodeLevelTeeDirectoryState nodeLevelState;
   private NodeLevelTeeDirectoryState ownNodeLevelState;
-  private WeakReference<CoreContainer> cc;
+  private volatile WeakReference<CoreContainer> cc;
 
   private boolean isDataNode = true;
   private String accessDir;
@@ -78,7 +78,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
   public void initCoreContainer(CoreContainer cc) {
     super.initCoreContainer(cc);
     // don't set up the index cache on nodes that don't use it
-    if (cc.nodeRoles.getRoleMode(NodeRoles.Role.DATA).equals(NodeRoles.MODE_OFF)) {
+    if (cc == null || cc.nodeRoles.getRoleMode(NodeRoles.Role.DATA).equals(NodeRoles.MODE_OFF)) {
       isDataNode = false;
       return;
     }
@@ -330,10 +330,8 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
 
   @Override
   public void init(NamedList<?> args) {
-    if (this.cc != null) {
-      CoreContainer cc = this.cc.get();
-      this.cc = null;
-      assert cc != null;
+    CoreContainer cc;
+    if (this.cc != null && (cc = this.cc.get()) != null) {
       nodeLevelState =
           cc.getObjectCache()
               .computeIfAbsent(

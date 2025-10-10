@@ -19,6 +19,7 @@ package org.apache.solr.core;
 import java.io.File;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.lang.ref.WeakReference;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -434,16 +435,17 @@ public abstract class CachingDirectoryFactory extends DirectoryFactory {
     }
   }
 
+  private volatile WeakReference<CoreContainer> cc;
   private volatile Supplier<Unloader.UnloadHelper> unloadHelperSupplier;
 
   @Override
-  @SuppressWarnings("unchecked")
   public void initCoreContainer(CoreContainer cc) {
     super.initCoreContainer(cc);
-    unloadHelperSupplier =
-        (Supplier<Unloader.UnloadHelper>)
-            cc.getObjectCache()
-                .computeIfAbsent("nodeLevelUnloadMetrics", (k) -> new UnloadHelper<>(cc));
+    // no purpose setting up unloading on nodes that don't use it
+    if (cc == null || cc.nodeRoles.getRoleMode(NodeRoles.Role.DATA).equals(NodeRoles.MODE_OFF)) {
+      return;
+    }
+    this.cc = new WeakReference<>(cc);
   }
 
   /*
@@ -470,7 +472,15 @@ public abstract class CachingDirectoryFactory extends DirectoryFactory {
   }
 
   @Override
+  @SuppressWarnings("unchecked")
   public void init(NamedList<?> args) {
+    CoreContainer cc;
+    if (this.cc != null && (cc = this.cc.get()) != null) {
+      unloadHelperSupplier =
+          (Supplier<Unloader.UnloadHelper>)
+              cc.getObjectCache()
+                  .computeIfAbsent("nodeLevelUnloadMetrics", (k) -> new UnloadHelper<>(cc));
+    }
     maxWriteMBPerSecFlush = (Double) args.get("maxWriteMBPerSecFlush");
     maxWriteMBPerSecMerge = (Double) args.get("maxWriteMBPerSecMerge");
     maxWriteMBPerSecRead = (Double) args.get("maxWriteMBPerSecRead");

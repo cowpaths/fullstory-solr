@@ -20,6 +20,8 @@ import org.apache.lucene.util.InfoStream;
 import org.apache.lucene.util.NamedThreadFactory;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.handler.admin.MetricsHandler;
+import org.apache.solr.metrics.MetricSuppliers;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricProducer;
 import org.apache.solr.metrics.SolrMetricsContext;
@@ -42,13 +44,23 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
 
   UnloadHelper(CoreContainer cc) {
     this.exec = cc.getUnloaderExecutor();
-    solrMetricsContext = cc.getMetricsHandler().getSolrMetricsContext().getChildContext(this);
-    String[] metricPath = new String[] {SolrInfoBean.Category.OTHER.toString(), "unloadable"};
-    created = solrMetricsContext.meter("created", metricPath);
-    loaded = solrMetricsContext.meter("loaded", metricPath);
-    loadTimeMillis = solrMetricsContext.histogram("loadTimeMillis", metricPath);
-    unloaded = solrMetricsContext.meter("unloaded", metricPath);
-    closed = solrMetricsContext.meter("closed", metricPath);
+    MetricsHandler metricsHandler = cc.getMetricsHandler();
+    if (metricsHandler == null) {
+      solrMetricsContext = null;
+      created = MetricSuppliers.NoOpMeterSupplier.INSTANCE.newMetric();
+      loaded = MetricSuppliers.NoOpMeterSupplier.INSTANCE.newMetric();
+      loadTimeMillis = MetricSuppliers.NoOpHistogramSupplier.INSTANCE.newMetric();
+      unloaded = MetricSuppliers.NoOpMeterSupplier.INSTANCE.newMetric();
+      closed = MetricSuppliers.NoOpMeterSupplier.INSTANCE.newMetric();
+    } else {
+      solrMetricsContext = metricsHandler.getSolrMetricsContext().getChildContext(this);
+      String[] metricPath = new String[] {SolrInfoBean.Category.OTHER.toString(), "unloadable"};
+      created = solrMetricsContext.meter("created", metricPath);
+      loaded = solrMetricsContext.meter("loaded", metricPath);
+      loadTimeMillis = solrMetricsContext.histogram("loadTimeMillis", metricPath);
+      unloaded = solrMetricsContext.meter("unloaded", metricPath);
+      closed = solrMetricsContext.meter("closed", metricPath);
+    }
   }
 
   private ExecutorService refQueueExec;
