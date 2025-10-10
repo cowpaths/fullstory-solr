@@ -31,10 +31,13 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import org.apache.lucene.index.Unloader;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.LockFactory;
+import org.apache.lucene.store.UnloaderCoordinationPoint;
 import org.apache.lucene.util.IOUtils;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
@@ -408,6 +411,7 @@ public abstract class CachingDirectoryFactory extends DirectoryFactory {
 
       if (directory == null) {
         directory = create(fullPath, createLockFactory(rawLockType), dirContext);
+        UnloaderCoordinationPoint.setUnloadHelperSupplier(directory, unloadHelperSupplier);
         assert ObjectReleaseTracker.track(directory);
         boolean success = false;
         try {
@@ -428,6 +432,18 @@ public abstract class CachingDirectoryFactory extends DirectoryFactory {
 
       return directory;
     }
+  }
+
+  private volatile Supplier<Unloader.UnloadHelper> unloadHelperSupplier;
+
+  @Override
+  @SuppressWarnings("unchecked")
+  public void initCoreContainer(CoreContainer cc) {
+    super.initCoreContainer(cc);
+    unloadHelperSupplier =
+        (Supplier<Unloader.UnloadHelper>)
+            cc.getObjectCache()
+                .computeIfAbsent("nodeLevelUnloadMetrics", (k) -> new UnloadHelper<>(cc));
   }
 
   /*
