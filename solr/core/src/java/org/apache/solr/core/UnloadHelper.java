@@ -10,7 +10,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
@@ -70,12 +70,11 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   private void handleRefQueues(
       ReferenceQueue<Object>[] queues,
       Consumer<Object> handler,
-      AtomicBoolean handleRefQueue,
+      AtomicReference<Boolean> handleRefQueue,
       LongSupplier outstandingSize) {
-    if (handleRefQueue.get() || closing) {
+    if (closing || !handleRefQueue.compareAndSet(null, Boolean.TRUE)) {
       return;
     }
-    handleRefQueue.set(true);
     refQueueExec =
         ExecutorUtil.newMDCAwareFixedThreadPool(
             queues.length, new NamedThreadFactory("refQueueExec"));
@@ -90,12 +89,12 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
               () -> {
                 activeRefQueueProcessors.increment();
                 try {
-                  while (handleRefQueue.get()) {
+                  while (handleRefQueue.get() == Boolean.TRUE) {
                     handler.accept(q.remove());
                     collectedRefs.increment();
                   }
                 } catch (InterruptedException ex) {
-                  if (handleRefQueue.get()) {
+                  if (handleRefQueue.get() == Boolean.TRUE) {
                     // unexpected -- we've been interrupted but are still
                     // supposed to be handling ref queue?
                     handleRefQueue.set(false);
@@ -179,7 +178,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
           public void maybeHandleRefQueues(
               ReferenceQueue<Object>[] queues,
               Consumer<Object> handler,
-              AtomicBoolean handleRefQueue,
+              AtomicReference<Boolean> handleRefQueue,
               LongSupplier outstandingSize) {
             handleRefQueues(queues, handler, handleRefQueue, outstandingSize);
           }
