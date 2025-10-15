@@ -67,6 +67,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   private volatile boolean closing = false;
   private Closeable refQueueHandling;
 
+  @SuppressWarnings("ReferenceEquality")
   private void handleRefQueues(
       ReferenceQueue<Object>[] queues,
       Consumer<Object> handler,
