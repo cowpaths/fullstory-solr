@@ -120,6 +120,9 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
             f.cancel(true);
           }
         };
+    if (solrMetricsContext == null) {
+      return;
+    }
     MetricsMap refQueueSize =
         new MetricsMap(
             map -> {
