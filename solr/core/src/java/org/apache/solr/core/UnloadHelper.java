@@ -6,6 +6,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.ref.ReferenceQueue;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
@@ -16,6 +17,8 @@ import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import org.apache.lucene.index.Unloader;
+import org.apache.lucene.index.Unloader.BlockingRunnable;
+import org.apache.lucene.index.Unloader.HoldingFlusher;
 import org.apache.lucene.util.InfoStream;
 import org.apache.lucene.util.NamedThreadFactory;
 import org.apache.lucene.util.RamUsageEstimator;
@@ -71,47 +74,43 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   private void handleRefQueues(
       ReferenceQueue<Object>[] queues,
       Consumer<Object> handler,
+      HoldingFlusher flushHolding,
       AtomicReference<Boolean> handleRefQueue,
+      LongSupplier holdingSize,
       LongSupplier outstandingSize) {
     if (closing || !handleRefQueue.compareAndSet(null, Boolean.TRUE)) {
       return;
     }
     refQueueExec =
         ExecutorUtil.newMDCAwareFixedThreadPool(
-            queues.length, new NamedThreadFactory("refQueueExec"));
+            queues.length << 1, new NamedThreadFactory("refQueueExec"));
     LongAdder activeRefQueueProcessors = new LongAdder();
+    LongAdder collectedHoldingRefs = new LongAdder();
     LongAdder collectedRefs = new LongAdder();
     @SuppressWarnings("rawtypes")
-    Future<?>[] refQueueFutures = new Future[queues.length];
+    Future<?>[] refQueueFutures = new Future[queues.length << 1];
     for (int i = queues.length - 1; i >= 0; i--) {
       ReferenceQueue<Object> q = queues[i];
       refQueueFutures[i] =
           refQueueExec.submit(
-              () -> {
-                activeRefQueueProcessors.increment();
-                try {
-                  while (handleRefQueue.get() == Boolean.TRUE) {
+              wrapTask(
+                  handleRefQueue,
+                  activeRefQueueProcessors,
+                  () -> {
                     handler.accept(q.remove());
                     collectedRefs.increment();
-                  }
-                } catch (InterruptedException ex) {
-                  if (handleRefQueue.get() == Boolean.TRUE) {
-                    // unexpected -- we've been interrupted but are still
-                    // supposed to be handling ref queue?
-                    handleRefQueue.set(false);
-                    log.error("unexpected interruption of ref queue processing", ex);
-                    throw ex;
-                  }
-                } catch (Throwable t) {
-                  handleRefQueue.set(false);
-                  log.error("exception in ref queue processing", t);
-                  throw t;
-                } finally {
-                  activeRefQueueProcessors.decrement();
-                }
-                log.info("normal exit of ref queue processing task");
-                return null;
-              });
+                  }));
+      int idx = i;
+      long[] nextHoldUntil = new long[] {System.nanoTime()};
+      refQueueFutures[queues.length + i] =
+          refQueueExec.submit(
+              wrapTask(
+                  handleRefQueue,
+                  activeRefQueueProcessors,
+                  () -> {
+                    collectedHoldingRefs.add(
+                        flushHolding.flush(nextHoldUntil[0], idx, nextHoldUntil));
+                  }));
     }
     this.refQueueHandling =
         () -> {
@@ -126,13 +125,22 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
     MetricsMap refQueueSize =
         new MetricsMap(
             map -> {
+              long sizeHolding = holdingSize.getAsLong();
+              long ramBytesUsedHolding = sizeHolding * Unloader.RAMBYTES_PER_HOLDINGREF;
               long size = outstandingSize.getAsLong();
               long ramBytesUsed = size * Unloader.RAMBYTES_PER_REF;
               map.put("activeProcessors", activeRefQueueProcessors.sum() + "/" + queues.length);
+              map.put("holdRefsCollected", collectedHoldingRefs.sum());
               map.put("refsCollected", collectedRefs.sum());
+              map.put("sizeHolding", sizeHolding);
+              map.put("ramBytesUsedHolding", ramBytesUsedHolding);
+              map.put("ramUsedHolding", RamUsageEstimator.humanReadableUnits(ramBytesUsedHolding));
               map.put("size", size);
               map.put("ramBytesUsed", ramBytesUsed);
               map.put("ramUsed", RamUsageEstimator.humanReadableUnits(ramBytesUsed));
+              map.put(
+                  "ramUsedOverall",
+                  RamUsageEstimator.humanReadableUnits(ramBytesUsedHolding + ramBytesUsed));
             });
     solrMetricsContext.gauge(
         refQueueSize, true, "refQueue", SolrInfoBean.Category.OTHER.toString(), "unloadable");
@@ -182,9 +190,12 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
           public void maybeHandleRefQueues(
               ReferenceQueue<Object>[] queues,
               Consumer<Object> handler,
+              HoldingFlusher flushHolding,
               AtomicReference<Boolean> handleRefQueue,
+              LongSupplier holdingSize,
               LongSupplier outstandingSize) {
-            handleRefQueues(queues, handler, handleRefQueue, outstandingSize);
+            handleRefQueues(
+                queues, handler, flushHolding, handleRefQueue, holdingSize, outstandingSize);
           }
         };
   }
@@ -214,5 +225,35 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
 
     @Override
     public void close() {}
+  }
+
+  private static Callable<Void> wrapTask(
+      AtomicReference<Boolean> handleRefQueue,
+      LongAdder activeRefQueueProcessors,
+      BlockingRunnable r) {
+    return () -> {
+      activeRefQueueProcessors.increment();
+      try {
+        while (handleRefQueue.get() == Boolean.TRUE) {
+          r.run();
+        }
+      } catch (InterruptedException ex) {
+        if (handleRefQueue.get() == Boolean.TRUE) {
+          // unexpected -- we've been interrupted but are still
+          // supposed to be handling ref queue?
+          handleRefQueue.set(false);
+          log.error("unexpected interruption of ref queue processing", ex);
+          throw ex;
+        }
+      } catch (Throwable t) {
+        handleRefQueue.set(false);
+        log.error("exception in ref queue processing", t);
+        throw t;
+      } finally {
+        activeRefQueueProcessors.decrement();
+      }
+      log.info("normal exit of ref queue processing task");
+      return null;
+    };
   }
 }
