@@ -70,7 +70,6 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   private volatile boolean closing = false;
   private Closeable refQueueHandling;
 
-  @SuppressWarnings("ReferenceEquality")
   private void handleRefQueues(
       ReferenceQueue<Object>[] queues,
       Consumer<Object> handler,
@@ -227,6 +226,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
     public void close() {}
   }
 
+  @SuppressWarnings("ReferenceEquality")
   private static Callable<Void> wrapTask(
       AtomicReference<Boolean> handleRefQueue,
       LongAdder activeRefQueueProcessors,
