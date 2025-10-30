@@ -75,6 +75,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
       Consumer<Object> handler,
       HoldingFlusher flushHolding,
       AtomicReference<Boolean> handleRefQueue,
+      LongSupplier indirectTrackedCount,
       LongSupplier holdingSize,
       LongSupplier outstandingSize) {
     if (closing || !handleRefQueue.compareAndSet(null, Boolean.TRUE)) {
@@ -129,6 +130,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
               long size = outstandingSize.getAsLong();
               long ramBytesUsed = size * Unloader.RAMBYTES_PER_REF;
               map.put("activeProcessors", activeRefQueueProcessors.sum() + "/" + queues.length);
+              map.put("indirectTrackedCount", indirectTrackedCount.getAsLong());
               map.put("holdRefsCollected", collectedHoldingRefs.sum());
               map.put("refsCollected", collectedRefs.sum());
               map.put("sizeHolding", sizeHolding);
@@ -191,10 +193,17 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
               Consumer<Object> handler,
               HoldingFlusher flushHolding,
               AtomicReference<Boolean> handleRefQueue,
+              LongSupplier indirectTrackedCount,
               LongSupplier holdingSize,
               LongSupplier outstandingSize) {
             handleRefQueues(
-                queues, handler, flushHolding, handleRefQueue, holdingSize, outstandingSize);
+                queues,
+                handler,
+                flushHolding,
+                handleRefQueue,
+                indirectTrackedCount,
+                holdingSize,
+                outstandingSize);
           }
         };
   }

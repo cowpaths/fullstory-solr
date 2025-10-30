@@ -38,6 +38,7 @@ allprojects {
           [propName: 'lucene.unload.assignRefQueueByThread', value: 'true', description: "true assigns deterministically by thread; false is round-robin"],
           [propName: 'lucene.unload.disable', value: 'false', description: "Disables resource unloading"],
           [propName: 'lucene.unload.parallelRefQueueCount', value: '32', description: "Parallelization factor of refqueues"],
+          [propName: 'lucene.unload.trackAllRefsDirectly', value: 'false', description: "if true, forces direct tracking of all derivative refs"],
           // asserts, debug output.
           [propName: 'tests.verbose', value: false, description: "Enables verbose mode (emits full test outputs immediately)."],
           [propName: 'tests.workDir',
