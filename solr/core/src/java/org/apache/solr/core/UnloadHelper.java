@@ -2,27 +2,15 @@ package org.apache.solr.core;
 
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Meter;
-import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
-import java.lang.ref.ReferenceQueue;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.LongAdder;
-import java.util.function.Consumer;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import org.apache.lucene.index.Unloader;
-import org.apache.lucene.index.Unloader.BlockingRunnable;
-import org.apache.lucene.index.Unloader.HoldingFlusher;
 import org.apache.lucene.util.InfoStream;
-import org.apache.lucene.util.NamedThreadFactory;
-import org.apache.lucene.util.RamUsageEstimator;
-import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.handler.admin.MetricsHandler;
 import org.apache.solr.metrics.MetricSuppliers;
 import org.apache.solr.metrics.MetricsMap;
@@ -66,82 +54,21 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
     }
   }
 
-  private ExecutorService refQueueExec;
   private volatile boolean closing = false;
-  private Closeable refQueueHandling;
 
-  private void handleRefQueues(
-      ReferenceQueue<Object>[] queues,
-      Consumer<Object> handler,
-      HoldingFlusher flushHolding,
-      AtomicReference<Boolean> handleRefQueue,
-      LongSupplier indirectTrackedCount,
-      LongSupplier holdingSize,
-      LongSupplier outstandingSize) {
-    if (closing || !handleRefQueue.compareAndSet(null, Boolean.TRUE)) {
+  private void handleRefQueues(LongSupplier indirectTrackedCount, LongSupplier refsCollected) {
+    if (closing) {
       return;
     }
-    refQueueExec =
-        ExecutorUtil.newMDCAwareFixedThreadPool(
-            queues.length << 1, new NamedThreadFactory("refQueueExec"));
-    LongAdder activeRefQueueProcessors = new LongAdder();
-    LongAdder collectedHoldingRefs = new LongAdder();
-    LongAdder collectedRefs = new LongAdder();
-    @SuppressWarnings("rawtypes")
-    Future<?>[] refQueueFutures = new Future[queues.length << 1];
-    for (int i = queues.length - 1; i >= 0; i--) {
-      ReferenceQueue<Object> q = queues[i];
-      refQueueFutures[i] =
-          refQueueExec.submit(
-              wrapTask(
-                  handleRefQueue,
-                  activeRefQueueProcessors,
-                  () -> {
-                    handler.accept(q.remove());
-                    collectedRefs.increment();
-                  }));
-      int idx = i;
-      long[] nextHoldUntil = new long[] {System.nanoTime()};
-      refQueueFutures[queues.length + i] =
-          refQueueExec.submit(
-              wrapTask(
-                  handleRefQueue,
-                  activeRefQueueProcessors,
-                  () -> {
-                    collectedHoldingRefs.add(
-                        flushHolding.flush(nextHoldUntil[0], idx, nextHoldUntil));
-                  }));
-    }
-    this.refQueueHandling =
-        () -> {
-          handleRefQueue.set(false);
-          for (Future<?> f : refQueueFutures) {
-            f.cancel(true);
-          }
-        };
     if (solrMetricsContext == null) {
       return;
     }
     MetricsMap refQueueSize =
         new MetricsMap(
             map -> {
-              long sizeHolding = holdingSize.getAsLong();
-              long ramBytesUsedHolding = sizeHolding * Unloader.RAMBYTES_PER_HOLDINGREF;
-              long size = outstandingSize.getAsLong();
-              long ramBytesUsed = size * Unloader.RAMBYTES_PER_REF;
-              map.put("activeProcessors", activeRefQueueProcessors.sum() + "/" + queues.length);
               map.put("indirectTrackedCount", indirectTrackedCount.getAsLong());
-              map.put("holdRefsCollected", collectedHoldingRefs.sum());
-              map.put("refsCollected", collectedRefs.sum());
-              map.put("sizeHolding", sizeHolding);
-              map.put("ramBytesUsedHolding", ramBytesUsedHolding);
-              map.put("ramUsedHolding", RamUsageEstimator.humanReadableUnits(ramBytesUsedHolding));
-              map.put("size", size);
-              map.put("ramBytesUsed", ramBytesUsed);
-              map.put("ramUsed", RamUsageEstimator.humanReadableUnits(ramBytesUsed));
-              map.put(
-                  "ramUsedOverall",
-                  RamUsageEstimator.humanReadableUnits(ramBytesUsedHolding + ramBytesUsed));
+              map.put("refsCollected", refsCollected.getAsLong());
+              map.put("size", loaded.getCount() - unloaded.getCount());
             });
     solrMetricsContext.gauge(
         refQueueSize, true, "refQueue", SolrInfoBean.Category.OTHER.toString(), "unloadable");
@@ -150,11 +77,8 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   @Override
   @SuppressWarnings("try")
   public void close() throws IOException {
-    try (Closeable c = refQueueHandling) {
-      closing = true;
-    }
+    closing = true;
     SolrMetricProducer.super.close();
-    ExecutorUtil.shutdownAndAwaitTermination(refQueueExec);
   }
 
   @Override
@@ -189,21 +113,10 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
 
           @Override
           public void maybeHandleRefQueues(
-              ReferenceQueue<Object>[] queues,
-              Consumer<Object> handler,
-              HoldingFlusher flushHolding,
-              AtomicReference<Boolean> handleRefQueue,
+              AtomicBoolean handleRefQueue,
               LongSupplier indirectTrackedCount,
-              LongSupplier holdingSize,
-              LongSupplier outstandingSize) {
-            handleRefQueues(
-                queues,
-                handler,
-                flushHolding,
-                handleRefQueue,
-                indirectTrackedCount,
-                holdingSize,
-                outstandingSize);
+              LongSupplier refsCollected) {
+            handleRefQueues(indirectTrackedCount, refsCollected);
           }
         };
   }
@@ -233,36 +146,5 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
 
     @Override
     public void close() {}
-  }
-
-  @SuppressWarnings("ReferenceEquality")
-  private static Callable<Void> wrapTask(
-      AtomicReference<Boolean> handleRefQueue,
-      LongAdder activeRefQueueProcessors,
-      BlockingRunnable r) {
-    return () -> {
-      activeRefQueueProcessors.increment();
-      try {
-        while (handleRefQueue.get() == Boolean.TRUE) {
-          r.run();
-        }
-      } catch (InterruptedException ex) {
-        if (handleRefQueue.get() == Boolean.TRUE) {
-          // unexpected -- we've been interrupted but are still
-          // supposed to be handling ref queue?
-          handleRefQueue.set(false);
-          log.error("unexpected interruption of ref queue processing", ex);
-          throw ex;
-        }
-      } catch (Throwable t) {
-        handleRefQueue.set(false);
-        log.error("exception in ref queue processing", t);
-        throw t;
-      } finally {
-        activeRefQueueProcessors.decrement();
-      }
-      log.info("normal exit of ref queue processing task");
-      return null;
-    };
   }
 }
