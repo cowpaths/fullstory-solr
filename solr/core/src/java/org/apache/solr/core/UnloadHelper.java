@@ -29,6 +29,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   private final Meter created;
   private final Meter loaded;
   private final Histogram loadTimeMillis;
+  private final Histogram lastAccessToReloadMillis;
   private final Meter unloaded;
   private final Meter closed;
   private final InfoStream infoStream = new UnloaderLoggingInfoStream();
@@ -41,6 +42,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
       created = MetricSuppliers.NoOpMeterSupplier.INSTANCE.newMetric();
       loaded = MetricSuppliers.NoOpMeterSupplier.INSTANCE.newMetric();
       loadTimeMillis = MetricSuppliers.NoOpHistogramSupplier.INSTANCE.newMetric();
+      lastAccessToReloadMillis = MetricSuppliers.NoOpHistogramSupplier.INSTANCE.newMetric();
       unloaded = MetricSuppliers.NoOpMeterSupplier.INSTANCE.newMetric();
       closed = MetricSuppliers.NoOpMeterSupplier.INSTANCE.newMetric();
     } else {
@@ -49,6 +51,8 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
       created = solrMetricsContext.meter("created", metricPath);
       loaded = solrMetricsContext.meter("loaded", metricPath);
       loadTimeMillis = solrMetricsContext.histogram("loadTimeMillis", metricPath);
+      lastAccessToReloadMillis =
+          solrMetricsContext.histogram("lastAccessToReloadMillis", metricPath);
       unloaded = solrMetricsContext.meter("unloaded", metricPath);
       closed = solrMetricsContext.meter("closed", metricPath);
     }
@@ -66,9 +70,16 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
     MetricsMap refQueueSize =
         new MetricsMap(
             map -> {
+              long totalLoaded = loaded.getCount();
+              long totalUnloaded = unloaded.getCount();
+              long totalCreated = created.getCount();
+              long totalClosed = closed.getCount();
+              long currentlyOpen = totalCreated - totalClosed;
+              long currentlyLoaded = totalLoaded - totalUnloaded;
               map.put("indirectTrackedCount", indirectTrackedCount.getAsLong());
               map.put("refsCollected", refsCollected.getAsLong());
-              map.put("size", loaded.getCount() - unloaded.getCount());
+              map.put("currentlyOpen", currentlyOpen);
+              map.put("loadedRatio", (double) currentlyLoaded / currentlyOpen);
             });
     solrMetricsContext.gauge(
         refQueueSize, true, "refQueue", SolrInfoBean.Category.OTHER.toString(), "unloadable");
@@ -96,6 +107,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
           public void onLoad(long nanosSincePriorAccess, long loadTime) {
             loaded.mark();
             loadTimeMillis.update(TimeUnit.NANOSECONDS.toMillis(loadTime));
+            lastAccessToReloadMillis.update(TimeUnit.NANOSECONDS.toMillis(nanosSincePriorAccess));
             super.onLoad(nanosSincePriorAccess, loadTime);
           }
 
