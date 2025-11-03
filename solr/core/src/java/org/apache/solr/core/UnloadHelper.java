@@ -2,20 +2,26 @@ package org.apache.solr.core;
 
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Meter;
+import com.codahale.metrics.Snapshot;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.apache.lucene.index.Unloader;
 import org.apache.lucene.util.InfoStream;
+import org.apache.solr.common.MapWriter;
 import org.apache.solr.handler.admin.MetricsHandler;
 import org.apache.solr.metrics.MetricSuppliers;
 import org.apache.solr.metrics.MetricsMap;
+import org.apache.solr.metrics.SolrMetricManager;
 import org.apache.solr.metrics.SolrMetricProducer;
 import org.apache.solr.metrics.SolrMetricsContext;
+import org.apache.solr.util.stats.MetricUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,11 +56,105 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
       String[] metricPath = new String[] {SolrInfoBean.Category.OTHER.toString(), "unloadable"};
       created = solrMetricsContext.meter("created", metricPath);
       loaded = solrMetricsContext.meter("loaded", metricPath);
-      loadTimeMillis = solrMetricsContext.histogram("loadTimeMillis", metricPath);
+      loadTimeMillis =
+          invertedHistogram(
+              solrMetricsContext, "loadTimeMillis", metricPath, DEFAULT_WRITE_HISTOGRAM);
       lastAccessToReloadMillis =
-          solrMetricsContext.histogram("lastAccessToReloadMillis", metricPath);
+          invertedHistogram(
+              solrMetricsContext,
+              "lastAccessToReloadMillis",
+              metricPath,
+              (snapshot, filter) -> {
+                filter.accept("min_ms", TimeUnit.NANOSECONDS.toMillis(snapshot.getMin()));
+                filter.accept("max_ms", TimeUnit.NANOSECONDS.toMillis(snapshot.getMax()));
+                filter.accept("mean_ms", nsToMs(snapshot.getMean()));
+                filter.accept("median_ms", nsToMs(snapshot.getMedian()));
+                filter.accept("stddev_ms", nsToMs(snapshot.getStdDev()));
+                filter.accept("p25_ms", nsToMs(snapshot.getValue(0.25)));
+                filter.accept("p05_ms", nsToMs(snapshot.getValue(0.05)));
+                filter.accept("p01_ms", nsToMs(snapshot.getValue(0.01)));
+                filter.accept("p001_ms", nsToMs(snapshot.getValue(0.001)));
+              });
       unloaded = solrMetricsContext.meter("unloaded", metricPath);
       closed = solrMetricsContext.meter("closed", metricPath);
+    }
+  }
+
+  private static final long NANOS_PER_MILLI = TimeUnit.MILLISECONDS.toNanos(1);
+
+  private static double nsToMs(double nanos) {
+    return nanos / NANOS_PER_MILLI;
+  }
+
+  private static Histogram invertedHistogram(
+      SolrMetricsContext ctx,
+      String metricName,
+      String[] metricPath,
+      BiConsumer<Snapshot, BiConsumer<String, Object>> writeHistogram) {
+    SolrMetricManager mgr = ctx.getMetricManager();
+    final String name = SolrMetricManager.mkName(metricName, metricPath);
+    ctx.registerMetricName(name);
+    return mgr.registry(ctx.getRegistryName())
+        .histogram(
+            name, () -> new TimeHistogram(mgr.getHistogramSupplier().newMetric(), writeHistogram));
+  }
+
+  @SuppressWarnings("UnnecessaryLambda")
+  private static final BiConsumer<Snapshot, BiConsumer<String, Object>> DEFAULT_WRITE_HISTOGRAM =
+      (snapshot, filter) -> {
+        filter.accept("min_ms", TimeUnit.NANOSECONDS.toMillis(snapshot.getMin()));
+        filter.accept("max_ms", TimeUnit.NANOSECONDS.toMillis(snapshot.getMax()));
+        filter.accept("mean_ms", nsToMs(snapshot.getMean()));
+        filter.accept("median_ms", nsToMs(snapshot.getMedian()));
+        filter.accept("stddev_ms", nsToMs(snapshot.getStdDev()));
+        filter.accept("p75_ms", nsToMs(snapshot.get75thPercentile()));
+        filter.accept("p95_ms", nsToMs(snapshot.get95thPercentile()));
+        filter.accept("p99_ms", nsToMs(snapshot.get99thPercentile()));
+        filter.accept("p999_ms", nsToMs(snapshot.get999thPercentile()));
+      };
+
+  private static final class TimeHistogram extends Histogram implements MetricUtils.SnapshotWriter {
+
+    private final Histogram delegate;
+    private final BiConsumer<Snapshot, BiConsumer<String, Object>> writeHistogram;
+
+    private TimeHistogram(
+        Histogram delegate, BiConsumer<Snapshot, BiConsumer<String, Object>> writeHistogram) {
+      super(null);
+      this.delegate = delegate;
+      this.writeHistogram = writeHistogram;
+    }
+
+    @Override
+    public void addSnapshot(
+        MapWriter.EntryWriter ew, Snapshot snapshot, Predicate<CharSequence> propertyFilter) {
+      BiConsumer<String, Object> filter =
+          (k, v) -> {
+            if (propertyFilter.test(k)) {
+              ew.putNoEx(k, v);
+            }
+          };
+      writeHistogram.accept(snapshot, filter);
+    }
+
+    @Override
+    public void update(int value) {
+      delegate.update(value);
+    }
+
+    @Override
+    public void update(long value) {
+      delegate.update(value);
+    }
+
+    @Override
+    public long getCount() {
+      return delegate.getCount();
+    }
+
+    @Override
+    public Snapshot getSnapshot() {
+      return delegate.getSnapshot();
     }
   }
 
@@ -106,8 +206,8 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
           @Override
           public void onLoad(long nanosSincePriorAccess, long loadTime) {
             loaded.mark();
-            loadTimeMillis.update(TimeUnit.NANOSECONDS.toMillis(loadTime));
-            lastAccessToReloadMillis.update(TimeUnit.NANOSECONDS.toMillis(nanosSincePriorAccess));
+            loadTimeMillis.update(loadTime);
+            lastAccessToReloadMillis.update(nanosSincePriorAccess);
             super.onLoad(nanosSincePriorAccess, loadTime);
           }
 
