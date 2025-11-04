@@ -225,12 +225,16 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
           }
 
           @Override
-          public void onLoad(long nanosSincePriorAccess, long loadTime) {
+          public void onLoad(long nanosSincePriorAccess, long loadTime, boolean initial) {
             loaded.mark();
             loadTimeMillis.update(loadTime);
-            lastAccessToReloadMillis.update(nanosSincePriorAccess);
-            h.update(nanosSincePriorAccess);
-            super.onLoad(nanosSincePriorAccess, loadTime);
+            if (!initial) {
+              // `nanosSincePriorAccess` is only relevant beyond the initial load (otherwise
+              // there's no "prior access" to measure from).
+              lastAccessToReloadMillis.update(nanosSincePriorAccess);
+              h.update(nanosSincePriorAccess);
+            }
+            super.onLoad(nanosSincePriorAccess, loadTime, initial);
           }
 
           @Override
