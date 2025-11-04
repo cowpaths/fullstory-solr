@@ -2,6 +2,7 @@ package org.apache.solr.core;
 
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Meter;
+import com.codahale.metrics.SlidingTimeWindowReservoir;
 import com.codahale.metrics.Snapshot;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
@@ -192,9 +193,24 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
     SolrMetricProducer.super.close();
   }
 
+  /**
+   * How many keep-alive time ranges should we care about when considering recent history of a
+   * resource for the purpose of avoiding thrashing.
+   */
+  private static final int KEEP_ALIVE_MULTIPLIER = 20;
+
+  private static final long TIME_WINDOW_NANOS = KEEP_ALIVE_MULTIPLIER * Unloader.KEEP_ALIVE_NANOS;
+
+  private static final long ACCEPTABLE_THRESHOLD = Unloader.KEEP_ALIVE_NANOS;
+
+  /** Max amount of time we'll ever wait. 8x the configured keep-alive */
+  private static final long MAX_THRESHOLD = Unloader.KEEP_ALIVE_NANOS << 3;
+
   @Override
   @SuppressWarnings("unchecked")
   public T get() {
+    Histogram h =
+        new Histogram(new SlidingTimeWindowReservoir(TIME_WINDOW_NANOS, TimeUnit.NANOSECONDS));
     return (T)
         new Unloader.AbstractUnloadHelper(exec, infoStream) {
           @Override
@@ -208,6 +224,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
             loaded.mark();
             loadTimeMillis.update(loadTime);
             lastAccessToReloadMillis.update(nanosSincePriorAccess);
+            h.update(nanosSincePriorAccess);
             super.onLoad(nanosSincePriorAccess, loadTime);
           }
 
@@ -221,6 +238,31 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
           public void onClose() {
             closed.mark();
             super.onClose();
+          }
+
+          @Override
+          public long deferUnload(long nanosSinceLastAccess) {
+            if (nanosSinceLastAccess >= MAX_THRESHOLD) {
+              // we've waited the max amount of time; don't defer any longer
+              return -1;
+            }
+            Snapshot s = h.getSnapshot();
+            if (s.size() == 0) {
+              // no recent loads; establish a baseline, don't defer
+              return -1;
+            }
+            // get a pessimistic estimate (based on recent history) of how long we anticipate
+            // we might enjoy the benefits of unloading if we were to unload now.
+            long pessimisticExpectRemaining = (long) s.getValue(0.25) - nanosSinceLastAccess;
+            if (pessimisticExpectRemaining >= ACCEPTABLE_THRESHOLD) {
+              // we expect it's worth unloading; don't defer.
+              return -1;
+            } else {
+              // wait a generous amount of time, up to `MAX_THRESHOLD`, to give a chance to
+              // be kept alive without being closed.
+              long generous = (long) s.getValue(0.75);
+              return Math.min(generous, MAX_THRESHOLD) - nanosSinceLastAccess;
+            }
           }
 
           @Override
