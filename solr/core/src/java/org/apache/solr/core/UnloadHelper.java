@@ -71,6 +71,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
                 filter.accept("mean_ms", nsToMs(snapshot.getMean()));
                 filter.accept("median_ms", nsToMs(snapshot.getMedian()));
                 filter.accept("stddev_ms", nsToMs(snapshot.getStdDev()));
+                filter.accept("p75_ms", nsToMs(snapshot.getValue(0.75)));
                 filter.accept("p25_ms", nsToMs(snapshot.getValue(0.25)));
                 filter.accept("p05_ms", nsToMs(snapshot.getValue(0.05)));
                 filter.accept("p01_ms", nsToMs(snapshot.getValue(0.01)));
