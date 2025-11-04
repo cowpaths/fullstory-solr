@@ -210,8 +210,12 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   @Override
   @SuppressWarnings("unchecked")
   public T get() {
-    Histogram h =
-        new Histogram(new SlidingTimeWindowReservoir(TIME_WINDOW_NANOS, TimeUnit.NANOSECONDS));
+    Histogram h;
+    if (Unloader.ADAPTIVE_DEFER) {
+      h = new Histogram(new SlidingTimeWindowReservoir(TIME_WINDOW_NANOS, TimeUnit.NANOSECONDS));
+    } else {
+      h = MetricSuppliers.NoOpHistogramSupplier.INSTANCE.newMetric();
+    }
     return (T)
         new Unloader.AbstractUnloadHelper(exec, infoStream) {
           @Override
