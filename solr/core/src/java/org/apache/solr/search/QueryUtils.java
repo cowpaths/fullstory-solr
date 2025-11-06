@@ -38,7 +38,6 @@ import org.apache.solr.common.SolrException;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.core.SolrConfig;
 import org.apache.solr.query.DynamicComplementPrefixQuery;
-import org.apache.solr.query.FilterQuery;
 import org.apache.solr.request.SolrQueryRequest;
 
 /** */
@@ -75,10 +74,6 @@ public class QueryUtils {
         return true;
       } else if (q instanceof DocSetQuery) {
         return true;
-      } else if (q instanceof FilterQuery) {
-        return true;
-      } else if (q instanceof ConstantScoreInf) {
-        return ((ConstantScoreInf) q).isConstantScore();
       } else if (q instanceof BooleanQuery) {
         // NOTE: this check can be very simple because:
         //  1. there's no need to check `q == clause.getQuery()` because BooleanQuery is final, with
