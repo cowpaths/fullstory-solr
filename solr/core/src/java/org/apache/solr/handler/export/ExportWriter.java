@@ -816,6 +816,9 @@ public class ExportWriter implements SolrCore.RawWriter, Closeable {
     }
 
     private void topDocs() throws IOException {
+      if (bits == null) {
+        return;
+      }
       try {
         queue.reset();
         SortDoc top = queue.top();

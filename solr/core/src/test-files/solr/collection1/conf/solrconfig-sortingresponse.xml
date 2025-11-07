@@ -38,6 +38,13 @@
     <documentCache size="512"
                    initialSize="512"
                    autowarmCount="0"/>
+
+    <filterCache size="512"
+                   initialSize="512"
+                   autowarmCount="0"
+                   enabled="${tests.solr.enableFilterCache:false}"/>
+
+    <useFilterForSortedQuery>${tests.solr.useFilterForSortedQuery:false}</useFilterForSortedQuery>
   </query>
 
 
