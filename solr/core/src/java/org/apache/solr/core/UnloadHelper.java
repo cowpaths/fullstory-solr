@@ -6,6 +6,7 @@ import com.codahale.metrics.SlidingTimeWindowReservoir;
 import com.codahale.metrics.Snapshot;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.util.Objects;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -15,6 +16,7 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.apache.lucene.index.Unloader;
 import org.apache.lucene.util.InfoStream;
+import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.MapWriter;
 import org.apache.solr.handler.admin.MetricsHandler;
 import org.apache.solr.metrics.MetricSuppliers;
@@ -41,7 +43,58 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   private final Meter closed;
   private final InfoStream infoStream = new UnloaderLoggingInfoStream();
 
+  private volatile Object lastMinUnloadSpec;
+  private volatile long minUnloadNanos = Unloader.KEEP_ALIVE_NANOS;
+
   UnloadHelper(CoreContainer cc) {
+    ZkController zkController = cc.getZkController();
+    if (zkController != null) {
+      // NOTE: this is scoped to the CoreContainer lifecycle, so we don't have to worry about
+      // removing the clusterProps listener.
+      log.info("adding clusterprops listener for minUnloadTime");
+      zkController
+          .getZkStateReader()
+          .registerClusterPropertiesListener(
+              (p) -> {
+                Object o = p.get("minUnloadTime");
+                if (Objects.equals(lastMinUnloadSpec, o)) {
+                  // we get notified every time clusterprops changes; shortcircuit processing
+                  // unless it's actually _our_ value that's changed.
+                  return false;
+                }
+                lastMinUnloadSpec = o;
+                long newVal;
+                if (o instanceof Number) {
+                  // millis
+                  newVal = TimeUnit.MILLISECONDS.toNanos(((Number) o).longValue());
+                } else if (o instanceof String) {
+                  try {
+                    newVal = Unloader.getNanos((String) o);
+                  } catch (Exception ex) {
+                    log.warn("problem parsing clusterprops `minUnloadTime` spec: {}", o, ex);
+                    newVal = Unloader.KEEP_ALIVE_NANOS;
+                  }
+                } else {
+                  // either null, or unrecognized type
+                  newVal = Unloader.KEEP_ALIVE_NANOS;
+                  if (o != null) {
+                    log.warn(
+                        "unrecognized type for clusterprops `minUnloadTime`: {} ({})",
+                        o,
+                        o.getClass());
+                  }
+                }
+                if (newVal < 0) {
+                  log.warn(
+                      "clusterprops minUnloadTime should be >= 0; found {}, from {}", newVal, o);
+                  minUnloadNanos = Unloader.KEEP_ALIVE_NANOS;
+                } else {
+                  log.info("set `minUnloadNanos` from clusterprops {} ({} nanos)", o, newVal);
+                  minUnloadNanos = newVal;
+                }
+                return false;
+              });
+    }
     this.exec = cc.getUnloaderExecutor();
     MetricsHandler metricsHandler = cc.getMetricsHandler();
     if (metricsHandler == null) {
@@ -251,21 +304,30 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
 
           @Override
           public long deferUnload(long nanosSinceLastAccess) {
-            if (nanosSinceLastAccess >= MAX_THRESHOLD) {
+            long minUnloadNanos = UnloadHelper.this.minUnloadNanos;
+            if (nanosSinceLastAccess >= Math.max(MAX_THRESHOLD, minUnloadNanos)) {
               // we've waited the max amount of time; don't defer any longer
               return -1;
             }
             Snapshot s = h.getSnapshot();
-            if (s.size() == 0) {
-              // no recent loads; establish a baseline, don't defer
-              return -1;
-            }
             // get a pessimistic estimate (based on recent history) of how long we anticipate
             // we might enjoy the benefits of unloading if we were to unload now.
-            long pessimisticExpectRemaining = (long) s.getValue(0.25) - nanosSinceLastAccess;
-            if (pessimisticExpectRemaining >= ACCEPTABLE_THRESHOLD) {
-              // we expect it's worth unloading; don't defer.
-              return -1;
+            @SuppressWarnings("unused")
+            long pessimisticExpectRemaining;
+            if (s.size() == 0
+                || (pessimisticExpectRemaining = (long) s.getValue(0.25) - nanosSinceLastAccess)
+                    >= ACCEPTABLE_THRESHOLD) {
+              // at this point we either expect it's worth unloading, or (size==0) we have no
+              // context with which to make a decision, so allow to proceed (establish a baseline)
+              if (nanosSinceLastAccess >= minUnloadNanos) {
+                // we meet the `minUnloadNanos` criterion; don't defer
+                return -1;
+              } else {
+                // we wait until `minUnloadNanos` criterion may have been satisfied; but don't
+                // wait longer than `MAX_THRESHOLD`, because we still want to check periodically
+                // in case `minUnloadNanos` is reduced after being set very long.
+                return Math.min(minUnloadNanos - nanosSinceLastAccess, MAX_THRESHOLD);
+              }
             } else {
               // wait a generous amount of time, up to `MAX_THRESHOLD`, to give a chance to
               // be kept alive without being closed.
