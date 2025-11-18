@@ -7,6 +7,8 @@ import com.codahale.metrics.SlidingTimeWindowReservoir;
 import com.codahale.metrics.Snapshot;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.util.AbstractMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -17,6 +19,7 @@ import java.util.function.BiConsumer;
 import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import org.apache.lucene.index.Unloader;
 import org.apache.lucene.util.InfoStream;
 import org.apache.solr.cloud.ZkController;
@@ -123,39 +126,41 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
       created = solrMetricsContext.meter("created", metricPath);
       loaded = solrMetricsContext.meter("loaded", metricPath);
       loadTimeMillis =
-          invertedHistogram(
+          customizedHistogram(
               solrMetricsContext, "loadTimeMillis", metricPath, DEFAULT_WRITE_HISTOGRAM);
       lastAccessToReloadMillis =
-          invertedHistogram(
-              solrMetricsContext,
-              "lastAccessToReloadMillis",
-              metricPath,
-              (snapshot, filter) -> {
-                filter.accept("min_ms", TimeUnit.NANOSECONDS.toMillis(snapshot.getMin()));
-                filter.accept("max_ms", TimeUnit.NANOSECONDS.toMillis(snapshot.getMax()));
-                filter.accept("mean_ms", nsToMs(snapshot.getMean()));
-                filter.accept("median_ms", nsToMs(snapshot.getMedian()));
-                filter.accept("stddev_ms", nsToMs(snapshot.getStdDev()));
-                filter.accept("p75_ms", nsToMs(snapshot.getValue(0.75)));
-                filter.accept("p25_ms", nsToMs(snapshot.getValue(0.25)));
-                filter.accept("p05_ms", nsToMs(snapshot.getValue(0.05)));
-                filter.accept("p01_ms", nsToMs(snapshot.getValue(0.01)));
-                filter.accept("p001_ms", nsToMs(snapshot.getValue(0.001)));
-              });
+          customizedHistogram(
+              solrMetricsContext, "lastAccessToReloadMillis", metricPath, INVERTED_WRITE_HISTOGRAM);
       unloaded = solrMetricsContext.meter("unloaded", metricPath);
       closed = solrMetricsContext.meter("closed", metricPath);
       if (reloadFrom != null) {
         solrMetricsContext.gauge(
             new MetricsMap(
                 m -> {
-                  for (Map.Entry<StackTrace, Histogram> e : reloadFrom.entrySet()) {
+                  List<AbstractMap.SimpleImmutableEntry<StackTrace, Snapshot>> lst =
+                      reloadFrom.entrySet().stream()
+                          .map(
+                              e ->
+                                  new AbstractMap.SimpleImmutableEntry<>(
+                                      e.getKey(), e.getValue().getSnapshot()))
+                          .sorted(
+                              (e1, e2) ->
+                                  Integer.compare(e2.getValue().size(), e1.getValue().size()))
+                          .collect(Collectors.toList());
+                  int i = 0;
+                  for (Map.Entry<StackTrace, Snapshot> e : lst) {
+                    StackTrace key = e.getKey();
+                    Snapshot value = e.getValue();
                     try {
                       m.put(
-                          e.getKey().toString(),
+                          Integer.toString(i++),
                           (MapWriter)
-                              ew ->
-                                  DEFAULT_WRITE_HISTOGRAM.accept(
-                                      e.getValue().getSnapshot(), ew.getBiConsumer()));
+                              ew -> {
+                                ew.put("stackHash", key.hashCode());
+                                ew.put("size", value.size());
+                                INVERTED_WRITE_HISTOGRAM.accept(value, ew.getBiConsumer());
+                                key.writeTo("stackTrace", ew);
+                              });
                     } catch (IOException ex) {
                       log.warn("exception reporting reloads", ex);
                       break;
@@ -175,7 +180,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
     return nanos / NANOS_PER_MILLI;
   }
 
-  private static Histogram invertedHistogram(
+  private static Histogram customizedHistogram(
       SolrMetricsContext ctx,
       String metricName,
       String[] metricPath,
@@ -201,6 +206,22 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
             filter.accept("p95_ms", nsToMs(snapshot.get95thPercentile()));
             filter.accept("p99_ms", nsToMs(snapshot.get99thPercentile()));
             filter.accept("p999_ms", nsToMs(snapshot.get999thPercentile()));
+          };
+
+  @SuppressWarnings("UnnecessaryLambda")
+  private static final BiConsumer<Snapshot, BiConsumer<CharSequence, Object>>
+      INVERTED_WRITE_HISTOGRAM =
+          (snapshot, filter) -> {
+            filter.accept("min_ms", TimeUnit.NANOSECONDS.toMillis(snapshot.getMin()));
+            filter.accept("max_ms", TimeUnit.NANOSECONDS.toMillis(snapshot.getMax()));
+            filter.accept("mean_ms", nsToMs(snapshot.getMean()));
+            filter.accept("median_ms", nsToMs(snapshot.getMedian()));
+            filter.accept("stddev_ms", nsToMs(snapshot.getStdDev()));
+            filter.accept("p75_ms", nsToMs(snapshot.getValue(0.75)));
+            filter.accept("p25_ms", nsToMs(snapshot.getValue(0.25)));
+            filter.accept("p05_ms", nsToMs(snapshot.getValue(0.05)));
+            filter.accept("p01_ms", nsToMs(snapshot.getValue(0.01)));
+            filter.accept("p001_ms", nsToMs(snapshot.getValue(0.001)));
           };
 
   private static final class TimeHistogram extends Histogram implements MetricUtils.SnapshotWriter {
@@ -321,8 +342,9 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
               // there's no "prior access" to measure from).
               lastAccessToReloadMillis.update(nanosSincePriorAccess);
               h.update(nanosSincePriorAccess);
-              if (reloadFrom != null) {
-                StackTrace st = new StackTrace();
+              StackTrace st;
+              if (reloadFrom != null && (st = new StackTrace()).nonMerge()) {
+                // we ignore merge-initiated reloads, since there's nothing we can do about these
                 if (log.isInfoEnabled()) {
                   log.info("reloaded; stackHash={}, rid={}", st.hashCode(), rid());
                 }
@@ -410,20 +432,22 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   private static final class StackTrace {
     private final StackTraceElement[] elements;
     private Integer hashCode;
-    private String toString;
+    private List<String> toString;
 
     private StackTrace() {
       this.elements = Thread.currentThread().getStackTrace();
     }
 
-    @Override
-    public String toString() {
-      String cached = toString;
+    private List<String> presentable() {
+      List<String> cached = toString;
       if (cached != null) {
         return cached;
       }
-      StringBuilder sb = new StringBuilder(512 * elements.length);
-      for (StackTraceElement e : elements) {
+      StringBuilder sb = new StringBuilder(512);
+      String[] ret = new String[elements.length];
+      for (int i = elements.length - 1; i >= 0; i--) {
+        sb.setLength(0);
+        StackTraceElement e = elements[i];
         sb.append(e.getClassName())
             .append('.')
             .append(e.getMethodName())
@@ -431,13 +455,14 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
             .append(e.getFileName())
             .append(':')
             .append(e.getLineNumber())
-            .append(")\n");
+            .append(')');
+        ret[i] = sb.toString();
       }
-      sb.append("stackHash=").append(hashCode()); // rough link between metrics display and logging
-      return toString = sb.toString();
+      return toString = List.of(ret);
     }
 
     @Override
+    @SuppressWarnings({"EqualsUnsafeCast", "ReferenceEquality"})
     public boolean equals(Object other) {
       if (this == other) return true;
       if (other == null) return false;
@@ -495,6 +520,23 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
     private static int hashCode(StackTraceElement e) {
       int result = 31 * e.getClassName().hashCode() + e.getMethodName().hashCode();
       return 31 * result + e.getLineNumber();
+    }
+
+    public void writeTo(String key, MapWriter.EntryWriter ew) throws IOException {
+      ew.put(
+          key,
+          (MapWriter)
+              ew1 -> {
+                int i = 0;
+                for (String s : presentable()) {
+                  ew1.put(Integer.toString(i++), s);
+                }
+              });
+    }
+
+    public boolean nonMerge() {
+      return !"org.apache.lucene.index.ConcurrentMergeScheduler$MergeThread"
+          .equals(elements[elements.length - 1].getClassName());
     }
   }
 
