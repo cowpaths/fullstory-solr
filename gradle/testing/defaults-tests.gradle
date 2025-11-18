@@ -34,6 +34,7 @@ allprojects {
           [propName: 'lucene.unload.ttl', value: '60m', description: "Time since last use at which a resource becomes eligible for unloading"],
           [propName: 'lucene.unload.initial', value: '1m', description: "Extra time allotted for first resource use after load/reload"],
           [propName: 'lucene.unload.disable', value: 'false', description: "Disables resource unloading"],
+          [propName: 'lucene.unload.trackReloads', value: 'false', description: "tracks reloads via logs and metrics"],
           // asserts, debug output.
           [propName: 'tests.verbose', value: false, description: "Enables verbose mode (emits full test outputs immediately)."],
           [propName: 'tests.workDir',

@@ -1,12 +1,15 @@
 package org.apache.solr.core;
 
+import com.codahale.metrics.ExponentiallyDecayingReservoir;
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.SlidingTimeWindowReservoir;
 import com.codahale.metrics.Snapshot;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -18,12 +21,15 @@ import org.apache.lucene.index.Unloader;
 import org.apache.lucene.util.InfoStream;
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.MapWriter;
+import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.handler.admin.MetricsHandler;
 import org.apache.solr.metrics.MetricSuppliers;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricManager;
 import org.apache.solr.metrics.SolrMetricProducer;
 import org.apache.solr.metrics.SolrMetricsContext;
+import org.apache.solr.request.SolrQueryRequest;
+import org.apache.solr.request.SolrRequestInfo;
 import org.apache.solr.util.stats.MetricUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,12 +39,18 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
+  // default to false
+  private static final boolean TRACK_RELOADS =
+      "true".equals(System.getProperty("lucene.unload.trackReloads"));
+
   private final ScheduledExecutorService exec;
   private final SolrMetricsContext solrMetricsContext;
   private final Meter created;
   private final Meter loaded;
   private final Histogram loadTimeMillis;
   private final Histogram lastAccessToReloadMillis;
+  private final ConcurrentHashMap<StackTrace, Histogram> reloadFrom =
+      TRACK_RELOADS ? new ConcurrentHashMap<>() : null;
   private final Meter unloaded;
   private final Meter closed;
   private final InfoStream infoStream = new UnloaderLoggingInfoStream();
@@ -132,6 +144,28 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
               });
       unloaded = solrMetricsContext.meter("unloaded", metricPath);
       closed = solrMetricsContext.meter("closed", metricPath);
+      if (reloadFrom != null) {
+        solrMetricsContext.gauge(
+            new MetricsMap(
+                m -> {
+                  for (Map.Entry<StackTrace, Histogram> e : reloadFrom.entrySet()) {
+                    try {
+                      m.put(
+                          e.getKey().toString(),
+                          (MapWriter)
+                              ew ->
+                                  DEFAULT_WRITE_HISTOGRAM.accept(
+                                      e.getValue().getSnapshot(), ew.getBiConsumer()));
+                    } catch (IOException ex) {
+                      log.warn("exception reporting reloads", ex);
+                      break;
+                    }
+                  }
+                }),
+            true,
+            "reloadFrom",
+            metricPath);
+      }
     }
   }
 
@@ -145,7 +179,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
       SolrMetricsContext ctx,
       String metricName,
       String[] metricPath,
-      BiConsumer<Snapshot, BiConsumer<String, Object>> writeHistogram) {
+      BiConsumer<Snapshot, BiConsumer<CharSequence, Object>> writeHistogram) {
     SolrMetricManager mgr = ctx.getMetricManager();
     final String name = SolrMetricManager.mkName(metricName, metricPath);
     ctx.registerMetricName(name);
@@ -155,26 +189,27 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   }
 
   @SuppressWarnings("UnnecessaryLambda")
-  private static final BiConsumer<Snapshot, BiConsumer<String, Object>> DEFAULT_WRITE_HISTOGRAM =
-      (snapshot, filter) -> {
-        filter.accept("min_ms", TimeUnit.NANOSECONDS.toMillis(snapshot.getMin()));
-        filter.accept("max_ms", TimeUnit.NANOSECONDS.toMillis(snapshot.getMax()));
-        filter.accept("mean_ms", nsToMs(snapshot.getMean()));
-        filter.accept("median_ms", nsToMs(snapshot.getMedian()));
-        filter.accept("stddev_ms", nsToMs(snapshot.getStdDev()));
-        filter.accept("p75_ms", nsToMs(snapshot.get75thPercentile()));
-        filter.accept("p95_ms", nsToMs(snapshot.get95thPercentile()));
-        filter.accept("p99_ms", nsToMs(snapshot.get99thPercentile()));
-        filter.accept("p999_ms", nsToMs(snapshot.get999thPercentile()));
-      };
+  private static final BiConsumer<Snapshot, BiConsumer<CharSequence, Object>>
+      DEFAULT_WRITE_HISTOGRAM =
+          (snapshot, filter) -> {
+            filter.accept("min_ms", TimeUnit.NANOSECONDS.toMillis(snapshot.getMin()));
+            filter.accept("max_ms", TimeUnit.NANOSECONDS.toMillis(snapshot.getMax()));
+            filter.accept("mean_ms", nsToMs(snapshot.getMean()));
+            filter.accept("median_ms", nsToMs(snapshot.getMedian()));
+            filter.accept("stddev_ms", nsToMs(snapshot.getStdDev()));
+            filter.accept("p75_ms", nsToMs(snapshot.get75thPercentile()));
+            filter.accept("p95_ms", nsToMs(snapshot.get95thPercentile()));
+            filter.accept("p99_ms", nsToMs(snapshot.get99thPercentile()));
+            filter.accept("p999_ms", nsToMs(snapshot.get999thPercentile()));
+          };
 
   private static final class TimeHistogram extends Histogram implements MetricUtils.SnapshotWriter {
 
     private final Histogram delegate;
-    private final BiConsumer<Snapshot, BiConsumer<String, Object>> writeHistogram;
+    private final BiConsumer<Snapshot, BiConsumer<CharSequence, Object>> writeHistogram;
 
     private TimeHistogram(
-        Histogram delegate, BiConsumer<Snapshot, BiConsumer<String, Object>> writeHistogram) {
+        Histogram delegate, BiConsumer<Snapshot, BiConsumer<CharSequence, Object>> writeHistogram) {
       super(null);
       this.delegate = delegate;
       this.writeHistogram = writeHistogram;
@@ -183,7 +218,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
     @Override
     public void addSnapshot(
         MapWriter.EntryWriter ew, Snapshot snapshot, Predicate<CharSequence> propertyFilter) {
-      BiConsumer<String, Object> filter =
+      BiConsumer<CharSequence, Object> filter =
           (k, v) -> {
             if (propertyFilter.test(k)) {
               ew.putNoEx(k, v);
@@ -286,6 +321,15 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
               // there's no "prior access" to measure from).
               lastAccessToReloadMillis.update(nanosSincePriorAccess);
               h.update(nanosSincePriorAccess);
+              if (reloadFrom != null) {
+                StackTrace st = new StackTrace();
+                if (log.isInfoEnabled()) {
+                  log.info("reloaded; stackHash={}, rid={}", st.hashCode(), rid());
+                }
+                reloadFrom
+                    .computeIfAbsent(st, (s) -> new Histogram(new ExponentiallyDecayingReservoir()))
+                    .update(nanosSincePriorAccess);
+              }
             }
             super.onLoad(nanosSincePriorAccess, loadTime, initial);
           }
@@ -344,6 +388,114 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
             handleRefQueues(indirectTrackedCount, refsCollected);
           }
         };
+  }
+
+  private static String rid() {
+    SolrRequestInfo requestInfo = SolrRequestInfo.getRequestInfo();
+    if (requestInfo == null) {
+      return null;
+    }
+    SolrQueryRequest req = requestInfo.getReq();
+    if (req == null) {
+      return null;
+    }
+    SolrParams params = req.getParams();
+    return params == null ? null : params.get("rid");
+  }
+
+  /**
+   * Special class to allow stack traces to be used as map keys, and to optimize
+   * equals/hashcode/toString for frequent use.
+   */
+  private static final class StackTrace {
+    private final StackTraceElement[] elements;
+    private Integer hashCode;
+    private String toString;
+
+    private StackTrace() {
+      this.elements = Thread.currentThread().getStackTrace();
+    }
+
+    @Override
+    public String toString() {
+      String cached = toString;
+      if (cached != null) {
+        return cached;
+      }
+      StringBuilder sb = new StringBuilder(512 * elements.length);
+      for (StackTraceElement e : elements) {
+        sb.append(e.getClassName())
+            .append('.')
+            .append(e.getMethodName())
+            .append('(')
+            .append(e.getFileName())
+            .append(':')
+            .append(e.getLineNumber())
+            .append(")\n");
+      }
+      sb.append("stackHash=").append(hashCode()); // rough link between metrics display and logging
+      return toString = sb.toString();
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other) return true;
+      if (other == null) return false;
+      StackTraceElement[] a1 = elements;
+      StackTraceElement[] a2 = ((StackTrace) other).elements;
+      if (a1 == a2) {
+        return true;
+      }
+      if (a1 == null || a2 == null) {
+        return false;
+      }
+      int length = a1.length;
+      if (a2.length != length) {
+        return false;
+      }
+
+      for (int i = 0; i < length; i++) {
+        StackTraceElement e1 = a1[i];
+        StackTraceElement e2 = a2[i];
+
+        if (e1 == e2) {
+          continue;
+        }
+        if (e1 == null) {
+          return false;
+        }
+
+        // Figure out whether the two elements are equal
+        if (!e1.getClassName().equals(e2.getClassName())) {
+          return false;
+        }
+        if (!e1.getMethodName().equals(e2.getMethodName())) {
+          return false;
+        }
+        if (e1.getLineNumber() != e2.getLineNumber()) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      return hashCode == null ? (hashCode = hashCode(elements)) : hashCode;
+    }
+
+    private static int hashCode(StackTraceElement[] elements) {
+      int result = 1;
+      for (StackTraceElement e : elements) {
+        result = 31 * result + hashCode(e);
+      }
+      return result;
+    }
+
+    private static int hashCode(StackTraceElement e) {
+      int result = 31 * e.getClassName().hashCode() + e.getMethodName().hashCode();
+      return 31 * result + e.getLineNumber();
+    }
   }
 
   @Override
