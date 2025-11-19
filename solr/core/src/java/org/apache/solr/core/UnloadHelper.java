@@ -21,6 +21,7 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.apache.lucene.index.Unloader;
+import org.apache.lucene.index.UnloadingFieldsProducer;
 import org.apache.lucene.util.InfoStream;
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.MapWriter;
@@ -346,7 +347,11 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
               if (reloadFrom != null && (st = new StackTrace()).nonMerge()) {
                 // we ignore merge-initiated reloads, since there's nothing we can do about these
                 if (log.isInfoEnabled()) {
-                  log.info("reloaded; stackHash={}, rid={}", st.hashCode(), rid());
+                  log.info(
+                      "reloaded; stackHash={}, rid={}, field={}",
+                      st.hashCode(),
+                      rid(),
+                      UnloadingFieldsProducer.FIELD_REQUESTED.get());
                 }
                 reloadFrom
                     .computeIfAbsent(st, (s) -> new Histogram(new ExponentiallyDecayingReservoir()))
