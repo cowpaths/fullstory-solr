@@ -480,11 +480,14 @@ public abstract class CachingDirectoryFactory extends DirectoryFactory {
       duff = null;
     }
     String duffF = duff;
+    int unloadMinSegSize = args.toSolrParams().getInt("unloadMinSegSize", 2_000);
     if (this.cc != null && (cc = this.cc.get()) != null) {
       unloadHelperSupplier =
           (Supplier<Unloader.UnloadHelper>)
               cc.getObjectCache()
-                  .computeIfAbsent("nodeLevelUnloadMetrics", (k) -> new UnloadHelper<>(cc, duffF));
+                  .computeIfAbsent(
+                      "nodeLevelUnloadMetrics",
+                      (k) -> new UnloadHelper<>(cc, duffF, unloadMinSegSize));
     }
     maxWriteMBPerSecFlush = (Double) args.get("maxWriteMBPerSecFlush");
     maxWriteMBPerSecMerge = (Double) args.get("maxWriteMBPerSecMerge");

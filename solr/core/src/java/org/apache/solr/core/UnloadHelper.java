@@ -51,6 +51,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
       "true".equals(System.getProperty("lucene.unload.trackReloads"));
 
   private final String disableUnloadForField;
+  private final int minSegSizeForUnload;
   private final ScheduledExecutorService exec;
   private final SolrMetricsContext solrMetricsContext;
   private final Meter created;
@@ -66,8 +67,9 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   private volatile Object lastMinUnloadSpec;
   private volatile long minUnloadNanos = Unloader.KEEP_ALIVE_NANOS;
 
-  UnloadHelper(CoreContainer cc, String disableUnloadForField) {
+  UnloadHelper(CoreContainer cc, String disableUnloadForField, int minSegSizeForUnload) {
     this.disableUnloadForField = disableUnloadForField;
+    this.minSegSizeForUnload = minSegSizeForUnload;
     ZkController zkController = cc.getZkController();
     if (zkController != null) {
       // NOTE: this is scoped to the CoreContainer lifecycle, so we don't have to worry about
@@ -381,14 +383,22 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
           @Override
           public boolean disableUnload(Class<?> resourceClass, SegmentReadState srs) {
             if (disableUnloadForField == null) {
-              return false;
+              return disableUnload0(srs);
             }
             FieldInfo fi = srs.fieldInfos.fieldInfo(disableUnloadForField);
             if (fi == null) {
-              return false;
+              return disableUnload0(srs);
             }
             String formatName = fi.getAttribute(PerFieldPostingsFormat.PER_FIELD_FORMAT_KEY);
-            return formatName == null || !formatName.startsWith("NoUnload");
+            if (formatName == null || !formatName.startsWith("NoUnload")) {
+              return true;
+            } else {
+              return disableUnload0(srs);
+            }
+          }
+
+          private boolean disableUnload0(SegmentReadState srs) {
+            return srs.segmentInfo.maxDoc() < minSegSizeForUnload;
           }
 
           @Override
