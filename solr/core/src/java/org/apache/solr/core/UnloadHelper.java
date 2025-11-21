@@ -66,6 +66,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
 
   private volatile Object lastMinUnloadSpec;
   private volatile long minUnloadNanos = Unloader.KEEP_ALIVE_NANOS;
+  private volatile int dynamicMinSegSize = -1;
 
   UnloadHelper(CoreContainer cc, String disableUnloadForField, int minSegSizeForUnload) {
     this.disableUnloadForField = disableUnloadForField;
@@ -116,6 +117,35 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
                   minUnloadNanos = newVal;
                 }
                 return false;
+              });
+      zkController
+          .getZkStateReader()
+          .registerClusterPropertiesListener(
+              (p) -> {
+                Object o = null;
+                try {
+                  o = p.get("unloadMinSegSize");
+                  int unloadMinSegSize;
+                  if (o instanceof Number) {
+                    unloadMinSegSize = ((Number) o).intValue();
+                  } else if (o instanceof String) {
+                    unloadMinSegSize = Integer.parseInt((String) o);
+                  } else if (o != null) {
+                    throw new IllegalArgumentException("unrecognized type");
+                  } else {
+                    unloadMinSegSize = -1;
+                  }
+                  if (unloadMinSegSize != dynamicMinSegSize) {
+                    log.info(
+                        "changed dynamic unloadMinSegSize; {} -> {}",
+                        dynamicMinSegSize,
+                        unloadMinSegSize);
+                  }
+                  dynamicMinSegSize = unloadMinSegSize;
+                } catch (Exception e) {
+                  log.warn("problem parsing unloadMinSegSize spec=\"{}\"", o, e);
+                }
+                return true;
               });
     }
     this.exec = cc.getUnloaderExecutor();
@@ -398,7 +428,14 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
           }
 
           private boolean disableUnload0(SegmentReadState srs) {
-            return srs.segmentInfo.maxDoc() < minSegSizeForUnload;
+            int dynamic = dynamicMinSegSize;
+            int threshold;
+            if (dynamic < 0) {
+              threshold = minSegSizeForUnload;
+            } else {
+              threshold = dynamicMinSegSize;
+            }
+            return srs.segmentInfo.maxDoc() < threshold;
           }
 
           @Override
