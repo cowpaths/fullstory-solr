@@ -475,11 +475,16 @@ public abstract class CachingDirectoryFactory extends DirectoryFactory {
   @SuppressWarnings("unchecked")
   public void init(NamedList<?> args) {
     CoreContainer cc;
+    String duff = (String) args.get("disableUnloadForField");
+    if (duff != null && duff.isEmpty()) {
+      duff = null;
+    }
+    String duffF = duff;
     if (this.cc != null && (cc = this.cc.get()) != null) {
       unloadHelperSupplier =
           (Supplier<Unloader.UnloadHelper>)
               cc.getObjectCache()
-                  .computeIfAbsent("nodeLevelUnloadMetrics", (k) -> new UnloadHelper<>(cc));
+                  .computeIfAbsent("nodeLevelUnloadMetrics", (k) -> new UnloadHelper<>(cc, duffF));
     }
     maxWriteMBPerSecFlush = (Double) args.get("maxWriteMBPerSecFlush");
     maxWriteMBPerSecMerge = (Double) args.get("maxWriteMBPerSecMerge");

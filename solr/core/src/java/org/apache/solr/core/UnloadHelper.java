@@ -20,6 +20,9 @@ import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import org.apache.lucene.codecs.perfield.PerFieldPostingsFormat;
+import org.apache.lucene.index.FieldInfo;
+import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.Unloader;
 import org.apache.lucene.index.UnloadingFieldsProducer;
 import org.apache.lucene.util.InfoStream;
@@ -47,6 +50,7 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   private static final boolean TRACK_RELOADS =
       "true".equals(System.getProperty("lucene.unload.trackReloads"));
 
+  private final String disableUnloadForField;
   private final ScheduledExecutorService exec;
   private final SolrMetricsContext solrMetricsContext;
   private final Meter created;
@@ -62,7 +66,8 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
   private volatile Object lastMinUnloadSpec;
   private volatile long minUnloadNanos = Unloader.KEEP_ALIVE_NANOS;
 
-  UnloadHelper(CoreContainer cc) {
+  UnloadHelper(CoreContainer cc, String disableUnloadForField) {
+    this.disableUnloadForField = disableUnloadForField;
     ZkController zkController = cc.getZkController();
     if (zkController != null) {
       // NOTE: this is scoped to the CoreContainer lifecycle, so we don't have to worry about
@@ -371,6 +376,19 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
           public void onClose() {
             closed.mark();
             super.onClose();
+          }
+
+          @Override
+          public boolean disableUnload(Class<?> resourceClass, SegmentReadState srs) {
+            if (disableUnloadForField == null) {
+              return false;
+            }
+            FieldInfo fi = srs.fieldInfos.fieldInfo(disableUnloadForField);
+            if (fi == null) {
+              return false;
+            }
+            String formatName = fi.getAttribute(PerFieldPostingsFormat.PER_FIELD_FORMAT_KEY);
+            return formatName == null || !formatName.startsWith("NoUnload");
           }
 
           @Override
