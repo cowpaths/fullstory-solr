@@ -135,8 +135,12 @@ public class TestDocSetProducer extends SolrTestCaseJ4 {
     for (int i = 100; i > 0; i--) {
       boolean b1 = r.nextBoolean();
       boolean b2 = r.nextBoolean();
-      TestAlwaysDocSet q1 = new TestAlwaysDocSet(getQuery(((NUM_DOCS >> 1) + 1), r), b1);
-      TestAlwaysDocSet q2 = new TestAlwaysDocSet(getQuery(((NUM_DOCS >> 1)), r), b2);
+      Query backingQ1 = getQuery(((NUM_DOCS >> 1) + 1), r);
+      Query backingQ2 = getQuery(((NUM_DOCS >> 1)), r);
+      TestAlwaysDocSet q1 = new TestAlwaysDocSet(backingQ1, b1);
+      TestAlwaysDocSet q2 = new TestAlwaysDocSet(backingQ2, b2);
+      TestAlwaysDocSet q3 = new TestAlwaysDocSet(backingQ1, !b1);
+      TestAlwaysDocSet q4 = new TestAlwaysDocSet(backingQ2, !b2);
       QueryResult result =
           core.withSearcher(
               (s) -> {
@@ -145,20 +149,37 @@ public class TestDocSetProducer extends SolrTestCaseJ4 {
                 cmd.setFilterList(List.of(q1, q2));
                 return s.search(cmd);
               });
+      QueryResult result2 =
+          core.withSearcher(
+              (s) -> {
+                QueryCommand cmd = new QueryCommand();
+                cmd.setQuery(new MatchAllDocsQuery());
+                cmd.setFilterList(List.of(q3, q4));
+                return s.search(cmd);
+              });
       assertTrue(result.getDocList().matches() > 0);
+      assertEquals(result.getDocList().matches(), result2.getDocList().matches()); // parity
       if (b1) {
         assertTrue(q1.calledCreateDocSet);
         assertFalse(q1.calledCreateWeight);
+        assertFalse(q3.calledCreateDocSet);
+        assertTrue(q3.calledCreateWeight);
       } else {
         assertFalse(q1.calledCreateDocSet);
         assertTrue(q1.calledCreateWeight);
+        assertTrue(q3.calledCreateDocSet);
+        assertFalse(q3.calledCreateWeight);
       }
       if (b2) {
         assertTrue(q2.calledCreateDocSet);
         assertFalse(q2.calledCreateWeight);
+        assertFalse(q4.calledCreateDocSet);
+        assertTrue(q4.calledCreateWeight);
       } else {
         assertFalse(q2.calledCreateDocSet);
         assertTrue(q2.calledCreateWeight);
+        assertTrue(q4.calledCreateDocSet);
+        assertFalse(q4.calledCreateWeight);
       }
     }
   }
