@@ -489,10 +489,19 @@ public class MetricUtils {
               ew.putNoEx(prop, histogram.getCount());
             }
             // non-time based values
-            addSnapshot(ew, snapshot, propertyFilter, false);
+            if (histogram instanceof SnapshotWriter) {
+              ((SnapshotWriter) histogram).addSnapshot(ew, snapshot, propertyFilter);
+            } else {
+              addSnapshot(ew, snapshot, propertyFilter, false);
+            }
           };
       consumer.accept(name, writer);
     }
+  }
+
+  public interface SnapshotWriter {
+    void addSnapshot(
+        MapWriter.EntryWriter ew, Snapshot snapshot, Predicate<CharSequence> propertyFilter);
   }
 
   // optionally convert ns to ms
@@ -567,7 +576,11 @@ public class MetricUtils {
             filter.accept("15minRate", timer.getFifteenMinuteRate());
             if (!skipHistograms) {
               // time-based values in nanoseconds
-              addSnapshot(ew, timer.getSnapshot(), propertyFilter, true);
+              if (timer instanceof SnapshotWriter) {
+                ((SnapshotWriter) timer).addSnapshot(ew, timer.getSnapshot(), propertyFilter);
+              } else {
+                addSnapshot(ew, timer.getSnapshot(), propertyFilter, true);
+              }
             }
           };
       if (writer._size() > 0) {

@@ -36,4 +36,4 @@ jobs:
     - name: Initialize gradle settings
       run: ./gradlew localSettings
     - name: Test Solr
-      run: ./gradlew test -Ptests.directory=org.apache.solr.storage.TeeDirectory
+      run: ./gradlew test -Ptests.directory=org.apache.solr.storage.TeeDirectory -Plucene.unload.ttl=1 -Plucene.unload.initial=0

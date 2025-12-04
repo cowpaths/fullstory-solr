@@ -37,8 +37,10 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.function.Supplier;
 import org.apache.commons.io.file.PathUtils;
 import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.Unloader;
 import org.apache.lucene.store.BaseDirectory;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
@@ -49,6 +51,7 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.Lock;
 import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.MMapDirectory;
+import org.apache.lucene.store.UnloaderCoordinationPoint;
 import org.apache.lucene.util.IOUtils;
 import org.apache.solr.common.util.CollectionUtil;
 import org.apache.solr.core.DirectoryFactory;
@@ -56,7 +59,8 @@ import org.apache.solr.util.IOFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDiskSizeDirectory {
+public class TeeDirectory extends BaseDirectory
+    implements DirectoryFactory.OnDiskSizeDirectory, UnloaderCoordinationPoint {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -129,14 +133,34 @@ public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDi
         List<String> buildAssociatedPaths = new ArrayList<>(3);
         Map.Entry<Directory, List<String>> persistentEntry = persistentFunction.apply(access);
         this.persistent = (CompressingDirectory) persistentEntry.getKey();
+        UnloaderCoordinationPoint.setUnloadHelperSupplier(this.persistent, unloadHelperSupplier);
         Path persistentFSPath = ((FSDirectory) persistent).getDirectory();
         buildAssociatedPaths.addAll(persistentEntry.getValue());
         Map.Entry<String, Directory> accessEntry = accessFunction.apply(null);
         this.access = accessEntry.getValue();
+        UnloaderCoordinationPoint.setUnloadHelperSupplier(this.access, unloadHelperSupplier);
         buildAssociatedPaths.add(accessEntry.getKey());
         associatedPaths = buildAssociatedPaths;
       }
     }
+  }
+
+  private volatile Supplier<Unloader.UnloadHelper> unloadHelperSupplier = null;
+
+  @Override
+  public void setUnloadHelperSupplier(Supplier<Unloader.UnloadHelper> supplier) {
+    if (Unloader.EXECUTOR_PER_DIRECTORY) {
+      throw new IllegalStateException();
+    }
+    this.unloadHelperSupplier = supplier;
+    UnloaderCoordinationPoint.setUnloadHelperSupplier(this.persistent, supplier);
+    UnloaderCoordinationPoint.setUnloadHelperSupplier(this.access, supplier);
+  }
+
+  @Override
+  public Unloader.UnloadHelper getUnloadHelper() {
+    Supplier<Unloader.UnloadHelper> supplier = this.unloadHelperSupplier;
+    return supplier == null ? null : supplier.get();
   }
 
   private static final LockFactory TEE_LOCK_FACTORY =

@@ -54,6 +54,8 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -187,6 +189,13 @@ public class CoreContainer {
 
   public Executor getCollectorExecutor() {
     return collectorExecutor;
+  }
+
+  private final ScheduledExecutorService unloaderExecutor =
+      Executors.newSingleThreadScheduledExecutor(new SolrNamedThreadFactory("unloaderExecutor"));
+
+  public ScheduledExecutorService getUnloaderExecutor() {
+    return unloaderExecutor;
   }
 
   public static class CoreLoadFailure {
@@ -1279,6 +1288,7 @@ public class CoreContainer {
   /** Close / shut down. Only called by {@link org.apache.solr.servlet.CoreContainerProvider}. */
   public void shutdown() {
 
+    unloaderExecutor.shutdownNow();
     ZkController zkController = getZkController();
     if (zkController != null) {
       if (distributedCollectionCommandRunner.isPresent()) {
@@ -1296,6 +1306,7 @@ public class CoreContainer {
 
     ExecutorUtil.shutdownAndAwaitTermination(coreContainerAsyncTaskExecutor);
     ExecutorUtil.shutdownAndAwaitTermination(collectorExecutor);
+    ExecutorUtil.awaitTermination(unloaderExecutor);
     ExecutorService customThreadPool =
         ExecutorUtil.newMDCAwareCachedThreadPool(new SolrNamedThreadFactory("closeThreadPool"));
 
