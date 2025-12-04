@@ -478,14 +478,14 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
       } else {
         final Weight backingWeight =
             backing.createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, 1f);
-        final long[][] staleBits;
+        final long[] staleBits;
         if (stale instanceof BitDocSet) {
           staleBits = ((BitDocSet) stale).getBits().getBits();
         } else {
           staleBits = null;
         }
         int size = 0;
-        FixedBitSet.BitsBuilder bits = new FixedBitSet.BitsBuilder(maxDoc);
+        long[] bits = new long[FixedBitSet.bits2words(maxDoc)];
         for (LeafReaderContext context : searcher.getLeafContexts()) {
           final Bits liveDocs = context.reader().getLiveDocs();
           final int newDocBase = context.docBase;
@@ -502,7 +502,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
               while ((doc = iter.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
                 if (liveDocs == null || liveDocs.get(doc)) {
                   int globalId = newDocBase + doc;
-                  bits.or(globalId >> 6, 1L << globalId);
+                  bits[globalId >> 6] |= (1L << globalId);
                   size++;
                 }
               }
@@ -512,7 +512,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
               while ((doc = iter.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
                 if (tpi.matches() && (liveDocs == null || liveDocs.get(doc))) {
                   int globalId = newDocBase + doc;
-                  bits.or(globalId >> 6, 1L << globalId);
+                  bits[globalId >> 6] |= (1L << globalId);
                   size++;
                 }
               }
@@ -562,12 +562,12 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
               while ((doc = disi.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
                 if (liveDocs == null || liveDocs.get(doc)) {
                   int globalId = newDocBase + doc;
-                  bits.or(globalId >> 6, 1L << globalId);
+                  bits[globalId >> 6] |= (1L << globalId);
                   size++;
                 }
               }
             } else {
-              copyBitRange(staleBits, docBase, bits.bits, newDocBase, segment.maxDoc);
+              copyBitRange(staleBits, docBase, bits, newDocBase, segment.maxDoc);
             }
           }
         }
