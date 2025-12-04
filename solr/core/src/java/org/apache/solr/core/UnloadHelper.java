@@ -421,6 +421,12 @@ final class UnloadHelper<T extends Unloader.UnloadHelper>
             }
             String formatName = fi.getAttribute(PerFieldPostingsFormat.PER_FIELD_FORMAT_KEY);
             if (formatName == null || !formatName.startsWith("NoUnload")) {
+              // This is a bit counterintuitive. `SegmentReadState` reports `FieldInfo` for
+              // all fields from all formats; at this point we don't know the format associated
+              // with the resource we're considering for unload eligibility, so we assume that
+              // unless the format is explicitly set to `NoUnload*` for the relevant field, that
+              // it is bundled in with the rest of the formats, and we disable all unloading
+              // for this segment.
               return true;
             } else {
               return disableUnload0(srs);
