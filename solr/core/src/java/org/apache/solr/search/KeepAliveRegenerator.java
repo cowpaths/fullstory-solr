@@ -21,7 +21,6 @@ import static org.apache.solr.search.OrdMapRegenerator.getRegenKeepAliveNanos;
 
 import java.io.IOException;
 import java.util.AbstractMap;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -523,8 +522,11 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
             final DocIdSetIterator disi;
             if (staleBits == null) {
               assert stale instanceof SortedIntDocSet;
-              final int[] docs = ((SortedIntDocSet) stale).getDocs();
-              final int first = Arrays.binarySearch(docs, docBase);
+              SortedIntDocSet staleSorted = (SortedIntDocSet) stale;
+              int capacity = staleSorted.capacity;
+              final int[][] docs = staleSorted.getDocs();
+              final int first =
+                  SortedIntDocSet.binarySearch(docs, 0, staleSorted.capacity, docBase);
               disi =
                   new DocIdSetIterator() {
                     final int limit = segment.maxDoc + docBase;
@@ -538,7 +540,11 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
 
                     @Override
                     public int nextDoc() {
-                      if (++idx >= docs.length || (id = docs[idx]) >= limit) {
+                      if (++idx >= capacity
+                          || (id =
+                                  docs[idx >> SortedIntDocSet.WORDS_SHIFT][
+                                      idx & SortedIntDocSet.ARR_MASK])
+                              >= limit) {
                         return id = NO_MORE_DOCS;
                       } else {
                         return id - docBase;
@@ -605,8 +611,11 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
             final int docBase = segment.docBase;
             final DocIdSetIterator disi;
             if (stale instanceof SortedIntDocSet) {
-              final int[] docs = ((SortedIntDocSet) stale).getDocs();
-              final int first = Arrays.binarySearch(docs, docBase);
+              SortedIntDocSet staleSorted = (SortedIntDocSet) stale;
+              int capacity = staleSorted.capacity;
+              final int[][] docs = staleSorted.getDocs();
+              final int first =
+                  SortedIntDocSet.binarySearch(docs, 0, staleSorted.capacity, docBase);
               disi =
                   new DocIdSetIterator() {
                     final int limit = segment.maxDoc + docBase;
@@ -620,7 +629,11 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
 
                     @Override
                     public int nextDoc() {
-                      if (++idx >= docs.length || (id = docs[idx]) >= limit) {
+                      if (++idx >= capacity
+                          || (id =
+                                  docs[idx >> SortedIntDocSet.WORDS_SHIFT][
+                                      idx & SortedIntDocSet.ARR_MASK])
+                              >= limit) {
                         return id = NO_MORE_DOCS;
                       } else {
                         return id - docBase;
