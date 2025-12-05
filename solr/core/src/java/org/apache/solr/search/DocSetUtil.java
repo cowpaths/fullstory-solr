@@ -344,63 +344,89 @@ public class DocSetUtil {
     return (v << numBits) >>> numBits;
   }
 
+  private static final int BITS_SHIFT = FixedBitSet.WORDS_SHIFT + 6; // per long[] and per long
+  private static final int BITS_PER_ARRAY = 1 << BITS_SHIFT;
+  private static final int BITS_MASK = BITS_PER_ARRAY - 1;
+
+  /**
+   * Analogous to {@link #copyBitRange(long[], int, long[], int, int)}, but takes 2-dimensional
+   * {@code long[]} as input (formatted according to boundaries defined by partitioning scheme of
+   * {@link FixedBitSet#WORDS_SHIFT}.
+   */
   public static void copyBitRange(
       final long[][] src, final int srcIdx, final long[][] dest, final int destIdx, final int len) {
     if (len == 0) return;
-    int srcOuterOffset = srcIdx >> FixedBitSet.WORDS_SHIFT;
-    int destOuterOffset = destIdx >> FixedBitSet.WORDS_SHIFT;
-    int srcInnerOffset = srcIdx & FixedBitSet.BLOCK_MASK;
-    int destInnerOffset = destIdx & FixedBitSet.BLOCK_MASK;
+    int srcOuterOffset = srcIdx >> BITS_SHIFT;
+    final int destOuterOffset = destIdx >> BITS_SHIFT;
+    int srcInnerOffset = srcIdx & BITS_MASK;
+    int destInnerOffset = destIdx & BITS_MASK;
     final int len1;
     final int len2;
     long[] srcArr1;
     long[] srcArr2;
 
     // the array offset of the word for the last "bit" element.
-    final int destOuterLimit = (destIdx + len - 1) >> 6;
+    final int destOuterLimit = (destIdx + len - 1) >> BITS_SHIFT;
 
     if (srcInnerOffset <= destInnerOffset) {
-      len2 = destInnerOffset - srcInnerOffset;
-      len1 = FixedBitSet.MAX_BLOCK_SIZE - len2;
+      len1 = destInnerOffset - srcInnerOffset;
+      len2 = BITS_PER_ARRAY - len1;
       srcArr1 = null;
       srcArr2 = src[srcOuterOffset];
     } else {
-      len1 = srcInnerOffset - destInnerOffset;
-      len2 = FixedBitSet.MAX_BLOCK_SIZE - len1;
+      len2 = srcInnerOffset - destInnerOffset;
+      len1 = BITS_PER_ARRAY - len2;
       srcArr1 = src[srcOuterOffset]; // clear out-of-scope bits
       srcArr2 = ++srcOuterOffset < src.length ? src[srcOuterOffset] : null;
     }
-    // NOTE: we have to special-case the `leftShift=0` case because right-shift over too-large
-    // values is defined as `shift % Long.SIZE`. i.e., `N >>> 64` does _not_ clear all bits,
-    // but rather is equivalent to `N >>> 0` (identity).
-    long incoming = (len2 == 0 ? 0 : (srcArr1 >>> len1)) | (srcArr2 << len2);
-    long extant = clearHigh(dest[destOuterOffset], FixedBitSet.MAX_BLOCK_SIZE - destInnerOffset);
-    if (destOuterOffset == destOuterLimit) {
-      // very short `len` -- special case
-      int remainder = ((destIdx + len - 1) & FixedBitSet.BLOCK_MASK) + 1;
-      extant |= clearLow(dest[destOuterOffset], remainder);
-      incoming = clearHigh(incoming, FixedBitSet.MAX_BLOCK_SIZE - remainder);
-      dest[destOuterOffset] = extant | incoming;
-      return;
-    }
     // special handling for the first word, which may be partial
-    dest[destOuterOffset] = extant | incoming;
+    long[] destArr = dest[destOuterOffset];
+    if (srcArr1 == null) {
+      copyBitRange(
+          srcArr2,
+          srcInnerOffset,
+          destArr,
+          destInnerOffset,
+          Math.min(len, BITS_PER_ARRAY - destInnerOffset));
+    } else if (srcArr2 == null) {
+      copyBitRange(
+          srcArr1,
+          srcInnerOffset,
+          destArr,
+          destInnerOffset,
+          Math.min(len, BITS_PER_ARRAY - srcInnerOffset));
+    } else {
+      int initialLen = BITS_PER_ARRAY - srcInnerOffset;
+      if (len <= initialLen) {
+        copyBitRange(srcArr1, srcInnerOffset, destArr, destInnerOffset, len);
+      } else {
+        copyBitRange(srcArr1, srcInnerOffset, destArr, destInnerOffset, initialLen);
+        copyBitRange(
+            srcArr2, 0, destArr, destInnerOffset + initialLen, Math.min(len2, len - initialLen));
+      }
+    }
+    if (destOuterOffset == destOuterLimit) return;
 
     for (int i = destOuterOffset + 1; i < destOuterLimit; i++) {
       // inner words are guaranteed to not be partial, so this can be very simple
       srcArr1 = srcArr2;
       srcArr2 = src[++srcOuterOffset];
-      dest[i] = (len2 == 0 ? 0 : (srcArr1 >>> len1)) | (srcArr2 << len2);
+      destArr = dest[i];
+      copyBitRange(srcArr1, len2, destArr, 0, len1);
+      copyBitRange(srcArr2, 0, destArr, len1, len2);
     }
     srcArr1 = srcArr2;
-    srcArr2 = ++srcOuterOffset < src.length ? src[srcOuterOffset] : 0;
+    srcArr2 = ++srcOuterOffset < src.length ? src[srcOuterOffset] : null;
 
     // special handling for the last word, which may be partial
-    int remainder = ((destIdx + len - 1) & 63) + 1;
-    extant = clearLow(dest[destOuterLimit], remainder);
-    incoming = (len2 == 0 ? 0 : (srcArr1 >>> len1)) | (srcArr2 << len2);
-    incoming = clearHigh(incoming, Long.SIZE - remainder);
-    dest[destOuterLimit] = extant | incoming;
+    int remainder = ((destIdx + len - 1) & BITS_MASK) + 1;
+    destArr = dest[destOuterLimit];
+    if (srcArr2 == null || remainder <= len1) {
+      copyBitRange(srcArr1, len2, destArr, 0, remainder);
+    } else {
+      copyBitRange(srcArr1, len2, destArr, 0, len1);
+      copyBitRange(srcArr2, 0, destArr, len1, remainder - len1);
+    }
   }
 
   /**
