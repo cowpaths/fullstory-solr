@@ -115,7 +115,7 @@ public final class LSBRadixSorter2D {
     }
 
     if (array == buf) {
-      System.arraycopy(arr, 0, array, 0, len);
+      SortedIntDocSet.arraycopy(arr, 0, array, 0, len);
     }
   }
 }
