@@ -484,7 +484,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
           staleBits = null;
         }
         int size = 0;
-        FixedBitSet.BitsBuilder bits = new FixedBitSet.BitsBuilder(maxDoc);
+        FixedBitSet.BitsBuilder bits = new FixedBitSet.BitsBuilder(FixedBitSet.bits2words(maxDoc));
         for (LeafReaderContext context : searcher.getLeafContexts()) {
           final Bits liveDocs = context.reader().getLiveDocs();
           final int newDocBase = context.docBase;
