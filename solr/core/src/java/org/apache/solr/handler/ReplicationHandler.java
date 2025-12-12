@@ -1650,7 +1650,7 @@ public class ReplicationHandler extends RequestHandlerBase
             rateLimiter.pause(maxBytesBeforePause);
             maxBytesBeforePause = 0;
           }
-          if (read != buf.length) {
+          if (read != buf.length || filelen <= offset + read) { //all data have been read
             writeNothingAndFlush();
             // we close because DeflaterOutputStream requires a close call, but  the request
             // outputstream is protected
