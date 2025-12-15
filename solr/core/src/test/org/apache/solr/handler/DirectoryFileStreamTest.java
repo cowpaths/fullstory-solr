@@ -26,6 +26,8 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.util.Random;
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.IndexOutput;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.core.DirectoryFactory;
@@ -34,14 +36,12 @@ import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.response.SolrQueryResponse;
 import org.junit.BeforeClass;
 import org.junit.Test;
-import org.apache.lucene.store.Directory;
-import org.apache.lucene.store.IndexOutput;
 
 /**
  * Tests the replication file stream protocol emitted by DirectoryFileStream.write(...).
- * <p>
- * Validates that when the file size is an exact multiple of PACKET_SZ and checksum is enabled, the
- * stream ends with a single 0-length marker and does not include a checksum for the EOF marker.
+ *
+ * <p>Validates that when the file size is an exact multiple of PACKET_SZ and checksum is enabled,
+ * the stream ends with a single 0-length marker and does not include a checksum for the EOF marker.
  */
 public class DirectoryFileStreamTest extends SolrTestCaseJ4 {
 
@@ -52,8 +52,8 @@ public class DirectoryFileStreamTest extends SolrTestCaseJ4 {
 
   @Test
   public void testDirectoryFileHandling() throws Exception {
-    testWithPackets(2); //2 whole packets
-    testWithPackets(2.5); //non-whole packets
+    testWithPackets(2); // 2 whole packets
+    testWithPackets(2.5); // non-whole packets
   }
 
   public void testWithPackets(double packetCount) throws Exception {
@@ -62,7 +62,7 @@ public class DirectoryFileStreamTest extends SolrTestCaseJ4 {
 
     // Create a file in the active index directory with size that is an exact multiple of PACKET_SZ
     final String fileName = "replication_stream_exact_multiple-" + packetCount + ".bin";
-    final int fileSize = (int)(packetCount * packetSize);
+    final int fileSize = (int) (packetCount * packetSize);
 
     final byte[] content = new byte[fileSize];
     new Random(17L).nextBytes(content);
@@ -75,15 +75,7 @@ public class DirectoryFileStreamTest extends SolrTestCaseJ4 {
 
     // Build a replication request to stream this file with checksum enabled
     final SolrQueryRequest req =
-        req(
-            CommonParams.WT,
-            FILE_STREAM,
-            COMMAND,
-            CMD_GET_FILE,
-            FILE,
-            fileName,
-            CHECKSUM,
-            "true");
+        req(CommonParams.WT, FILE_STREAM, COMMAND, CMD_GET_FILE, FILE, fileName, CHECKSUM, "true");
     final SolrQueryResponse rsp = new SolrQueryResponse();
 
     final ReplicationHandler handler =
@@ -94,8 +86,7 @@ public class DirectoryFileStreamTest extends SolrTestCaseJ4 {
 
     final Object writerObj = rsp.getValues().get(FILE_STREAM);
     assertNotNull("Response should contain filestream writer", writerObj);
-    assertTrue(
-        "filestream must be a RawWriter", writerObj instanceof SolrCore.RawWriter);
+    assertTrue("filestream must be a RawWriter", writerObj instanceof SolrCore.RawWriter);
 
     final ByteArrayOutputStream bos = new ByteArrayOutputStream();
     ((SolrCore.RawWriter) writerObj).write(bos);
@@ -126,8 +117,6 @@ public class DirectoryFileStreamTest extends SolrTestCaseJ4 {
     assertEquals("No trailing bytes expected after EOF marker", 0, dis.available());
     assertArrayEquals("Downloaded content must match original", content, downloadedContent);
 
-
     df.release(dir);
   }
 }
-
