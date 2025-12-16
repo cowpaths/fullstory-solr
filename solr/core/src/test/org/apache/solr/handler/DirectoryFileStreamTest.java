@@ -65,7 +65,7 @@ public class DirectoryFileStreamTest extends SolrTestCaseJ4 {
     final int fileSize = (int) (packetCount * packetSize);
 
     final byte[] content = new byte[fileSize];
-    new Random(17L).nextBytes(content);
+    random().nextBytes(content);
 
     final DirectoryFactory df = core.getDirectoryFactory();
     final Directory dir = df.get(core.getIndexDir(), DirectoryFactory.DirContext.DEFAULT, null);

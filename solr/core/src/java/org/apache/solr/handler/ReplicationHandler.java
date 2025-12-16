@@ -1650,7 +1650,10 @@ public class ReplicationHandler extends RequestHandlerBase
             rateLimiter.pause(maxBytesBeforePause);
             maxBytesBeforePause = 0;
           }
-          if (read != buf.length || filelen <= offset + read) { // all data have been read
+          // TODO: adding 2nd condition to catch edge case of file size i * 1024 * 1024, which i is integer.
+          // might want to consider removing the first condition later on as the 2nd condition is supposed to catch
+          // all cases
+          if (read != buf.length || filelen <= offset + read) {
             writeNothingAndFlush();
             // we close because DeflaterOutputStream requires a close call, but  the request
             // outputstream is protected
