@@ -1650,8 +1650,10 @@ public class ReplicationHandler extends RequestHandlerBase
             rateLimiter.pause(maxBytesBeforePause);
             maxBytesBeforePause = 0;
           }
-          // TODO: adding 2nd condition to catch edge case of file size i * 1024 * 1024, which i is integer.
-          // might want to consider removing the first condition later on as the 2nd condition is supposed to catch
+          // TODO: adding 2nd condition to catch edge case of file size i * 1024 * 1024,
+          // which i is integer.
+          // Might want to consider removing the first condition later on as the 2nd condition is
+          // supposed to catch
           // all cases
           if (read != buf.length || filelen <= offset + read) {
             writeNothingAndFlush();

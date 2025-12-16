@@ -25,7 +25,6 @@ import static org.apache.solr.handler.ReplicationHandler.FILE_STREAM;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
-import java.util.Random;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.solr.SolrTestCaseJ4;
