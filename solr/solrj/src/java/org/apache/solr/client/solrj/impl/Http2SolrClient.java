@@ -895,15 +895,15 @@ public class Http2SolrClient extends HttpSolrClientBase {
       // This prevents double-release when both onFailure and completeListener are called.
       // Using WeakHashMap so entries are automatically removed when Request objects are GC'd.
       // No manual cleanup needed - entries are removed automatically when Requests are no longer referenced.
-      final java.util.Map<Request, Boolean> completedRequestsMap = new java.util.WeakHashMap<>();
-      final java.util.Set<Request> completedRequests =
-          java.util.Collections.synchronizedSet(completedRequestsMap.keySet());
+      final java.util.Map<Request, Boolean> completedRequests =
+          java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
       completeListener =
           result -> {
             Request request = result != null ? result.getRequest() : null;
             // Only release once per request, even if called from both
             // normal completion and onFailure (e.g., session closed)
-            if (request != null && completedRequests.add(request)) {
+            // Use putIfAbsent to atomically check and add - returns null if key was absent
+            if (request != null && completedRequests.putIfAbsent(request, Boolean.TRUE) == null) {
               phaser.arriveAndDeregister();
               available.release();
             }
