@@ -218,7 +218,7 @@ public class HttpShardHandlerFactory extends ShardHandlerFactory
               long delayNanos = System.nanoTime() - start;
               if (delayNanos > DELAY_WARN_THRESHOLD) {
                 long millis = TimeUnit.MILLISECONDS.convert(delayNanos, TimeUnit.NANOSECONDS);
-                log.info("Remote shard request delayed by {} milliseconds", millis);
+                log.info("Remote shard request {} delayed by {} milliseconds", request, millis);
                 if (delayedRequests != null) {
                   delayedRequests.update(millis);
                 }

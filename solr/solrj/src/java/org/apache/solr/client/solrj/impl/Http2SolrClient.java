@@ -454,7 +454,8 @@ public class Http2SolrClient extends HttpSolrClientBase {
       future.completeExceptionally(e);
       return future;
     }
-    mrrv.request
+    final Request request = mrrv.request;
+    request
         .onRequestQueued(asyncTracker.queuedListener)
         .onComplete(asyncTracker.completeListener)
         .send(
@@ -489,6 +490,15 @@ public class Http2SolrClient extends HttpSolrClientBase {
               @Override
               public void onFailure(Response response, Throwable failure) {
                 super.onFailure(response, failure);
+                // When transport failures occur (e.g., "session closed"), onFailure is called
+                // but completeListener may not be invoked. Ensure semaphore and phaser
+                // are released. The completeListener is idempotent and will only release once.
+                Request failedRequest = response != null ? response.getRequest() : request;
+                if (failedRequest != null) {
+                  // Create a Result object for the idempotent completeListener
+                  asyncTracker.completeListener.onComplete(
+                      new Result(failedRequest, response, failure));
+                }
                 future.completeExceptionally(
                     new SolrServerException(failure.getMessage(), failure));
               }
@@ -871,7 +881,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
     AsyncTracker() {
       // TODO: what about shared instances?
       phaser = new Phaser(1);
-      available = new Semaphore(MAX_OUTSTANDING_REQUESTS, false);
+      available = new Semaphore(MAX_OUTSTANDING_REQUESTS, true);
       queuedListener =
           request -> {
             phaser.register();
@@ -881,10 +891,23 @@ public class Http2SolrClient extends HttpSolrClientBase {
 
             }
           };
+      // Track completed requests to make release idempotent
+      // This prevents double-release when both onFailure and completeListener are called.
+      // Using WeakHashMap so entries are automatically removed when Request objects are GC'd.
+      // No manual cleanup needed - entries are removed automatically when Requests are no longer
+      // referenced.
+      final java.util.Map<Request, Boolean> completedRequests =
+          java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
       completeListener =
           result -> {
-            phaser.arriveAndDeregister();
-            available.release();
+            Request request = result != null ? result.getRequest() : null;
+            // Only release once per request, even if called from both
+            // normal completion and onFailure (e.g., session closed)
+            // Use putIfAbsent to atomically check and add - returns null if key was absent
+            if (request != null && completedRequests.putIfAbsent(request, Boolean.TRUE) == null) {
+              phaser.arriveAndDeregister();
+              available.release();
+            }
           };
     }
 
