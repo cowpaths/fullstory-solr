@@ -894,7 +894,8 @@ public class Http2SolrClient extends HttpSolrClientBase {
       // Track completed requests to make release idempotent
       // This prevents double-release when both onFailure and completeListener are called.
       // Using WeakHashMap so entries are automatically removed when Request objects are GC'd.
-      // No manual cleanup needed - entries are removed automatically when Requests are no longer referenced.
+      // No manual cleanup needed - entries are removed automatically when Requests are no longer
+      // referenced.
       final java.util.Map<Request, Boolean> completedRequests =
           java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
       completeListener =
