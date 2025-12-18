@@ -22,6 +22,7 @@ import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
+import org.apache.lucene.util.LSBRadixSorter;
 import org.apache.lucene.util.packed.PackedInts;
 
 /**
@@ -34,9 +35,7 @@ public final class DocSetBuilder {
   private final int maxDoc;
   private final int threshold;
 
-  private int capacity = -1;
-  private int[][] buffer;
-
+  private int[] buffer;
   private int pos;
 
   private FixedBitSet bitSet;
@@ -48,8 +47,7 @@ public final class DocSetBuilder {
     if (costEst > threshold) {
       bitSet = new FixedBitSet(maxDoc);
     } else {
-      this.capacity = Math.max((int) costEst, 1);
-      this.buffer = SortedIntDocSet.allocate(this.capacity);
+      this.buffer = new int[Math.max((int) costEst, 1)];
     }
   }
 
@@ -57,24 +55,24 @@ public final class DocSetBuilder {
     assert bitSet == null;
     bitSet = new FixedBitSet(maxDoc);
     for (int i = 0; i < pos; ++i) {
-      bitSet.set(buffer[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK]);
+      bitSet.set(buffer[i]);
     }
-    this.capacity = -1;
     this.buffer = null;
     this.pos = 0;
   }
 
   private void growBuffer(int minSize) {
-    if (minSize < capacity) return;
+    if (minSize < buffer.length) return;
 
-    int newSize = capacity;
+    int newSize = buffer.length;
     while (newSize < minSize) {
       newSize = newSize << 1;
     }
     newSize = Math.min(newSize, threshold);
 
-    this.capacity = newSize;
-    buffer = SortedIntDocSet.grow(buffer, pos, newSize);
+    int[] newBuffer = new int[newSize];
+    System.arraycopy(buffer, 0, newBuffer, 0, pos);
+    buffer = newBuffer;
   }
 
   public void add(DocIdSetIterator iter, int base) throws IOException {
@@ -84,17 +82,16 @@ public final class DocSetBuilder {
       add(bitSet, iter, base);
     } else {
       while (true) {
-        for (int i = pos; i < capacity; ++i) {
+        for (int i = pos; i < buffer.length; ++i) {
           final int doc = iter.nextDoc();
           if (doc == DocIdSetIterator.NO_MORE_DOCS) {
             pos = i; // update pos
             return;
           }
-          buffer[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK] =
-              doc + base; // using the loop counter may help with removal of bounds checking
+          buffer[i] = doc + base; // using the loop counter may help with removal of bounds checking
         }
 
-        pos = capacity; // update pos
+        pos = buffer.length; // update pos
         if (pos + 1 >= threshold) {
           break;
         }
@@ -144,7 +141,7 @@ public final class DocSetBuilder {
     if (bitSet != null) {
       bitSet.set(doc);
     } else {
-      if (pos >= capacity) {
+      if (pos >= buffer.length) {
         if (pos + 1 >= threshold) {
           upgradeToBitSet();
           bitSet.set(doc);
@@ -152,18 +149,18 @@ public final class DocSetBuilder {
         }
         growBuffer(pos + 1);
       }
-      buffer[pos >> SortedIntDocSet.WORDS_SHIFT][pos++ & SortedIntDocSet.ARR_MASK] = doc;
+      buffer[pos++] = doc;
     }
   }
 
-  private static int dedup(int[][] arr, int length, FixedBitSet acceptDocs) {
+  private static int dedup(int[] arr, int length, FixedBitSet acceptDocs) {
     int pos = 0;
     int previous = -1;
     for (int i = 0; i < length; ++i) {
-      final int value = arr[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK];
+      final int value = arr[i];
       // assert value >= previous;
       if (value != previous && (acceptDocs == null || acceptDocs.get(value))) {
-        arr[pos >> SortedIntDocSet.WORDS_SHIFT][pos++ & SortedIntDocSet.ARR_MASK] = value;
+        arr[pos++] = value;
         previous = value;
       }
     }
@@ -179,7 +176,7 @@ public final class DocSetBuilder {
       // TODO - if this set will be cached, should we make it smaller if it's below
       // DocSetUtil.smallSetSize?
     } else {
-      LSBRadixSorter2D sorter = new LSBRadixSorter2D();
+      LSBRadixSorter sorter = new LSBRadixSorter();
       sorter.sort(PackedInts.bitsRequired(maxDoc - 1), buffer, pos);
       final int l = dedup(buffer, pos, filter);
       assert l <= pos;

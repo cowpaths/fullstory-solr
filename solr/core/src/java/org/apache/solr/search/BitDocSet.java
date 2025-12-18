@@ -16,7 +16,6 @@
  */
 package org.apache.solr.search;
 
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import org.apache.lucene.index.LeafReaderContext;
@@ -329,8 +328,7 @@ public class BitDocSet extends DocSet {
 
   @Override
   public long ramBytesUsed() {
-    return BASE_RAM_BYTES_USED
-        + (Arrays.stream(bits.getBits()).mapToLong((a) -> a.length).sum() << 3);
+    return BASE_RAM_BYTES_USED + ((long) bits.getBits().length << 3);
   }
 
   @Override

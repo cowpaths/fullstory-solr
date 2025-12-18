@@ -1414,11 +1414,10 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   private DocSet getResult(DocsEnumState deState, int largestPossible) throws IOException {
     int smallSetSize = DocSetUtil.smallSetSize(maxDoc());
     int scratchSize = Math.min(smallSetSize, largestPossible);
-    if (deState.scratch == null || SortedIntDocSet.getCapacity(deState.scratch) < scratchSize)
-      deState.scratch = SortedIntDocSet.allocate(scratchSize);
+    if (deState.scratch == null || deState.scratch.length < scratchSize)
+      deState.scratch = new int[scratchSize];
 
-    final int[][] docs = deState.scratch;
-    final int docsCapacity = SortedIntDocSet.getCapacity(docs);
+    final int[] docs = deState.scratch;
     int upto = 0;
     int bitsSet = 0;
     FixedBitSet fbs = null;
@@ -1438,7 +1437,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         int base = sub.slice.start;
         int docid;
 
-        if (largestPossible > docsCapacity) {
+        if (largestPossible > docs.length) {
           if (fbs == null) fbs = new FixedBitSet(maxDoc());
           while ((docid = sub.postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
             fbs.set(docid + base);
@@ -1446,14 +1445,13 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
           }
         } else {
           while ((docid = sub.postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-            docs[upto >> SortedIntDocSet.WORDS_SHIFT][upto++ & SortedIntDocSet.ARR_MASK] =
-                docid + base;
+            docs[upto++] = docid + base;
           }
         }
       }
     } else {
       int docid;
-      if (largestPossible > docsCapacity) {
+      if (largestPossible > docs.length) {
         fbs = new FixedBitSet(maxDoc());
         while ((docid = postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
           fbs.set(docid);
@@ -1461,7 +1459,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         }
       } else {
         while ((docid = postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-          docs[upto >> SortedIntDocSet.WORDS_SHIFT][upto++ & SortedIntDocSet.ARR_MASK] = docid;
+          docs[upto++] = docid;
         }
       }
     }
@@ -1469,13 +1467,12 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     DocSet result;
     if (fbs != null) {
       for (int i = 0; i < upto; i++) {
-        fbs.set(docs[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK]);
+        fbs.set(docs[i]);
       }
       bitsSet += upto;
       result = new BitDocSet(fbs, bitsSet);
     } else {
-      result =
-          upto == 0 ? DocSet.empty() : new SortedIntDocSet(SortedIntDocSet.shrinkClone(docs, upto));
+      result = upto == 0 ? DocSet.empty() : new SortedIntDocSet(Arrays.copyOf(docs, upto));
     }
     return result;
   }
@@ -2576,7 +2573,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
     public int minSetSizeCached;
 
-    public int[][] scratch;
+    public int[] scratch;
   }
 
   /**
