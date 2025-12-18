@@ -36,7 +36,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Phaser;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
@@ -863,28 +862,20 @@ public class Http2SolrClient extends HttpSolrClientBase {
 
     // wait for async requests
     private final Phaser phaser;
-    // maximum outstanding requests left
-    private final Semaphore available;
     private final Request.QueuedListener queuedListener;
     private final Response.CompleteListener completeListener;
 
     AsyncTracker() {
       // TODO: what about shared instances?
       phaser = new Phaser(1);
-      available = new Semaphore(MAX_OUTSTANDING_REQUESTS, false);
+      // available = new Semaphore(MAX_OUTSTANDING_REQUESTS, false);
       queuedListener =
           request -> {
             phaser.register();
-            try {
-              available.acquire();
-            } catch (InterruptedException ignored) {
-
-            }
           };
       completeListener =
           result -> {
             phaser.arriveAndDeregister();
-            available.release();
           };
     }
 
@@ -899,7 +890,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
   }
 
   public int getAvailablePermits() {
-    return asyncTracker.available.availablePermits();
+    return 1000;
   }
 
   public static class Builder
