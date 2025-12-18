@@ -45,6 +45,7 @@ public class BitDocSet extends DocSet {
   /**
    * Normally this is set to 17, making for max 1M blocks. May set lower for improved test coverage
    * of edge cases. TODO: maybe set this dynamically according to configured G1HeapRegionSize?
+   *
    * <ul>
    *   <li>23 -&gt; 1M blocks
    *   <li>22 -&gt; 512K blocks
@@ -67,7 +68,9 @@ public class BitDocSet extends DocSet {
    * </ul>
    */
   public static final int BIT_SHIFT;
+
   private static final int DEFAULT_MAX_BIT_SHIFT = 23; // 1M blocks
+
   static {
     // here we work based on the assumption that the min and max heap sizes will be the same, and
     // will guide the heap region sizing
@@ -86,9 +89,20 @@ public class BitDocSet extends DocSet {
       }
     }
     BIT_SHIFT = Math.min(maxBitShift, Math.max(6, (exp - 11)));
-    System.err.println("exp="+exp);
+    System.err.println("exp=" + exp);
     long maxBlockBytes = 1L << (BIT_SHIFT - 3);
-    System.err.println("MEM="+(maxMemory >> 20)+"m, maxBlockBytes="+maxBlockBytes+" ("+(maxBlockBytes >> 10)+"k) BIT_SHIFT="+ BIT_SHIFT +" / "+RamUsageEstimator.humanReadableUnits(RamUsageEstimator.sizeOf(new FixedBitSet(1 << BIT_SHIFT))));
+    System.err.println(
+        "MEM="
+            + (maxMemory >> 20)
+            + "m, maxBlockBytes="
+            + maxBlockBytes
+            + " ("
+            + (maxBlockBytes >> 10)
+            + "k) BIT_SHIFT="
+            + BIT_SHIFT
+            + " / "
+            + RamUsageEstimator.humanReadableUnits(
+                RamUsageEstimator.sizeOf(new FixedBitSet(1 << BIT_SHIFT))));
   }
 
   public static final int MAX_BLOCK_BITS = 1 << BIT_SHIFT;
@@ -144,27 +158,28 @@ public class BitDocSet extends DocSet {
     }
   }
 
-  private static final DocIterator EMPTY_DOC_ITERATOR = new DocIterator() {
-    @Override
-    public int nextDoc() {
-      return DocIdSetIterator.NO_MORE_DOCS;
-    }
+  private static final DocIterator EMPTY_DOC_ITERATOR =
+      new DocIterator() {
+        @Override
+        public int nextDoc() {
+          return DocIdSetIterator.NO_MORE_DOCS;
+        }
 
-    @Override
-    public float score() {
-      throw new IllegalStateException();
-    }
+        @Override
+        public float score() {
+          throw new IllegalStateException();
+        }
 
-    @Override
-    public boolean hasNext() {
-      return false;
-    }
+        @Override
+        public boolean hasNext() {
+          return false;
+        }
 
-    @Override
-    public Integer next() {
-      throw new NoSuchElementException();
-    }
-  };
+        @Override
+        public Integer next() {
+          throw new NoSuchElementException();
+        }
+      };
 
   @Override
   public DocIterator iterator() {
@@ -456,7 +471,8 @@ public class BitDocSet extends DocSet {
       public int nextDoc() {
         if (segDoc >= lastSegDoc) return segDoc = NO_MORE_DOCS;
         int nextInner = innerIdx + 1;
-        while (nextInner >= MAX_BLOCK_BITS || (innerIdx = bs.nextSetBit(nextInner)) == NO_MORE_DOCS) {
+        while (nextInner >= MAX_BLOCK_BITS
+            || (innerIdx = bs.nextSetBit(nextInner)) == NO_MORE_DOCS) {
           if (++outerIdx < bss.length) {
             bs = bss[outerIdx];
             nextInner = 0;
@@ -480,7 +496,8 @@ public class BitDocSet extends DocSet {
         bs = bss[outerIdx];
         partitionBase = outerIdx << BIT_SHIFT;
         int nextInner = nextGlobal & BLOCK_BIT_MASK;
-        while (nextInner >= MAX_BLOCK_BITS || (innerIdx = bs.nextSetBit(nextInner)) == NO_MORE_DOCS) {
+        while (nextInner >= MAX_BLOCK_BITS
+            || (innerIdx = bs.nextSetBit(nextInner)) == NO_MORE_DOCS) {
           if (++outerIdx < bss.length) {
             bs = bss[outerIdx];
             nextInner = 0;
@@ -516,8 +533,7 @@ public class BitDocSet extends DocSet {
 
   @Override
   public long ramBytesUsed() {
-    return BASE_RAM_BYTES_USED
-        + RamUsageEstimator.sizeOf(bits);
+    return BASE_RAM_BYTES_USED + RamUsageEstimator.sizeOf(bits);
   }
 
   @Override

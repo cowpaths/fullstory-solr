@@ -21,7 +21,6 @@ import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Bits;
-import org.apache.lucene.util.FixedBitSet;
 
 /**
  * An immutable ordered set of Lucene Document Ids. It's similar to a Lucene {@link

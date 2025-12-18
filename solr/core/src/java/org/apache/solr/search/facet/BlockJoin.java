@@ -18,7 +18,6 @@ package org.apache.solr.search.facet;
 
 import java.io.IOException;
 import org.apache.lucene.search.DocIdSetIterator;
-import org.apache.lucene.util.FixedBitSet;
 import org.apache.solr.search.BitDocSet;
 import org.apache.solr.search.DocIterator;
 import org.apache.solr.search.DocSet;

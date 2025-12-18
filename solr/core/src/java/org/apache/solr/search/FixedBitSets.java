@@ -20,13 +20,13 @@ import static org.apache.solr.search.BitDocSet.BIT_SHIFT;
 import static org.apache.solr.search.BitDocSet.BLOCK_BIT_MASK;
 import static org.apache.solr.search.BitDocSet.MAX_BLOCK_BITS;
 
+import java.io.IOException;
+import java.util.Arrays;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.RamUsageEstimator;
-import java.io.IOException;
-import java.util.Arrays;
 
 /**
  * A {@link FixedBitSet} based implementation of a {@link DocSet}. Good for medium/large sets.
@@ -91,9 +91,11 @@ public class FixedBitSets implements Bits, Accountable {
 
   public int length() {
     if (cachedLength == -1) {
-      return cachedLength = Math.toIntExact(Arrays.stream(parts).mapToLong(FixedBitSet::length).sum());
+      return cachedLength =
+          Math.toIntExact(Arrays.stream(parts).mapToLong(FixedBitSet::length).sum());
     } else {
-      assert cachedLength == Math.toIntExact(Arrays.stream(parts).mapToLong(FixedBitSet::length).sum());
+      assert cachedLength
+          == Math.toIntExact(Arrays.stream(parts).mapToLong(FixedBitSet::length).sum());
       return cachedLength;
     }
   }
@@ -298,6 +300,7 @@ public class FixedBitSets implements Bits, Accountable {
       throw new UnsupportedOperationException();
     }
   }
+
   public void or(DocIdSetIterator iter) throws IOException {
     ResettableDocIdSetIterator partIter = new ResettableDocIdSetIterator(iter);
     for (FixedBitSet part : parts) {

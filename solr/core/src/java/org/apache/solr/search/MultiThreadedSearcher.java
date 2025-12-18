@@ -177,7 +177,9 @@ public class MultiThreadedSearcher {
         if (itBitSet != null) {
           final int skipWords = this.skipWords.get(bs_idx);
           final LongBuffer itBits = itBitSet.getBits();
-          for (int idx = 0, lim1 = itBits.capacity(), lim2 = allBits.capacity(); idx < lim1 && skipWords + idx < lim2; ++idx) {
+          for (int idx = 0, lim1 = itBits.capacity(), lim2 = allBits.capacity();
+              idx < lim1 && skipWords + idx < lim2;
+              ++idx) {
             int destIdx = skipWords + idx;
             allBits.put(destIdx, allBits.get(destIdx) ^ itBits.get(idx));
           }

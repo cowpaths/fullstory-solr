@@ -31,14 +31,11 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.SimpleCollector;
 import org.apache.lucene.search.TermInSetQuery;
-import org.apache.lucene.util.BitSet;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.BytesRefHash;
-import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.automaton.Automaton;
 import org.apache.lucene.util.automaton.DaciukMihovAutomatonBuilder;
 import org.apache.solr.schema.SchemaField;
-import org.apache.solr.search.BitDocSet;
 import org.apache.solr.search.DocSet;
 import org.apache.solr.search.FixedBitSets;
 

@@ -17,7 +17,6 @@
 package org.apache.solr.search;
 
 import java.util.Random;
-import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.SuppressForbidden;
 import org.apache.solr.util.RTimer;
 

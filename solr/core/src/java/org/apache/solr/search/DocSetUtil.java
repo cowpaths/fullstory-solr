@@ -345,12 +345,20 @@ public class DocSetUtil {
   }
 
   public static void copyBitRange(
-      final FixedBitSets src, final int srcIdx, final FixedBitSets dest, final int destIdx, final int len) {
+      final FixedBitSets src,
+      final int srcIdx,
+      final FixedBitSets dest,
+      final int destIdx,
+      final int len) {
     copyBitRange(src.parts, srcIdx, dest.parts, destIdx, len);
   }
 
   public static void copyBitRange(
-      final FixedBitSet[] src, final int srcIdx, final FixedBitSet[] dest, final int destIdx, final int len) {
+      final FixedBitSet[] src,
+      final int srcIdx,
+      final FixedBitSet[] dest,
+      final int destIdx,
+      final int len) {
     LongBuffer[] src2 = Arrays.stream(src).map(FixedBitSet::getBits).toArray(LongBuffer[]::new);
     LongBuffer[] dest2 = Arrays.stream(dest).map(FixedBitSet::getBits).toArray(LongBuffer[]::new);
     copyBitRange(src2, srcIdx, dest2, destIdx, len);
@@ -369,12 +377,16 @@ public class DocSetUtil {
   }
 
   /**
-   * Analogous to {@link #copyBitRange(LongBuffer, int, LongBuffer, int, int)}, but takes 2-dimensional
-   * {@code long[]} as input (formatted according to boundaries defined by partitioning scheme of
-   * {@link BitDocSet#BIT_SHIFT}.
+   * Analogous to {@link #copyBitRange(LongBuffer, int, LongBuffer, int, int)}, but takes
+   * 2-dimensional {@code long[]} as input (formatted according to boundaries defined by
+   * partitioning scheme of {@link BitDocSet#BIT_SHIFT}.
    */
   public static void copyBitRange(
-      final LongBuffer[] src, final int srcIdx, final LongBuffer[] dest, final int destIdx, final int len) {
+      final LongBuffer[] src,
+      final int srcIdx,
+      final LongBuffer[] dest,
+      final int destIdx,
+      final int len) {
     if (len == 0) return;
     int srcOuterOffset = srcIdx >> BitDocSet.BIT_SHIFT;
     final int destOuterOffset = destIdx >> BitDocSet.BIT_SHIFT;
@@ -460,7 +472,11 @@ public class DocSetUtil {
    * operations -- on the order of ~100x.
    */
   public static void copyBitRange(
-      final LongBuffer src, final int srcIdx, final LongBuffer dest, final int destIdx, final int len) {
+      final LongBuffer src,
+      final int srcIdx,
+      final LongBuffer dest,
+      final int destIdx,
+      final int len) {
     if (len == 0) return;
     int srcOuterOffset = srcIdx >> 6;
     int destOuterOffset = destIdx >> 6;
