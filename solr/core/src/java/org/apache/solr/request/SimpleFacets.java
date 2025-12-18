@@ -272,7 +272,7 @@ public class SimpleFacets {
       AllGroupHeadsCollector<?> allGroupHeadsCollector =
           grouping.getCommands().get(0).createAllGroupCollector();
       searcher.search(base.makeQuery(), allGroupHeadsCollector);
-      return new BitDocSet(allGroupHeadsCollector.retrieveGroupHeads(searcher.maxDoc()));
+      return BitDocSet.newInstance(allGroupHeadsCollector.retrieveGroupHeads(searcher.maxDoc()));
     } else {
       return base;
     }

@@ -17,6 +17,7 @@
 package org.apache.solr.search;
 
 import java.lang.invoke.MethodHandles;
+import java.nio.LongBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -417,16 +418,17 @@ public class TestFiltering extends SolrTestCaseJ4 {
     } else {
       // term or boolean query
       int numWords = FixedBitSet.bits2words(model.indexSize);
-      long[] psetBits = new long[numWords];
-      for (int i = 0; i < psetBits.length; i++) {
-        psetBits[i] = random().nextLong(); // set 50% of the bits on average
+      LongBuffer psetBits = FixedBitSet.DEFAULT_MODIFIER.allocate(numWords);
+      for (int i = 0, lim = psetBits.capacity(); i < lim; i++) {
+        psetBits.put(i, random().nextLong()); // set 50% of the bits on average
       }
       // Make sure no 'ghost' bits are set beyond model.indexSize (see
       // FixedBitSet.verifyGhostBitsClear)
       if ((model.indexSize & 0x3f) != 0) {
         long mask = -1L << model.indexSize; // & 0x3f is implicit
 
-        psetBits[numWords - 1] &= ~mask;
+        int idx = numWords - 1;
+        psetBits.put(idx, psetBits.get(idx) & ~mask);
       }
       FixedBitSet pset = new FixedBitSet(psetBits, model.indexSize);
       if (positive) {

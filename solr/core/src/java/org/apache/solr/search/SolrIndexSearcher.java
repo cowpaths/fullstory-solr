@@ -969,7 +969,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     if (answer instanceof BitDocSet) {
       return (BitDocSet) answer;
     }
-    FixedBitSet bs = new FixedBitSet(maxDoc());
+    FixedBitSets bs = new FixedBitSets(maxDoc());
     DocIterator iter = answer.iterator();
     while (iter.hasNext()) {
       bs.set(iter.nextDoc());
@@ -1085,7 +1085,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
   private BitDocSet liveDocs;
 
-  private static final BitDocSet EMPTY = new BitDocSet(new FixedBitSet(0), 0);
+  private static final BitDocSet EMPTY = new BitDocSet(new FixedBitSet[0], 0);
 
   private BitDocSet computeLiveDocs() {
     switch (leafContexts.size()) {
@@ -1094,19 +1094,18 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         return EMPTY;
       case 1:
         final Bits onlySegLiveDocs = leafContexts.get(0).reader().getLiveDocs();
-        final FixedBitSet fbs;
+        final int onlySegMaxDoc = maxDoc();
+        final FixedBitSets fbs = new FixedBitSets(onlySegMaxDoc);
         if (onlySegLiveDocs == null) {
           // `LeafReader.getLiveDocs()` returns null if no deleted docs -- accordingly, set all bits
-          final int onlySegMaxDoc = maxDoc();
-          fbs = new FixedBitSet(onlySegMaxDoc);
           fbs.set(0, onlySegMaxDoc);
         } else {
-          fbs = FixedBitSet.copyOf(onlySegLiveDocs);
+          FixedBitSet.copyTo(onlySegLiveDocs, fbs.parts, FixedBitSet.DEFAULT_MODIFIER);
         }
         assert fbs.cardinality() == numDocs();
         return new BitDocSet(fbs, numDocs());
       default:
-        final FixedBitSet bs = new FixedBitSet(maxDoc());
+        final FixedBitSets bs = new FixedBitSets(maxDoc());
         for (LeafReaderContext ctx : leafContexts) {
           final LeafReader r = ctx.reader();
           final Bits segLiveDocs = r.getLiveDocs();
@@ -1414,13 +1413,14 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   private DocSet getResult(DocsEnumState deState, int largestPossible) throws IOException {
     int smallSetSize = DocSetUtil.smallSetSize(maxDoc());
     int scratchSize = Math.min(smallSetSize, largestPossible);
-    if (deState.scratch == null || deState.scratch.length < scratchSize)
-      deState.scratch = new int[scratchSize];
+    if (deState.scratch == null || SortedIntDocSet.getCapacity(deState.scratch) < scratchSize)
+      deState.scratch = SortedIntDocSet.allocate(scratchSize);
 
-    final int[] docs = deState.scratch;
+    final int[][] docs = deState.scratch;
+    final int docsCapacity = SortedIntDocSet.getCapacity(docs);
     int upto = 0;
     int bitsSet = 0;
-    FixedBitSet fbs = null;
+    FixedBitSets fbs = null;
 
     PostingsEnum postingsEnum = deState.termsEnum.postings(deState.postingsEnum, PostingsEnum.NONE);
     postingsEnum = BitsFilteredPostingsEnum.wrap(postingsEnum, deState.liveDocs);
@@ -1437,29 +1437,30 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         int base = sub.slice.start;
         int docid;
 
-        if (largestPossible > docs.length) {
-          if (fbs == null) fbs = new FixedBitSet(maxDoc());
+        if (largestPossible > docsCapacity) {
+          if (fbs == null) fbs = new FixedBitSets(maxDoc());
           while ((docid = sub.postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
             fbs.set(docid + base);
             bitsSet++;
           }
         } else {
           while ((docid = sub.postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-            docs[upto++] = docid + base;
+            docs[upto >> SortedIntDocSet.WORDS_SHIFT][upto++ & SortedIntDocSet.ARR_MASK] =
+                docid + base;
           }
         }
       }
     } else {
       int docid;
-      if (largestPossible > docs.length) {
-        fbs = new FixedBitSet(maxDoc());
+      if (largestPossible > docsCapacity) {
+        fbs = new FixedBitSets(maxDoc());
         while ((docid = postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
           fbs.set(docid);
           bitsSet++;
         }
       } else {
         while ((docid = postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-          docs[upto++] = docid;
+          docs[upto >> SortedIntDocSet.WORDS_SHIFT][upto++ & SortedIntDocSet.ARR_MASK] = docid;
         }
       }
     }
@@ -1467,12 +1468,13 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     DocSet result;
     if (fbs != null) {
       for (int i = 0; i < upto; i++) {
-        fbs.set(docs[i]);
+        fbs.set(docs[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK]);
       }
       bitsSet += upto;
       result = new BitDocSet(fbs, bitsSet);
     } else {
-      result = upto == 0 ? DocSet.empty() : new SortedIntDocSet(Arrays.copyOf(docs, upto));
+      result =
+          upto == 0 ? DocSet.empty() : new SortedIntDocSet(SortedIntDocSet.shrinkClone(docs, upto));
     }
     return result;
   }
@@ -2164,7 +2166,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         totalHits = topDocsResult.totalHits;
         topDocs = topDocsResult.topDocs;
         maxScore = searchResult.getMaxScore(totalHits);
-        set = new BitDocSet(searchResult.getFixedBitSet());
+        set = new BitDocSet(searchResult.getFixedBitSet(), totalHits);
 
         // TODO: Is this correct?
         // hitsRelation = populateScoresIfNeeded(cmd, needScores, topDocs, query,
@@ -2573,7 +2575,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
     public int minSetSizeCached;
 
-    public int[] scratch;
+    public int[][] scratch;
   }
 
   /**

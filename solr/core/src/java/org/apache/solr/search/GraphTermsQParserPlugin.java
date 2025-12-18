@@ -525,7 +525,7 @@ abstract class PointSetQuery extends Query implements DocSetProducer, Accountabl
     ramBytesUsed = BASE_RAM_BYTES + RamUsageEstimator.sizeOfObject(sortedPackedPoints);
   }
 
-  private FixedBitSet getLiveDocs(IndexSearcher searcher) throws IOException {
+  private FixedBitSets getLiveDocs(IndexSearcher searcher) throws IOException {
     if (!searcher.getIndexReader().hasDeletions()) {
       return null;
     }
@@ -586,7 +586,7 @@ abstract class PointSetQuery extends Query implements DocSetProducer, Accountabl
       }
     }
 
-    FixedBitSet liveDocs = getLiveDocs(searcher);
+    FixedBitSets liveDocs = getLiveDocs(searcher);
     DocSet set = builder.build(liveDocs);
     return set;
   }

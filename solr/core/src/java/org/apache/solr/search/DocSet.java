@@ -40,7 +40,7 @@ public abstract class DocSet implements Accountable, Cloneable /* extends Collec
   // can't use a trivial static initializer "EMPTY = new SortedIntDocSet" because it can lead to
   // classloader deadlock
   private static class EmptyLazyHolder {
-    static final DocSet INSTANCE = new SortedIntDocSet(new int[0]);
+    static final DocSet INSTANCE = new SortedIntDocSet(new int[0][]);
   }
 
   /** An empty instance (has no docs). */
@@ -127,7 +127,7 @@ public abstract class DocSet implements Accountable, Cloneable /* extends Collec
    * Adds all the docs from this set to the target. The target should be sized large enough to
    * accommodate all of the documents before calling this method.
    */
-  public abstract void addAllTo(FixedBitSet target);
+  public abstract void addAllTo(FixedBitSets target);
 
   @Override
   public abstract DocSet clone();
@@ -139,8 +139,8 @@ public abstract class DocSet implements Accountable, Cloneable /* extends Collec
   public abstract Bits getBits();
 
   // internal only
-  protected abstract FixedBitSet getFixedBitSet();
+  protected abstract FixedBitSets getFixedBitSet();
 
   // internal only
-  protected abstract FixedBitSet getFixedBitSetClone();
+  protected abstract FixedBitSets getFixedBitSetClone();
 }

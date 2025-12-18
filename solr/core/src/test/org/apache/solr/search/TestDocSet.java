@@ -19,6 +19,7 @@ package org.apache.solr.search;
 import static org.apache.solr.search.DocSetUtil.copyBitRange;
 
 import java.io.IOException;
+import java.nio.LongBuffer;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -98,16 +99,19 @@ public class TestDocSet extends SolrTestCase {
   }
 
   public DocSet getIntDocSet(FixedBitSet bs) {
-    int[] docs = new int[bs.cardinality()];
-    BitSetIterator iter = new BitSetIterator(bs, 0);
-    for (int i = 0; i < docs.length; i++) {
-      docs[i] = iter.nextDoc();
+    int size = bs.cardinality();
+    int lim = bs.length();
+    int[][] docs = SortedIntDocSet.allocate(size);
+    int doc = -1;
+    int i = 0;
+    while (++doc < lim && (doc = bs.nextSetBit(doc)) != DocIdSetIterator.NO_MORE_DOCS) {
+      docs[i >> SortedIntDocSet.WORDS_SHIFT][i++ & SortedIntDocSet.ARR_MASK] = doc;
     }
     return new SortedIntDocSet(docs);
   }
 
   public DocSet getBitDocSet(FixedBitSet bs) {
-    return new BitDocSet(bs);
+    return new BitDocSet(partition(bs));
   }
 
   public DocSlice getDocSlice(FixedBitSet bs) {
@@ -153,7 +157,7 @@ public class TestDocSet extends SolrTestCase {
   }
 
   public void checkEqual(FixedBitSet bs, DocSet set) {
-    for (int i = 0; i < set.size(); i++) {
+    for (int i = 0, lim = set.size(); i < lim; i++) {
       assertEquals(bs.get(i), set.exists(i));
     }
     assertEquals(bs.cardinality(), set.size());
@@ -175,14 +179,24 @@ public class TestDocSet extends SolrTestCase {
     }
   }
 
+  private static FixedBitSets partition(FixedBitSet b) {
+    int numBits = b.length();
+    FixedBitSets ret = new FixedBitSets(numBits);
+    int doc = -1;
+    while (++doc < numBits && (doc = b.nextSetBit(doc)) != DocIdSetIterator.NO_MORE_DOCS) {
+      ret.set(doc);
+    }
+    return ret;
+  }
+
   protected void doSingle(int maxSize) {
     int sz = rand.nextInt(maxSize + 1);
     int sz2 = rand.nextInt(maxSize);
     FixedBitSet bs1 = getRandomSet(sz, rand.nextInt(sz + 1));
     FixedBitSet bs2 = getRandomSet(sz, rand.nextInt(sz2 + 1));
 
-    DocSet a1 = new BitDocSet(bs1);
-    DocSet a2 = new BitDocSet(bs2);
+    DocSet a1 = new BitDocSet(partition(bs1));
+    DocSet a2 = new BitDocSet(partition(bs2));
     DocSet b1 = getDocSet(bs1);
     DocSet b2 = getDocSet(bs2);
 
@@ -242,11 +256,15 @@ public class TestDocSet extends SolrTestCase {
     if (n <= smallSetCutoff) {
       if (smallSetType == 0) {
         Arrays.sort(a);
-        return new SortedIntDocSet(a);
+        int[][] dimensional = SortedIntDocSet.allocate(n);
+        for (int i = 0; i < n; i++) {
+          dimensional[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK] = a[i];
+        }
+        return new SortedIntDocSet(dimensional);
       }
     }
 
-    return new BitDocSet(obs, n);
+    return new BitDocSet(partition(obs), n);
   }
 
   public DocSet[] getRandomSets(int nSets, int minSetSize, int maxSetSize, int maxDoc) {
@@ -586,7 +604,7 @@ public class TestDocSet extends SolrTestCase {
   public void doFilterTest(IndexReader reader) throws IOException {
     IndexReaderContext topLevelContext = reader.getContext();
     FixedBitSet bs = getRandomSet(reader.maxDoc(), rand.nextInt(reader.maxDoc() + 1));
-    DocSet a = new BitDocSet(bs);
+    DocSet a = new BitDocSet(partition(bs));
     DocSet b = getIntDocSet(bs);
 
     //    Query fa = a.makeQuery();
@@ -645,11 +663,11 @@ public class TestDocSet extends SolrTestCase {
           sz == 0
               ? 0
               : (rand.nextInt(sz) + 1); // +1 here b/c we want nextInt(sz) _inclusive_ of sz.
-      final FixedBitSet dest = new FixedBitSet(destSize);
-      final FixedBitSet roundTrip = new FixedBitSet(sz);
+      final FixedBitSets dest = new FixedBitSets(destSize);
+      final FixedBitSets roundTrip = new FixedBitSets(sz);
       DocSetUtil.copyTo(src.asReadOnlyBits(), 0, sz, dest, destOffset);
       DocSetUtil.copyTo(dest.asReadOnlyBits(), destOffset, destOffset + sz, roundTrip, 0);
-      assertEquals(src, roundTrip);
+      assertArrayEquals(partition(src).parts, roundTrip.parts);
     }
   }
 
@@ -660,7 +678,7 @@ public class TestDocSet extends SolrTestCase {
 
     final int base = context.docBase;
     final int length = context.reader().maxDoc();
-    final FixedBitSet bs = docSet.getFixedBitSet();
+    final FixedBitSets bs = docSet.getFixedBitSet();
     return new Bits() {
       @Override
       public boolean get(int index) {
@@ -682,6 +700,24 @@ public class TestDocSet extends SolrTestCase {
       try {
         assertTrue(
             "failed for inner seed " + Long.toUnsignedString(seed, 16), doTestCopyBitRange(seed));
+        successfulSeeds++;
+      } catch (Throwable ex) {
+        System.err.println("exception for inner seed: " + Long.toUnsignedString(seed, 16));
+        throw ex;
+      }
+    }
+    System.err.println("testCopyBitRange successful seed count: " + successfulSeeds);
+  }
+
+  public void testCopyBitRangeArr() {
+    Random r = random();
+    int successfulSeeds = 0;
+    for (int i = 100 * RANDOM_MULTIPLIER; i > 0; i--) {
+      long seed = r.nextLong();
+      try {
+        assertTrue(
+            "failed for inner seed " + Long.toUnsignedString(seed, 16),
+            doTestCopyBitRangeArr(seed));
         successfulSeeds++;
       } catch (Throwable ex) {
         System.err.println("exception for inner seed: " + Long.toUnsignedString(seed, 16));
@@ -738,5 +774,75 @@ public class TestDocSet extends SolrTestCase {
       copyBitRange(dest, mapping[2], rtx, mapping[0], mapping[1]);
     }
     return Arrays.equals(src, rtx);
+  }
+
+  /**
+   * Tests the correctness of {@link DocSetUtil#copyBitRange(long[], int, long[], int, int)} by
+   * copying arbitrary ranges from a source "bitset" array to a dest "bitset" array, and back into
+   * their original positions in a new array (essentially a round-trip), and comparing the source
+   * and "round-tripped" final array for equality.
+   */
+  private static boolean doTestCopyBitRangeArr(long seed) {
+    Random r = new Random(seed);
+    long[] src = new long[r.nextInt(1026) + 1];
+    for (int i = src.length - 1; i >= 0; i--) {
+      src[i] = r.nextLong();
+    }
+    int bitLen = src.length * Long.SIZE;
+    int boundary2 = r.nextInt(bitLen);
+    int boundary1 = r.nextInt(boundary2 + 1);
+    int boundary3 = boundary2 + r.nextInt(bitLen - boundary2);
+    int[][] regions =
+        new int[][] {
+          new int[] {0, boundary1},
+          new int[] {boundary1, boundary2 - boundary1},
+          new int[] {boundary2, boundary3 - boundary2},
+          new int[] {boundary3, bitLen - boundary3}
+        };
+    Integer[] regionIdxs = new Integer[regions.length];
+    for (int i = regionIdxs.length - 1; i >= 0; i--) {
+      regionIdxs[i] = i;
+    }
+    Collections.shuffle(Arrays.asList(regionIdxs), r);
+    int[][] mappings = new int[regions.length][];
+    int newOffset = 0;
+    for (int i = 0; i < regions.length; i++) {
+      int[] region = regions[regionIdxs[i]];
+      mappings[i] = Arrays.copyOf(region, 3);
+      mappings[i][2] = newOffset;
+      newOffset += region[1];
+    }
+    FixedBitSets srcArr = new FixedBitSets(src.length << 6);
+    int idx = 0;
+    for (FixedBitSet a : srcArr.parts) {
+      LongBuffer bits = a.getBits();
+      for (int i = 0, lim = bits.capacity(); i < lim; i++) {
+        bits.put(i, src[idx++]);
+      }
+    }
+
+    FixedBitSets destArr = new FixedBitSets(src.length << 6);
+    Collections.shuffle(Arrays.asList(mappings), r);
+    for (int[] mapping : mappings) {
+      copyBitRange(srcArr, mapping[0], destArr, mapping[2], mapping[1]);
+    }
+    FixedBitSets rtx = new FixedBitSets(src.length << 6);
+    Collections.shuffle(Arrays.asList(mappings), r);
+    for (int[] mapping : mappings) {
+      copyBitRange(destArr, mapping[2], rtx, mapping[0], mapping[1]);
+    }
+    boolean ret = Arrays.deepEquals(srcArr.parts, rtx.parts);
+    if (!ret) {
+      System.err.println(srcArr.parts.length + " ?= " + rtx.parts.length);
+      for (int i = 0; i < srcArr.parts.length; i++) {
+        LongBuffer a = srcArr.parts[i].getBits();
+        LongBuffer b = rtx.parts[i].getBits();
+        System.err.println(
+            "\t" + a.capacity() + " ?= " + b.capacity() + " equals?: " + a.equals(b));
+        System.err.println("\t\t" + a);
+        System.err.println("\t\t" + b);
+      }
+    }
+    return ret;
   }
 }

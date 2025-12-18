@@ -45,6 +45,7 @@ import org.apache.lucene.util.automaton.DaciukMihovAutomatonBuilder;
 import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.BitDocSet;
 import org.apache.solr.search.DocSet;
+import org.apache.solr.search.FixedBitSets;
 import org.apache.solr.search.SolrIndexSearcher;
 
 /**
@@ -181,11 +182,11 @@ public class GraphQuery extends Query {
       // Size that the bit set needs to be.
       int capacity = fromSearcher.getRawReader().maxDoc();
       // The bit set to contain the results that match the query.
-      FixedBitSet resultBits = new FixedBitSet(capacity);
+      FixedBitSets resultBits = new FixedBitSets(capacity);
       // this holds the result at each level
       BitDocSet fromSet = null;
       // the root docs if we return root is false
-      FixedBitSet rootBits = null;
+      FixedBitSets rootBits = null;
       // the initial query for the frontier for the first query
       Query frontierQuery = q;
       // Find all documents in this graph that are leaf nodes to speed traversal
@@ -212,7 +213,7 @@ public class GraphQuery extends Query {
                   : new GraphEdgeCollector.GraphTermsCollector(
                       collectSchemaField, new BitDocSet(resultBits), leafNodes);
 
-          fromSet = new BitDocSet(new FixedBitSet(capacity));
+          fromSet = new BitDocSet(new FixedBitSets(capacity));
           graphResultCollector.setCollectDocs(fromSet.getBits());
 
           fromSearcher.search(frontierQuery, graphResultCollector);

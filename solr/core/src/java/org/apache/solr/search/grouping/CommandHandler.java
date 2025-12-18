@@ -206,7 +206,7 @@ public class CommandHandler {
           query, filter, MultiCollector.wrap(collectors.toArray(new Collector[0])));
     }
 
-    return new BitDocSet(allGroupHeadsCollector.retrieveGroupHeads(searcher.maxDoc()));
+    return BitDocSet.newInstance(allGroupHeadsCollector.retrieveGroupHeads(searcher.maxDoc()));
   }
 
   private DocSet computeDocSet(Query query, ProcessedFilter filter, List<Collector> collectors)

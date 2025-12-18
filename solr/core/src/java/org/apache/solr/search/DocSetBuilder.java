@@ -21,8 +21,6 @@ import org.apache.lucene.index.PostingsEnum;
 import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.BytesRef;
-import org.apache.lucene.util.FixedBitSet;
-import org.apache.lucene.util.LSBRadixSorter;
 import org.apache.lucene.util.packed.PackedInts;
 
 /**
@@ -35,44 +33,47 @@ public final class DocSetBuilder {
   private final int maxDoc;
   private final int threshold;
 
-  private int[] buffer;
+  private int capacity = -1;
+  private int[][] buffer;
+
   private int pos;
 
-  private FixedBitSet bitSet;
+  private FixedBitSets bitSet;
 
   public DocSetBuilder(int maxDoc, long costEst) {
     this.maxDoc = maxDoc;
     this.threshold = DocSetUtil.smallSetSize(maxDoc);
 
     if (costEst > threshold) {
-      bitSet = new FixedBitSet(maxDoc);
+      bitSet = new FixedBitSets(maxDoc);
     } else {
-      this.buffer = new int[Math.max((int) costEst, 1)];
+      this.capacity = Math.max((int) costEst, 1);
+      this.buffer = SortedIntDocSet.allocate(this.capacity);
     }
   }
 
   private void upgradeToBitSet() {
     assert bitSet == null;
-    bitSet = new FixedBitSet(maxDoc);
+    bitSet = new FixedBitSets(maxDoc);
     for (int i = 0; i < pos; ++i) {
-      bitSet.set(buffer[i]);
+      bitSet.set(buffer[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK]);
     }
+    this.capacity = -1;
     this.buffer = null;
     this.pos = 0;
   }
 
   private void growBuffer(int minSize) {
-    if (minSize < buffer.length) return;
+    if (minSize < capacity) return;
 
-    int newSize = buffer.length;
+    int newSize = capacity;
     while (newSize < minSize) {
       newSize = newSize << 1;
     }
     newSize = Math.min(newSize, threshold);
 
-    int[] newBuffer = new int[newSize];
-    System.arraycopy(buffer, 0, newBuffer, 0, pos);
-    buffer = newBuffer;
+    this.capacity = newSize;
+    buffer = SortedIntDocSet.grow(buffer, pos, newSize);
   }
 
   public void add(DocIdSetIterator iter, int base) throws IOException {
@@ -82,16 +83,17 @@ public final class DocSetBuilder {
       add(bitSet, iter, base);
     } else {
       while (true) {
-        for (int i = pos; i < buffer.length; ++i) {
+        for (int i = pos; i < capacity; ++i) {
           final int doc = iter.nextDoc();
           if (doc == DocIdSetIterator.NO_MORE_DOCS) {
             pos = i; // update pos
             return;
           }
-          buffer[i] = doc + base; // using the loop counter may help with removal of bounds checking
+          buffer[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK] =
+              doc + base; // using the loop counter may help with removal of bounds checking
         }
 
-        pos = buffer.length; // update pos
+        pos = capacity; // update pos
         if (pos + 1 >= threshold) {
           break;
         }
@@ -104,7 +106,7 @@ public final class DocSetBuilder {
     }
   }
 
-  public static void add(FixedBitSet bitSet, DocIdSetIterator iter, int base) throws IOException {
+  public static void add(FixedBitSets bitSet, DocIdSetIterator iter, int base) throws IOException {
     for (int doc = iter.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = iter.nextDoc()) {
       bitSet.set(doc + base);
     }
@@ -141,7 +143,7 @@ public final class DocSetBuilder {
     if (bitSet != null) {
       bitSet.set(doc);
     } else {
-      if (pos >= buffer.length) {
+      if (pos >= capacity) {
         if (pos + 1 >= threshold) {
           upgradeToBitSet();
           bitSet.set(doc);
@@ -149,25 +151,25 @@ public final class DocSetBuilder {
         }
         growBuffer(pos + 1);
       }
-      buffer[pos++] = doc;
+      buffer[pos >> SortedIntDocSet.WORDS_SHIFT][pos++ & SortedIntDocSet.ARR_MASK] = doc;
     }
   }
 
-  private static int dedup(int[] arr, int length, FixedBitSet acceptDocs) {
+  private static int dedup(int[][] arr, int length, FixedBitSets acceptDocs) {
     int pos = 0;
     int previous = -1;
     for (int i = 0; i < length; ++i) {
-      final int value = arr[i];
+      final int value = arr[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK];
       // assert value >= previous;
       if (value != previous && (acceptDocs == null || acceptDocs.get(value))) {
-        arr[pos++] = value;
+        arr[pos >> SortedIntDocSet.WORDS_SHIFT][pos++ & SortedIntDocSet.ARR_MASK] = value;
         previous = value;
       }
     }
     return pos;
   }
 
-  public DocSet build(FixedBitSet filter) {
+  public DocSet build(FixedBitSets filter) {
     if (bitSet != null) {
       if (filter != null) {
         bitSet.and(filter);
@@ -176,7 +178,7 @@ public final class DocSetBuilder {
       // TODO - if this set will be cached, should we make it smaller if it's below
       // DocSetUtil.smallSetSize?
     } else {
-      LSBRadixSorter sorter = new LSBRadixSorter();
+      LSBRadixSorter2D sorter = new LSBRadixSorter2D();
       sorter.sort(PackedInts.bitsRequired(maxDoc - 1), buffer, pos);
       final int l = dedup(buffer, pos, filter);
       assert l <= pos;
@@ -186,7 +188,7 @@ public final class DocSetBuilder {
   }
 
   /** Only use this if you know there were no duplicates and that docs were collected in-order! */
-  public DocSet buildUniqueInOrder(FixedBitSet filter) {
+  public DocSet buildUniqueInOrder(FixedBitSets filter) {
     if (bitSet != null) {
       if (filter != null) {
         bitSet.and(filter);

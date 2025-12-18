@@ -23,6 +23,7 @@ import org.apache.solr.search.BitDocSet;
 import org.apache.solr.search.DocIterator;
 import org.apache.solr.search.DocSet;
 import org.apache.solr.search.DocSetCollector;
+import org.apache.solr.search.FixedBitSets;
 import org.apache.solr.search.QueryContext;
 
 /**
@@ -38,7 +39,7 @@ public class BlockJoin {
   public static DocSet toChildren(
       DocSet parentInput, BitDocSet parentList, DocSet acceptDocs, QueryContext qcontext)
       throws IOException {
-    FixedBitSet parentBits = parentList.getBits();
+    FixedBitSets parentBits = parentList.getBits();
     DocSetCollector collector = new DocSetCollector(qcontext.searcher().maxDoc());
     DocIterator iter = parentInput.iterator();
     while (iter.hasNext()) {
@@ -62,7 +63,7 @@ public class BlockJoin {
    */
   public static DocSet toParents(DocSet childInput, BitDocSet parentList, QueryContext qcontext)
       throws IOException {
-    FixedBitSet parentBits = parentList.getBits();
+    FixedBitSets parentBits = parentList.getBits();
     DocSetCollector collector = new DocSetCollector(qcontext.searcher().maxDoc());
     DocIterator iter = childInput.iterator();
     int currentParent = -1;

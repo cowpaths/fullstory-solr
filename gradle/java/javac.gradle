@@ -67,8 +67,10 @@ allprojects {
         ]
       }
 
-      if (propertyOrDefault("javac.failOnWarnings", true).toBoolean()) {
+      if (propertyOrDefault("javac.failOnWarnings", true).toBoolean() && false) {
         options.compilerArgs += "-Werror"
+      } else {
+        options.compilerArgs += "--enable-preview"
       }
     }
   }

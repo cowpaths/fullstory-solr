@@ -16,8 +16,6 @@
  */
 package org.apache.solr.search;
 
-import org.apache.lucene.util.FixedBitSet;
-
 /**
  * A {@link BitDocSet} based implementation that mutates the underlying bits for andNot and
  * intersection. This allows for computing the combinations of sets without duplicating the
@@ -26,7 +24,7 @@ import org.apache.lucene.util.FixedBitSet;
  * @since solr 9.2
  */
 class MutableBitDocSet extends BitDocSet {
-  private MutableBitDocSet(FixedBitSet bits, int size) {
+  private MutableBitDocSet(FixedBitSets bits, int size) {
     super(bits, size);
   }
 
@@ -85,8 +83,9 @@ class MutableBitDocSet extends BitDocSet {
     }
 
     // Operates directly on the underlying bitsets.
-    FixedBitSet newbits = getFixedBitSet();
-    newbits.and(other.getFixedBitSet());
+    FixedBitSets newbits = getFixedBitSet();
+    FixedBitSets otherBits = other.getFixedBitSet();
+    newbits.and(otherBits);
 
     resetSize();
     return this;
@@ -113,7 +112,7 @@ class MutableBitDocSet extends BitDocSet {
   }
 
   @Override
-  public void addAllTo(FixedBitSet target) {
+  public void addAllTo(FixedBitSets target) {
     throw new UnsupportedOperationException();
   }
 

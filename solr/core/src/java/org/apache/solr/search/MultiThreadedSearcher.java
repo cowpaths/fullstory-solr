@@ -18,6 +18,7 @@ package org.apache.solr.search;
 
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.nio.LongBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -159,7 +160,7 @@ public class MultiThreadedSearcher {
         bitSet = new FixedBitSet(numWords * 64);
         this.bitSets.addLast(bitSet);
 
-      } else if (bitSet.getBits().length < numWords) {
+      } else if (bitSet.getBits().capacity() < numWords) {
         FixedBitSet smallerBitSet = this.bitSets.removeLast();
         bitSet = new FixedBitSet(numWords * 64);
         bitSet.xor(smallerBitSet);
@@ -170,14 +171,15 @@ public class MultiThreadedSearcher {
     }
 
     void update(FixedBitSet allBitSet) {
-      final long[] allBits = allBitSet.getBits();
+      final LongBuffer allBits = allBitSet.getBits();
       for (int bs_idx = 0; bs_idx < this.bitSets.size(); ++bs_idx) {
         final FixedBitSet itBitSet = this.bitSets.get(bs_idx);
         if (itBitSet != null) {
           final int skipWords = this.skipWords.get(bs_idx);
-          final long[] itBits = itBitSet.getBits();
-          for (int idx = 0; idx < itBits.length && skipWords + idx < allBits.length; ++idx) {
-            allBits[skipWords + idx] ^= itBits[idx];
+          final LongBuffer itBits = itBitSet.getBits();
+          for (int idx = 0, lim1 = itBits.capacity(), lim2 = allBits.capacity(); idx < lim1 && skipWords + idx < lim2; ++idx) {
+            int destIdx = skipWords + idx;
+            allBits.put(destIdx, allBits.get(destIdx) ^ itBits.get(idx));
           }
         }
       }
@@ -220,10 +222,10 @@ public class MultiThreadedSearcher {
       }
     }
 
-    public FixedBitSet getFixedBitSet() {
+    public FixedBitSet[] getFixedBitSet() {
       for (Object res : result) {
-        if (res instanceof FixedBitSet) {
-          return (FixedBitSet) res;
+        if (res instanceof FixedBitSet[]) {
+          return (FixedBitSet[]) res;
         }
       }
       return null;

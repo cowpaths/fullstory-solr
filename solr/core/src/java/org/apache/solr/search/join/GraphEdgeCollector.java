@@ -38,7 +38,9 @@ import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.automaton.Automaton;
 import org.apache.lucene.util.automaton.DaciukMihovAutomatonBuilder;
 import org.apache.solr.schema.SchemaField;
+import org.apache.solr.search.BitDocSet;
 import org.apache.solr.search.DocSet;
+import org.apache.solr.search.FixedBitSets;
 
 /**
  * A graph hit collector. This accumulates the edges for a given graph traversal. On each collect
@@ -54,7 +56,7 @@ abstract class GraphEdgeCollector extends SimpleCollector implements Collector {
   DocSet leafNodes;
 
   int numHits = 0; // number of documents visited
-  BitSet bits; // if not null, used to collect documents visited
+  FixedBitSets bits; // if not null, used to collect documents visited
 
   int base;
 
@@ -69,7 +71,7 @@ abstract class GraphEdgeCollector extends SimpleCollector implements Collector {
 
   // Set to use to collect docs being visited
   // TODO: this should be replaced with a more general delegating collector
-  public void setCollectDocs(FixedBitSet target) {
+  public void setCollectDocs(FixedBitSets target) {
     this.bits = target;
   }
 

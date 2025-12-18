@@ -31,7 +31,7 @@ public class DocSetPerf {
     }
   }
 
-  static FixedBitSet bs;
+  static FixedBitSets bs;
   static BitDocSet bds;
   static int[] ids; // not unique
 
@@ -43,7 +43,7 @@ public class DocSetPerf {
   }
 
   static void generate(int maxSize, int bitsToSet) {
-    bs = new FixedBitSet(maxSize);
+    bs = new FixedBitSets(maxSize);
     ids = new int[bitsToSet];
     int count = 0;
     if (maxSize > 0) {
@@ -75,7 +75,7 @@ public class DocSetPerf {
 
     long ret = 0;
 
-    FixedBitSet[] sets = new FixedBitSet[numSets];
+    FixedBitSets[] sets = new FixedBitSets[numSets];
     DocSet[] bset = new DocSet[numSets];
 
     for (int i = 0; i < numSets; i++) {
@@ -89,11 +89,11 @@ public class DocSetPerf {
     if ("test".equals(test)) {
       for (int it = 0; it < iter; it++) {
         generate(randSize ? rand.nextInt(bitSetSize) : bitSetSize, numBitsSet);
-        FixedBitSet bs1 = bs;
+        FixedBitSets bs1 = bs;
         BitDocSet bds1 = bds;
         generate(randSize ? rand.nextInt(bitSetSize) : bitSetSize, numBitsSet);
 
-        FixedBitSet res = bs1.clone();
+        FixedBitSets res = bs1.clone();
         res.and(bs);
         int icount = res.cardinality();
 

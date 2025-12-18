@@ -57,6 +57,7 @@ import org.apache.solr.search.DocSetBuilder;
 import org.apache.solr.search.DocSetProducer;
 import org.apache.solr.search.DocSetUtil;
 import org.apache.solr.search.ExtendedQueryBase;
+import org.apache.solr.search.FixedBitSets;
 import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.util.TestInjection;
 
@@ -182,7 +183,7 @@ public final class SolrRangeQuery extends ExtendedQueryBase implements DocSetPro
     assert TestInjection.injectDocSetDelay(this);
     int maxDoc = searcher.maxDoc();
     BitDocSet liveDocs = searcher.getLiveDocSet();
-    FixedBitSet liveBits = liveDocs.size() == maxDoc ? null : liveDocs.getBits();
+    FixedBitSets liveBits = liveDocs.size() == maxDoc ? null : liveDocs.getBits();
 
     DocSetBuilder builder = new DocSetBuilder(maxDoc, cost);
 

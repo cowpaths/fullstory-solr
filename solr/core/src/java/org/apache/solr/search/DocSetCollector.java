@@ -27,7 +27,7 @@ import org.apache.lucene.util.FixedBitSet;
 /** */
 public class DocSetCollector extends SimpleCollector {
   int pos = 0;
-  FixedBitSet bits;
+  FixedBitSets bits;
   final int maxDoc;
   final int smallSetSize;
   int base;
@@ -62,7 +62,7 @@ public class DocSetCollector extends SimpleCollector {
     } else {
       // this conditional could be removed if BitSet was preallocated, but that
       // would take up more memory, and add more GC time...
-      if (bits == null) bits = new FixedBitSet(maxDoc);
+      if (bits == null) bits = new FixedBitSets(maxDoc);
       bits.set(doc);
     }
 
@@ -136,7 +136,7 @@ public class DocSetCollector extends SimpleCollector {
       size++;
     }
 
-    public void copyTo(FixedBitSet bits) {
+    public void copyTo(FixedBitSets bits) {
       if (size > 0) {
         int resultPos = 0;
         for (int i = 0; i < arrays.size(); i++) {
@@ -152,15 +152,29 @@ public class DocSetCollector extends SimpleCollector {
       }
     }
 
-    public int[] toArray() {
-      int[] result = new int[size];
+    public int[][] toArray() {
+      int[][] result = SortedIntDocSet.allocate(size);
       if (size > 0) {
         int resultPos = 0;
         for (int i = 0; i < arrays.size(); i++) {
           int[] srcArray = arrays.get(i);
-          int intsToCopy =
+          final int intsToCopy =
               (i < (arrays.size() - 1)) ? srcArray.length : indexForNextAddInCurrentAddArray;
-          System.arraycopy(srcArray, 0, result, resultPos, intsToCopy);
+          int destArrIdx = resultPos >> SortedIntDocSet.WORDS_SHIFT;
+          int destOff = resultPos & SortedIntDocSet.ARR_MASK;
+          int destRemaining = SortedIntDocSet.MAX_ARR_SIZE - destOff;
+          if (intsToCopy <= destRemaining) {
+            System.arraycopy(srcArray, 0, result[destArrIdx], destOff, intsToCopy);
+          } else {
+            int toCopy = destRemaining;
+            System.arraycopy(srcArray, 0, result[destArrIdx], destOff, toCopy);
+            int srcCopied = toCopy;
+            do {
+              toCopy = Math.min(intsToCopy - srcCopied, SortedIntDocSet.MAX_ARR_SIZE);
+              System.arraycopy(srcArray, srcCopied, result[++destArrIdx], 0, toCopy);
+              srcCopied += toCopy;
+            } while (intsToCopy > srcCopied);
+          }
           resultPos += intsToCopy;
         }
         assert resultPos == size;

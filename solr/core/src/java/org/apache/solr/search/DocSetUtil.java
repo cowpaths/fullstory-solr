@@ -17,6 +17,8 @@
 package org.apache.solr.search;
 
 import java.io.IOException;
+import java.nio.LongBuffer;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import org.apache.lucene.index.DirectoryReader;
@@ -197,7 +199,7 @@ public class DocSetUtil {
   private static DocSet createSmallSet(
       List<LeafReaderContext> leaves, PostingsEnum[] postList, int maxPossible, int firstReader)
       throws IOException {
-    int[] docs = new int[maxPossible];
+    int[][] docs = SortedIntDocSet.allocate(maxPossible);
     int sz = 0;
     for (int i = firstReader; i < postList.length; i++) {
       PostingsEnum postings = postList[i];
@@ -210,7 +212,7 @@ public class DocSetUtil {
         if (subId == DocIdSetIterator.NO_MORE_DOCS) break;
         if (liveDocs != null && !liveDocs.get(subId)) continue;
         int globalId = subId + base;
-        docs[sz++] = globalId;
+        docs[sz >> SortedIntDocSet.WORDS_SHIFT][sz++ & SortedIntDocSet.ARR_MASK] = globalId;
       }
     }
 
@@ -220,7 +222,7 @@ public class DocSetUtil {
   private static DocSet createBigSet(
       List<LeafReaderContext> leaves, PostingsEnum[] postList, int maxDoc, int firstReader)
       throws IOException {
-    long[] bits = new long[FixedBitSet.bits2words(maxDoc)];
+    FixedBitSets bits = new FixedBitSets(maxDoc);
     int sz = 0;
     for (int i = firstReader; i < postList.length; i++) {
       PostingsEnum postings = postList[i];
@@ -232,13 +234,12 @@ public class DocSetUtil {
         int subId = postings.nextDoc();
         if (subId == DocIdSetIterator.NO_MORE_DOCS) break;
         if (liveDocs != null && !liveDocs.get(subId)) continue;
-        int globalId = subId + base;
-        bits[globalId >> 6] |= (1L << globalId);
+        bits.set(subId + base);
         sz++;
       }
     }
 
-    BitDocSet docSet = new BitDocSet(new FixedBitSet(bits, maxDoc), sz);
+    BitDocSet docSet = new BitDocSet(bits.parts, sz);
 
     int smallSetSize = smallSetSize(maxDoc);
     if (sz < smallSetSize) {
@@ -253,12 +254,11 @@ public class DocSetUtil {
 
   public static DocSet toSmallSet(BitDocSet bitSet) {
     int sz = bitSet.size();
-    int[] docs = new int[sz];
-    FixedBitSet bs = bitSet.getBits();
-    int doc = -1;
+    int[][] docs = SortedIntDocSet.allocate(sz);
+    FixedBitSets bs = bitSet.getBits();
+    BitDocSet.BitSetsIterator iter = new BitDocSet.BitSetsIterator(bs.parts, bs.length(), sz);
     for (int i = 0; i < sz; i++) {
-      doc = bs.nextSetBit(doc + 1);
-      docs[i] = doc;
+      docs[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK] = iter.nextDoc();
     }
     return new SortedIntDocSet(docs);
   }
@@ -306,7 +306,7 @@ public class DocSetUtil {
    * @param destOffset start offset of range in destination
    */
   static void copyTo(
-      Bits src, final int srcOffset, int srcLimit, FixedBitSet dest, int destOffset) {
+      Bits src, final int srcOffset, int srcLimit, FixedBitSets dest, int destOffset) {
     /*
     NOTE: `adjustedSegDocBase` +1 to compensate for the fact that `segOrd` always has to "read
     ahead" by 1. Adding 1 to set `adjustedSegDocBase` once allows us to use `segOrd` as-is (with
@@ -344,6 +344,111 @@ public class DocSetUtil {
     return (v << numBits) >>> numBits;
   }
 
+  public static void copyBitRange(
+      final FixedBitSets src, final int srcIdx, final FixedBitSets dest, final int destIdx, final int len) {
+    copyBitRange(src.parts, srcIdx, dest.parts, destIdx, len);
+  }
+
+  public static void copyBitRange(
+      final FixedBitSet[] src, final int srcIdx, final FixedBitSet[] dest, final int destIdx, final int len) {
+    LongBuffer[] src2 = Arrays.stream(src).map(FixedBitSet::getBits).toArray(LongBuffer[]::new);
+    LongBuffer[] dest2 = Arrays.stream(dest).map(FixedBitSet::getBits).toArray(LongBuffer[]::new);
+    copyBitRange(src2, srcIdx, dest2, destIdx, len);
+  }
+
+  public static void copyBitRange(
+      final long[] src, final int srcIdx, final long[] dest, final int destIdx, final int len) {
+    copyBitRange(LongBuffer.wrap(src), srcIdx, LongBuffer.wrap(dest), destIdx, len);
+  }
+
+  public static void copyBitRange(
+      final long[][] src, final int srcIdx, final long[][] dest, final int destIdx, final int len) {
+    LongBuffer[] src2 = Arrays.stream(src).map(LongBuffer::wrap).toArray(LongBuffer[]::new);
+    LongBuffer[] dest2 = Arrays.stream(dest).map(LongBuffer::wrap).toArray(LongBuffer[]::new);
+    copyBitRange(src2, srcIdx, dest2, destIdx, len);
+  }
+
+  /**
+   * Analogous to {@link #copyBitRange(LongBuffer, int, LongBuffer, int, int)}, but takes 2-dimensional
+   * {@code long[]} as input (formatted according to boundaries defined by partitioning scheme of
+   * {@link BitDocSet#BIT_SHIFT}.
+   */
+  public static void copyBitRange(
+      final LongBuffer[] src, final int srcIdx, final LongBuffer[] dest, final int destIdx, final int len) {
+    if (len == 0) return;
+    int srcOuterOffset = srcIdx >> BitDocSet.BIT_SHIFT;
+    final int destOuterOffset = destIdx >> BitDocSet.BIT_SHIFT;
+    int srcInnerOffset = srcIdx & BitDocSet.BLOCK_BIT_MASK;
+    int destInnerOffset = destIdx & BitDocSet.BLOCK_BIT_MASK;
+    final int len1;
+    final int len2;
+    LongBuffer srcArr1;
+    LongBuffer srcArr2;
+
+    // the array offset of the word for the last "bit" element.
+    final int destOuterLimit = (destIdx + len - 1) >> BitDocSet.BIT_SHIFT;
+
+    if (srcInnerOffset <= destInnerOffset) {
+      len1 = destInnerOffset - srcInnerOffset;
+      len2 = BitDocSet.MAX_BLOCK_BITS - len1;
+      srcArr1 = null;
+      srcArr2 = src[srcOuterOffset];
+    } else {
+      len2 = srcInnerOffset - destInnerOffset;
+      len1 = BitDocSet.MAX_BLOCK_BITS - len2;
+      srcArr1 = src[srcOuterOffset]; // clear out-of-scope bits
+      srcArr2 = ++srcOuterOffset < src.length ? src[srcOuterOffset] : null;
+    }
+    // special handling for the first word, which may be partial
+    LongBuffer destArr = dest[destOuterOffset];
+    if (srcArr1 == null) {
+      copyBitRange(
+          srcArr2,
+          srcInnerOffset,
+          destArr,
+          destInnerOffset,
+          Math.min(len, BitDocSet.MAX_BLOCK_BITS - destInnerOffset));
+    } else if (srcArr2 == null) {
+      copyBitRange(
+          srcArr1,
+          srcInnerOffset,
+          destArr,
+          destInnerOffset,
+          Math.min(len, BitDocSet.MAX_BLOCK_BITS - srcInnerOffset));
+    } else {
+      int initialLen = BitDocSet.MAX_BLOCK_BITS - srcInnerOffset;
+      if (len <= initialLen) {
+        copyBitRange(srcArr1, srcInnerOffset, destArr, destInnerOffset, len);
+      } else {
+        copyBitRange(srcArr1, srcInnerOffset, destArr, destInnerOffset, initialLen);
+        copyBitRange(
+            srcArr2, 0, destArr, destInnerOffset + initialLen, Math.min(len2, len - initialLen));
+      }
+    }
+    if (destOuterOffset == destOuterLimit) return;
+
+    for (int i = destOuterOffset + 1; i < destOuterLimit; i++) {
+      // inner words are guaranteed to not be partial, so this can be very simple
+      srcArr1 = srcArr2;
+      srcArr2 = src[++srcOuterOffset];
+      destArr = dest[i];
+      copyBitRange(srcArr1, len2, destArr, 0, len1);
+      copyBitRange(srcArr2, 0, destArr, len1, len2);
+    }
+    srcArr1 = srcArr2;
+    srcArr2 = ++srcOuterOffset < src.length ? src[srcOuterOffset] : null;
+
+    // special handling for the last word, which may be partial
+    int remainder = ((destIdx + len - 1) & BitDocSet.BLOCK_BIT_MASK) + 1;
+    destArr = dest[destOuterLimit];
+    if (srcArr2 == null || remainder <= len1) {
+      copyBitRange(srcArr1, len2, destArr, 0, remainder);
+    } else {
+      copyBitRange(srcArr1, len2, destArr, 0, len1);
+      copyBitRange(srcArr2, 0, destArr, len1, remainder - len1);
+    }
+  }
+
   /**
    * Analogous to {@link System#arraycopy(Object, int, Object, int, int)}, but copies {@code long[]}
    * of the format that is used to back {@link FixedBitSet}, e.g., with offset and length args
@@ -355,7 +460,7 @@ public class DocSetUtil {
    * operations -- on the order of ~100x.
    */
   public static void copyBitRange(
-      final long[] src, final int srcIdx, final long[] dest, final int destIdx, final int len) {
+      final LongBuffer src, final int srcIdx, final LongBuffer dest, final int destIdx, final int len) {
     if (len == 0) return;
     int srcOuterOffset = srcIdx >> 6;
     int destOuterOffset = destIdx >> 6;
@@ -373,43 +478,43 @@ public class DocSetUtil {
       leftShift2 = destInnerOffset - srcInnerOffset;
       rightShift1 = Long.SIZE - leftShift2;
       srcWord1 = 0;
-      srcWord2 = clearLow(src[srcOuterOffset], srcInnerOffset); // clear out-of-scope bits
+      srcWord2 = clearLow(src.get(srcOuterOffset), srcInnerOffset); // clear out-of-scope bits
     } else {
       rightShift1 = srcInnerOffset - destInnerOffset;
       leftShift2 = Long.SIZE - rightShift1;
-      srcWord1 = clearLow(src[srcOuterOffset], srcInnerOffset); // clear out-of-scope bits
-      srcWord2 = ++srcOuterOffset < src.length ? src[srcOuterOffset] : 0;
+      srcWord1 = clearLow(src.get(srcOuterOffset), srcInnerOffset); // clear out-of-scope bits
+      srcWord2 = ++srcOuterOffset < src.capacity() ? src.get(srcOuterOffset) : 0;
     }
     // NOTE: we have to special-case the `leftShift=0` case because right-shift over too-large
     // values is defined as `shift % Long.SIZE`. i.e., `N >>> 64` does _not_ clear all bits,
     // but rather is equivalent to `N >>> 0` (identity).
     long incoming = (leftShift2 == 0 ? 0 : (srcWord1 >>> rightShift1)) | (srcWord2 << leftShift2);
-    long extant = clearHigh(dest[destOuterOffset], Long.SIZE - destInnerOffset);
+    long extant = clearHigh(dest.get(destOuterOffset), Long.SIZE - destInnerOffset);
     if (destOuterOffset == destOuterLimit) {
       // very short `len` -- special case
       int remainder = ((destIdx + len - 1) & 63) + 1;
-      extant |= clearLow(dest[destOuterOffset], remainder);
+      extant |= clearLow(dest.get(destOuterOffset), remainder);
       incoming = clearHigh(incoming, Long.SIZE - remainder);
-      dest[destOuterOffset] = extant | incoming;
+      dest.put(destOuterOffset, extant | incoming);
       return;
     }
     // special handling for the first word, which may be partial
-    dest[destOuterOffset] = extant | incoming;
+    dest.put(destOuterOffset, extant | incoming);
 
     for (int i = destOuterOffset + 1; i < destOuterLimit; i++) {
       // inner words are guaranteed to not be partial, so this can be very simple
       srcWord1 = srcWord2;
-      srcWord2 = src[++srcOuterOffset];
-      dest[i] = (leftShift2 == 0 ? 0 : (srcWord1 >>> rightShift1)) | (srcWord2 << leftShift2);
+      srcWord2 = src.get(++srcOuterOffset);
+      dest.put(i, (leftShift2 == 0 ? 0 : (srcWord1 >>> rightShift1)) | (srcWord2 << leftShift2));
     }
     srcWord1 = srcWord2;
-    srcWord2 = ++srcOuterOffset < src.length ? src[srcOuterOffset] : 0;
+    srcWord2 = ++srcOuterOffset < src.capacity() ? src.get(srcOuterOffset) : 0;
 
     // special handling for the last word, which may be partial
     int remainder = ((destIdx + len - 1) & 63) + 1;
-    extant = clearLow(dest[destOuterLimit], remainder);
+    extant = clearLow(dest.get(destOuterLimit), remainder);
     incoming = (leftShift2 == 0 ? 0 : (srcWord1 >>> rightShift1)) | (srcWord2 << leftShift2);
     incoming = clearHigh(incoming, Long.SIZE - remainder);
-    dest[destOuterLimit] = extant | incoming;
+    dest.put(destOuterLimit, extant | incoming);
   }
 }

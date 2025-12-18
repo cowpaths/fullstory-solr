@@ -375,7 +375,7 @@ public class Grouping {
     }
 
     if (getGroupedDocSet && allGroupHeadsCollector != null) {
-      qr.setDocSet(new BitDocSet(allGroupHeadsCollector.retrieveGroupHeads(maxDoc)));
+      qr.setDocSet(BitDocSet.newInstance(allGroupHeadsCollector.retrieveGroupHeads(maxDoc)));
     } else if (getDocSet) {
       qr.setDocSet(setCollector.getDocSet());
     }

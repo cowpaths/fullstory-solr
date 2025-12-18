@@ -39,6 +39,7 @@ import org.apache.solr.schema.FieldType;
 import org.apache.solr.schema.TrieField;
 import org.apache.solr.search.BitDocSet;
 import org.apache.solr.search.DocSet;
+import org.apache.solr.search.FixedBitSets;
 import org.apache.solr.search.SolrCache;
 import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.search.facet.SlotAcc.CountSlotAcc;
@@ -342,7 +343,7 @@ public class UnInvertedField extends DocTermOrds {
             && baseCountAccStruct != null;
 
     if (doNegative) {
-      FixedBitSet bs = ((BitDocSet) docs).getBits().clone();
+      FixedBitSets bs = ((BitDocSet) docs).getBits().clone();
       bs.flip(0, maxDoc);
       // TODO: when iterator across negative elements is available, use that
       // instead of creating a new bitset and inverting.

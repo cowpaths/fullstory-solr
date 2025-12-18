@@ -59,6 +59,7 @@ import org.apache.solr.schema.FieldType;
 import org.apache.solr.search.BitDocSet;
 import org.apache.solr.search.DocSet;
 import org.apache.solr.search.DocSetUtil;
+import org.apache.solr.search.FixedBitSets;
 import org.apache.solr.search.SolrIndexSearcher;
 
 public class CrossCollectionJoinQuery extends Query {
@@ -121,7 +122,7 @@ public class CrossCollectionJoinQuery extends Query {
     BytesRefBuilder bytes;
     PostingsEnum postingsEnum;
 
-    FixedBitSet bitSet;
+    FixedBitSets bitSet;
 
     public TermsJoinKeyCollector(FieldType fieldType, Terms terms, SolrIndexSearcher searcher)
         throws IOException {
@@ -131,7 +132,7 @@ public class CrossCollectionJoinQuery extends Query {
       termsEnum = terms.iterator();
       bytes = new BytesRefBuilder();
 
-      bitSet = new FixedBitSet(searcher.maxDoc());
+      bitSet = new FixedBitSets(searcher.maxDoc());
     }
 
     @Override
