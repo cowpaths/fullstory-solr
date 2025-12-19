@@ -17,6 +17,7 @@
 package org.apache.solr.search;
 
 import java.io.IOException;
+import java.nio.IntBuffer;
 import org.apache.lucene.index.PostingsEnum;
 import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.search.DocIdSetIterator;
@@ -34,7 +35,7 @@ public final class DocSetBuilder {
   private final int threshold;
 
   private int capacity = -1;
-  private int[][] buffer;
+  private IntBuffer[] buffer;
 
   private int pos;
 
@@ -56,7 +57,7 @@ public final class DocSetBuilder {
     assert bitSet == null;
     bitSet = new FixedBitSets(maxDoc);
     for (int i = 0; i < pos; ++i) {
-      bitSet.set(buffer[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK]);
+      bitSet.set(buffer[i >> SortedIntDocSet.WORDS_SHIFT].get(i & SortedIntDocSet.ARR_MASK));
     }
     this.capacity = -1;
     this.buffer = null;
@@ -89,8 +90,8 @@ public final class DocSetBuilder {
             pos = i; // update pos
             return;
           }
-          buffer[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK] =
-              doc + base; // using the loop counter may help with removal of bounds checking
+          // using the loop counter may help with removal of bounds checking
+          buffer[i >> SortedIntDocSet.WORDS_SHIFT].put(i & SortedIntDocSet.ARR_MASK, doc + base);
         }
 
         pos = capacity; // update pos
@@ -151,18 +152,18 @@ public final class DocSetBuilder {
         }
         growBuffer(pos + 1);
       }
-      buffer[pos >> SortedIntDocSet.WORDS_SHIFT][pos++ & SortedIntDocSet.ARR_MASK] = doc;
+      buffer[pos >> SortedIntDocSet.WORDS_SHIFT].put(pos++ & SortedIntDocSet.ARR_MASK, doc);
     }
   }
 
-  private static int dedup(int[][] arr, int length, FixedBitSets acceptDocs) {
+  private static int dedup(IntBuffer[] arr, int length, FixedBitSets acceptDocs) {
     int pos = 0;
     int previous = -1;
     for (int i = 0; i < length; ++i) {
-      final int value = arr[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK];
+      final int value = arr[i >> SortedIntDocSet.WORDS_SHIFT].get(i & SortedIntDocSet.ARR_MASK);
       // assert value >= previous;
       if (value != previous && (acceptDocs == null || acceptDocs.get(value))) {
-        arr[pos >> SortedIntDocSet.WORDS_SHIFT][pos++ & SortedIntDocSet.ARR_MASK] = value;
+        arr[pos >> SortedIntDocSet.WORDS_SHIFT].put(pos++ & SortedIntDocSet.ARR_MASK, value);
         previous = value;
       }
     }

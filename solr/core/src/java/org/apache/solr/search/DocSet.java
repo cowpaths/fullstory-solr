@@ -16,6 +16,7 @@
  */
 package org.apache.solr.search;
 
+import java.nio.IntBuffer;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Query;
@@ -39,7 +40,7 @@ public abstract class DocSet implements Accountable, Cloneable /* extends Collec
   // can't use a trivial static initializer "EMPTY = new SortedIntDocSet" because it can lead to
   // classloader deadlock
   private static class EmptyLazyHolder {
-    static final DocSet INSTANCE = new SortedIntDocSet(new int[0][]);
+    static final DocSet INSTANCE = new SortedIntDocSet(new IntBuffer[0]);
   }
 
   /** An empty instance (has no docs). */

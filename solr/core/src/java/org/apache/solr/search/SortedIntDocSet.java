@@ -302,7 +302,8 @@ public class SortedIntDocSet extends DocSet {
     int i = 0, j = 0;
     IntBuffer[] aDocs = a.docs;
     IntBuffer[] bDocs = b.docs;
-    int doca = aDocs[i >> WORDS_SHIFT].get(i & ARR_MASK), docb = bDocs[j >> WORDS_SHIFT].get(j & ARR_MASK);
+    int doca = aDocs[i >> WORDS_SHIFT].get(i & ARR_MASK),
+        docb = bDocs[j >> WORDS_SHIFT].get(j & ARR_MASK);
     for (; ; ) {
       // switch on the sign bit somehow? Hopefully JVM is smart enough to just test once.
 
@@ -353,7 +354,8 @@ public class SortedIntDocSet extends DocSet {
     int i = 0, j = 0;
     IntBuffer[] aDocs = a.docs;
     IntBuffer[] bDocs = b.docs;
-    int doca = aDocs[i >> WORDS_SHIFT].get(i & ARR_MASK), docb = bDocs[j >> WORDS_SHIFT].get(j & ARR_MASK);
+    int doca = aDocs[i >> WORDS_SHIFT].get(i & ARR_MASK),
+        docb = bDocs[j >> WORDS_SHIFT].get(j & ARR_MASK);
     for (; ; ) {
       // switch on the sign bit somehow?  Hopefull JVM is smart enough to just test once.
 
@@ -373,7 +375,8 @@ public class SortedIntDocSet extends DocSet {
   }
 
   /** puts the intersection of a and b into the target array and returns the size */
-  public static int intersection(IntBuffer[] a, int lena, IntBuffer[] b, int lenb, IntBuffer[] target) {
+  public static int intersection(
+      IntBuffer[] a, int lena, IntBuffer[] b, int lenb, IntBuffer[] target) {
     if (lena > lenb) {
       int ti = lena;
       lena = lenb;
@@ -610,7 +613,8 @@ public class SortedIntDocSet extends DocSet {
     return count;
   }
 
-  public static void arraycopy(IntBuffer[] src, int srcIdx, IntBuffer[] dest, int destIdx, int len) {
+  public static void arraycopy(
+      IntBuffer[] src, int srcIdx, IntBuffer[] dest, int destIdx, int len) {
     if (len == 0) return;
     int srcOuterOffset = srcIdx >> WORDS_SHIFT;
     final int destOuterOffset = destIdx >> WORDS_SHIFT;
@@ -687,7 +691,7 @@ public class SortedIntDocSet extends DocSet {
     }
   }
 
-  private static void buffercopy(IntBuffer src, int srcOff, IntBuffer dest, int destOff, int len) {
+  static void buffercopy(IntBuffer src, int srcOff, IntBuffer dest, int destOff, int len) {
     dest.slice().position(destOff).put(src.slice(srcOff, len));
   }
 
@@ -914,7 +918,9 @@ public class SortedIntDocSet extends DocSet {
       @Override
       public int nextDoc() {
         return adjustedDoc =
-            (++idx >= limitIdx) ? NO_MORE_DOCS : (docs[idx >> WORDS_SHIFT].get(idx & ARR_MASK) - base);
+            (++idx >= limitIdx)
+                ? NO_MORE_DOCS
+                : (docs[idx >> WORDS_SHIFT].get(idx & ARR_MASK) - base);
       }
 
       @Override

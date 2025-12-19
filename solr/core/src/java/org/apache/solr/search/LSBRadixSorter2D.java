@@ -19,7 +19,7 @@ package org.apache.solr.search;
 import static org.apache.solr.search.SortedIntDocSet.ARR_MASK;
 import static org.apache.solr.search.SortedIntDocSet.WORDS_SHIFT;
 
-import java.util.Arrays;
+import java.nio.IntBuffer;
 
 /** Copied from {@link org.apache.lucene.util.LSBRadixSorter} */
 public final class LSBRadixSorter2D {
@@ -27,41 +27,50 @@ public final class LSBRadixSorter2D {
   private static final int INSERTION_SORT_THRESHOLD = 30;
   private static final int HISTOGRAM_SIZE = 256;
 
-  private final int[][] histogram = SortedIntDocSet.allocate(HISTOGRAM_SIZE);
-  private int[][] buffer = new int[0][];
+  private final IntBuffer[] histogram = SortedIntDocSet.allocate(HISTOGRAM_SIZE);
+  private IntBuffer[] buffer = new IntBuffer[0];
   private int bufferCapacity = 0;
 
-  private static void buildHistogram(int[][] array, int len, int[][] histogram, int shift) {
+  private static void buildHistogram(IntBuffer[] array, int len, IntBuffer[] histogram, int shift) {
     for (int i = 0; i < len; ++i) {
-      final int b = (array[i >> WORDS_SHIFT][i & ARR_MASK] >>> shift) & 0xFF;
-      histogram[b >> WORDS_SHIFT][b & ARR_MASK] += 1;
+      final int b = (array[i >> WORDS_SHIFT].get(i & ARR_MASK) >>> shift) & 0xFF;
+      IntBuffer buf = histogram[b >> WORDS_SHIFT];
+      int innerIdx = b & ARR_MASK;
+      buf.put(innerIdx, buf.get(innerIdx) + 1); // TODO: vectorize?
     }
   }
 
-  private static void sumHistogram(int[][] histogram) {
+  private static void sumHistogram(IntBuffer[] histogram) {
     int accum = 0;
     for (int i = 0; i < HISTOGRAM_SIZE; ++i) {
-      final int count = histogram[i >> WORDS_SHIFT][i & ARR_MASK];
-      histogram[i >> WORDS_SHIFT][i & ARR_MASK] = accum;
+      final int count = histogram[i >> WORDS_SHIFT].get(i & ARR_MASK);
+      histogram[i >> WORDS_SHIFT].put(i & ARR_MASK, accum);
       accum += count;
     }
   }
 
-  private static void reorder(int[][] array, int len, int[][] histogram, int shift, int[][] dest) {
+  private static void reorder(
+      IntBuffer[] array, int len, IntBuffer[] histogram, int shift, IntBuffer[] dest) {
     for (int i = 0; i < len; ++i) {
-      final int v = array[i >> WORDS_SHIFT][i & ARR_MASK];
+      final int v = array[i >> WORDS_SHIFT].get(i & ARR_MASK);
       final int b = (v >>> shift) & 0xFF;
-      int destIdx = histogram[b >> WORDS_SHIFT][b & ARR_MASK]++;
-      dest[destIdx >> WORDS_SHIFT][destIdx & ARR_MASK] = v;
+      IntBuffer buf = histogram[b >> WORDS_SHIFT];
+      int innerIdx = b & ARR_MASK;
+      int destIdx = buf.get(innerIdx);
+      buf.put(innerIdx, destIdx + 1);
+      dest[destIdx >> WORDS_SHIFT].put(destIdx & ARR_MASK, v);
     }
   }
 
-  private static boolean sort(int[][] array, int len, int[][] histogram, int shift, int[][] dest) {
-    for (int[] sub : histogram) {
-      Arrays.fill(sub, 0);
+  private static boolean sort(
+      IntBuffer[] array, int len, IntBuffer[] histogram, int shift, IntBuffer[] dest) {
+    for (IntBuffer sub : histogram) {
+      for (int i = 0, lim = sub.capacity(); i < lim; i++) {
+        sub.put(i, 0); // TODO: vector broadcast?
+      }
     }
     buildHistogram(array, len, histogram, shift);
-    if (histogram[0][0] == len) {
+    if (histogram[0].get(0) == len) {
       return false;
     }
     sumHistogram(histogram);
@@ -69,16 +78,16 @@ public final class LSBRadixSorter2D {
     return true;
   }
 
-  private static void insertionSort(int[][] array, int off, int len) {
+  private static void insertionSort(IntBuffer[] array, int off, int len) {
     for (int i = off + 1, end = off + len; i < end; ++i) {
       for (int j = i; j > off; --j) {
         int prevIdx = j - 1;
         int tmp;
         int candidate;
-        if ((tmp = array[prevIdx >> WORDS_SHIFT][prevIdx & ARR_MASK])
-            > (candidate = array[j >> WORDS_SHIFT][j & ARR_MASK])) {
-          array[prevIdx >> WORDS_SHIFT][prevIdx & ARR_MASK] = candidate;
-          array[j >> WORDS_SHIFT][j & ARR_MASK] = tmp;
+        if ((tmp = array[prevIdx >> WORDS_SHIFT].get(prevIdx & ARR_MASK))
+            > (candidate = array[j >> WORDS_SHIFT].get(j & ARR_MASK))) {
+          array[prevIdx >> WORDS_SHIFT].put(prevIdx & ARR_MASK, candidate);
+          array[j >> WORDS_SHIFT].put(j & ARR_MASK, tmp);
         } else {
           break;
         }
@@ -92,7 +101,7 @@ public final class LSBRadixSorter2D {
    * @param numBits how many bits are required to store any of the values in {@code array[0:len]}.
    *     Pass {@code 32} if unknown.
    */
-  public void sort(int numBits, final int[][] array, int len) {
+  public void sort(int numBits, final IntBuffer[] array, int len) {
     if (len < INSERTION_SORT_THRESHOLD) {
       insertionSort(array, 0, len);
       return;
@@ -101,14 +110,14 @@ public final class LSBRadixSorter2D {
     buffer = SortedIntDocSet.grow(buffer, bufferCapacity, len);
     bufferCapacity = len;
 
-    int[][] arr = array;
+    IntBuffer[] arr = array;
 
-    int[][] buf = buffer;
+    IntBuffer[] buf = buffer;
 
     for (int shift = 0; shift < numBits; shift += 8) {
       if (sort(arr, len, histogram, shift, buf)) {
         // swap arrays
-        int[][] tmp = arr;
+        IntBuffer[] tmp = arr;
         arr = buf;
         buf = tmp;
       }

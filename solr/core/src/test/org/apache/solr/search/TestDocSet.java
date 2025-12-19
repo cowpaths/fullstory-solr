@@ -19,6 +19,7 @@ package org.apache.solr.search;
 import static org.apache.solr.search.DocSetUtil.copyBitRange;
 
 import java.io.IOException;
+import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.util.Arrays;
 import java.util.Collections;
@@ -101,11 +102,11 @@ public class TestDocSet extends SolrTestCase {
   public DocSet getIntDocSet(FixedBitSet bs) {
     int size = bs.cardinality();
     int lim = bs.length();
-    int[][] docs = SortedIntDocSet.allocate(size);
+    IntBuffer[] docs = SortedIntDocSet.allocate(size);
     int doc = -1;
     int i = 0;
     while (++doc < lim && (doc = bs.nextSetBit(doc)) != DocIdSetIterator.NO_MORE_DOCS) {
-      docs[i >> SortedIntDocSet.WORDS_SHIFT][i++ & SortedIntDocSet.ARR_MASK] = doc;
+      docs[i >> SortedIntDocSet.WORDS_SHIFT].put(i++ & SortedIntDocSet.ARR_MASK, doc);
     }
     return new SortedIntDocSet(docs);
   }
@@ -256,9 +257,9 @@ public class TestDocSet extends SolrTestCase {
     if (n <= smallSetCutoff) {
       if (smallSetType == 0) {
         Arrays.sort(a);
-        int[][] dimensional = SortedIntDocSet.allocate(n);
+        IntBuffer[] dimensional = SortedIntDocSet.allocate(n);
         for (int i = 0; i < n; i++) {
-          dimensional[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK] = a[i];
+          dimensional[i >> SortedIntDocSet.WORDS_SHIFT].put(i & SortedIntDocSet.ARR_MASK, a[i]);
         }
         return new SortedIntDocSet(dimensional);
       }

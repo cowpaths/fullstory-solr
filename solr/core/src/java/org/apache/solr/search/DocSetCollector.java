@@ -17,6 +17,7 @@
 package org.apache.solr.search;
 
 import java.io.IOException;
+import java.nio.IntBuffer;
 import java.util.ArrayList;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.Scorable;
@@ -151,8 +152,8 @@ public class DocSetCollector extends SimpleCollector {
       }
     }
 
-    public int[][] toArray() {
-      int[][] result = SortedIntDocSet.allocate(size);
+    public IntBuffer[] toArray() {
+      IntBuffer[] result = SortedIntDocSet.allocate(size);
       if (size > 0) {
         int resultPos = 0;
         for (int i = 0; i < arrays.size(); i++) {
@@ -163,14 +164,17 @@ public class DocSetCollector extends SimpleCollector {
           int destOff = resultPos & SortedIntDocSet.ARR_MASK;
           int destRemaining = SortedIntDocSet.MAX_ARR_SIZE - destOff;
           if (intsToCopy <= destRemaining) {
-            System.arraycopy(srcArray, 0, result[destArrIdx], destOff, intsToCopy);
+            SortedIntDocSet.buffercopy(
+                IntBuffer.wrap(srcArray), 0, result[destArrIdx], destOff, intsToCopy);
           } else {
             int toCopy = destRemaining;
-            System.arraycopy(srcArray, 0, result[destArrIdx], destOff, toCopy);
+            SortedIntDocSet.buffercopy(
+                IntBuffer.wrap(srcArray), 0, result[destArrIdx], destOff, toCopy);
             int srcCopied = toCopy;
             do {
               toCopy = Math.min(intsToCopy - srcCopied, SortedIntDocSet.MAX_ARR_SIZE);
-              System.arraycopy(srcArray, srcCopied, result[++destArrIdx], 0, toCopy);
+              SortedIntDocSet.buffercopy(
+                  IntBuffer.wrap(srcArray), srcCopied, result[++destArrIdx], 0, toCopy);
               srcCopied += toCopy;
             } while (intsToCopy > srcCopied);
           }

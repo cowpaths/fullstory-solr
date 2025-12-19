@@ -17,6 +17,7 @@
 package org.apache.solr.search;
 
 import java.io.IOException;
+import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.util.Arrays;
 import java.util.Iterator;
@@ -199,7 +200,7 @@ public class DocSetUtil {
   private static DocSet createSmallSet(
       List<LeafReaderContext> leaves, PostingsEnum[] postList, int maxPossible, int firstReader)
       throws IOException {
-    int[][] docs = SortedIntDocSet.allocate(maxPossible);
+    IntBuffer[] docs = SortedIntDocSet.allocate(maxPossible);
     int sz = 0;
     for (int i = firstReader; i < postList.length; i++) {
       PostingsEnum postings = postList[i];
@@ -212,7 +213,7 @@ public class DocSetUtil {
         if (subId == DocIdSetIterator.NO_MORE_DOCS) break;
         if (liveDocs != null && !liveDocs.get(subId)) continue;
         int globalId = subId + base;
-        docs[sz >> SortedIntDocSet.WORDS_SHIFT][sz++ & SortedIntDocSet.ARR_MASK] = globalId;
+        docs[sz >> SortedIntDocSet.WORDS_SHIFT].put(sz++ & SortedIntDocSet.ARR_MASK, globalId);
       }
     }
 
@@ -254,11 +255,11 @@ public class DocSetUtil {
 
   public static DocSet toSmallSet(BitDocSet bitSet) {
     int sz = bitSet.size();
-    int[][] docs = SortedIntDocSet.allocate(sz);
+    IntBuffer[] docs = SortedIntDocSet.allocate(sz);
     FixedBitSets bs = bitSet.getBits();
     BitDocSet.BitSetsIterator iter = new BitDocSet.BitSetsIterator(bs.parts, bs.length(), sz);
     for (int i = 0; i < sz; i++) {
-      docs[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK] = iter.nextDoc();
+      docs[i >> SortedIntDocSet.WORDS_SHIFT].put(i & SortedIntDocSet.ARR_MASK, iter.nextDoc());
     }
     return new SortedIntDocSet(docs);
   }

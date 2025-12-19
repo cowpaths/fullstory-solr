@@ -18,6 +18,7 @@
 package org.apache.solr.search;
 
 import java.io.IOException;
+import java.nio.IntBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -456,7 +457,7 @@ class JoinQuery extends Query {
       for (DocSet set : resultList) {
         SortedIntDocSet sorted = (SortedIntDocSet) set;
         int capacity = sorted.capacity;
-        final int[][] docs = sorted.getDocs();
+        final IntBuffer[] docs = sorted.getDocs();
         pq.add(
             new DisiWrapper(
                 new ConstantScoreScorer(
@@ -478,8 +479,8 @@ class JoinQuery extends Query {
                           return id = NO_MORE_DOCS;
                         } else {
                           return id =
-                              docs[idx >> SortedIntDocSet.WORDS_SHIFT][
-                                  idx & SortedIntDocSet.ARR_MASK];
+                              docs[idx >> SortedIntDocSet.WORDS_SHIFT].get(
+                                  idx & SortedIntDocSet.ARR_MASK);
                         }
                       }
 

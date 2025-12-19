@@ -20,6 +20,7 @@ import com.codahale.metrics.Gauge;
 import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.nio.IntBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -1416,7 +1417,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     if (deState.scratch == null || SortedIntDocSet.getCapacity(deState.scratch) < scratchSize)
       deState.scratch = SortedIntDocSet.allocate(scratchSize);
 
-    final int[][] docs = deState.scratch;
+    final IntBuffer[] docs = deState.scratch;
     final int docsCapacity = SortedIntDocSet.getCapacity(docs);
     int upto = 0;
     int bitsSet = 0;
@@ -1445,8 +1446,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
           }
         } else {
           while ((docid = sub.postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-            docs[upto >> SortedIntDocSet.WORDS_SHIFT][upto++ & SortedIntDocSet.ARR_MASK] =
-                docid + base;
+            docs[upto >> SortedIntDocSet.WORDS_SHIFT].put(
+                upto++ & SortedIntDocSet.ARR_MASK, docid + base);
           }
         }
       }
@@ -1460,7 +1461,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         }
       } else {
         while ((docid = postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-          docs[upto >> SortedIntDocSet.WORDS_SHIFT][upto++ & SortedIntDocSet.ARR_MASK] = docid;
+          docs[upto >> SortedIntDocSet.WORDS_SHIFT].put(upto++ & SortedIntDocSet.ARR_MASK, docid);
         }
       }
     }
@@ -1468,7 +1469,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     DocSet result;
     if (fbs != null) {
       for (int i = 0; i < upto; i++) {
-        fbs.set(docs[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK]);
+        fbs.set(docs[i >> SortedIntDocSet.WORDS_SHIFT].get(i & SortedIntDocSet.ARR_MASK));
       }
       bitsSet += upto;
       result = new BitDocSet(fbs, bitsSet);
@@ -2575,7 +2576,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
     public int minSetSizeCached;
 
-    public int[][] scratch;
+    public IntBuffer[] scratch;
   }
 
   /**

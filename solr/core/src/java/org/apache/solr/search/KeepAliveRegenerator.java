@@ -20,6 +20,7 @@ import static org.apache.solr.search.DocSetUtil.copyBitRange;
 import static org.apache.solr.search.OrdMapRegenerator.getRegenKeepAliveNanos;
 
 import java.io.IOException;
+import java.nio.IntBuffer;
 import java.util.AbstractMap;
 import java.util.Collections;
 import java.util.HashMap;
@@ -521,7 +522,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
               assert stale instanceof SortedIntDocSet;
               SortedIntDocSet staleSorted = (SortedIntDocSet) stale;
               int capacity = staleSorted.capacity;
-              final int[][] docs = staleSorted.getDocs();
+              final IntBuffer[] docs = staleSorted.getDocs();
               final int first =
                   SortedIntDocSet.binarySearch(docs, 0, staleSorted.capacity, docBase);
               disi =
@@ -539,8 +540,8 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
                     public int nextDoc() {
                       if (++idx >= capacity
                           || (id =
-                                  docs[idx >> SortedIntDocSet.WORDS_SHIFT][
-                                      idx & SortedIntDocSet.ARR_MASK])
+                                  docs[idx >> SortedIntDocSet.WORDS_SHIFT].get(
+                                      idx & SortedIntDocSet.ARR_MASK))
                               >= limit) {
                         return id = NO_MORE_DOCS;
                       } else {
@@ -608,7 +609,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
             if (stale instanceof SortedIntDocSet) {
               SortedIntDocSet staleSorted = (SortedIntDocSet) stale;
               int capacity = staleSorted.capacity;
-              final int[][] docs = staleSorted.getDocs();
+              final IntBuffer[] docs = staleSorted.getDocs();
               final int first =
                   SortedIntDocSet.binarySearch(docs, 0, staleSorted.capacity, docBase);
               disi =
@@ -626,8 +627,8 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
                     public int nextDoc() {
                       if (++idx >= capacity
                           || (id =
-                                  docs[idx >> SortedIntDocSet.WORDS_SHIFT][
-                                      idx & SortedIntDocSet.ARR_MASK])
+                                  docs[idx >> SortedIntDocSet.WORDS_SHIFT].get(
+                                      idx & SortedIntDocSet.ARR_MASK))
                               >= limit) {
                         return id = NO_MORE_DOCS;
                       } else {
