@@ -54,7 +54,7 @@ public class FixedBitSets implements Bits, Accountable {
     this.parts = new FixedBitSet[lastIdx + 1];
     int len = ((numBits - 1) & BLOCK_BIT_MASK) + 1;
     for (int i = lastIdx; i >= 0; i--) {
-      parts[i] = new FixedBitSet(len, MODIFIER);
+      parts[i] = new FixedBitSet(len, MODIFIER, this);
       len = MAX_BLOCK_BITS;
     }
   }
@@ -63,9 +63,13 @@ public class FixedBitSets implements Bits, Accountable {
     this.parts = parts;
   }
 
-  private FixedBitSets(FixedBitSet[] parts, int cachedLength) {
-    this.parts = parts;
-    this.cachedLength = cachedLength;
+  private FixedBitSets(FixedBitSets template) {
+    FixedBitSet[] otherParts = template.parts;
+    this.parts = new FixedBitSet[otherParts.length];
+    for (int i = otherParts.length - 1; i >= 0; i--) {
+      this.parts[i] = otherParts[i].clone(MODIFIER, this);
+    }
+    this.cachedLength = template.cachedLength;
   }
 
   public void set(int index) {
@@ -186,11 +190,7 @@ public class FixedBitSets implements Bits, Accountable {
 
   @Override
   public FixedBitSets clone() {
-    FixedBitSet[] ret = new FixedBitSet[parts.length];
-    for (int i = parts.length - 1; i >= 0; i--) {
-      ret[i] = parts[i].clone(MODIFIER);
-    }
-    return new FixedBitSets(ret, cachedLength);
+    return new FixedBitSets(this);
   }
 
   @Override
