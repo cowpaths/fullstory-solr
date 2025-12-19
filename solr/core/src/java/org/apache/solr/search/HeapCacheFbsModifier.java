@@ -19,6 +19,8 @@ package org.apache.solr.search;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.solr.common.util.EnvUtils;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -66,7 +68,7 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier {
   }
 
   @Override
-  public ByteBuffer allocateBytes(int size, Object sentinel) {
+  public ByteBuffer allocateBytes(int size) {
     for (long extant = this.headAndTail.get(); ; ) {
       int head = (int) (extant >> Integer.SIZE);
       long tail = extant & TAIL_MASK;
@@ -88,5 +90,31 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier {
         extant = witness;
       }
     }
+  }
+
+  private void registerBatch(Object sentinel, List<ByteBuffer> blocks) {
+    // TODO: implement this!
+  }
+
+  @Override
+  public FixedBitSet.Modifier getBatchModifier(Object sentinel, int batchSize) {
+    List<ByteBuffer> blocks = new ArrayList<>(batchSize);
+    return new FixedBitSet.Modifier() {
+      @Override
+      public ByteBuffer allocateBytes(int size) {
+        ByteBuffer ret = HeapCacheFbsModifier.this.allocateBytes(size);
+        blocks.add(ret);
+        return ret;
+      }
+
+      @Override
+      public void close() {
+        try {
+          registerBatch(sentinel, blocks);
+        } finally {
+          FixedBitSet.Modifier.super.close();
+        }
+      }
+    };
   }
 }

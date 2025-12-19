@@ -97,9 +97,9 @@ public class SortedIntDocSet extends DocSet {
     int outerSize = ((size - 1) >> WORDS_SHIFT) + 1;
     IntBuffer[] ret = new IntBuffer[outerSize];
     int i = outerSize - 1;
-    ret[i] = FixedBitSet.DEFAULT_MODIFIER.allocateInt(((size - 1) & ARR_MASK) + 1, null);
+    ret[i] = FixedBitSet.DEFAULT_MODIFIER.allocateInt(((size - 1) & ARR_MASK) + 1);
     while (--i >= 0) {
-      ret[i] = FixedBitSet.DEFAULT_MODIFIER.allocateInt(MAX_ARR_SIZE, null);
+      ret[i] = FixedBitSet.DEFAULT_MODIFIER.allocateInt(MAX_ARR_SIZE);
     }
     return ret;
   }
@@ -111,7 +111,7 @@ public class SortedIntDocSet extends DocSet {
     IntBuffer[] newArr = new IntBuffer[outerSize];
     int i = outerSize - 1;
     int lastIdxSize = ((newSize - 1) & ARR_MASK) + 1;
-    IntBuffer lastIdxArr = FixedBitSet.DEFAULT_MODIFIER.allocateInt(lastIdxSize, null);
+    IntBuffer lastIdxArr = FixedBitSet.DEFAULT_MODIFIER.allocateInt(lastIdxSize);
     newArr[i] = lastIdxArr;
     buffercopy(arr[i], 0, lastIdxArr, 0, lastIdxSize);
     while (--i >= 0) {
@@ -127,12 +127,11 @@ public class SortedIntDocSet extends DocSet {
     IntBuffer[] newArr = new IntBuffer[outerSize];
     int i = outerSize - 1;
     int lastIdxSize = ((newSize - 1) & ARR_MASK) + 1;
-    IntBuffer lastIdxArr = FixedBitSet.DEFAULT_MODIFIER.allocateInt(lastIdxSize, null);
+    IntBuffer lastIdxArr = FixedBitSet.DEFAULT_MODIFIER.allocateInt(lastIdxSize);
     newArr[i] = lastIdxArr;
     buffercopy(arr[i], 0, lastIdxArr, 0, lastIdxSize);
     while (--i >= 0) {
       // don't share content
-      // TODO: fix this!
       newArr[i] = clone(arr[i]);
     }
     return newArr;
@@ -642,7 +641,6 @@ public class SortedIntDocSet extends DocSet {
     // special handling for the first word, which may be partial
     IntBuffer destArr = dest[destOuterOffset];
     if (srcArr1 == null) {
-      // TODO: fix this!
       buffercopy(
           srcArr2,
           srcInnerOffset,
@@ -650,7 +648,6 @@ public class SortedIntDocSet extends DocSet {
           destInnerOffset,
           Math.min(len, MAX_ARR_SIZE - destInnerOffset));
     } else if (srcArr2 == null) {
-      // TODO: fix this!
       buffercopy(
           srcArr1,
           srcInnerOffset,
@@ -696,7 +693,7 @@ public class SortedIntDocSet extends DocSet {
   }
 
   private static IntBuffer clone(IntBuffer src) {
-    return FixedBitSet.DEFAULT_MODIFIER.allocateInt(src.capacity(), null).put(src.slice()).clear();
+    return FixedBitSet.DEFAULT_MODIFIER.allocateInt(src.capacity()).put(src.slice()).clear();
   }
 
   @Override

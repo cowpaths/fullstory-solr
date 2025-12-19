@@ -53,9 +53,11 @@ public class FixedBitSets implements Bits, Accountable {
     int lastIdx = (numBits - 1) >> BIT_SHIFT;
     this.parts = new FixedBitSet[lastIdx + 1];
     int len = ((numBits - 1) & BLOCK_BIT_MASK) + 1;
-    for (int i = lastIdx; i >= 0; i--) {
-      parts[i] = new FixedBitSet(len, MODIFIER, this);
-      len = MAX_BLOCK_BITS;
+    try (FixedBitSet.Modifier m = MODIFIER.getBatchModifier(this, parts.length)) {
+      for (int i = lastIdx; i >= 0; i--) {
+        parts[i] = new FixedBitSet(len, m);
+        len = MAX_BLOCK_BITS;
+      }
     }
   }
 
@@ -66,8 +68,10 @@ public class FixedBitSets implements Bits, Accountable {
   private FixedBitSets(FixedBitSets template) {
     FixedBitSet[] otherParts = template.parts;
     this.parts = new FixedBitSet[otherParts.length];
-    for (int i = otherParts.length - 1; i >= 0; i--) {
-      this.parts[i] = otherParts[i].clone(MODIFIER, this);
+    try (FixedBitSet.Modifier m = MODIFIER.getBatchModifier(this, otherParts.length)) {
+      for (int i = otherParts.length - 1; i >= 0; i--) {
+        this.parts[i] = otherParts[i].clone(m);
+      }
     }
     this.cachedLength = template.cachedLength;
   }
