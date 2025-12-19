@@ -97,9 +97,9 @@ public class SortedIntDocSet extends DocSet {
     int outerSize = ((size - 1) >> WORDS_SHIFT) + 1;
     IntBuffer[] ret = new IntBuffer[outerSize];
     int i = outerSize - 1;
-    ret[i] = FixedBitSet.DEFAULT_MODIFIER.allocateInt(((size - 1) & ARR_MASK) + 1);
+    ret[i] = FixedBitSet.DEFAULT_MODIFIER.allocateInt(((size - 1) & ARR_MASK) + 1, null);
     while (--i >= 0) {
-      ret[i] = FixedBitSet.DEFAULT_MODIFIER.allocateInt(MAX_ARR_SIZE);
+      ret[i] = FixedBitSet.DEFAULT_MODIFIER.allocateInt(MAX_ARR_SIZE, null);
     }
     return ret;
   }
@@ -111,7 +111,7 @@ public class SortedIntDocSet extends DocSet {
     IntBuffer[] newArr = new IntBuffer[outerSize];
     int i = outerSize - 1;
     int lastIdxSize = ((newSize - 1) & ARR_MASK) + 1;
-    IntBuffer lastIdxArr = FixedBitSet.DEFAULT_MODIFIER.allocateInt(lastIdxSize);
+    IntBuffer lastIdxArr = FixedBitSet.DEFAULT_MODIFIER.allocateInt(lastIdxSize, null);
     newArr[i] = lastIdxArr;
     buffercopy(arr[i], 0, lastIdxArr, 0, lastIdxSize);
     while (--i >= 0) {
@@ -127,7 +127,7 @@ public class SortedIntDocSet extends DocSet {
     IntBuffer[] newArr = new IntBuffer[outerSize];
     int i = outerSize - 1;
     int lastIdxSize = ((newSize - 1) & ARR_MASK) + 1;
-    IntBuffer lastIdxArr = FixedBitSet.DEFAULT_MODIFIER.allocateInt(lastIdxSize);
+    IntBuffer lastIdxArr = FixedBitSet.DEFAULT_MODIFIER.allocateInt(lastIdxSize, null);
     newArr[i] = lastIdxArr;
     buffercopy(arr[i], 0, lastIdxArr, 0, lastIdxSize);
     while (--i >= 0) {
@@ -696,7 +696,7 @@ public class SortedIntDocSet extends DocSet {
   }
 
   private static IntBuffer clone(IntBuffer src) {
-    return FixedBitSet.DEFAULT_MODIFIER.allocateInt(src.capacity()).put(src.slice()).clear();
+    return FixedBitSet.DEFAULT_MODIFIER.allocateInt(src.capacity(), null).put(src.slice()).clear();
   }
 
   @Override
