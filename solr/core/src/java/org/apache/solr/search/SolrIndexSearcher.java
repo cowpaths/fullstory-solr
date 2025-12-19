@@ -1475,7 +1475,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       result = new BitDocSet(fbs, bitsSet);
     } else {
       result =
-          upto == 0 ? DocSet.empty() : new SortedIntDocSet(SortedIntDocSet.shrinkClone(docs, upto));
+          upto == 0 ? DocSet.empty() : new SortedIntDocSet(SortedIntDocSet.shrink(docs, upto));
     }
     return result;
   }

@@ -35,6 +35,8 @@ public class SortedIntDocSet extends DocSet {
       RamUsageEstimator.shallowSizeOfInstance(SortedIntDocSet.class)
           + RamUsageEstimator.NUM_BYTES_ARRAY_HEADER;
 
+  private static final FixedBitSet.Modifier MODIFIER = FixedBitSet.DEFAULT_MODIFIER;
+
   protected final IntBuffer[] docs;
   final int capacity;
 
@@ -70,7 +72,7 @@ public class SortedIntDocSet extends DocSet {
     int i = lastIdx >> SortedIntDocSet.WORDS_SHIFT;
     buffercopy(buffer[i], 0, ret[i], 0, (lastIdx & SortedIntDocSet.ARR_MASK) + 1);
     while (--i >= 0) {
-      ret[i] = buffer[i];
+      buffercopy(buffer[i], 0, ret[i], 0, SortedIntDocSet.MAX_ARR_SIZE);
     }
     return ret;
   }
@@ -97,44 +99,26 @@ public class SortedIntDocSet extends DocSet {
     int outerSize = ((size - 1) >> WORDS_SHIFT) + 1;
     IntBuffer[] ret = new IntBuffer[outerSize];
     int i = outerSize - 1;
-    ret[i] = FixedBitSet.DEFAULT_MODIFIER.allocateInt(((size - 1) & ARR_MASK) + 1);
-    while (--i >= 0) {
-      ret[i] = FixedBitSet.DEFAULT_MODIFIER.allocateInt(MAX_ARR_SIZE);
+    try (FixedBitSet.Modifier m = MODIFIER.getBatchModifier(ret, ret.length)) {
+      ret[i] = m.allocateInt(((size - 1) & ARR_MASK) + 1);
+      while (--i >= 0) {
+        ret[i] = m.allocateInt(MAX_ARR_SIZE);
+      }
     }
     return ret;
   }
 
   public static IntBuffer[] shrink(IntBuffer[] arr, int newSize) {
     if (newSize == 0) return zeroInts;
-    if (getCapacity(arr) == newSize) return arr;
-    int outerSize = ((newSize - 1) >> WORDS_SHIFT) + 1;
-    IntBuffer[] newArr = new IntBuffer[outerSize];
-    int i = outerSize - 1;
+    IntBuffer[] ret = allocate(newSize);
+    int i = ret.length - 1;
     int lastIdxSize = ((newSize - 1) & ARR_MASK) + 1;
-    IntBuffer lastIdxArr = FixedBitSet.DEFAULT_MODIFIER.allocateInt(lastIdxSize);
-    newArr[i] = lastIdxArr;
-    buffercopy(arr[i], 0, lastIdxArr, 0, lastIdxSize);
-    while (--i >= 0) {
-      // share content; careful!
-      newArr[i] = arr[i];
-    }
-    return newArr;
-  }
-
-  public static IntBuffer[] shrinkClone(IntBuffer[] arr, int newSize) {
-    if (newSize == 0) return zeroInts;
-    int outerSize = ((newSize - 1) >> WORDS_SHIFT) + 1;
-    IntBuffer[] newArr = new IntBuffer[outerSize];
-    int i = outerSize - 1;
-    int lastIdxSize = ((newSize - 1) & ARR_MASK) + 1;
-    IntBuffer lastIdxArr = FixedBitSet.DEFAULT_MODIFIER.allocateInt(lastIdxSize);
-    newArr[i] = lastIdxArr;
-    buffercopy(arr[i], 0, lastIdxArr, 0, lastIdxSize);
+    buffercopy(arr[i], 0, ret[i], 0, lastIdxSize);
     while (--i >= 0) {
       // don't share content
-      newArr[i] = clone(arr[i]);
+      buffercopy(arr[i], 0, ret[i], 0, SortedIntDocSet.MAX_ARR_SIZE);
     }
-    return newArr;
+    return ret;
   }
 
   public static int intersectionSize(
@@ -692,8 +676,8 @@ public class SortedIntDocSet extends DocSet {
     dest.slice().position(destOff).put(src.slice(srcOff, len));
   }
 
-  private static IntBuffer clone(IntBuffer src) {
-    return FixedBitSet.DEFAULT_MODIFIER.allocateInt(src.capacity()).put(src.slice()).clear();
+  private static IntBuffer clone(IntBuffer src, FixedBitSet.Modifier m) {
+    return m.allocateInt(src.capacity()).put(src.slice()).clear();
   }
 
   @Override
@@ -967,8 +951,10 @@ public class SortedIntDocSet extends DocSet {
   @Override
   public SortedIntDocSet clone() {
     IntBuffer[] newDocs = new IntBuffer[docs.length];
-    for (int i = docs.length - 1; i >= 0; i--) {
-      newDocs[i] = clone(docs[i]);
+    try (FixedBitSet.Modifier m = MODIFIER.getBatchModifier(newDocs, newDocs.length)) {
+      for (int i = docs.length - 1; i >= 0; i--) {
+        newDocs[i] = clone(docs[i], m);
+      }
     }
     return new SortedIntDocSet(newDocs);
   }
