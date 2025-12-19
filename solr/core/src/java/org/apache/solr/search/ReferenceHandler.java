@@ -16,6 +16,8 @@
  */
 package org.apache.solr.search;
 
+import org.apache.lucene.util.Accountable;
+import org.apache.lucene.util.RamUsageEstimator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.io.Closeable;
@@ -25,15 +27,17 @@ import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
 import java.util.Arrays;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Consumer;
 
 /** Handles thread-safe dynamic unloading and on-demand reloading of backing resource. */
-public class ReferenceHandler implements Closeable {
+public class ReferenceHandler<T extends Accountable> implements Closeable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -41,17 +45,22 @@ public class ReferenceHandler implements Closeable {
 
   private final Closeable onClose;
 
-  public ReferenceHandler(ExecutorService exec) {
+  private final Consumer<T> onCollection;
+
+  @SuppressWarnings("unchecked")
+  public ReferenceHandler(ExecutorService exec, Consumer<T> onCollection) {
+    this.onCollection = onCollection;
     for (int i = PARALLEL_HEAD_FACTOR - 1; i >= 0; i--) {
-      head[i] = new Ref(null, null, null, null);
+      head[i] = new Ref<T>(null, null, null, null);
+      removeOutstanding[i] = new ReferenceQueue<>();
     }
     Future<?>[] refQueueHandlers = new Future[removeOutstanding.length];
     int i = 0;
     for (ReferenceQueue<Object> q : removeOutstanding) {
       refQueueHandlers[i++] = exec.submit(() -> {
-        Ref collected;
-        while ((collected = (Ref) q.remove()) != null) {
-          remove(collected);
+        Reference<?> collected;
+        while ((collected = q.remove()) != null) {
+          remove((Ref<T>) collected);
         }
         return null;
       });
@@ -67,7 +76,7 @@ public class ReferenceHandler implements Closeable {
       for (Future<?> f : refQueueHandlers) {
         try {
           f.get(10, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
+        } catch (CancellationException e) {
           // swallow; this is how we exit
         } catch (Exception e) {
           log.warn("exception on close", e);
@@ -81,8 +90,12 @@ public class ReferenceHandler implements Closeable {
     onClose.close();
   }
 
+  public long getOutstandingSize() {
+    return outstandingSize.sum();
+  }
+
   private static final int DEFAULT_PARALLEL_HEAD_FACTOR = 32;
-  private static final int PARALLEL_HEAD_FACTOR;
+  static final int PARALLEL_HEAD_FACTOR;
 
   /**
    * Setting this to false ensures even (round-robin) utilization of refqueues. Assigning by thread
@@ -117,36 +130,40 @@ public class ReferenceHandler implements Closeable {
   private static final int PARALLEL_HEAD_MASK = PARALLEL_HEAD_FACTOR - 1;
 
   @SuppressWarnings({"unchecked", "rawtypes"})
-  private static final ReferenceQueue<Object>[] removeOutstanding =
+  private final ReferenceQueue<Object>[] removeOutstanding =
       new ReferenceQueue[PARALLEL_HEAD_FACTOR];
 
-  static {
-    for (int i = PARALLEL_HEAD_FACTOR - 1; i >= 0; i--) {
-      removeOutstanding[i] = new ReferenceQueue<>();
-    }
-  }
+  public static final long RAMBYTES_PER_REF =
+      RamUsageEstimator.shallowSizeOfInstance(Ref.class)
+          + RamUsageEstimator.shallowSizeOfInstance(AtomicReference.class);
 
-  private static final class Ref extends WeakReference<Object> {
-    private final Runnable onCollection;
-    private final AtomicReference<Ref> next = new AtomicReference<>();
-    private volatile Ref prev;
+  private static final class Ref<T> extends WeakReference<Object> {
+    private final T onCollection;
+    private final AtomicReference<Ref<T>> next = new AtomicReference<>();
+    private volatile Ref<T> prev;
 
     public Ref(
-        Object referent, ReferenceQueue<? super Object> q, Runnable onCollection, Ref prev) {
+        Object referent, ReferenceQueue<? super Object> q, T onCollection, Ref<T> prev) {
       super(referent, q);
       this.onCollection = onCollection;
       this.prev = prev;
     }
   }
 
-  private final Ref[] head = new Ref[PARALLEL_HEAD_FACTOR];
+  @SuppressWarnings("unchecked")
+  private final Ref<T>[] head = new Ref[PARALLEL_HEAD_FACTOR];
 
-  private static final Ref RESERVED = new Ref(null, null, null, null);
-  private static final Ref REMOVED = new Ref(null, null, null, null);
+  private static final Ref<?> RESERVED = new Ref<>(null, null, null, null);
+  private static final Ref<?> REMOVED = new Ref<>(null, null, null, null);
+
+  @SuppressWarnings("unchecked")
+  private final Ref<T> reserved = (Ref<T>) RESERVED;
+  @SuppressWarnings("unchecked")
+  private final Ref<T> removed = (Ref<T>) REMOVED;
 
   private static final AtomicInteger ARBITRARY_REFQUEUE = new AtomicInteger();
 
-  private Ref add(final Object o, Runnable onCollection) {
+  private Ref<T> add(final Object o, T onCollection) {
     int parallelIdx;
     if (ASSIGN_REFQUEUE_BY_THREAD) {
       parallelIdx = Thread.currentThread().hashCode() & PARALLEL_HEAD_MASK;
@@ -154,15 +171,15 @@ public class ReferenceHandler implements Closeable {
       parallelIdx = ARBITRARY_REFQUEUE.getAndIncrement() & PARALLEL_HEAD_MASK;
     }
     outstandingSize.increment();
-    Ref head = this.head[parallelIdx];
+    Ref<T> head = this.head[parallelIdx];
     try {
-      final Ref ref = new Ref(o, removeOutstanding[parallelIdx], onCollection, head);
-      Ref next = reserve(head, RESERVED);
+      final Ref<T> ref = new Ref<>(o, removeOutstanding[parallelIdx], onCollection, head);
+      Ref<T> next = reserve(head, reserved);
       if (next != null) {
         next.prev = ref;
         ref.next.set(next);
       }
-      if (!head.next.compareAndSet(RESERVED, ref)) {
+      if (!head.next.compareAndSet(reserved, ref)) {
         throw new IllegalStateException();
       }
       return ref;
@@ -171,8 +188,8 @@ public class ReferenceHandler implements Closeable {
     }
   }
 
-  private static Ref reserve(Ref ref, Ref reservation) {
-    Ref next = ref.next.get();
+  private static <T> Ref<T> reserve(Ref<T> ref, Ref<T> reservation) {
+    Ref<T> next = ref.next.get();
     for (; ; ) {
       while (next == RESERVED) {
         if (reservation == REMOVED) {
@@ -180,7 +197,7 @@ public class ReferenceHandler implements Closeable {
         }
         next = ref.next.get();
       }
-      Ref extant = ref.next.compareAndExchange(next, reservation);
+      Ref<T> extant = ref.next.compareAndExchange(next, reservation);
       if (extant == next) {
         return next;
       } else {
@@ -189,17 +206,17 @@ public class ReferenceHandler implements Closeable {
     }
   }
 
-  private void remove(final Ref ref) {
+  private void remove(final Ref<T> ref) {
     try {
-      ref.onCollection.run();
+      onCollection.accept(ref.onCollection);
     } finally {
-      Ref next = reserve(ref, REMOVED);
+      Ref<T> next = reserve(ref, removed);
       outstandingSize.decrement();
       // now we have a lock on the link to next
-      Ref prev;
+      Ref<T> prev;
       for (; ; ) {
         prev = ref.prev;
-        if (prev.next.compareAndSet(ref, RESERVED)) {
+        if (prev.next.compareAndSet(ref, reserved)) {
           break;
         } else {
           Thread.yield();
@@ -209,7 +226,7 @@ public class ReferenceHandler implements Closeable {
       if (next != null) {
         next.prev = prev;
       }
-      if (!prev.next.compareAndSet(RESERVED, next)) {
+      if (!prev.next.compareAndSet(reserved, next)) {
         throw new IllegalStateException();
       }
     }
@@ -220,10 +237,8 @@ public class ReferenceHandler implements Closeable {
     return Math.toIntExact(Arrays.stream(head).filter((r) -> r.next.get() != null).count());
   }
 
-  private static final Runnable NO_OP = () -> {};
-
   // visible for testing
-  void addDummyReference(int byteSize) {
-    add(new byte[byteSize], NO_OP);
+  void addDummyReference(int byteSize, T onCompletion) {
+    add(new byte[byteSize], onCompletion);
   }
 }
