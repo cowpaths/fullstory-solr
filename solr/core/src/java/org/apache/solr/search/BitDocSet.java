@@ -108,33 +108,22 @@ public class BitDocSet extends DocSet {
   public static final int MAX_BLOCK_BITS = 1 << BIT_SHIFT;
   public static final int BLOCK_BIT_MASK = MAX_BLOCK_BITS - 1;
 
-  private final FixedBitSet[] bits;
   private final FixedBitSets parts;
-  int size; // number of docs in the set (cached for perf)
+  int size = -1; // number of docs in the set (cached for perf)
 
   public BitDocSet() {
     parts = new FixedBitSets(64);
-    bits = parts.parts;
   }
 
-  /**
-   * Construct a BitDocSet, and provides the number of set bits. The capacity of the {@link
-   * FixedBitSet} should be at least maxDoc()
-   */
-  private BitDocSet(FixedBitSet[] bits, int size) {
-    this.bits = bits;
-    this.parts = new FixedBitSets(bits);
-    this.size = size;
+  private BitDocSet(FixedBitSet bits) {
+    this.parts = new FixedBitSets(new FixedBitSet[] {bits});
   }
 
   public BitDocSet(FixedBitSets parts) {
-    this.bits = parts.parts;
     this.parts = parts;
-    size = -1;
   }
 
   public BitDocSet(FixedBitSets parts, int size) {
-    this.bits = parts.parts;
     this.parts = parts;
     this.size = size;
   }
@@ -143,7 +132,7 @@ public class BitDocSet extends DocSet {
 
   public static BitDocSet newInstance(FixedBitSet fixedBitSet) {
     if (fixedBitSet.getBits().capacity() <= MAX_BLOCK_LONGS) {
-      return new BitDocSet(new FixedBitSet[] {fixedBitSet}, -1);
+      return new BitDocSet(fixedBitSet);
     } else {
       FixedBitSets ret = new FixedBitSets(fixedBitSet.length());
       FixedBitSet.copyTo(fixedBitSet, ret.parts);
@@ -176,9 +165,10 @@ public class BitDocSet extends DocSet {
 
   @Override
   public DocIterator iterator() {
-    if (bits.length == 0) {
+    if (parts.parts.length == 0) {
       return EMPTY_DOC_ITERATOR;
     }
+    FixedBitSet[] bits = parts.parts;
     return new DocIterator() {
       int outerIdx = 0;
       private int base = 0;
@@ -420,7 +410,7 @@ public class BitDocSet extends DocSet {
           cost = size;
           break;
       }
-      return new BitSetsIterator(bits, length(), cost);
+      return new BitSetsIterator(parts.parts, length(), cost);
     }
 
     final int maxDoc = context.reader().maxDoc();
@@ -432,7 +422,7 @@ public class BitDocSet extends DocSet {
     final int base = context.docBase;
     // `lastSegDoc` is the max doc in this segment, limited to bit set length
     final int lastSegDoc = Math.min(maxDoc, length() - base) - 1;
-    final FixedBitSet[] bss = bits;
+    final FixedBitSet[] bss = parts.parts;
 
     return new DocIdSetIterator() {
       int outerIdx = base >> BIT_SHIFT;
@@ -512,7 +502,7 @@ public class BitDocSet extends DocSet {
 
   @Override
   public long ramBytesUsed() {
-    return BASE_RAM_BYTES_USED + RamUsageEstimator.sizeOf(bits);
+    return BASE_RAM_BYTES_USED + RamUsageEstimator.sizeOf(parts.parts);
   }
 
   @Override
