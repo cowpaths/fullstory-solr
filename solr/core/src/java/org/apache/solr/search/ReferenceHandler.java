@@ -37,11 +37,14 @@ public class ReferenceHandler implements Closeable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
-  private static final LongAdder OUTSTANDING_SIZE = new LongAdder();
+  private final LongAdder outstandingSize = new LongAdder();
 
   private final Closeable onClose;
 
   public ReferenceHandler(ExecutorService exec) {
+    for (int i = PARALLEL_HEAD_FACTOR - 1; i >= 0; i--) {
+      head[i] = new Ref(null, null, null, null);
+    }
     Future<?>[] refQueueHandlers = new Future[removeOutstanding.length];
     int i = 0;
     for (ReferenceQueue<Object> q : removeOutstanding) {
@@ -136,28 +139,22 @@ public class ReferenceHandler implements Closeable {
     }
   }
 
-  private static final Ref[] HEAD = new Ref[PARALLEL_HEAD_FACTOR];
-
-  static {
-    for (int i = PARALLEL_HEAD_FACTOR - 1; i >= 0; i--) {
-      HEAD[i] = new Ref(null, null, null, null);
-    }
-  }
+  private final Ref[] head = new Ref[PARALLEL_HEAD_FACTOR];
 
   private static final Ref RESERVED = new Ref(null, null, null, null);
   private static final Ref REMOVED = new Ref(null, null, null, null);
 
   private static final AtomicInteger ARBITRARY_REFQUEUE = new AtomicInteger();
 
-  private static Ref add(final Object o, Runnable onCollection) {
+  private Ref add(final Object o, Runnable onCollection) {
     int parallelIdx;
     if (ASSIGN_REFQUEUE_BY_THREAD) {
       parallelIdx = Thread.currentThread().hashCode() & PARALLEL_HEAD_MASK;
     } else {
       parallelIdx = ARBITRARY_REFQUEUE.getAndIncrement() & PARALLEL_HEAD_MASK;
     }
-    OUTSTANDING_SIZE.increment();
-    Ref head = HEAD[parallelIdx];
+    outstandingSize.increment();
+    Ref head = this.head[parallelIdx];
     try {
       final Ref ref = new Ref(o, removeOutstanding[parallelIdx], onCollection, head);
       Ref next = reserve(head, RESERVED);
@@ -192,37 +189,41 @@ public class ReferenceHandler implements Closeable {
     }
   }
 
-  private static void remove(final Ref ref) {
-    Ref next = reserve(ref, REMOVED);
-    OUTSTANDING_SIZE.decrement();
-    // now we have a lock on the link to next
-    Ref prev;
-    for (; ; ) {
-      prev = ref.prev;
-      if (prev.next.compareAndSet(ref, RESERVED)) {
-        break;
-      } else {
-        Thread.yield();
+  private void remove(final Ref ref) {
+    try {
+      ref.onCollection.run();
+    } finally {
+      Ref next = reserve(ref, REMOVED);
+      outstandingSize.decrement();
+      // now we have a lock on the link to next
+      Ref prev;
+      for (; ; ) {
+        prev = ref.prev;
+        if (prev.next.compareAndSet(ref, RESERVED)) {
+          break;
+        } else {
+          Thread.yield();
+        }
       }
-    }
-    // now we have a lock on the link from prev
-    if (next != null) {
-      next.prev = prev;
-    }
-    if (!prev.next.compareAndSet(RESERVED, next)) {
-      throw new IllegalStateException();
+      // now we have a lock on the link from prev
+      if (next != null) {
+        next.prev = prev;
+      }
+      if (!prev.next.compareAndSet(RESERVED, next)) {
+        throw new IllegalStateException();
+      }
     }
   }
 
   // visible for testing
-  static int nonEmptyRefQueueHeadCount() {
-    return Math.toIntExact(Arrays.stream(HEAD).filter((r) -> r.next.get() != null).count());
+  int nonEmptyRefQueueHeadCount() {
+    return Math.toIntExact(Arrays.stream(head).filter((r) -> r.next.get() != null).count());
   }
 
   private static final Runnable NO_OP = () -> {};
 
   // visible for testing
-  static void addDummyReference(int byteSize) {
+  void addDummyReference(int byteSize) {
     add(new byte[byteSize], NO_OP);
   }
 }
