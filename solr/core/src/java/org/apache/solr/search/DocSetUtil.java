@@ -240,7 +240,7 @@ public class DocSetUtil {
       }
     }
 
-    BitDocSet docSet = new BitDocSet(bits.parts, sz);
+    BitDocSet docSet = new BitDocSet(bits, sz);
 
     int smallSetSize = smallSetSize(maxDoc);
     if (sz < smallSetSize) {

@@ -39,20 +39,27 @@ public class FixedBitSets implements Bits, Accountable {
   private static final long BASE_RAM_BYTES_USED =
       RamUsageEstimator.shallowSizeOfInstance(FixedBitSets.class);
 
+  private static final FixedBitSet.Modifier MODIFIER = FixedBitSet.DEFAULT_MODIFIER;
+
   public final FixedBitSet[] parts;
   private int cachedLength = -1;
 
   public FixedBitSets(int numBits) {
+    if (numBits == 0) {
+      this.parts = new FixedBitSet[0];
+      this.cachedLength = 0;
+      return;
+    }
     int lastIdx = (numBits - 1) >> BIT_SHIFT;
     this.parts = new FixedBitSet[lastIdx + 1];
     int len = ((numBits - 1) & BLOCK_BIT_MASK) + 1;
     for (int i = lastIdx; i >= 0; i--) {
-      parts[i] = new FixedBitSet(len);
+      parts[i] = new FixedBitSet(len, MODIFIER);
       len = MAX_BLOCK_BITS;
     }
   }
 
-  public FixedBitSets(FixedBitSet[] parts) {
+  FixedBitSets(FixedBitSet[] parts) {
     this.parts = parts;
   }
 
@@ -181,7 +188,7 @@ public class FixedBitSets implements Bits, Accountable {
   public FixedBitSets clone() {
     FixedBitSet[] ret = new FixedBitSet[parts.length];
     for (int i = parts.length - 1; i >= 0; i--) {
-      ret[i] = parts[i].clone();
+      ret[i] = parts[i].clone(MODIFIER);
     }
     return new FixedBitSets(ret, cachedLength);
   }

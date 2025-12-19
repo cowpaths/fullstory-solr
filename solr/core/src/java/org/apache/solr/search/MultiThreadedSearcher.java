@@ -224,10 +224,10 @@ public class MultiThreadedSearcher {
       }
     }
 
-    public FixedBitSet[] getFixedBitSet() {
+    public FixedBitSets getFixedBitSet() {
       for (Object res : result) {
-        if (res instanceof FixedBitSet[]) {
-          return (FixedBitSet[]) res;
+        if (res instanceof FixedBitSets) {
+          return (FixedBitSets) res;
         }
       }
       return null;

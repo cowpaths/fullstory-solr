@@ -1086,7 +1086,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
   private BitDocSet liveDocs;
 
-  private static final BitDocSet EMPTY = new BitDocSet(new FixedBitSet[0], 0);
+  private static final BitDocSet EMPTY = new BitDocSet(new FixedBitSets(0), 0);
 
   private BitDocSet computeLiveDocs() {
     switch (leafContexts.size()) {
@@ -1101,7 +1101,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
           // `LeafReader.getLiveDocs()` returns null if no deleted docs -- accordingly, set all bits
           fbs.set(0, onlySegMaxDoc);
         } else {
-          FixedBitSet.copyTo(onlySegLiveDocs, fbs.parts, FixedBitSet.DEFAULT_MODIFIER);
+          FixedBitSet.copyTo(onlySegLiveDocs, fbs.parts);
         }
         assert fbs.cardinality() == numDocs();
         return new BitDocSet(fbs, numDocs());

@@ -113,22 +113,15 @@ public class BitDocSet extends DocSet {
   int size; // number of docs in the set (cached for perf)
 
   public BitDocSet() {
-    bits = new FixedBitSet[] {new FixedBitSet(64)};
-    parts = new FixedBitSets(bits);
-  }
-
-  /** Construct a BitDocSet. The capacity of the {@link FixedBitSet} should be at least maxDoc() */
-  public BitDocSet(FixedBitSet[] bits) {
-    this.bits = bits;
-    this.parts = new FixedBitSets(bits);
-    size = -1;
+    parts = new FixedBitSets(64);
+    bits = parts.parts;
   }
 
   /**
    * Construct a BitDocSet, and provides the number of set bits. The capacity of the {@link
    * FixedBitSet} should be at least maxDoc()
    */
-  public BitDocSet(FixedBitSet[] bits, int size) {
+  private BitDocSet(FixedBitSet[] bits, int size) {
     this.bits = bits;
     this.parts = new FixedBitSets(bits);
     this.size = size;
@@ -150,10 +143,10 @@ public class BitDocSet extends DocSet {
 
   public static BitDocSet newInstance(FixedBitSet fixedBitSet) {
     if (fixedBitSet.getBits().capacity() <= MAX_BLOCK_LONGS) {
-      return new BitDocSet(new FixedBitSet[] {fixedBitSet});
+      return new BitDocSet(new FixedBitSet[] {fixedBitSet}, -1);
     } else {
       FixedBitSets ret = new FixedBitSets(fixedBitSet.length());
-      FixedBitSet.copyTo(fixedBitSet, ret.parts, FixedBitSet.DEFAULT_MODIFIER);
+      FixedBitSet.copyTo(fixedBitSet, ret.parts);
       return new BitDocSet(ret);
     }
   }
@@ -284,11 +277,7 @@ public class BitDocSet extends DocSet {
     // Default... handle with bitsets.
     FixedBitSets newbits = getFixedBitSetClone();
     newbits.and(((BitDocSet) other).parts);
-    return new BitDocSet(newbits.parts);
-  }
-
-  public static void and(FixedBitSet[] bitSet, FixedBitSet[] filter) {
-    // TODO: mutate first bitset
+    return new BitDocSet(newbits);
   }
 
   @Override
@@ -343,7 +332,7 @@ public class BitDocSet extends DocSet {
   public DocSet andNot(DocSet other) {
     FixedBitSets newbits = getFixedBitSetClone();
     andNot(newbits, other);
-    return new BitDocSet(newbits.parts);
+    return new BitDocSet(newbits);
   }
 
   /**
@@ -374,23 +363,13 @@ public class BitDocSet extends DocSet {
   }
 
   static FixedBitSets ensureCapacity(FixedBitSets subject, int numBits) {
-    if (numBits == 0 || numBits <= subject.length()) {
+    if (numBits == 0 || numBits < subject.length()) {
       return subject;
     }
-    int newLen = ArrayUtil.oversize(numBits, Long.BYTES);
-    int lastIdx = (newLen - 1) >> BIT_SHIFT;
-    FixedBitSet[] ret = new FixedBitSet[lastIdx + 1];
-    FixedBitSet[] bits = subject.parts;
-    int len = ((newLen - 1) & BLOCK_BIT_MASK) + 1;
-    for (int i = lastIdx; i >= 0; i--) {
-      FixedBitSet dest = new FixedBitSet(len);
-      if (i < bits.length) {
-        dest.or(bits[i]);
-      }
-      ret[i] = dest;
-      len = MAX_BLOCK_BITS;
-    }
-    return new FixedBitSets(ret);
+    int newWordLen = ArrayUtil.oversize(FixedBitSet.bits2words(numBits) + 1, Long.BYTES);
+    FixedBitSets ret = new FixedBitSets(newWordLen << 6);
+    ret.or(subject);
+    return ret;
   }
 
   @Override
@@ -412,12 +391,12 @@ public class BitDocSet extends DocSet {
         newbits.set(doc);
       }
     }
-    return new BitDocSet(newbits.parts);
+    return new BitDocSet(newbits);
   }
 
   @Override
   public BitDocSet clone() {
-    return new BitDocSet(bits.clone(), size);
+    return new BitDocSet(parts.clone(), size);
   }
 
   @Override
