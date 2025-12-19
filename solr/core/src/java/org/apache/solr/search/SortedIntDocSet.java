@@ -17,6 +17,7 @@
 package org.apache.solr.search;
 
 import com.carrotsearch.hppc.IntHashSet;
+import java.nio.IntBuffer;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -25,6 +26,7 @@ import org.apache.lucene.index.ReaderUtil;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Bits;
+import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.RamUsageEstimator;
 
 /** A simple sorted int[] array implementation of {@link DocSet}, good for small sets. */
@@ -33,23 +35,23 @@ public class SortedIntDocSet extends DocSet {
       RamUsageEstimator.shallowSizeOfInstance(SortedIntDocSet.class)
           + RamUsageEstimator.NUM_BYTES_ARRAY_HEADER;
 
-  protected final int[][] docs;
+  protected final IntBuffer[] docs;
   final int capacity;
 
   /**
    * @param docs Sorted list of ids
    */
-  public SortedIntDocSet(int[][] docs) {
+  public SortedIntDocSet(IntBuffer[] docs) {
     this.docs = docs;
     this.capacity = getCapacity(docs);
   }
 
-  static int getCapacity(int[][] docs) {
+  static int getCapacity(IntBuffer[] docs) {
     int lastOuterIdx = docs.length - 1;
     if (lastOuterIdx == -1) {
       return 0;
     } else {
-      return docs[lastOuterIdx].length + (lastOuterIdx * MAX_ARR_SIZE);
+      return docs[lastOuterIdx].capacity() + (lastOuterIdx * MAX_ARR_SIZE);
     }
   }
 
@@ -57,23 +59,23 @@ public class SortedIntDocSet extends DocSet {
    * @param docs Sorted list of ids
    * @param len Number of ids in the list
    */
-  public SortedIntDocSet(int[][] docs, int len) {
+  public SortedIntDocSet(IntBuffer[] docs, int len) {
     this(shrink(docs, len));
   }
 
-  public static int[][] grow(int[][] buffer, int limit, int newSize) {
-    int[][] ret = allocate(newSize);
+  public static IntBuffer[] grow(IntBuffer[] buffer, int limit, int newSize) {
+    IntBuffer[] ret = allocate(newSize);
     if (limit <= 0) return ret;
     int lastIdx = limit - 1;
     int i = lastIdx >> SortedIntDocSet.WORDS_SHIFT;
-    System.arraycopy(buffer[i], 0, ret[i], 0, (lastIdx & SortedIntDocSet.ARR_MASK) + 1);
+    buffercopy(buffer[i], 0, ret[i], 0, (lastIdx & SortedIntDocSet.ARR_MASK) + 1);
     while (--i >= 0) {
       ret[i] = buffer[i];
     }
     return ret;
   }
 
-  public int[][] getDocs() {
+  public IntBuffer[] getDocs() {
     return docs;
   }
 
@@ -82,7 +84,7 @@ public class SortedIntDocSet extends DocSet {
     return capacity;
   }
 
-  public static int[][] zeroInts = new int[0][];
+  public static IntBuffer[] zeroInts = new IntBuffer[0];
   public static SortedIntDocSet zero = new SortedIntDocSet(zeroInts);
 
   // -5 b/c there are 32 bits per int
@@ -90,28 +92,28 @@ public class SortedIntDocSet extends DocSet {
   static final int MAX_ARR_SIZE = 1 << WORDS_SHIFT;
   static final int ARR_MASK = MAX_ARR_SIZE - 1;
 
-  public static int[][] allocate(int size) {
+  public static IntBuffer[] allocate(int size) {
     if (size <= 0) return zeroInts;
     int outerSize = ((size - 1) >> WORDS_SHIFT) + 1;
-    int[][] ret = new int[outerSize][];
+    IntBuffer[] ret = new IntBuffer[outerSize];
     int i = outerSize - 1;
-    ret[i] = new int[((size - 1) & ARR_MASK) + 1];
+    ret[i] = FixedBitSet.DEFAULT_MODIFIER.allocateInt(((size - 1) & ARR_MASK) + 1);
     while (--i >= 0) {
-      ret[i] = new int[MAX_ARR_SIZE];
+      ret[i] = FixedBitSet.DEFAULT_MODIFIER.allocateInt(MAX_ARR_SIZE);
     }
     return ret;
   }
 
-  public static int[][] shrink(int[][] arr, int newSize) {
+  public static IntBuffer[] shrink(IntBuffer[] arr, int newSize) {
     if (newSize == 0) return zeroInts;
     if (getCapacity(arr) == newSize) return arr;
     int outerSize = ((newSize - 1) >> WORDS_SHIFT) + 1;
-    int[][] newArr = new int[outerSize][];
+    IntBuffer[] newArr = new IntBuffer[outerSize];
     int i = outerSize - 1;
     int lastIdxSize = ((newSize - 1) & ARR_MASK) + 1;
-    int[] lastIdxArr = new int[lastIdxSize];
+    IntBuffer lastIdxArr = FixedBitSet.DEFAULT_MODIFIER.allocateInt(lastIdxSize);
     newArr[i] = lastIdxArr;
-    System.arraycopy(arr[i], 0, lastIdxArr, 0, lastIdxSize);
+    buffercopy(arr[i], 0, lastIdxArr, 0, lastIdxSize);
     while (--i >= 0) {
       // share content; careful!
       newArr[i] = arr[i];
@@ -119,26 +121,27 @@ public class SortedIntDocSet extends DocSet {
     return newArr;
   }
 
-  public static int[][] shrinkClone(int[][] arr, int newSize) {
+  public static IntBuffer[] shrinkClone(IntBuffer[] arr, int newSize) {
     if (newSize == 0) return zeroInts;
     int outerSize = ((newSize - 1) >> WORDS_SHIFT) + 1;
-    int[][] newArr = new int[outerSize][];
+    IntBuffer[] newArr = new IntBuffer[outerSize];
     int i = outerSize - 1;
     int lastIdxSize = ((newSize - 1) & ARR_MASK) + 1;
-    int[] lastIdxArr = new int[lastIdxSize];
+    IntBuffer lastIdxArr = FixedBitSet.DEFAULT_MODIFIER.allocateInt(lastIdxSize);
     newArr[i] = lastIdxArr;
-    System.arraycopy(arr[i], 0, lastIdxArr, 0, lastIdxSize);
+    buffercopy(arr[i], 0, lastIdxArr, 0, lastIdxSize);
     while (--i >= 0) {
       // don't share content
-      newArr[i] = arr[i].clone();
+      // TODO: fix this!
+      newArr[i] = clone(arr[i]);
     }
     return newArr;
   }
 
   public static int intersectionSize(
       SortedIntDocSet smallerSortedList, SortedIntDocSet biggerSortedList) {
-    final int[][] a = smallerSortedList.docs;
-    final int[][] b = biggerSortedList.docs;
+    final IntBuffer[] a = smallerSortedList.docs;
+    final IntBuffer[] b = biggerSortedList.docs;
 
     // The next doc we are looking for will be much closer to the last position we tried
     // than it will be to the midpoint between last and high... so probe ahead using
@@ -167,7 +170,7 @@ public class SortedIntDocSet extends DocSet {
     int max = biggerSortedList.capacity - 1;
 
     for (int i = 0; i < smallerSortedList.capacity; i++) {
-      int doca = a[i >> WORDS_SHIFT][i & ARR_MASK];
+      int doca = a[i >> WORDS_SHIFT].get(i & ARR_MASK);
 
       int high = max;
 
@@ -175,7 +178,7 @@ public class SortedIntDocSet extends DocSet {
 
       // short linear probe to see if we can drop the high pointer in one big jump.
       if (probe < high) {
-        if (b[probe >> WORDS_SHIFT][probe & ARR_MASK] >= doca) {
+        if (b[probe >> WORDS_SHIFT].get(probe & ARR_MASK) >= doca) {
           // success!  we cut down the upper bound by a lot in one step!
           high = probe;
         } else {
@@ -185,7 +188,7 @@ public class SortedIntDocSet extends DocSet {
           // reprobe worth it? it appears so!
           probe = low + step;
           if (probe < high) {
-            if (b[probe >> WORDS_SHIFT][probe & ARR_MASK] >= doca) {
+            if (b[probe >> WORDS_SHIFT].get(probe & ARR_MASK) >= doca) {
               high = probe;
             } else {
               low = probe + 1;
@@ -197,7 +200,7 @@ public class SortedIntDocSet extends DocSet {
       // binary search the rest of the way
       while (low <= high) {
         int mid = (low + high) >>> 1;
-        int docb = b[mid >> WORDS_SHIFT][mid & ARR_MASK];
+        int docb = b[mid >> WORDS_SHIFT].get(mid & ARR_MASK);
 
         if (docb < doca) {
           low = mid + 1;
@@ -221,8 +224,8 @@ public class SortedIntDocSet extends DocSet {
       SortedIntDocSet smallerSortedList, SortedIntDocSet biggerSortedList) {
     // see intersectionSize for more in-depth comments of this algorithm
 
-    final int[][] a = smallerSortedList.docs;
-    final int[][] b = biggerSortedList.docs;
+    final IntBuffer[] a = smallerSortedList.docs;
+    final IntBuffer[] b = biggerSortedList.docs;
 
     int step = (biggerSortedList.capacity / smallerSortedList.capacity) + 1;
 
@@ -232,17 +235,17 @@ public class SortedIntDocSet extends DocSet {
     int max = biggerSortedList.capacity - 1;
 
     for (int i = 0; i < smallerSortedList.capacity; i++) {
-      int doca = a[i >> WORDS_SHIFT][i & ARR_MASK];
+      int doca = a[i >> WORDS_SHIFT].get(i & ARR_MASK);
       int high = max;
       int probe = low + step;
       if (probe < high) {
-        if (b[probe >> WORDS_SHIFT][probe & ARR_MASK] >= doca) {
+        if (b[probe >> WORDS_SHIFT].get(probe & ARR_MASK) >= doca) {
           high = probe;
         } else {
           low = probe + 1;
           probe = low + step;
           if (probe < high) {
-            if (b[probe >> WORDS_SHIFT][probe & ARR_MASK] >= doca) {
+            if (b[probe >> WORDS_SHIFT].get(probe & ARR_MASK) >= doca) {
               high = probe;
             } else {
               low = probe + 1;
@@ -253,7 +256,7 @@ public class SortedIntDocSet extends DocSet {
 
       while (low <= high) {
         int mid = (low + high) >>> 1;
-        int docb = b[mid >> WORDS_SHIFT][mid & ARR_MASK];
+        int docb = b[mid >> WORDS_SHIFT].get(mid & ARR_MASK);
 
         if (docb < doca) {
           low = mid + 1;
@@ -274,9 +277,9 @@ public class SortedIntDocSet extends DocSet {
       // BitDocSet is  better at random access than we are
       int icount = 0;
       for (int i = 0; i < docs.length; i++) {
-        int[] sub = docs[i];
-        for (int j = 0, lim = sub.length; j < lim; j++) {
-          if (other.exists(sub[j])) icount++;
+        IntBuffer sub = docs[i];
+        for (int j = 0, lim = sub.capacity(); j < lim; j++) {
+          if (other.exists(sub.get(j))) icount++;
         }
       }
       return icount;
@@ -297,9 +300,9 @@ public class SortedIntDocSet extends DocSet {
     // if they are close in size, just do a linear walk of both.
     int icount = 0;
     int i = 0, j = 0;
-    int[][] aDocs = a.docs;
-    int[][] bDocs = b.docs;
-    int doca = aDocs[i >> WORDS_SHIFT][i & ARR_MASK], docb = bDocs[j >> WORDS_SHIFT][j & ARR_MASK];
+    IntBuffer[] aDocs = a.docs;
+    IntBuffer[] bDocs = b.docs;
+    int doca = aDocs[i >> WORDS_SHIFT].get(i & ARR_MASK), docb = bDocs[j >> WORDS_SHIFT].get(j & ARR_MASK);
     for (; ; ) {
       // switch on the sign bit somehow? Hopefully JVM is smart enough to just test once.
 
@@ -307,16 +310,16 @@ public class SortedIntDocSet extends DocSet {
       // check that case first.  This resulted in a 13% speedup.
       if (doca > docb) {
         if (++j >= b.capacity) break;
-        docb = bDocs[j >> WORDS_SHIFT][j & ARR_MASK];
+        docb = bDocs[j >> WORDS_SHIFT].get(j & ARR_MASK);
       } else if (doca < docb) {
         if (++i >= a.capacity) break;
-        doca = aDocs[i >> WORDS_SHIFT][i & ARR_MASK];
+        doca = aDocs[i >> WORDS_SHIFT].get(i & ARR_MASK);
       } else {
         icount++;
         if (++i >= a.capacity) break;
-        doca = aDocs[i >> WORDS_SHIFT][i & ARR_MASK];
+        doca = aDocs[i >> WORDS_SHIFT].get(i & ARR_MASK);
         if (++j >= b.capacity) break;
-        docb = bDocs[j >> WORDS_SHIFT][j & ARR_MASK];
+        docb = bDocs[j >> WORDS_SHIFT].get(j & ARR_MASK);
       }
     }
     return icount;
@@ -326,9 +329,9 @@ public class SortedIntDocSet extends DocSet {
   public boolean intersects(DocSet other) {
     if (!(other instanceof SortedIntDocSet)) {
       // assume BitDocSet is better at random access than we are
-      for (int[] sub : docs) {
-        for (int doc : sub) {
-          if (other.exists(doc)) return true;
+      for (IntBuffer sub : docs) {
+        for (int i = 0, lim = sub.capacity(); i < lim; i++) {
+          if (other.exists(sub.get(i))) return true;
         }
       }
       return false;
@@ -348,9 +351,9 @@ public class SortedIntDocSet extends DocSet {
 
     // if they are close in size, just do a linear walk of both.
     int i = 0, j = 0;
-    int[][] aDocs = a.docs;
-    int[][] bDocs = b.docs;
-    int doca = aDocs[i >> WORDS_SHIFT][i & ARR_MASK], docb = bDocs[j >> WORDS_SHIFT][j & ARR_MASK];
+    IntBuffer[] aDocs = a.docs;
+    IntBuffer[] bDocs = b.docs;
+    int doca = aDocs[i >> WORDS_SHIFT].get(i & ARR_MASK), docb = bDocs[j >> WORDS_SHIFT].get(j & ARR_MASK);
     for (; ; ) {
       // switch on the sign bit somehow?  Hopefull JVM is smart enough to just test once.
 
@@ -358,10 +361,10 @@ public class SortedIntDocSet extends DocSet {
       // check that case first.  This resulted in a 13% speedup.
       if (doca > docb) {
         if (++j >= b.capacity) break;
-        docb = bDocs[j >> WORDS_SHIFT][j & ARR_MASK];
+        docb = bDocs[j >> WORDS_SHIFT].get(j & ARR_MASK);
       } else if (doca < docb) {
         if (++i >= a.capacity) break;
-        doca = aDocs[i >> WORDS_SHIFT][i & ARR_MASK];
+        doca = aDocs[i >> WORDS_SHIFT].get(i & ARR_MASK);
       } else {
         return true;
       }
@@ -370,12 +373,12 @@ public class SortedIntDocSet extends DocSet {
   }
 
   /** puts the intersection of a and b into the target array and returns the size */
-  public static int intersection(int[][] a, int lena, int[][] b, int lenb, int[][] target) {
+  public static int intersection(IntBuffer[] a, int lena, IntBuffer[] b, int lenb, IntBuffer[] target) {
     if (lena > lenb) {
       int ti = lena;
       lena = lenb;
       lenb = ti;
-      int[][] ta = a;
+      IntBuffer[] ta = a;
       a = b;
       b = ta;
     }
@@ -389,20 +392,20 @@ public class SortedIntDocSet extends DocSet {
 
     int icount = 0;
     int i = 0, j = 0;
-    int doca = a[i >> WORDS_SHIFT][i & ARR_MASK], docb = b[j >> WORDS_SHIFT][j & ARR_MASK];
+    int doca = a[i >> WORDS_SHIFT].get(i & ARR_MASK), docb = b[j >> WORDS_SHIFT].get(j & ARR_MASK);
     for (; ; ) {
       if (doca > docb) {
         if (++j >= lenb) break;
-        docb = b[j >> WORDS_SHIFT][j & ARR_MASK];
+        docb = b[j >> WORDS_SHIFT].get(j & ARR_MASK);
       } else if (doca < docb) {
         if (++i >= lena) break;
-        doca = a[i >> WORDS_SHIFT][i & ARR_MASK];
+        doca = a[i >> WORDS_SHIFT].get(i & ARR_MASK);
       } else {
-        target[icount >> WORDS_SHIFT][icount++ & ARR_MASK] = doca;
+        target[icount >> WORDS_SHIFT].put(icount++ & ARR_MASK, doca);
         if (++i >= lena) break;
-        doca = a[i >> WORDS_SHIFT][i & ARR_MASK];
+        doca = a[i >> WORDS_SHIFT].get(i & ARR_MASK);
         if (++j >= lenb) break;
-        docb = b[j >> WORDS_SHIFT][j & ARR_MASK];
+        docb = b[j >> WORDS_SHIFT].get(j & ARR_MASK);
       }
     }
     return icount;
@@ -413,7 +416,7 @@ public class SortedIntDocSet extends DocSet {
    * smaller than lenb
    */
   protected static int intersectionBinarySearch(
-      int[][] a, int lena, int[][] b, int lenb, int[][] target) {
+      IntBuffer[] a, int lena, IntBuffer[] b, int lenb, IntBuffer[] target) {
     int step = (lenb / lena) + 1;
     step = step + step;
 
@@ -422,7 +425,7 @@ public class SortedIntDocSet extends DocSet {
     int max = lenb - 1;
 
     for (int i = 0; i < lena; i++) {
-      int doca = a[i >> WORDS_SHIFT][i & ARR_MASK];
+      int doca = a[i >> WORDS_SHIFT].get(i & ARR_MASK);
 
       int high = max;
 
@@ -430,7 +433,7 @@ public class SortedIntDocSet extends DocSet {
 
       // short linear probe to see if we can drop the high pointer in one big jump.
       if (probe < high) {
-        if (b[probe >> WORDS_SHIFT][probe & ARR_MASK] >= doca) {
+        if (b[probe >> WORDS_SHIFT].get(probe & ARR_MASK) >= doca) {
           // success!  we cut down the upper bound by a lot in one step!
           high = probe;
         } else {
@@ -440,7 +443,7 @@ public class SortedIntDocSet extends DocSet {
           // reprobe worth it? it appears so!
           probe = low + step;
           if (probe < high) {
-            if (b[probe >> WORDS_SHIFT][probe & ARR_MASK] >= doca) {
+            if (b[probe >> WORDS_SHIFT].get(probe & ARR_MASK) >= doca) {
               high = probe;
             } else {
               low = probe + 1;
@@ -452,14 +455,14 @@ public class SortedIntDocSet extends DocSet {
       // binary search
       while (low <= high) {
         int mid = (low + high) >>> 1;
-        int docb = b[mid >> WORDS_SHIFT][mid & ARR_MASK];
+        int docb = b[mid >> WORDS_SHIFT].get(mid & ARR_MASK);
 
         if (docb < doca) {
           low = mid + 1;
         } else if (docb > doca) {
           high = mid - 1;
         } else {
-          target[icount >> WORDS_SHIFT][icount++ & ARR_MASK] = doca;
+          target[icount >> WORDS_SHIFT].put(icount++ & ARR_MASK, doca);
           low = mid + 1; // found it, so start at next element
           break;
         }
@@ -476,11 +479,11 @@ public class SortedIntDocSet extends DocSet {
   public DocSet intersection(DocSet other) {
     if (!(other instanceof SortedIntDocSet)) {
       int icount = 0;
-      int[][] arr = allocate(capacity);
+      IntBuffer[] arr = allocate(capacity);
       for (int i = 0; i < capacity; i++) {
-        int doc = docs[i >> WORDS_SHIFT][i & ARR_MASK];
+        int doc = docs[i >> WORDS_SHIFT].get(i & ARR_MASK);
         if (other.exists(doc)) {
-          arr[icount >> WORDS_SHIFT][icount & ARR_MASK] = doc;
+          arr[icount >> WORDS_SHIFT].put(icount & ARR_MASK, doc);
           icount++;
         }
       }
@@ -492,7 +495,7 @@ public class SortedIntDocSet extends DocSet {
 
     SortedIntDocSet otherSet = (SortedIntDocSet) other;
     int maxsz = Math.min(capacity, otherSet.capacity);
-    int[][] arr = allocate(maxsz);
+    IntBuffer[] arr = allocate(maxsz);
     int sz = intersection(docs, capacity, otherSet.docs, otherSet.capacity, arr);
     if (sz == capacity) {
       return this; // no change
@@ -501,7 +504,7 @@ public class SortedIntDocSet extends DocSet {
   }
 
   protected static int andNotBinarySearch(
-      int[][] a, int lena, int[][] b, int lenb, int[][] target) {
+      IntBuffer[] a, int lena, IntBuffer[] b, int lenb, IntBuffer[] target) {
     int step = (lenb / lena) + 1;
     step = step + step;
 
@@ -511,7 +514,7 @@ public class SortedIntDocSet extends DocSet {
 
     outer:
     for (int i = 0; i < lena; i++) {
-      int doca = a[i >> WORDS_SHIFT][i & ARR_MASK];
+      int doca = a[i >> WORDS_SHIFT].get(i & ARR_MASK);
 
       int high = max;
 
@@ -519,7 +522,7 @@ public class SortedIntDocSet extends DocSet {
 
       // short linear probe to see if we can drop the high pointer in one big jump.
       if (probe < high) {
-        if (b[probe >> WORDS_SHIFT][probe & ARR_MASK] >= doca) {
+        if (b[probe >> WORDS_SHIFT].get(probe & ARR_MASK) >= doca) {
           // success!  we cut down the upper bound by a lot in one step!
           high = probe;
         } else {
@@ -529,7 +532,7 @@ public class SortedIntDocSet extends DocSet {
           // reprobe worth it? it appears so!
           probe = low + step;
           if (probe < high) {
-            if (b[probe >> WORDS_SHIFT][probe & ARR_MASK] >= doca) {
+            if (b[probe >> WORDS_SHIFT].get(probe & ARR_MASK) >= doca) {
               high = probe;
             } else {
               low = probe + 1;
@@ -541,7 +544,7 @@ public class SortedIntDocSet extends DocSet {
       // binary search
       while (low <= high) {
         int mid = (low + high) >>> 1;
-        int docb = b[mid >> WORDS_SHIFT][mid & ARR_MASK];
+        int docb = b[mid >> WORDS_SHIFT].get(mid & ARR_MASK);
 
         if (docb < doca) {
           low = mid + 1;
@@ -555,20 +558,20 @@ public class SortedIntDocSet extends DocSet {
       // Didn't find it... low is now positioned on the insertion point,
       // which is higher than what we were looking for, so continue using
       // the same low point.
-      target[count >> WORDS_SHIFT][count++ & ARR_MASK] = doca;
+      target[count >> WORDS_SHIFT].put(count++ & ARR_MASK, doca);
     }
 
     return count;
   }
 
   /** puts the intersection of a and not b into the target array and returns the size */
-  public static int andNot(int[][] a, int lena, int[][] b, int lenb, int[][] target) {
+  public static int andNot(IntBuffer[] a, int lena, IntBuffer[] b, int lenb, IntBuffer[] target) {
     if (lena == 0) return 0;
     if (lenb == 0) {
       int i = lena >> WORDS_SHIFT;
-      System.arraycopy(a[i], 0, target[i], 0, lena & ARR_MASK);
+      buffercopy(a[i], 0, target[i], 0, lena & ARR_MASK);
       while (--i >= 0) {
-        System.arraycopy(a[i], 0, target[i], 0, MAX_ARR_SIZE);
+        buffercopy(a[i], 0, target[i], 0, MAX_ARR_SIZE);
       }
       return lena;
     }
@@ -580,20 +583,20 @@ public class SortedIntDocSet extends DocSet {
 
     int count = 0;
     int i = 0, j = 0;
-    int doca = a[i >> WORDS_SHIFT][i & ARR_MASK], docb = b[j >> WORDS_SHIFT][j & ARR_MASK];
+    int doca = a[i >> WORDS_SHIFT].get(i & ARR_MASK), docb = b[j >> WORDS_SHIFT].get(j & ARR_MASK);
     for (; ; ) {
       if (doca > docb) {
         if (++j >= lenb) break;
-        docb = b[j >> WORDS_SHIFT][j & ARR_MASK];
+        docb = b[j >> WORDS_SHIFT].get(j & ARR_MASK);
       } else if (doca < docb) {
-        target[count >> WORDS_SHIFT][count++ & ARR_MASK] = doca;
+        target[count >> WORDS_SHIFT].put(count++ & ARR_MASK, doca);
         if (++i >= lena) break;
-        doca = a[i >> WORDS_SHIFT][i & ARR_MASK];
+        doca = a[i >> WORDS_SHIFT].get(i & ARR_MASK);
       } else {
         if (++i >= lena) break;
-        doca = a[i >> WORDS_SHIFT][i & ARR_MASK];
+        doca = a[i >> WORDS_SHIFT].get(i & ARR_MASK);
         if (++j >= lenb) break;
-        docb = b[j >> WORDS_SHIFT][j & ARR_MASK];
+        docb = b[j >> WORDS_SHIFT].get(j & ARR_MASK);
       }
     }
 
@@ -607,7 +610,7 @@ public class SortedIntDocSet extends DocSet {
     return count;
   }
 
-  public static void arraycopy(int[][] src, int srcIdx, int[][] dest, int destIdx, int len) {
+  public static void arraycopy(IntBuffer[] src, int srcIdx, IntBuffer[] dest, int destIdx, int len) {
     if (len == 0) return;
     int srcOuterOffset = srcIdx >> WORDS_SHIFT;
     final int destOuterOffset = destIdx >> WORDS_SHIFT;
@@ -615,8 +618,8 @@ public class SortedIntDocSet extends DocSet {
     int destInnerOffset = destIdx & ARR_MASK;
     final int len1;
     final int len2;
-    int[] srcArr1;
-    int[] srcArr2;
+    IntBuffer srcArr1;
+    IntBuffer srcArr2;
 
     // the array offset of the word for the last "bit" element.
     final int destOuterLimit = (destIdx + len - 1) >> WORDS_SHIFT;
@@ -633,16 +636,18 @@ public class SortedIntDocSet extends DocSet {
       srcArr2 = ++srcOuterOffset < src.length ? src[srcOuterOffset] : null;
     }
     // special handling for the first word, which may be partial
-    int[] destArr = dest[destOuterOffset];
+    IntBuffer destArr = dest[destOuterOffset];
     if (srcArr1 == null) {
-      System.arraycopy(
+      // TODO: fix this!
+      buffercopy(
           srcArr2,
           srcInnerOffset,
           destArr,
           destInnerOffset,
           Math.min(len, MAX_ARR_SIZE - destInnerOffset));
     } else if (srcArr2 == null) {
-      System.arraycopy(
+      // TODO: fix this!
+      buffercopy(
           srcArr1,
           srcInnerOffset,
           destArr,
@@ -651,10 +656,10 @@ public class SortedIntDocSet extends DocSet {
     } else {
       int initialLen = MAX_ARR_SIZE - srcInnerOffset;
       if (len <= initialLen) {
-        System.arraycopy(srcArr1, srcInnerOffset, destArr, destInnerOffset, len);
+        buffercopy(srcArr1, srcInnerOffset, destArr, destInnerOffset, len);
       } else {
-        System.arraycopy(srcArr1, srcInnerOffset, destArr, destInnerOffset, initialLen);
-        System.arraycopy(
+        buffercopy(srcArr1, srcInnerOffset, destArr, destInnerOffset, initialLen);
+        buffercopy(
             srcArr2, 0, destArr, destInnerOffset + initialLen, Math.min(len2, len - initialLen));
       }
     }
@@ -665,8 +670,8 @@ public class SortedIntDocSet extends DocSet {
       srcArr1 = srcArr2;
       srcArr2 = src[++srcOuterOffset];
       destArr = dest[i];
-      System.arraycopy(srcArr1, len2, destArr, 0, len1);
-      System.arraycopy(srcArr2, 0, destArr, len1, len2);
+      buffercopy(srcArr1, len2, destArr, 0, len1);
+      buffercopy(srcArr2, 0, destArr, len1, len2);
     }
     srcArr1 = srcArr2;
     srcArr2 = ++srcOuterOffset < src.length ? src[srcOuterOffset] : null;
@@ -675,11 +680,19 @@ public class SortedIntDocSet extends DocSet {
     int remainder = ((destIdx + len - 1) & ARR_MASK) + 1;
     destArr = dest[destOuterLimit];
     if (srcArr2 == null || remainder <= len1) {
-      System.arraycopy(srcArr1, len2, destArr, 0, remainder);
+      buffercopy(srcArr1, len2, destArr, 0, remainder);
     } else {
-      System.arraycopy(srcArr1, len2, destArr, 0, len1);
-      System.arraycopy(srcArr2, 0, destArr, len1, remainder - len1);
+      buffercopy(srcArr1, len2, destArr, 0, len1);
+      buffercopy(srcArr2, 0, destArr, len1, remainder - len1);
     }
+  }
+
+  private static void buffercopy(IntBuffer src, int srcOff, IntBuffer dest, int destOff, int len) {
+    dest.slice().position(destOff).put(src.slice(srcOff, len));
+  }
+
+  private static IntBuffer clone(IntBuffer src) {
+    return FixedBitSet.DEFAULT_MODIFIER.allocateInt(src.capacity()).put(src.slice()).clear();
   }
 
   @Override
@@ -688,10 +701,10 @@ public class SortedIntDocSet extends DocSet {
 
     if (!(other instanceof SortedIntDocSet)) {
       int count = 0;
-      int[][] arr = allocate(capacity);
+      IntBuffer[] arr = allocate(capacity);
       for (int i = 0; i < capacity; i++) {
-        int doc = docs[i >> WORDS_SHIFT][i & ARR_MASK];
-        if (!other.exists(doc)) arr[count >> WORDS_SHIFT][count++ & ARR_MASK] = doc;
+        int doc = docs[i >> WORDS_SHIFT].get(i & ARR_MASK);
+        if (!other.exists(doc)) arr[count >> WORDS_SHIFT].put(count++ & ARR_MASK, doc);
       }
       if (count == capacity) {
         return this; // no change
@@ -700,7 +713,7 @@ public class SortedIntDocSet extends DocSet {
     }
 
     SortedIntDocSet otherSet = (SortedIntDocSet) other;
-    int[][] arr = allocate(capacity);
+    IntBuffer[] arr = allocate(capacity);
     int sz = andNot(docs, capacity, otherSet.docs, otherSet.capacity, arr);
     if (sz == capacity) {
       return this; // no change
@@ -710,9 +723,9 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public void addAllTo(FixedBitSets target) {
-    for (int[] sub : docs) {
-      for (int doc : sub) {
-        target.set(doc);
+    for (IntBuffer sub : docs) {
+      for (int i = 0, lim = sub.capacity(); i < lim; i++) {
+        target.set(sub.get(i));
       }
     }
   }
@@ -726,7 +739,7 @@ public class SortedIntDocSet extends DocSet {
     // binary search
     while (low <= high) {
       int mid = (low + high) >>> 1;
-      int docb = docs[mid >> WORDS_SHIFT][mid & ARR_MASK];
+      int docb = docs[mid >> WORDS_SHIFT].get(mid & ARR_MASK);
 
       if (docb < doc) {
         low = mid + 1;
@@ -763,7 +776,7 @@ public class SortedIntDocSet extends DocSet {
 
       @Override
       public int nextDoc() {
-        return docs[pos >> WORDS_SHIFT][pos++ & ARR_MASK];
+        return docs[pos >> WORDS_SHIFT].get(pos++ & ARR_MASK);
       }
 
       @Override
@@ -776,9 +789,9 @@ public class SortedIntDocSet extends DocSet {
   @Override
   public Bits getBits() {
     IntHashSet hashSet = new IntHashSet(capacity);
-    for (int[] sub : docs) {
-      for (int doc : sub) {
-        hashSet.add(doc);
+    for (IntBuffer sub : docs) {
+      for (int i = 0, lim = sub.capacity(); i < lim; i++) {
+        hashSet.add(sub.get(i));
       }
     }
 
@@ -802,7 +815,7 @@ public class SortedIntDocSet extends DocSet {
       return 0;
     } else {
       int idx = size - 1;
-      return getDocs()[idx >> WORDS_SHIFT][idx & ARR_MASK] + 1;
+      return getDocs()[idx >> WORDS_SHIFT].get(idx & ARR_MASK) + 1;
     }
   }
 
@@ -837,7 +850,7 @@ public class SortedIntDocSet extends DocSet {
       List<LeafReaderContext> leaves = ReaderUtil.getTopLevelContext(ctx).leaves();
       final int[] ret = new int[leaves.size()];
       int lastLimit = 0;
-      int lastLimitDoc = docs[0][0]; // capacity != 0
+      int lastLimitDoc = docs[0].get(0); // capacity != 0
       for (LeafReaderContext lrc : leaves) {
         // sanity check that initial `lastLimit*` values are valid (and consequently that our
         // initial setting of `startIdx` for context.ord==0 won't inadvertently include invalid
@@ -854,7 +867,7 @@ public class SortedIntDocSet extends DocSet {
         lastLimit = nextLimit < 0 ? ~nextLimit : nextLimit;
         lastLimitDoc =
             lastLimit < capacity
-                ? docs[lastLimit >> WORDS_SHIFT][lastLimit & ARR_MASK]
+                ? docs[lastLimit >> WORDS_SHIFT].get(lastLimit & ARR_MASK)
                 : DocIdSetIterator.NO_MORE_DOCS;
         ret[lrc.ord] = lastLimit;
       }
@@ -901,7 +914,7 @@ public class SortedIntDocSet extends DocSet {
       @Override
       public int nextDoc() {
         return adjustedDoc =
-            (++idx >= limitIdx) ? NO_MORE_DOCS : (docs[idx >> WORDS_SHIFT][idx & ARR_MASK] - base);
+            (++idx >= limitIdx) ? NO_MORE_DOCS : (docs[idx >> WORDS_SHIFT].get(idx & ARR_MASK) - base);
       }
 
       @Override
@@ -910,7 +923,7 @@ public class SortedIntDocSet extends DocSet {
         target += base;
 
         // probe next
-        int rawDoc = docs[idx >> WORDS_SHIFT][idx & ARR_MASK];
+        int rawDoc = docs[idx >> WORDS_SHIFT].get(idx & ARR_MASK);
         if (rawDoc >= target) return adjustedDoc = rawDoc - base;
 
         // TODO: probe more before resorting to binary search?
@@ -918,7 +931,7 @@ public class SortedIntDocSet extends DocSet {
         final int findIdx = binarySearch(docs, idx + 1, limitIdx, target);
         idx = findIdx < 0 ? ~findIdx : findIdx;
         return adjustedDoc =
-            idx < limitIdx ? docs[idx >> WORDS_SHIFT][idx & ARR_MASK] - base : NO_MORE_DOCS;
+            idx < limitIdx ? docs[idx >> WORDS_SHIFT].get(idx & ARR_MASK) - base : NO_MORE_DOCS;
       }
 
       @Override
@@ -928,13 +941,13 @@ public class SortedIntDocSet extends DocSet {
     };
   }
 
-  public static int binarySearch(int[][] a, int fromIndex, int toIndex, int key) {
+  public static int binarySearch(IntBuffer[] a, int fromIndex, int toIndex, int key) {
     int low = fromIndex;
     int high = toIndex - 1;
 
     while (low <= high) {
       int mid = (low + high) >>> 1;
-      int midVal = a[mid >> WORDS_SHIFT][mid & ARR_MASK];
+      int midVal = a[mid >> WORDS_SHIFT].get(mid & ARR_MASK);
 
       if (midVal < key) low = mid + 1;
       else if (midVal > key) high = mid - 1;
@@ -950,9 +963,9 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public SortedIntDocSet clone() {
-    int[][] newDocs = new int[docs.length][];
+    IntBuffer[] newDocs = new IntBuffer[docs.length];
     for (int i = docs.length - 1; i >= 0; i--) {
-      newDocs[i] = docs[i].clone();
+      newDocs[i] = clone(docs[i]);
     }
     return new SortedIntDocSet(newDocs);
   }
