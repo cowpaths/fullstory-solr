@@ -868,7 +868,6 @@ public class Http2SolrClient extends HttpSolrClientBase {
     AsyncTracker() {
       // TODO: what about shared instances?
       phaser = new Phaser(1);
-      // available = new Semaphore(MAX_OUTSTANDING_REQUESTS, false);
       queuedListener =
           request -> {
             phaser.register();
