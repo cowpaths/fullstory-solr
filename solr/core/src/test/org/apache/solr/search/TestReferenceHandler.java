@@ -18,7 +18,6 @@ package org.apache.solr.search;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.lang.ref.Reference;
 import java.nio.LongBuffer;
 import java.util.Random;
 import java.util.concurrent.ExecutionException;
@@ -60,34 +59,38 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
 
   public void testHeapCacheFbs() throws InterruptedException, ExecutionException, IOException {
     int nThreads = 20;
-    ExecutorService exec = ExecutorUtil.newMDCAwareFixedThreadPool(nThreads, new SolrNamedThreadFactory("testHeapCache"));
+    ExecutorService exec =
+        ExecutorUtil.newMDCAwareFixedThreadPool(
+            nThreads, new SolrNamedThreadFactory("testHeapCache"));
     try (Closeable c = () -> ExecutorUtil.shutdownAndAwaitTermination(exec);
-         HeapCacheFbsModifier h = new HeapCacheFbsModifier()) {
+        HeapCacheFbsModifier h = new HeapCacheFbsModifier()) {
       AtomicBoolean finished = new AtomicBoolean(false);
       Future<?>[] futures = new Future[nThreads];
       for (int i = 0; i < nThreads; i++) {
         Random r = new Random(random().nextLong());
-        futures[i] = exec.submit(() -> {
-          try {
-            while (!finished.get()) {
-              int size = r.nextInt((SortedIntDocSet.MAX_ARR_SIZE >> 1) + 1);
-              LongBuffer compare = LongBuffer.allocate(size);
-              LongBuffer bb;
-              try (FixedBitSet.Modifier m = h.getBatchModifier(compare, 1)) {
-                bb = m.allocate(size);
-              }
-              for (int j = 0; j < size; j++) {
-                long v = r.nextLong();
-                compare.put(v);
-                bb.put(v);
-              }
-              assertEquals(compare.clear(), bb.clear());
-            }
-          } catch (Throwable t) {
-            finished.set(true);
-            throw t;
-          }
-        });
+        futures[i] =
+            exec.submit(
+                () -> {
+                  try {
+                    while (!finished.get()) {
+                      int size = r.nextInt((SortedIntDocSet.MAX_ARR_SIZE >> 1) + 1);
+                      LongBuffer compare = LongBuffer.allocate(size);
+                      LongBuffer bb;
+                      try (FixedBitSet.Modifier m = h.getBatchModifier(compare, 1)) {
+                        bb = m.allocate(size);
+                      }
+                      for (int j = 0; j < size; j++) {
+                        long v = r.nextLong();
+                        compare.put(v);
+                        bb.put(v);
+                      }
+                      assertEquals(compare.clear(), bb.clear());
+                    }
+                  } catch (Throwable t) {
+                    finished.set(true);
+                    throw t;
+                  }
+                });
       }
       long endNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(N_SECONDS);
       long remainingNanos;
@@ -95,11 +98,16 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
         System.out.println(
             "seconds remaining: "
                 + TimeUnit.NANOSECONDS.toSeconds(remainingNanos)
-                +", activeThreads="+h.activeThreadCount()
-                +", outstanding="+h.outstandingCount()
-                +", allocated="+h.allocatedCount()
-                +", collected="+h.collectedCount()
-                +", exhausted="+h.exhaustedCount());
+                + ", activeThreads="
+                + h.activeThreadCount()
+                + ", outstanding="
+                + h.outstandingCount()
+                + ", allocated="
+                + h.allocatedCount()
+                + ", collected="
+                + h.collectedCount()
+                + ", exhausted="
+                + h.exhaustedCount());
         Thread.sleep(Math.min(1000, TimeUnit.NANOSECONDS.toMillis(remainingNanos)));
       }
       finished.set(true);
@@ -109,11 +117,16 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
       for (int i = 0; i < 10; i++) {
         System.gc();
         System.out.println(
-            "activeThreads="+h.activeThreadCount()
-                +", outstanding="+h.outstandingCount()
-                +", allocated="+h.allocatedCount()
-                +", collected="+h.collectedCount()
-                +", exhausted="+h.exhaustedCount());
+            "activeThreads="
+                + h.activeThreadCount()
+                + ", outstanding="
+                + h.outstandingCount()
+                + ", allocated="
+                + h.allocatedCount()
+                + ", collected="
+                + h.collectedCount()
+                + ", exhausted="
+                + h.exhaustedCount());
         Thread.sleep(500);
       }
     }
@@ -128,10 +141,13 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
     LongAdder collectedRefs = new LongAdder();
     LongAdder totalBytesIn = new LongAdder();
     LongAdder totalBytesOut = new LongAdder();
-    ReferenceHandler<Dummy> rh = new ReferenceHandler<>((a) -> {
-      collectedRefs.increment();
-      totalBytesOut.add(a.ramBytesUsed());
-    }, null);
+    ReferenceHandler<Dummy> rh =
+        new ReferenceHandler<>(
+            (a) -> {
+              collectedRefs.increment();
+              totalBytesOut.add(a.ramBytesUsed());
+            },
+            null);
     AtomicBoolean finished = new AtomicBoolean();
     @SuppressWarnings("rawtypes")
     Future<?>[] futures = new Future[nThreads];

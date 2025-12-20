@@ -16,12 +16,6 @@
  */
 package org.apache.solr.search;
 
-import org.apache.lucene.util.Accountable;
-import org.apache.lucene.util.RamUsageEstimator;
-import org.apache.solr.common.util.ExecutorUtil;
-import org.apache.solr.common.util.SolrNamedThreadFactory;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -38,6 +32,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
+import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.common.util.SolrNamedThreadFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Handles thread-safe dynamic unloading and on-demand reloading of backing resource. */
 public class ReferenceHandler<T> implements Closeable {
@@ -57,7 +56,8 @@ public class ReferenceHandler<T> implements Closeable {
   @SuppressWarnings("unchecked")
   public ReferenceHandler(Consumer<T> onCollection, Runnable output) {
     int execSize = PARALLEL_HEAD_FACTOR + (output == null ? 0 : 1);
-    this.exec = ExecutorUtil.newMDCAwareFixedThreadPool(execSize, new SolrNamedThreadFactory("refHandler"));
+    this.exec =
+        ExecutorUtil.newMDCAwareFixedThreadPool(execSize, new SolrNamedThreadFactory("refHandler"));
     this.onCollection = onCollection;
     for (int i = PARALLEL_HEAD_FACTOR - 1; i >= 0; i--) {
       head[i] = new Ref<T>(null, null, null, null);
@@ -66,47 +66,52 @@ public class ReferenceHandler<T> implements Closeable {
     Future<?>[] refQueueHandlers = new Future[execSize];
     int i = 0;
     for (ReferenceQueue<Object> q : removeOutstanding) {
-      refQueueHandlers[i++] = exec.submit(() -> {
-        activeThreads.increment();
-        try {
-          Reference<?> collected;
-          while ((collected = q.remove()) != null) {
-            remove((Ref<T>) collected);
-          }
-        } finally {
-          activeThreads.decrement();
-        }
-        return null;
-      });
+      refQueueHandlers[i++] =
+          exec.submit(
+              () -> {
+                activeThreads.increment();
+                try {
+                  Reference<?> collected;
+                  while ((collected = q.remove()) != null) {
+                    remove((Ref<T>) collected);
+                  }
+                } finally {
+                  activeThreads.decrement();
+                }
+                return null;
+              });
     }
     if (output != null) {
-      refQueueHandlers[i] = exec.submit(() -> {
-        activeThreads.increment();
-        try {
-          output.run();
-        } finally {
-          activeThreads.decrement();
-        }
-      });
+      refQueueHandlers[i] =
+          exec.submit(
+              () -> {
+                activeThreads.increment();
+                try {
+                  output.run();
+                } finally {
+                  activeThreads.decrement();
+                }
+              });
     }
-    onClose = () -> {
-      for (Future<?> f : refQueueHandlers) {
-        try {
-          f.cancel(true);
-        } catch (Exception e) {
-          log.warn("exception on close", e);
-        }
-      }
-      for (Future<?> f : refQueueHandlers) {
-        try {
-          f.get(10, TimeUnit.SECONDS);
-        } catch (CancellationException e) {
-          // swallow; this is how we exit
-        } catch (Exception e) {
-          log.warn("exception on close", e);
-        }
-      }
-    };
+    onClose =
+        () -> {
+          for (Future<?> f : refQueueHandlers) {
+            try {
+              f.cancel(true);
+            } catch (Exception e) {
+              log.warn("exception on close", e);
+            }
+          }
+          for (Future<?> f : refQueueHandlers) {
+            try {
+              f.get(10, TimeUnit.SECONDS);
+            } catch (CancellationException e) {
+              // swallow; this is how we exit
+            } catch (Exception e) {
+              log.warn("exception on close", e);
+            }
+          }
+        };
   }
 
   @Override
@@ -174,8 +179,7 @@ public class ReferenceHandler<T> implements Closeable {
     private final AtomicReference<Ref<T>> next = new AtomicReference<>();
     private volatile Ref<T> prev;
 
-    public Ref(
-        Object referent, ReferenceQueue<? super Object> q, T onCollection, Ref<T> prev) {
+    public Ref(Object referent, ReferenceQueue<? super Object> q, T onCollection, Ref<T> prev) {
       super(referent, q);
       this.onCollection = onCollection;
       this.prev = prev;
@@ -190,6 +194,7 @@ public class ReferenceHandler<T> implements Closeable {
 
   @SuppressWarnings("unchecked")
   private final Ref<T> reserved = (Ref<T>) RESERVED;
+
   @SuppressWarnings("unchecked")
   private final Ref<T> removed = (Ref<T>) REMOVED;
 

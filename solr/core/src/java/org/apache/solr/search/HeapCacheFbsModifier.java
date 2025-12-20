@@ -16,8 +16,6 @@
  */
 package org.apache.solr.search;
 
-import org.apache.lucene.util.FixedBitSet;
-import org.apache.solr.common.util.EnvUtils;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,10 +23,10 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+import org.apache.lucene.util.FixedBitSet;
+import org.apache.solr.common.util.EnvUtils;
 
-/**
- * Pools buffers backed by heap byte[] of largest possible size
- */
+/** Pools buffers backed by heap byte[] of largest possible size */
 public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable {
   private static class Holder {
     static final HeapCacheFbsModifier INSTANCE = new HeapCacheFbsModifier();
@@ -53,7 +51,8 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
 
   private final AtomicLong headAndTail;
   private int releaseTail;
-  private final BlockingQueue<List<ByteBuffer>> releaseQueue = new ArrayBlockingQueue<>(2048, false);
+  private final BlockingQueue<List<ByteBuffer>> releaseQueue =
+      new ArrayBlockingQueue<>(2048, false);
 
   private final ReferenceHandler<List<ByteBuffer>> refHandler;
 
@@ -63,7 +62,9 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
     long maxMemory = Runtime.getRuntime().maxMemory();
     long defaultTargetPoolSize = Math.toIntExact(maxMemory / 16); // default to 1/16 of heap
     long maxPoolSize = Math.toIntExact(maxMemory / 2); // max of 1/2 of heap
-    int targetPoolSizeMB = EnvUtils.getPropertyAsInteger(POOL_TARGET_MB_PROPNAME, Math.toIntExact(defaultTargetPoolSize >> 20));
+    int targetPoolSizeMB =
+        EnvUtils.getPropertyAsInteger(
+            POOL_TARGET_MB_PROPNAME, Math.toIntExact(defaultTargetPoolSize >> 20));
     long targetPoolSizeSpec;
     if (targetPoolSizeMB == -1) {
       targetPoolSizeSpec = defaultTargetPoolSize;
@@ -81,7 +82,9 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
     int numPartitions = ((N_BLOCKS - 1) / MAX_BLOCKS_PER_PARTITION) + 1;
     pool = new ByteBuffer[POOL_ARR_SIZE];
     int blockIdx = 0;
-    for (int i = numPartitions - 1, partitionNumBlocks = ((N_BLOCKS - 1) / numPartitions) + 1; i >= 0; i--) {
+    for (int i = numPartitions - 1, partitionNumBlocks = ((N_BLOCKS - 1) / numPartitions) + 1;
+        i >= 0;
+        i--) {
       ByteBuffer partition = ByteBuffer.allocate(partitionNumBlocks * BLOCK_SIZE_BYTES);
       for (int j = 0; j < partitionNumBlocks; j++) {
         pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
@@ -90,19 +93,22 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
     }
     headAndTail = new AtomicLong(N_BLOCKS);
     releaseTail = N_BLOCKS;
-    refHandler = new ReferenceHandler<>((toRelease) -> {
-      try {
-        releaseQueue.put(toRelease);
-      } catch (InterruptedException e) {
-        throw new RuntimeException(e);
-      }
-    }, () -> {
-      try {
-        releaseLoop();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-    });
+    refHandler =
+        new ReferenceHandler<>(
+            (toRelease) -> {
+              try {
+                releaseQueue.put(toRelease);
+              } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+              }
+            },
+            () -> {
+              try {
+                releaseLoop();
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+              }
+            });
     FixedBitSets.MODIFIER = this;
   }
 
@@ -132,9 +138,22 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
         exhausted.increment();
         return null;
       } else if (avail < 0) {
-        throw new IllegalStateException("avail="+avail+", "+tail+", "+((int) tail)+", "+head+" !!! "+allocated.sum()+" ~= "+ collected.sum());
+        throw new IllegalStateException(
+            "avail="
+                + avail
+                + ", "
+                + tail
+                + ", "
+                + ((int) tail)
+                + ", "
+                + head
+                + " !!! "
+                + allocated.sum()
+                + " ~= "
+                + collected.sum());
       }
-      long witness = this.headAndTail.compareAndExchange(extant, ((long) (head + 1) << Integer.SIZE) | tail);
+      long witness =
+          this.headAndTail.compareAndExchange(extant, ((long) (head + 1) << Integer.SIZE) | tail);
       if (witness == extant) {
         allocated.increment();
         ByteBuffer ret = pool[head & POOL_SIZE_MASK].clear().limit(size);
@@ -199,15 +218,19 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
   public long exhaustedCount() {
     return exhausted.sum();
   }
+
   public long allocatedCount() {
     return allocated.sum();
   }
+
   public long collectedCount() {
     return collected.sum();
   }
+
   public long outstandingCount() {
     return refHandler.getOutstandingSize();
   }
+
   public int activeThreadCount() {
     return refHandler.activeThreadCount();
   }
