@@ -52,6 +52,8 @@ public class ReferenceHandler<T> implements Closeable {
 
   private final ExecutorService exec;
 
+  private final LongAdder activeThreads = new LongAdder();
+
   @SuppressWarnings("unchecked")
   public ReferenceHandler(Consumer<T> onCollection, Runnable output) {
     int execSize = PARALLEL_HEAD_FACTOR + (output == null ? 0 : 1);
@@ -65,15 +67,27 @@ public class ReferenceHandler<T> implements Closeable {
     int i = 0;
     for (ReferenceQueue<Object> q : removeOutstanding) {
       refQueueHandlers[i++] = exec.submit(() -> {
-        Reference<?> collected;
-        while ((collected = q.remove()) != null) {
-          remove((Ref<T>) collected);
+        activeThreads.increment();
+        try {
+          Reference<?> collected;
+          while ((collected = q.remove()) != null) {
+            remove((Ref<T>) collected);
+          }
+        } finally {
+          activeThreads.decrement();
         }
         return null;
       });
     }
     if (output != null) {
-      refQueueHandlers[i] = exec.submit(output);
+      refQueueHandlers[i] = exec.submit(() -> {
+        activeThreads.increment();
+        try {
+          output.run();
+        } finally {
+          activeThreads.decrement();
+        }
+      });
     }
     onClose = () -> {
       for (Future<?> f : refQueueHandlers) {
@@ -106,6 +120,10 @@ public class ReferenceHandler<T> implements Closeable {
 
   public long getOutstandingSize() {
     return outstandingSize.sum();
+  }
+
+  public int activeThreadCount() {
+    return Math.toIntExact(activeThreads.sum());
   }
 
   private static final int DEFAULT_PARALLEL_HEAD_FACTOR = 32;

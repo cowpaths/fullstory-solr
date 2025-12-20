@@ -78,7 +78,7 @@ public class BitDocSet extends DocSet {
     int exp = 64 - Long.numberOfLeadingZeros(maxMemory) - 1; // round down to nearest power of 2
     String tmp = System.getProperty("solr.bitdocset.maxwordsshift");
     int maxBitShift;
-    if (tmp == null) {
+    if (tmp == null || "-1".equals(tmp)) {
       maxBitShift = DEFAULT_MAX_BIT_SHIFT;
     } else {
       try {
