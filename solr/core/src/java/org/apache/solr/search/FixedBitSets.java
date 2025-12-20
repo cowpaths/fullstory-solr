@@ -39,7 +39,7 @@ public class FixedBitSets implements Bits, Accountable {
   private static final long BASE_RAM_BYTES_USED =
       RamUsageEstimator.shallowSizeOfInstance(FixedBitSets.class);
 
-  private static final FixedBitSet.Modifier MODIFIER = FixedBitSet.DEFAULT_MODIFIER;
+  static FixedBitSet.Modifier MODIFIER = FixedBitSet.DEFAULT_MODIFIER;
 
   public final FixedBitSet[] parts;
   private int cachedLength = -1;

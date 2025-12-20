@@ -25,7 +25,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
-
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.NamedThreadFactory;
 import org.apache.lucene.util.RamUsageEstimator;
@@ -58,12 +57,11 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
     final int batchSize = 1024;
 
     ExecutorService exec =
-        Executors.newFixedThreadPool(
-            nThreads + ReferenceHandler.PARALLEL_HEAD_FACTOR, new NamedThreadFactory("TestReferenceHandler"));
+        Executors.newFixedThreadPool(nThreads, new NamedThreadFactory("TestReferenceHandler"));
     LongAdder collectedRefs = new LongAdder();
     LongAdder totalBytesIn = new LongAdder();
     LongAdder totalBytesOut = new LongAdder();
-    ReferenceHandler<Dummy> rh = new ReferenceHandler<>(exec, (a) -> {
+    ReferenceHandler<Dummy> rh = new ReferenceHandler<>((a) -> {
       collectedRefs.increment();
       totalBytesOut.add(a.ramBytesUsed());
     });

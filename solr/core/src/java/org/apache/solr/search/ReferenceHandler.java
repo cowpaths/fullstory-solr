@@ -18,10 +18,13 @@ package org.apache.solr.search;
 
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.common.util.SolrNamedThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
@@ -37,7 +40,7 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 
 /** Handles thread-safe dynamic unloading and on-demand reloading of backing resource. */
-public class ReferenceHandler<T extends Accountable> implements Closeable {
+public class ReferenceHandler<T> implements Closeable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -47,8 +50,11 @@ public class ReferenceHandler<T extends Accountable> implements Closeable {
 
   private final Consumer<T> onCollection;
 
+  private final ExecutorService exec;
+
   @SuppressWarnings("unchecked")
-  public ReferenceHandler(ExecutorService exec, Consumer<T> onCollection) {
+  public ReferenceHandler(Consumer<T> onCollection) {
+    this.exec = ExecutorUtil.newMDCAwareFixedThreadPool(PARALLEL_HEAD_FACTOR, new SolrNamedThreadFactory("refHandler"));
     this.onCollection = onCollection;
     for (int i = PARALLEL_HEAD_FACTOR - 1; i >= 0; i--) {
       head[i] = new Ref<T>(null, null, null, null);
@@ -86,8 +92,12 @@ public class ReferenceHandler<T extends Accountable> implements Closeable {
   }
 
   @Override
-  public void close() throws IOException {
-    onClose.close();
+  public void close() {
+    try (Closeable c = () -> ExecutorUtil.shutdownAndAwaitTermination(exec)) {
+      onClose.close();
+    } catch (IOException e) {
+      throw new UncheckedIOException("should never happen", e);
+    }
   }
 
   public long getOutstandingSize() {
@@ -163,7 +173,7 @@ public class ReferenceHandler<T extends Accountable> implements Closeable {
 
   private static final AtomicInteger ARBITRARY_REFQUEUE = new AtomicInteger();
 
-  private Ref<T> add(final Object o, T onCollection) {
+  public void add(final Object o, T onCollection) {
     int parallelIdx;
     if (ASSIGN_REFQUEUE_BY_THREAD) {
       parallelIdx = Thread.currentThread().hashCode() & PARALLEL_HEAD_MASK;
@@ -182,7 +192,6 @@ public class ReferenceHandler<T extends Accountable> implements Closeable {
       if (!head.next.compareAndSet(reserved, ref)) {
         throw new IllegalStateException();
       }
-      return ref;
     } finally {
       Reference.reachabilityFence(o);
     }

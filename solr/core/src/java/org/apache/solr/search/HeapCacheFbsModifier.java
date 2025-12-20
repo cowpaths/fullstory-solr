@@ -26,7 +26,7 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Pools buffers backed by heap byte[] of largest possible size
  */
-public class HeapCacheFbsModifier implements FixedBitSet.Modifier {
+public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable {
   private static final int BLOCK_SIZE_BYTES = SortedIntDocSet.MAX_ARR_SIZE << 2;
   private static final int MAX_BLOCKS_PER_PARTITION;
   private static final int N_BLOCKS;
@@ -41,11 +41,21 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier {
 
   private final AtomicLong headAndTail;
 
+  private final ReferenceHandler<List<ByteBuffer>> refHandler;
+
+  public static final String POOL_TARGET_MB_PROPNAME = "solr.fbspool.targetMB";
+
   static {
     long maxMemory = Runtime.getRuntime().maxMemory();
     long defaultTargetPoolSize = Math.toIntExact(maxMemory / 4); // default to 1/4 of heap
     long maxPoolSize = Math.toIntExact(maxMemory / 2); // max of 1/2 of heap
-    long targetPoolSizeSpec = EnvUtils.getPropertyAsLong("solr.fbspool.targetsize", defaultTargetPoolSize);
+    int targetPoolSizeMB = EnvUtils.getPropertyAsInteger(POOL_TARGET_MB_PROPNAME, Math.toIntExact(defaultTargetPoolSize >> 20));
+    long targetPoolSizeSpec;
+    if (targetPoolSizeMB == -1) {
+      targetPoolSizeSpec = defaultTargetPoolSize;
+    } else {
+      targetPoolSizeSpec = ((long) targetPoolSizeMB) << 20;
+    }
     long targetPoolSize = Math.min(maxPoolSize, targetPoolSizeSpec);
     N_BLOCKS = Math.toIntExact(targetPoolSize / BLOCK_SIZE_BYTES);
     MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
@@ -65,6 +75,15 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier {
       partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
     }
     headAndTail = new AtomicLong(N_BLOCKS);
+    refHandler = new ReferenceHandler<>(this::releaseBatch);
+    FixedBitSets.MODIFIER = this;
+  }
+
+  @Override
+  public void close() {
+    try (refHandler) {
+      FixedBitSets.MODIFIER = FixedBitSet.DEFAULT_MODIFIER;
+    }
   }
 
   @Override
@@ -92,8 +111,8 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier {
     }
   }
 
-  private void registerBatch(Object sentinel, List<ByteBuffer> blocks) {
-    // TODO: implement this!
+  private void releaseBatch(List<ByteBuffer> toRelease) {
+    // TODO: implement this
   }
 
   @Override
@@ -110,7 +129,7 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier {
       @Override
       public void close() {
         try {
-          registerBatch(sentinel, blocks);
+          refHandler.add(sentinel, blocks);
         } finally {
           FixedBitSet.Modifier.super.close();
         }

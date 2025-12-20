@@ -81,6 +81,7 @@ allprojects {
   plugins.withType(JavaPlugin) {
     ext {
       testOptions += [
+          [propName: 'solr.fbspool.targetMB', value: "-1", description: "Configures pooling of docset partitions (0 -> disabled, -1 -> default)"],
           [propName: 'solr.bitdocset.maxwordsshift', value: "7", description: "May set lower to exercise DocSet partitioning"],
           // seed, repetition and amplification.
           [propName: 'tests.seed', value: { -> rootSeed }, description: "Sets the master randomization seed."],

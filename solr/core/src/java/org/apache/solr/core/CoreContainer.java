@@ -65,6 +65,7 @@ import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.util.FixedBitSet;
 import org.apache.solr.api.ClusterPluginsSource;
 import org.apache.solr.api.ContainerPluginsRegistry;
 import org.apache.solr.api.JerseyResource;
@@ -97,6 +98,7 @@ import org.apache.solr.common.cloud.Replica.State;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.cloud.ZkStateReader;
 import org.apache.solr.common.util.CollectionUtil;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.IOUtils;
 import org.apache.solr.common.util.ObjectCache;
@@ -143,6 +145,8 @@ import org.apache.solr.request.SolrRequestHandler;
 import org.apache.solr.request.SolrRequestInfo;
 import org.apache.solr.search.CacheConfig;
 import org.apache.solr.search.CacheOverridesManager;
+import org.apache.solr.search.FixedBitSets;
+import org.apache.solr.search.HeapCacheFbsModifier;
 import org.apache.solr.search.SolrCache;
 import org.apache.solr.search.SolrFieldCacheBean;
 import org.apache.solr.security.AllowListUrlChecker;
@@ -413,8 +417,13 @@ public class CoreContainer {
     this(config, locator, false);
   }
 
+  private static final boolean POOL_DOCSET_BLOCKS = EnvUtils.getPropertyAsInteger(HeapCacheFbsModifier.POOL_TARGET_MB_PROPNAME, 0) != 0;
+
   public CoreContainer(NodeConfig config, CoresLocator locator, boolean asyncSolrCoreLoad) {
     this.cfg = requireNonNull(config);
+    if (POOL_DOCSET_BLOCKS) {
+      objectCache.computeIfAbsent("fbsModifier", (k) -> new HeapCacheFbsModifier());
+    }
     this.loader = config.getSolrResourceLoader();
     this.solrHome = config.getSolrHome();
     this.solrCores = SolrCores.newSolrCores(this);
