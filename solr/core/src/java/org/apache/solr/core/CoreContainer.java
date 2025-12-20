@@ -422,7 +422,7 @@ public class CoreContainer {
   public CoreContainer(NodeConfig config, CoresLocator locator, boolean asyncSolrCoreLoad) {
     this.cfg = requireNonNull(config);
     if (POOL_DOCSET_BLOCKS) {
-      objectCache.computeIfAbsent("fbsModifier", (k) -> new HeapCacheFbsModifier());
+      objectCache.computeIfAbsent("fbsModifier", (k) -> HeapCacheFbsModifier.getInstance());
     }
     this.loader = config.getSolrResourceLoader();
     this.solrHome = config.getSolrHome();

@@ -30,6 +30,14 @@ import java.util.concurrent.atomic.LongAdder;
  * Pools buffers backed by heap byte[] of largest possible size
  */
 public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable {
+  private static class Holder {
+    static final HeapCacheFbsModifier INSTANCE = new HeapCacheFbsModifier();
+  }
+
+  public static HeapCacheFbsModifier getInstance() {
+    return Holder.INSTANCE;
+  }
+
   private static final int BLOCK_SIZE_BYTES = SortedIntDocSet.MAX_ARR_SIZE << 2;
   private static final int MAX_BLOCKS_PER_PARTITION;
   private static final int N_BLOCKS;
@@ -69,7 +77,7 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
     POOL_SIZE_MASK = POOL_ARR_SIZE - 1;
   }
 
-  public HeapCacheFbsModifier() {
+  HeapCacheFbsModifier() {
     int numPartitions = ((N_BLOCKS - 1) / MAX_BLOCKS_PER_PARTITION) + 1;
     pool = new ByteBuffer[POOL_ARR_SIZE];
     int blockIdx = 0;
