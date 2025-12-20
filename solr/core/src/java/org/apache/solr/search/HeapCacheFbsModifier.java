@@ -21,6 +21,8 @@ import org.apache.solr.common.util.EnvUtils;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -40,6 +42,8 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
   private final ByteBuffer[] pool;
 
   private final AtomicLong headAndTail;
+  private int releaseTail;
+  private final BlockingQueue<List<ByteBuffer>> releaseQueue = new ArrayBlockingQueue<>(2048, false);
 
   private final ReferenceHandler<List<ByteBuffer>> refHandler;
 
@@ -75,7 +79,20 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
       partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
     }
     headAndTail = new AtomicLong(N_BLOCKS);
-    refHandler = new ReferenceHandler<>(this::releaseBatch);
+    releaseTail = N_BLOCKS;
+    refHandler = new ReferenceHandler<>((toRelease) -> {
+      try {
+        releaseQueue.put(toRelease);
+      } catch (InterruptedException e) {
+        throw new RuntimeException(e);
+      }
+    }, () -> {
+      try {
+        releaseLoop();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    });
     FixedBitSets.MODIFIER = this;
   }
 
@@ -111,8 +128,23 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
     }
   }
 
-  private void releaseBatch(List<ByteBuffer> toRelease) {
-    // TODO: implement this
+  private void releaseLoop() throws InterruptedException {
+    for (; ; ) {
+      List<ByteBuffer> toRelease = releaseQueue.take();
+      int destOff = releaseTail;
+      for (ByteBuffer bb : toRelease) {
+        pool[destOff++ & POOL_SIZE_MASK] = bb;
+      }
+      releaseTail = destOff;
+      for (long extant = headAndTail.get(); ; ) {
+        long witness = headAndTail.compareAndExchange(extant, (extant ^ TAIL_MASK) | destOff);
+        if (witness == extant) {
+          break;
+        } else {
+          extant = witness;
+        }
+      }
+    }
   }
 
   @Override

@@ -64,7 +64,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
     ReferenceHandler<Dummy> rh = new ReferenceHandler<>((a) -> {
       collectedRefs.increment();
       totalBytesOut.add(a.ramBytesUsed());
-    });
+    }, null);
     AtomicBoolean finished = new AtomicBoolean();
     @SuppressWarnings("rawtypes")
     Future<?>[] futures = new Future[nThreads];

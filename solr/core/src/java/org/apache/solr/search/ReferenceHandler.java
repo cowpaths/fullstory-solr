@@ -53,14 +53,15 @@ public class ReferenceHandler<T> implements Closeable {
   private final ExecutorService exec;
 
   @SuppressWarnings("unchecked")
-  public ReferenceHandler(Consumer<T> onCollection) {
-    this.exec = ExecutorUtil.newMDCAwareFixedThreadPool(PARALLEL_HEAD_FACTOR, new SolrNamedThreadFactory("refHandler"));
+  public ReferenceHandler(Consumer<T> onCollection, Runnable output) {
+    int execSize = PARALLEL_HEAD_FACTOR + (output == null ? 0 : 1);
+    this.exec = ExecutorUtil.newMDCAwareFixedThreadPool(execSize, new SolrNamedThreadFactory("refHandler"));
     this.onCollection = onCollection;
     for (int i = PARALLEL_HEAD_FACTOR - 1; i >= 0; i--) {
       head[i] = new Ref<T>(null, null, null, null);
       removeOutstanding[i] = new ReferenceQueue<>();
     }
-    Future<?>[] refQueueHandlers = new Future[removeOutstanding.length];
+    Future<?>[] refQueueHandlers = new Future[execSize];
     int i = 0;
     for (ReferenceQueue<Object> q : removeOutstanding) {
       refQueueHandlers[i++] = exec.submit(() -> {
@@ -70,6 +71,9 @@ public class ReferenceHandler<T> implements Closeable {
         }
         return null;
       });
+    }
+    if (output != null) {
+      refQueueHandlers[i] = exec.submit(output);
     }
     onClose = () -> {
       for (Future<?> f : refQueueHandlers) {
