@@ -63,7 +63,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
         ExecutorUtil.newMDCAwareFixedThreadPool(
             nThreads, new SolrNamedThreadFactory("testHeapCache"));
     try (Closeable c = () -> ExecutorUtil.shutdownAndAwaitTermination(exec);
-        HeapCacheFbsModifier h = new HeapCacheFbsModifier()) {
+        HeapCacheFbsModifier h = new HeapCacheFbsModifier(false)) {
       AtomicBoolean finished = new AtomicBoolean(false);
       Future<?>[] futures = new Future[nThreads];
       for (int i = 0; i < nThreads; i++) {
@@ -114,13 +114,14 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
       for (Future<?> f : futures) {
         f.get();
       }
-      for (int i = 0; i < 10; i++) {
+      long outstanding = Long.MAX_VALUE;
+      for (int i = 0; i < 10 && outstanding > 0; i++) {
         System.gc();
         System.out.println(
             "activeThreads="
                 + h.activeThreadCount()
                 + ", outstanding="
-                + h.outstandingCount()
+                + (outstanding = h.outstandingCount())
                 + ", allocated="
                 + h.allocatedCount()
                 + ", collected="

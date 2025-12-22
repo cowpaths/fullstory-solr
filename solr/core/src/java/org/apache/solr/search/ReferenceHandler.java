@@ -111,6 +111,8 @@ public class ReferenceHandler<T> implements Closeable {
               log.warn("exception on close", e);
             }
           }
+          Arrays.fill(head, null);
+          Arrays.fill(removeOutstanding, null);
         };
   }
 

@@ -20,13 +20,16 @@ import static org.apache.solr.search.BitDocSet.BIT_SHIFT;
 import static org.apache.solr.search.BitDocSet.BLOCK_BIT_MASK;
 import static org.apache.solr.search.BitDocSet.MAX_BLOCK_BITS;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.util.Arrays;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.FixedBitSet;
+import org.apache.lucene.util.IOSupplier;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.lucene.util.ThreadInterruptedException;
 
 /**
  * A {@link FixedBitSet} based implementation of a {@link DocSet}. Good for medium/large sets.
@@ -40,6 +43,55 @@ public class FixedBitSets implements Bits, Accountable {
       RamUsageEstimator.shallowSizeOfInstance(FixedBitSets.class);
 
   static FixedBitSet.Modifier MODIFIER = FixedBitSet.DEFAULT_MODIFIER;
+
+  private static final Object SYNC = new Object();
+
+  private static int registeredCount = 0;
+
+  public static <T extends FixedBitSet.Modifier> T registerModifier(IOSupplier<T> register)
+      throws IOException {
+    synchronized (SYNC) {
+      for (; ; ) {
+        if (MODIFIER == FixedBitSet.DEFAULT_MODIFIER) {
+          registeredCount = 1;
+          T ret = register.get();
+          MODIFIER = ret;
+          SYNC.notifyAll();
+          return ret;
+        } else {
+          @SuppressWarnings("unchecked")
+          T ret = (T) MODIFIER;
+          if (registeredCount == 0) {
+            try {
+              SYNC.wait();
+            } catch (InterruptedException e) {
+              throw new ThreadInterruptedException(e);
+            }
+          } else {
+            registeredCount++;
+            return ret;
+          }
+        }
+      }
+    }
+  }
+
+  public static boolean unregisterModifer(FixedBitSet.Modifier m, Closeable close)
+      throws IOException {
+    synchronized (SYNC) {
+      if (MODIFIER != m) {
+        throw new IllegalStateException();
+      }
+      if (--registeredCount == 0) {
+        MODIFIER = FixedBitSet.DEFAULT_MODIFIER;
+        close.close();
+        SYNC.notifyAll();
+        return true;
+      } else {
+        return false;
+      }
+    }
+  }
 
   public final FixedBitSet[] parts;
   private int cachedLength = -1;

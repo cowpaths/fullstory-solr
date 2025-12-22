@@ -16,8 +16,11 @@
  */
 package org.apache.solr.search;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -28,12 +31,13 @@ import org.apache.solr.common.util.EnvUtils;
 
 /** Pools buffers backed by heap byte[] of largest possible size */
 public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable {
-  private static class Holder {
-    static final HeapCacheFbsModifier INSTANCE = new HeapCacheFbsModifier();
-  }
 
   public static HeapCacheFbsModifier getInstance() {
-    return Holder.INSTANCE;
+    try {
+      return FixedBitSets.registerModifier(HeapCacheFbsModifier::new);
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
   }
 
   private static final int BLOCK_SIZE_BYTES = SortedIntDocSet.MAX_ARR_SIZE << 2;
@@ -47,6 +51,7 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
   // dummy, for efficiently clearing buffers
   private static final ByteBuffer FRESH = ByteBuffer.allocate(BLOCK_SIZE_BYTES);
 
+  private final boolean unregister;
   private final ByteBuffer[] pool;
 
   private final AtomicLong headAndTail;
@@ -78,7 +83,12 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
     POOL_SIZE_MASK = POOL_ARR_SIZE - 1;
   }
 
-  HeapCacheFbsModifier() {
+  private HeapCacheFbsModifier() {
+    this(true);
+  }
+
+  HeapCacheFbsModifier(boolean unregister) {
+    this.unregister = unregister;
     int numPartitions = ((N_BLOCKS - 1) / MAX_BLOCKS_PER_PARTITION) + 1;
     pool = new ByteBuffer[POOL_ARR_SIZE];
     int blockIdx = 0;
@@ -109,13 +119,24 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
                 Thread.currentThread().interrupt();
               }
             });
-    FixedBitSets.MODIFIER = this;
   }
 
   @Override
   public void close() {
-    try (refHandler) {
-      FixedBitSets.MODIFIER = FixedBitSet.DEFAULT_MODIFIER;
+    if (unregister) {
+      try {
+        if (FixedBitSets.unregisterModifer(this, refHandler)) {
+          Arrays.fill(pool, null);
+        }
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
+    } else {
+      try {
+        refHandler.close();
+      } finally {
+        Arrays.fill(pool, null);
+      }
     }
   }
 
