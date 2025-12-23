@@ -22,6 +22,7 @@ import static org.apache.solr.search.BitDocSet.MAX_BLOCK_BITS;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Accountable;
@@ -42,7 +43,10 @@ public class FixedBitSets implements Bits, Accountable {
   private static final long BASE_RAM_BYTES_USED =
       RamUsageEstimator.shallowSizeOfInstance(FixedBitSets.class);
 
-  static FixedBitSet.Modifier MODIFIER = FixedBitSet.DEFAULT_MODIFIER;
+  private static final FixedBitSet.Modifier DEFAULT_MODIFIER =
+      FixedBitSet.DEFAULT_MODIFIER.partitioned(BIT_SHIFT);
+
+  static FixedBitSet.Modifier MODIFIER = DEFAULT_MODIFIER;
 
   private static final Object SYNC = new Object();
 
@@ -52,7 +56,7 @@ public class FixedBitSets implements Bits, Accountable {
       throws IOException {
     synchronized (SYNC) {
       for (; ; ) {
-        if (MODIFIER == FixedBitSet.DEFAULT_MODIFIER) {
+        if (MODIFIER == DEFAULT_MODIFIER) {
           registeredCount = 1;
           T ret = register.get();
           MODIFIER = ret;
@@ -76,15 +80,16 @@ public class FixedBitSets implements Bits, Accountable {
     }
   }
 
-  public static boolean unregisterModifer(FixedBitSet.Modifier m, Closeable close)
+  public static boolean unregisterModifier(FixedBitSet.Modifier m, Closeable close)
       throws IOException {
     synchronized (SYNC) {
       if (MODIFIER != m) {
         throw new IllegalStateException();
       }
       if (--registeredCount == 0) {
-        MODIFIER = FixedBitSet.DEFAULT_MODIFIER;
-        close.close();
+        try (close) {
+          MODIFIER = DEFAULT_MODIFIER;
+        }
         SYNC.notifyAll();
         return true;
       } else {
@@ -104,12 +109,11 @@ public class FixedBitSets implements Bits, Accountable {
     }
     int lastIdx = (numBits - 1) >> BIT_SHIFT;
     this.parts = new FixedBitSet[lastIdx + 1];
+    ByteBuffer[] bb = MODIFIER.allocateBytesArr(FixedBitSet.bits2words(numBits) << 3, this.parts);
     int len = ((numBits - 1) & BLOCK_BIT_MASK) + 1;
-    try (FixedBitSet.Modifier m = MODIFIER.getBatchModifier(this, parts.length)) {
-      for (int i = lastIdx; i >= 0; i--) {
-        parts[i] = new FixedBitSet(len, m);
-        len = MAX_BLOCK_BITS;
-      }
+    for (int i = lastIdx; i >= 0; i--) {
+      parts[i] = new FixedBitSet(bb[i].asLongBuffer(), len);
+      len = MAX_BLOCK_BITS;
     }
   }
 
@@ -120,12 +124,12 @@ public class FixedBitSets implements Bits, Accountable {
   private FixedBitSets(FixedBitSets template) {
     FixedBitSet[] otherParts = template.parts;
     this.parts = new FixedBitSet[otherParts.length];
-    try (FixedBitSet.Modifier m = MODIFIER.getBatchModifier(this, otherParts.length)) {
-      for (int i = otherParts.length - 1; i >= 0; i--) {
-        this.parts[i] = otherParts[i].clone(m);
-      }
+    int numBits = template.length();
+    ByteBuffer[] bb = MODIFIER.allocateBytesArr(FixedBitSet.bits2words(numBits) << 3, this.parts);
+    for (int i = otherParts.length - 1; i >= 0; i--) {
+      this.parts[i] = otherParts[i].clone(bb[i].asLongBuffer());
     }
-    this.cachedLength = template.cachedLength;
+    this.cachedLength = numBits;
   }
 
   public void set(int index) {

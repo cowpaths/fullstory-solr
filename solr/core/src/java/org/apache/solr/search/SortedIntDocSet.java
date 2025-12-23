@@ -17,6 +17,7 @@
 package org.apache.solr.search;
 
 import com.carrotsearch.hppc.IntHashSet;
+import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.util.Collection;
 import java.util.Collections;
@@ -26,7 +27,6 @@ import org.apache.lucene.index.ReaderUtil;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Bits;
-import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.RamUsageEstimator;
 
 /** A simple sorted int[] array implementation of {@link DocSet}, good for small sets. */
@@ -34,8 +34,6 @@ public class SortedIntDocSet extends DocSet {
   private static final long BASE_RAM_BYTES_USED =
       RamUsageEstimator.shallowSizeOfInstance(SortedIntDocSet.class)
           + RamUsageEstimator.NUM_BYTES_ARRAY_HEADER;
-
-  private static final FixedBitSet.Modifier MODIFIER = FixedBitSet.DEFAULT_MODIFIER;
 
   protected final IntBuffer[] docs;
   final int capacity;
@@ -99,11 +97,10 @@ public class SortedIntDocSet extends DocSet {
     int outerSize = ((size - 1) >> WORDS_SHIFT) + 1;
     IntBuffer[] ret = new IntBuffer[outerSize];
     int i = outerSize - 1;
-    try (FixedBitSet.Modifier m = MODIFIER.getBatchModifier(ret, ret.length)) {
-      ret[i] = m.allocateInt(((size - 1) & ARR_MASK) + 1);
-      while (--i >= 0) {
-        ret[i] = m.allocateInt(MAX_ARR_SIZE);
-      }
+    ByteBuffer[] bb = FixedBitSets.MODIFIER.allocateBytesArr(size << 2, ret);
+    ret[i] = bb[i].asIntBuffer();
+    while (--i >= 0) {
+      ret[i] = bb[i].asIntBuffer();
     }
     return ret;
   }
@@ -676,10 +673,6 @@ public class SortedIntDocSet extends DocSet {
     dest.slice().position(destOff).put(src.slice(srcOff, len));
   }
 
-  private static IntBuffer clone(IntBuffer src, FixedBitSet.Modifier m) {
-    return m.allocateInt(src.capacity()).put(src.slice()).clear();
-  }
-
   @Override
   public DocSet andNot(DocSet other) {
     if (other.size() == 0) return this;
@@ -951,10 +944,9 @@ public class SortedIntDocSet extends DocSet {
   @Override
   public SortedIntDocSet clone() {
     IntBuffer[] newDocs = new IntBuffer[docs.length];
-    try (FixedBitSet.Modifier m = MODIFIER.getBatchModifier(newDocs, newDocs.length)) {
-      for (int i = docs.length - 1; i >= 0; i--) {
-        newDocs[i] = clone(docs[i], m);
-      }
+    ByteBuffer[] bb = FixedBitSets.MODIFIER.allocateBytesArr(capacity << 2, newDocs);
+    for (int i = docs.length - 1; i >= 0; i--) {
+      newDocs[i] = bb[i].asIntBuffer().put(docs[i].slice()).clear();
     }
     return new SortedIntDocSet(newDocs);
   }

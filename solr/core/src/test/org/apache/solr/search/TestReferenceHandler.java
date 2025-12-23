@@ -18,14 +18,19 @@ package org.apache.solr.search;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
+import java.util.Arrays;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.FixedBitSet;
@@ -57,6 +62,49 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
     }
   }
 
+  public void testInit() throws IOException, ExecutionException, InterruptedException {
+    int nThreads = 10;
+    ExecutorService exec =
+        ExecutorUtil.newMDCAwareFixedThreadPool(
+            nThreads, new SolrNamedThreadFactory("testHeapCache"));
+    try (Closeable c = () -> ExecutorUtil.shutdownAndAwaitTermination(exec)) {
+      CountDownLatch cdl = new CountDownLatch(nThreads);
+      Future<?>[] futures = new Future[nThreads];
+      for (int i = nThreads - 1; i >= 0; i--) {
+        int idx = i;
+        futures[i] =
+            exec.submit(
+                () -> {
+                  cdl.countDown();
+                  cdl.await();
+                  try (FixedBitSet.Modifier m =
+                      FixedBitSets.registerModifier(
+                          () ->
+                              new FixedBitSet.Modifier() {
+                                @Override
+                                public void close() {
+                                  try {
+                                    FixedBitSets.unregisterModifier(this, null);
+                                  } catch (IOException ex) {
+                                    throw new UncheckedIOException(ex);
+                                  }
+                                }
+                              })) {
+                    System.err.println("opened! " + idx + " " + System.identityHashCode(m));
+                  }
+                  System.err.println("closed! " + idx);
+                  return null;
+                });
+      }
+      for (Future<?> f : futures) {
+        f.get();
+      }
+    }
+  }
+
+  private static final int BLOCK_SHIFT = BitDocSet.BIT_SHIFT - 6;
+  private static final int BLOCK_MASK = (1 << BLOCK_SHIFT) - 1;
+
   public void testHeapCacheFbs() throws InterruptedException, ExecutionException, IOException {
     int nThreads = 20;
     ExecutorService exec =
@@ -66,6 +114,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
         HeapCacheFbsModifier h = new HeapCacheFbsModifier(false)) {
       AtomicBoolean finished = new AtomicBoolean(false);
       Future<?>[] futures = new Future[nThreads];
+      AtomicInteger errCt = new AtomicInteger();
       for (int i = 0; i < nThreads; i++) {
         Random r = new Random(random().nextLong());
         futures[i] =
@@ -73,21 +122,38 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
                 () -> {
                   try {
                     while (!finished.get()) {
-                      int size = r.nextInt((SortedIntDocSet.MAX_ARR_SIZE >> 1) + 1);
+                      int size = r.nextInt(2048);
                       LongBuffer compare = LongBuffer.allocate(size);
-                      LongBuffer bb;
-                      try (FixedBitSet.Modifier m = h.getBatchModifier(compare, 1)) {
-                        bb = m.allocate(size);
-                      }
+                      LongBuffer[] bb =
+                          Arrays.stream(h.allocateBytesArr(size << 3, compare))
+                              .map(ByteBuffer::asLongBuffer)
+                              .toArray(LongBuffer[]::new);
                       for (int j = 0; j < size; j++) {
-                        long v = r.nextLong();
-                        compare.put(v);
-                        bb.put(v);
+                        long v = j; // r.nextLong();
+                        compare.put(j, v);
+                        bb[j >> BLOCK_SHIFT].put((j & BLOCK_MASK), v);
                       }
-                      assertEquals(compare.clear(), bb.clear());
+                      for (int j = size - 1; j >= 0; j--) {
+                        try {
+                          assertEquals(compare.get(j), bb[j >> BLOCK_SHIFT].get(j & BLOCK_MASK));
+                        } catch (AssertionError er) {
+                          System.err.println(
+                              "XXX "
+                                  + Long.toUnsignedString(compare.get(j), 16)
+                                  + " != "
+                                  + Long.toUnsignedString(
+                                      bb[j >> BLOCK_SHIFT].get(j & BLOCK_MASK), 16)
+                                  + "; idx="
+                                  + Integer.toUnsignedString(j, 16));
+                          if (errCt.incrementAndGet() > 30) {
+                            throw er;
+                          }
+                        }
+                      }
                     }
                   } catch (Throwable t) {
                     finished.set(true);
+                    t.printStackTrace(System.err);
                     throw t;
                   }
                 });
@@ -115,17 +181,21 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
         f.get();
       }
       long outstanding = Long.MAX_VALUE;
-      for (int i = 0; i < 10 && outstanding > 0; i++) {
+      long allocated = -1;
+      long collected = -1;
+      for (int i = 0; i < 10 && (outstanding > 0 || allocated != collected); i++) {
         System.gc();
         System.out.println(
             "activeThreads="
                 + h.activeThreadCount()
+                + ", available="
+                + h.available()
                 + ", outstanding="
                 + (outstanding = h.outstandingCount())
                 + ", allocated="
-                + h.allocatedCount()
+                + (allocated = h.allocatedCount())
                 + ", collected="
-                + h.collectedCount()
+                + (collected = h.collectedCount())
                 + ", exhausted="
                 + h.exhaustedCount());
         Thread.sleep(500);

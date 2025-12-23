@@ -19,9 +19,7 @@ package org.apache.solr.search;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
@@ -42,7 +40,7 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
 
   private static final int BLOCK_SIZE_BYTES = SortedIntDocSet.MAX_ARR_SIZE << 2;
   private static final int MAX_BLOCKS_PER_PARTITION;
-  private static final int N_BLOCKS;
+  static final int N_BLOCKS;
   private static final long TAIL_MASK = -1L >>> Integer.SIZE;
   private static final long HEAD_MASK = ~TAIL_MASK;
   private static final int POOL_ARR_SIZE;
@@ -55,11 +53,9 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
   private final ByteBuffer[] pool;
 
   private final AtomicLong headAndTail;
-  private int releaseTail;
-  private final BlockingQueue<List<ByteBuffer>> releaseQueue =
-      new ArrayBlockingQueue<>(2048, false);
+  private final BlockingQueue<ByteBuffer[]> releaseQueue = new ArrayBlockingQueue<>(1024, false);
 
-  private final ReferenceHandler<List<ByteBuffer>> refHandler;
+  private final ReferenceHandler<ByteBuffer[]> refHandler;
 
   public static final String POOL_TARGET_MB_PROPNAME = "solr.fbspool.targetMB";
 
@@ -79,7 +75,8 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
     long targetPoolSize = Math.min(maxPoolSize, targetPoolSizeSpec);
     N_BLOCKS = Math.toIntExact(targetPoolSize / BLOCK_SIZE_BYTES);
     MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
-    POOL_ARR_SIZE = Integer.highestOneBit(N_BLOCKS) << 1;
+    // NOTE: we must oversize by _at least_ 2x, to avoid concurrency issues
+    POOL_ARR_SIZE = Integer.highestOneBit(N_BLOCKS - 1) << 2;
     POOL_SIZE_MASK = POOL_ARR_SIZE - 1;
   }
 
@@ -102,7 +99,6 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
       partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
     }
     headAndTail = new AtomicLong(N_BLOCKS);
-    releaseTail = N_BLOCKS;
     refHandler =
         new ReferenceHandler<>(
             (toRelease) -> {
@@ -125,7 +121,7 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
   public void close() {
     if (unregister) {
       try {
-        if (FixedBitSets.unregisterModifer(this, refHandler)) {
+        if (FixedBitSets.unregisterModifier(this, refHandler)) {
           Arrays.fill(pool, null);
         }
       } catch (IOException e) {
@@ -145,41 +141,40 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
 
   @Override
   public ByteBuffer allocateBytes(int size) {
-    ByteBuffer ret = allocateBytes0(size);
-    return ret == null ? ByteBuffer.allocate(size) : ret;
+    throw new UnsupportedOperationException();
   }
 
-  private ByteBuffer allocateBytes0(int size) {
+  private static final ByteBuffer[] EMPTY = new ByteBuffer[0];
+
+  public int available() {
+    long extant = this.headAndTail.get();
+    int head = (int) (extant >>> Integer.SIZE);
+    final int tail = (int) extant;
+    return tail - head;
+  }
+
+  @Override
+  public ByteBuffer[] allocateBytesArr(int numBytes, Object sentinel) {
+    if (numBytes == 0) {
+      return EMPTY;
+    }
     for (long extant = this.headAndTail.get(); ; ) {
-      int head = (int) (extant >> Integer.SIZE);
-      long tail = extant & TAIL_MASK;
-      int avail = (int) tail - head;
+      int head = (int) (extant >>> Integer.SIZE);
+      final int tail = (int) extant;
+      int avail = tail - head;
       if (avail == 0) {
         // exhausted; fallback to main heap allocation
-        exhausted.increment();
-        return null;
+        return allocateBytesArr(-1, 0, numBytes, null);
       } else if (avail < 0) {
-        throw new IllegalStateException(
-            "avail="
-                + avail
-                + ", "
-                + tail
-                + ", "
-                + ((int) tail)
-                + ", "
-                + head
-                + " !!! "
-                + allocated.sum()
-                + " ~= "
-                + collected.sum());
+        throw new IllegalStateException();
       }
+      int tryReserve = Math.min(avail, ((numBytes - 1) >> BYTE_SHIFT) + 1);
       long witness =
-          this.headAndTail.compareAndExchange(extant, ((long) (head + 1) << Integer.SIZE) | tail);
+          this.headAndTail.compareAndExchange(
+              extant, ((((long) head + tryReserve) << Integer.SIZE)) | (tail & TAIL_MASK));
       if (witness == extant) {
-        allocated.increment();
-        ByteBuffer ret = pool[head & POOL_SIZE_MASK].clear().limit(size);
-        // zero it out
-        return ret.put(FRESH.slice(0, size)).flip();
+        // we have a batch reservation; now actually allocate
+        return allocateBytesArr(head, tryReserve, numBytes, sentinel);
       } else {
         extant = witness;
       }
@@ -189,16 +184,16 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
   private final LongAdder collected = new LongAdder();
 
   private void releaseLoop() throws InterruptedException {
+    int destOff = N_BLOCKS;
     for (; ; ) {
-      List<ByteBuffer> toRelease = releaseQueue.take();
-      int destOff = releaseTail;
+      ByteBuffer[] toRelease = releaseQueue.take();
       for (ByteBuffer bb : toRelease) {
         pool[destOff++ & POOL_SIZE_MASK] = bb;
       }
-      collected.add(toRelease.size());
-      releaseTail = destOff;
+      collected.add(toRelease.length);
       for (long extant = headAndTail.get(); ; ) {
-        long witness = headAndTail.compareAndExchange(extant, (extant & HEAD_MASK) | destOff);
+        long witness =
+            headAndTail.compareAndExchange(extant, (extant & HEAD_MASK) | (destOff & TAIL_MASK));
         if (witness == extant) {
           break;
         } else {
@@ -209,31 +204,55 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
   }
 
   @Override
-  public FixedBitSet.Modifier getBatchModifier(Object sentinel, int batchSize) {
-    List<ByteBuffer> blocks = new ArrayList<>(batchSize);
-    return new FixedBitSet.Modifier() {
-      @Override
-      public ByteBuffer allocateBytes(int size) {
-        ByteBuffer ret = HeapCacheFbsModifier.this.allocateBytes0(size);
-        if (ret == null) {
-          return ByteBuffer.allocate(size);
-        } else {
-          blocks.add(ret);
-          return ret;
-        }
-      }
+  public FixedBitSet.Modifier partitioned(int bitShift) {
+    assert bitShift == BitDocSet.BIT_SHIFT;
+    return this;
+  }
 
-      @Override
-      public void close() {
-        try {
-          if (!blocks.isEmpty()) {
-            refHandler.add(sentinel, blocks);
-          }
-        } finally {
-          FixedBitSet.Modifier.super.close();
-        }
+  private static final int BYTE_SHIFT = BitDocSet.BIT_SHIFT - 3;
+  private static final int MAX_BYTES = 1 << BYTE_SHIFT;
+  private static final int BYTE_MASK = MAX_BYTES - 1;
+
+  private ByteBuffer[] allocateBytesArr(
+      int head, int pooledReserved, int numBytes, Object sentinel) {
+    int lastIdx = (numBytes - 1) >> BYTE_SHIFT;
+    ByteBuffer[] ret = new ByteBuffer[lastIdx + 1];
+    int i = 0;
+    for (int fullPooledLim = Math.min(pooledReserved - 1, lastIdx); i < fullPooledLim; i++) {
+      ret[i] = initBuf(head++, MAX_BYTES);
+    }
+    int lastLen = ((numBytes - 1) & BYTE_MASK) + 1;
+    if (i < pooledReserved) {
+      ret[i] = initBuf(head, i++ == lastIdx ? lastLen : MAX_BYTES);
+      ByteBuffer[] pooled;
+      if (i == ret.length) {
+        pooled = ret;
+      } else {
+        // if any are pooled, we register the pooled ones for tracking
+        pooled = new ByteBuffer[pooledReserved];
+        System.arraycopy(ret, 0, pooled, 0, pooledReserved);
+        exhausted.add(ret.length - pooledReserved);
       }
-    };
+      refHandler.add(sentinel, pooled);
+      allocated.add(pooledReserved);
+    } else {
+      exhausted.add(ret.length);
+    }
+    for (; i < lastIdx; i++) {
+      // full unpooled
+      ret[i] = ByteBuffer.allocate(MAX_BYTES);
+    }
+    if (i == lastIdx) {
+      // last idx is unpooled
+      ret[i] = ByteBuffer.allocate(lastLen);
+    }
+    return ret;
+  }
+
+  private ByteBuffer initBuf(int head, int size) {
+    ByteBuffer ret = pool[head & POOL_SIZE_MASK].clear().limit(size);
+    // zero it out
+    return ret.put(FRESH.slice(0, size)).flip();
   }
 
   public long exhaustedCount() {
