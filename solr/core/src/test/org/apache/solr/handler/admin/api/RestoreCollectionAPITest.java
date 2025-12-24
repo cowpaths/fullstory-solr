@@ -43,6 +43,7 @@ import org.apache.solr.common.util.NamedList;
 import org.apache.solr.core.CoreContainer;
 import org.apache.solr.core.NodeConfig;
 import org.apache.solr.request.LocalSolrQueryRequest;
+import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -50,15 +51,22 @@ import org.junit.Test;
 public class RestoreCollectionAPITest extends SolrTestCaseJ4 {
 
   private static RestoreCollectionAPI restoreCollectionAPI;
+  private static CoreContainer cc;
 
   @BeforeClass
   public static void setUpApi() {
     restoreCollectionAPI =
         new RestoreCollectionAPI(
-            new CoreContainer(
-                new NodeConfig.NodeConfigBuilder("testnode", createTempDir()).build()),
+            cc =
+                new CoreContainer(
+                    new NodeConfig.NodeConfigBuilder("testnode", createTempDir()).build()),
             new LocalSolrQueryRequest(null, new NamedList<>()),
             null);
+  }
+
+  @AfterClass
+  public static void closeCoreContainer() {
+    cc.shutdown();
   }
 
   @Test

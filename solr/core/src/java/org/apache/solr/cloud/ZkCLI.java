@@ -333,6 +333,7 @@ public class ZkCLI implements CLIO {
           }
 
           ConfigSetService.bootstrapConf(cc);
+          cc.shutdown();
 
           // No need to close the CoreContainer, as it wasn't started
           // up in the first place...

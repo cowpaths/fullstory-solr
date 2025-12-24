@@ -261,6 +261,7 @@ public class TestZkConfigSetService extends SolrTestCaseJ4 {
     assertTrue(cc.getConfigSetService().checkConfigExists("collection1"));
 
     zkClient.close();
+    cc.shutdown();
   }
 
   static SolrZkClient buildZkClient(
