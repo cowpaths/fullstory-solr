@@ -231,7 +231,8 @@ public class Http2SolrClient extends HttpSolrClientBase {
       HTTP2Client http2client = new HTTP2Client(clientConnector);
       transport = new HttpClientTransportOverHTTP2(http2client);
       httpClient = new HttpClient(transport);
-      int maxConnections = (builder.maxConnectionsPerHost != null) ? builder.maxConnectionsPerHost : 4;
+      int maxConnections =
+          (builder.maxConnectionsPerHost != null) ? builder.maxConnectionsPerHost : 8;
       httpClient.setMaxConnectionsPerDestination(maxConnections);
     }
 
@@ -968,8 +969,8 @@ public class Http2SolrClient extends HttpSolrClientBase {
     }
 
     /**
-     * Set maxConnectionsPerHost for http1 and http2 connections. For http2 connections, defaults
-     * to 4 if not specified.
+     * Set maxConnectionsPerHost for http1 and http2 connections. For http2 connections, defaults to
+     * 4 if not specified.
      *
      * @deprecated Please use {@link #withMaxConnectionsPerHost(int)}
      */
