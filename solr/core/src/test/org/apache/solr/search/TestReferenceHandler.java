@@ -115,6 +115,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
       AtomicBoolean finished = new AtomicBoolean(false);
       Future<?>[] futures = new Future[nThreads];
       AtomicInteger errCt = new AtomicInteger();
+      int maxSize = (SortedIntDocSet.MAX_ARR_SIZE >> 1) * 16;
       for (int i = 0; i < nThreads; i++) {
         Random r = new Random(random().nextLong());
         futures[i] =
@@ -122,7 +123,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
                 () -> {
                   try {
                     while (!finished.get()) {
-                      int size = r.nextInt(2048);
+                      int size = r.nextInt(maxSize);
                       LongBuffer compare = LongBuffer.allocate(size);
                       LongBuffer[] bb =
                           Arrays.stream(h.allocateBytesArr(size << 3, compare))

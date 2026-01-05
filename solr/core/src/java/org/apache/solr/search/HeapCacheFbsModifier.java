@@ -47,7 +47,7 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
   private static final int POOL_SIZE_MASK;
 
   // dummy, for efficiently clearing buffers
-  private static final ByteBuffer FRESH = ByteBuffer.allocate(BLOCK_SIZE_BYTES);
+  private static final ByteBuffer FRESH = ByteBuffer.allocate(BLOCK_SIZE_BYTES).order(FixedBitSet.BYTE_ORDER);
 
   private final boolean unregister;
   private final ByteBuffer[] pool;
@@ -158,6 +158,7 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
     if (numBytes == 0) {
       return EMPTY;
     }
+    int partitionCount = ((numBytes - 1) >> BYTE_SHIFT) + 1;
     for (long extant = this.headAndTail.get(); ; ) {
       int head = (int) (extant >>> Integer.SIZE);
       final int tail = (int) extant;
@@ -168,7 +169,7 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
       } else if (avail < 0) {
         throw new IllegalStateException();
       }
-      int tryReserve = Math.min(avail, ((numBytes - 1) >> BYTE_SHIFT) + 1);
+      int tryReserve = Math.min(avail, partitionCount);
       long witness =
           this.headAndTail.compareAndExchange(
               extant, ((((long) head + tryReserve) << Integer.SIZE)) | (tail & TAIL_MASK));
@@ -240,11 +241,11 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
     }
     for (; i < lastIdx; i++) {
       // full unpooled
-      ret[i] = ByteBuffer.allocate(MAX_BYTES);
+      ret[i] = ByteBuffer.allocate(MAX_BYTES).order(FixedBitSet.BYTE_ORDER);
     }
     if (i == lastIdx) {
       // last idx is unpooled
-      ret[i] = ByteBuffer.allocate(lastLen);
+      ret[i] = ByteBuffer.allocate(lastLen).order(FixedBitSet.BYTE_ORDER);
     }
     return ret;
   }
