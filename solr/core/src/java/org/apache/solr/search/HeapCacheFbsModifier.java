@@ -47,7 +47,8 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
   private static final int POOL_SIZE_MASK;
 
   // dummy, for efficiently clearing buffers
-  private static final ByteBuffer FRESH = ByteBuffer.allocate(BLOCK_SIZE_BYTES).order(FixedBitSet.BYTE_ORDER);
+  private static final ByteBuffer FRESH =
+      ByteBuffer.allocate(BLOCK_SIZE_BYTES).order(FixedBitSet.BYTE_ORDER);
 
   private final boolean unregister;
   private final ByteBuffer[] pool;
@@ -92,7 +93,9 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
     for (int i = numPartitions - 1, partitionNumBlocks = ((N_BLOCKS - 1) / numPartitions) + 1;
         i >= 0;
         i--) {
-      ByteBuffer partition = ByteBuffer.allocate(partitionNumBlocks * BLOCK_SIZE_BYTES);
+      ByteBuffer partition =
+          ByteBuffer.allocateDirect(partitionNumBlocks * BLOCK_SIZE_BYTES)
+              .order(FixedBitSet.BYTE_ORDER);
       for (int j = 0; j < partitionNumBlocks; j++) {
         pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
       }
