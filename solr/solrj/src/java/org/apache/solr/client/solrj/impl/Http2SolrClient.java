@@ -35,9 +35,9 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Phaser;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import org.apache.solr.client.solrj.ResponseParser;
 import org.apache.solr.client.solrj.SolrRequest;
@@ -863,20 +863,25 @@ public class Http2SolrClient extends HttpSolrClientBase {
     private static final int MAX_REQUESTS_QUEUED_PER_DESTINATION = 3000;
 
     // wait for async requests
-    private final Phaser phaser;
+    private final AtomicInteger activeRequests = new AtomicInteger(0);
+    private final Object lock = new Object();
     private final Request.QueuedListener queuedListener;
     private final Response.CompleteListener completeListener;
 
     AsyncTracker() {
       // TODO: what about shared instances?
-      phaser = new Phaser(1);
       queuedListener =
           request -> {
-            phaser.register();
+            activeRequests.incrementAndGet();
           };
       completeListener =
           result -> {
-            phaser.arriveAndDeregister();
+            synchronized (lock) {
+              int remaining = activeRequests.decrementAndGet();
+              if (remaining == 0) {
+                lock.notifyAll();
+              }
+            }
           };
     }
 
@@ -885,8 +890,16 @@ public class Http2SolrClient extends HttpSolrClientBase {
     }
 
     public void waitForComplete() {
-      phaser.arriveAndAwaitAdvance();
-      phaser.arriveAndDeregister();
+      synchronized (lock) {
+        while (activeRequests.get() > 0) {
+          try {
+            lock.wait();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException(e);
+          }
+        }
+      }
     }
   }
 
