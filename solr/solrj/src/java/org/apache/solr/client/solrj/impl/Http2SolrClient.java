@@ -904,7 +904,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
   }
 
   public int getAvailablePermits() {
-    return 1000;
+    return this.asyncTracker.activeRequests.get();
   }
 
   public static class Builder
