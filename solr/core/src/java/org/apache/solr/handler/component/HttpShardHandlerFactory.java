@@ -455,9 +455,9 @@ public class HttpShardHandlerFactory extends ShardHandlerFactory
             solrMetricsContext.getMetricRegistry(),
             SolrMetricManager.mkName("httpShardExecutor", expandedScope, "threadPool"));
     solrMetricsContext.gauge(
-        () -> defaultClient.getAvailablePermits(),
+        () -> defaultClient.getOutstandingRequests(),
         false,
-        "httpClientAvailablePermits",
+        "httpClientOutstandingRequests",
         expandedScope);
   }
 }

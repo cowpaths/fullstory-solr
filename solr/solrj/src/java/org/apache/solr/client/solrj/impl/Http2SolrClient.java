@@ -872,12 +872,21 @@ public class Http2SolrClient extends HttpSolrClientBase {
       // TODO: what about shared instances?
       queuedListener =
           request -> {
-            activeRequests.incrementAndGet();
+            int count = activeRequests.incrementAndGet();
+            if (log.isInfoEnabled()) {
+              log.info("Request queued, activeRequests={}, uri={}", count, request.getURI());
+            }
           };
       completeListener =
           result -> {
             synchronized (lock) {
               int remaining = activeRequests.decrementAndGet();
+              if (log.isInfoEnabled()) {
+                log.info(
+                    "Request completed, activeRequests={}, uri={}",
+                    remaining,
+                    result.getRequest() != null ? result.getRequest().getURI() : "unknown");
+              }
               if (remaining == 0) {
                 lock.notifyAll();
               }
@@ -887,6 +896,14 @@ public class Http2SolrClient extends HttpSolrClientBase {
 
     int getMaxRequestsQueuedPerDestination() {
       return MAX_REQUESTS_QUEUED_PER_DESTINATION;
+    }
+
+    int getMaxOutstandingRequests() {
+      return MAX_OUTSTANDING_REQUESTS;
+    }
+
+    int getActiveRequests() {
+      return activeRequests.get();
     }
 
     public void waitForComplete() {
@@ -903,8 +920,12 @@ public class Http2SolrClient extends HttpSolrClientBase {
     }
   }
 
-  public int getAvailablePermits() {
-    return this.asyncTracker.activeRequests.get();
+  public int getOutstandingRequests() {
+    int count = this.asyncTracker.getActiveRequests();
+    if (log.isInfoEnabled()) {
+      log.info("getOutstandingRequests() called, returning activeRequests={}", count);
+    }
+    return count;
   }
 
   public static class Builder
