@@ -16,8 +16,10 @@
  */
 package org.apache.solr.search;
 
+import com.codahale.metrics.Gauge;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -25,10 +27,17 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.util.FixedBitSet;
+import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.common.util.EnvUtils;
+import org.apache.solr.metrics.MetricsMap;
+import org.apache.solr.metrics.SolrMetricProducer;
+import org.apache.solr.metrics.SolrMetricsContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Pools buffers backed by heap byte[] of largest possible size */
-public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable {
+public class HeapCacheFbsModifier
+    implements FixedBitSet.Modifier, AutoCloseable, SolrMetricProducer {
 
   public static HeapCacheFbsModifier getInstance() {
     try {
@@ -37,6 +46,8 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
       throw new UncheckedIOException(e);
     }
   }
+
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private static final int BLOCK_SIZE_BYTES = SortedIntDocSet.MAX_ARR_SIZE << 2;
   private static final int MAX_BLOCKS_PER_PARTITION;
@@ -62,8 +73,8 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
 
   static {
     long maxMemory = Runtime.getRuntime().maxMemory();
-    long defaultTargetPoolSize = Math.toIntExact(maxMemory / 16); // default to 1/16 of heap
-    long maxPoolSize = Math.toIntExact(maxMemory / 2); // max of 1/2 of heap
+    long defaultTargetPoolSize = maxMemory / 16; // default to 1/16 of heap
+    long maxPoolSize = maxMemory / 2; // max of 1/2 of heap
     int targetPoolSizeMB =
         EnvUtils.getPropertyAsInteger(
             POOL_TARGET_MB_PROPNAME, Math.toIntExact(defaultTargetPoolSize >> 20));
@@ -79,6 +90,13 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
     // NOTE: we must oversize by _at least_ 2x, to avoid concurrency issues
     POOL_ARR_SIZE = Integer.highestOneBit(N_BLOCKS - 1) << 2;
     POOL_SIZE_MASK = POOL_ARR_SIZE - 1;
+    if (log.isInfoEnabled()) {
+      log.info(
+          "block_size={}, n_blocks={}, pool_size_bytes={}",
+          RamUsageEstimator.humanReadableUnits(BLOCK_SIZE_BYTES),
+          N_BLOCKS,
+          RamUsageEstimator.humanReadableUnits((long) N_BLOCKS * BLOCK_SIZE_BYTES));
+    }
   }
 
   private HeapCacheFbsModifier() {
@@ -120,19 +138,84 @@ public class HeapCacheFbsModifier implements FixedBitSet.Modifier, AutoCloseable
             });
   }
 
+  private static final SolrMetricsContext DISABLED = new SolrMetricsContext(null, null, null);
+
+  private SolrMetricsContext solrMetricsContext;
+
+  /**
+   * This object is inherently scoped to the JVM, but metrics are managed by the CoreContainer. In
+   * most real-world use cases this is fine, but if there's more than one CoreContainer per JVM,
+   * metrics can be initialized multiple times. In such cases, CoreContainer metric lifecycle may be
+   * out of sync with {@link HeapCacheFbsModifier} life cycle, so we just bail and disable metrics
+   * entirely if they are registered multiple times.
+   */
+  @Override
+  public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
+    // sync on some arbitrary private object
+    synchronized (headAndTail) {
+      if (solrMetricsContext != null) {
+        if (solrMetricsContext != DISABLED) {
+          if (log.isInfoEnabled()) {
+            log.info("double-init metrics; disabling", new RuntimeException("stack trace"));
+          }
+          try {
+            SolrMetricProducer.super.close();
+          } catch (IOException e) {
+            throw new UncheckedIOException(e);
+          } finally {
+            solrMetricsContext = DISABLED;
+          }
+        }
+        return;
+      }
+      log.info("init metrics");
+      solrMetricsContext = parentContext.getChildContext(this);
+      Gauge<?> cacheMap =
+          new MetricsMap(
+              map -> {
+                long allocated = this.allocated.sum();
+                long exhausted = this.exhausted.sum();
+                long extant = this.headAndTail.get();
+                int head = (int) (extant >>> Integer.SIZE);
+                final int tail = (int) extant;
+                int avail = tail - head;
+                map.put("outstandingRefCount", refHandler.getOutstandingSize());
+                map.put("activeRefProcessingThreads", refHandler.activeThreadCount());
+                map.put("allocatedCount", allocated);
+                map.put("exhaustedCount", exhausted);
+                map.put("allocatedRatio", (double) allocated / (allocated + exhausted));
+                map.put("availableBlockCount", avail);
+                map.put("availableBlockRatio", (double) avail / N_BLOCKS);
+              });
+      getSolrMetricsContext().gauge(cacheMap, true, scope, "DOCSET");
+    }
+  }
+
+  @Override
+  public SolrMetricsContext getSolrMetricsContext() {
+    SolrMetricsContext ctx = solrMetricsContext;
+    return ctx == DISABLED ? null : ctx;
+  }
+
   @Override
   public void close() {
     if (unregister) {
       try {
         if (FixedBitSets.unregisterModifier(this, refHandler)) {
-          Arrays.fill(pool, null);
+          try {
+            SolrMetricProducer.super.close();
+          } finally {
+            Arrays.fill(pool, null);
+          }
         }
       } catch (IOException e) {
         throw new UncheckedIOException(e);
       }
     } else {
-      try {
-        refHandler.close();
+      try (refHandler) {
+        SolrMetricProducer.super.close();
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
       } finally {
         Arrays.fill(pool, null);
       }

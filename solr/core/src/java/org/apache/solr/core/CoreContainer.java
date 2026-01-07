@@ -420,9 +420,6 @@ public class CoreContainer {
 
   public CoreContainer(NodeConfig config, CoresLocator locator, boolean asyncSolrCoreLoad) {
     this.cfg = requireNonNull(config);
-    if (POOL_DOCSET_BLOCKS) {
-      objectCache.computeIfAbsent("fbsModifier", (k) -> HeapCacheFbsModifier.getInstance());
-    }
     this.loader = config.getSolrResourceLoader();
     this.solrHome = config.getSolrHome();
     this.solrCores = SolrCores.newSolrCores(this);
@@ -829,6 +826,22 @@ public class CoreContainer {
     metricManager = new SolrMetricManager(loader, cfg.getMetricsConfig());
     String registryName = SolrMetricManager.getRegistryName(SolrInfoBean.Group.node);
     solrMetricsContext = new SolrMetricsContext(metricManager, registryName, metricTag);
+
+    if (POOL_DOCSET_BLOCKS) {
+      objectCache.computeIfAbsent(
+          "docsetCache",
+          (k) -> {
+            HeapCacheFbsModifier ret = HeapCacheFbsModifier.getInstance();
+            // NOTE: there's a race condition here that mainly affects tests. When there are
+            // multiple CoreContainers per JVM, they will have metrics initialized multiple times
+            // (harmless), but more importantly, `SolrMetricsProducer.close()` may not work
+            // properly due to effective refCount-based closing.
+            // For now, `HeapCacheFbsModifier.initializeMetrics()` should just unregister all
+            // metrics if it's initialized more than once.
+            ret.initializeMetrics(solrMetricsContext, "docsetCache");
+            return ret;
+          });
+    }
 
     tracer = TracerConfigurator.loadTracer(loader, cfg.getTracerConfiguratorPluginInfo());
 
