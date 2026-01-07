@@ -872,21 +872,14 @@ public class Http2SolrClient extends HttpSolrClientBase {
       // TODO: what about shared instances?
       queuedListener =
           request -> {
-            int count = activeRequests.incrementAndGet();
-            if (log.isInfoEnabled()) {
-              log.info("Request queued, activeRequests={}, uri={}", count, request.getURI());
+            synchronized (lock) {
+              activeRequests.incrementAndGet();
             }
           };
       completeListener =
           result -> {
             synchronized (lock) {
               int remaining = activeRequests.decrementAndGet();
-              if (log.isInfoEnabled()) {
-                log.info(
-                    "Request completed, activeRequests={}, uri={}",
-                    remaining,
-                    result.getRequest() != null ? result.getRequest().getURI() : "unknown");
-              }
               if (remaining == 0) {
                 lock.notifyAll();
               }
@@ -912,8 +905,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
           try {
             lock.wait();
           } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException(e);
+            // ignore as we are closing
           }
         }
       }
@@ -922,9 +914,6 @@ public class Http2SolrClient extends HttpSolrClientBase {
 
   public int getOutstandingRequests() {
     int count = this.asyncTracker.getActiveRequests();
-    if (log.isInfoEnabled()) {
-      log.info("getOutstandingRequests() called, returning activeRequests={}", count);
-    }
     return count;
   }
 
