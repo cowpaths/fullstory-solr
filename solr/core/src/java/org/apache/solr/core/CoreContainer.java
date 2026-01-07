@@ -780,6 +780,17 @@ public class CoreContainer {
     containerHandlers.getJerseyEndpoints().register(clazz);
   }
 
+  /** TEMPORARY! to fake heap pressure. */
+  private static final byte[][] STRESS_OVERHEAD;
+
+  static {
+    int stressOverheadMB = EnvUtils.getPropertyAsInteger("solr.stressOverheadMB", 0);
+    STRESS_OVERHEAD = new byte[stressOverheadMB][];
+    for (int i = stressOverheadMB - 1; i >= 0; i--) {
+      STRESS_OVERHEAD[i] = new byte[1 << 20]; // 1M byte array
+    }
+  }
+
   // -------------------------------------------------------------------
   // Initialization / Cleanup
   // -------------------------------------------------------------------
