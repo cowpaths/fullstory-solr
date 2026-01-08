@@ -901,13 +901,15 @@ public class Http2SolrClient extends HttpSolrClientBase {
                     ? TimeUnit.MILLISECONDS.convert(
                         queuedTimeNanos - lastSendTimeNanos, TimeUnit.NANOSECONDS)
                     : 0;
-            log.info(
-                "Request queued: {} {}, thread={}, activeRequests={}, delayFromSend={}us",
-                request.getMethod(),
-                request.getURI(),
-                Thread.currentThread().getName(),
-                activeRequests.get(),
-                delayFromSend);
+            if (log.isInfoEnabled()) {
+              log.info(
+                  "Request queued: {} {}, thread={}, activeRequests={}, delayFromSend={}us",
+                  request.getMethod(),
+                  request.getURI(),
+                  Thread.currentThread().getName(),
+                  activeRequests.get(),
+                  delayFromSend);
+            }
             synchronized (lock) {
               activeRequests.incrementAndGet();
             }
