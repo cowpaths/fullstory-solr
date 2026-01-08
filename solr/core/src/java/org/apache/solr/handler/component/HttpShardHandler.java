@@ -16,6 +16,7 @@
  */
 package org.apache.solr.handler.component;
 
+import java.lang.invoke.MethodHandles;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,9 +48,13 @@ import org.apache.solr.core.CoreDescriptor;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.request.SolrRequestInfo;
 import org.apache.solr.security.AllowListUrlChecker;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @NotThreadSafe
 public class HttpShardHandler extends ShardHandler {
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+
   /**
    * If the request context map has an entry with this key and Boolean.TRUE as value, {@link
    * #prepDistributed(ResponseBuilder)} will only include {@link
@@ -164,6 +169,12 @@ public class HttpShardHandler extends ShardHandler {
     }
 
     CompletableFuture<LBSolrClient.Rsp> future = this.lbClient.requestAsync(lbReq);
+    long afterRequestAsync = System.nanoTime();
+    long delayMillis =
+        TimeUnit.MILLISECONDS.convert(afterRequestAsync - startTime, TimeUnit.NANOSECONDS);
+    if (delayMillis > 1000) {
+      log.warn("HttpShardHandler: requestAsync() call took {} milliseconds", delayMillis);
+    }
     ShardRequestCallback callback = onRequestSubmit(future, sreq, urls, params);
     future.whenComplete(
         (rsp, throwable) -> {

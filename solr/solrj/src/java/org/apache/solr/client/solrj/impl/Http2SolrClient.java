@@ -210,7 +210,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
     ClientConnector clientConnector = new ClientConnector();
     clientConnector.setReuseAddress(true);
     clientConnector.setSslContextFactory(sslContextFactory);
-    clientConnector.setSelectors(2);
+    clientConnector.setSelectors(8);
 
     HttpClientTransport transport;
     if (builder.useHttp1_1) {
@@ -232,7 +232,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
       transport = new HttpClientTransportOverHTTP2(http2client);
       httpClient = new HttpClient(transport);
       int maxConnections =
-          (builder.maxConnectionsPerHost != null) ? builder.maxConnectionsPerHost : 8;
+          (builder.maxConnectionsPerHost != null) ? builder.maxConnectionsPerHost : 16;
       httpClient.setMaxConnectionsPerDestination(maxConnections);
     }
 
@@ -442,6 +442,8 @@ public class Http2SolrClient extends HttpSolrClientBase {
   @Override
   public CompletableFuture<NamedList<Object>> requestAsync(
       final SolrRequest<?> solrRequest, String collection) {
+    long requestAsyncStart = System.nanoTime();
+    log.info("Http2SolrClient.requestAsync: Entry, thread={}", Thread.currentThread().getName());
     if (ClientUtils.shouldApplyDefaultCollection(collection, solrRequest)) {
       collection = defaultCollection;
     }
@@ -449,11 +451,34 @@ public class Http2SolrClient extends HttpSolrClientBase {
     final MakeRequestReturnValue mrrv;
     final String url;
     try {
+      long beforeGetUrl = System.nanoTime();
       url = getRequestUrl(solrRequest, collection);
+      long afterGetUrl = System.nanoTime();
+      long getUrlDelay =
+          TimeUnit.MILLISECONDS.convert(afterGetUrl - beforeGetUrl, TimeUnit.NANOSECONDS);
+      if (getUrlDelay > 1000) {
+        log.info("Http2SolrClient: getRequestUrl() took {} milliseconds", getUrlDelay);
+      }
+
+      long beforeMakeRequest = System.nanoTime();
       mrrv = makeRequest(solrRequest, url, true);
+      long afterMakeRequest = System.nanoTime();
+      long makeRequestDelay =
+          TimeUnit.MILLISECONDS.convert(afterMakeRequest - beforeMakeRequest, TimeUnit.NANOSECONDS);
+      if (makeRequestDelay > 1000) {
+        log.info("Http2SolrClient: makeRequest() took {} milliseconds", makeRequestDelay);
+      }
     } catch (SolrServerException | IOException e) {
       future.completeExceptionally(e);
       return future;
+    }
+
+    long beforeSend = System.nanoTime();
+    asyncTracker.lastSendTimeNanos = beforeSend;
+    long requestAsyncTotalDelay =
+        TimeUnit.MILLISECONDS.convert(beforeSend - requestAsyncStart, TimeUnit.NANOSECONDS);
+    if (requestAsyncTotalDelay > 1000) {
+      log.info("Http2SolrClient: Total time before send() {} milliseconds", requestAsyncTotalDelay);
     }
     mrrv.request
         .onRequestQueued(asyncTracker.queuedListener)
@@ -867,11 +892,27 @@ public class Http2SolrClient extends HttpSolrClientBase {
     private final Object lock = new Object();
     private final Request.QueuedListener queuedListener;
     private final Response.CompleteListener completeListener;
+    private volatile long lastSendTimeNanos = 0;
 
     AsyncTracker() {
       // TODO: what about shared instances?
       queuedListener =
           request -> {
+            long queuedTimeNanos = System.nanoTime();
+            long delayFromSend =
+                lastSendTimeNanos > 0
+                    ? TimeUnit.MILLISECONDS.convert(
+                        queuedTimeNanos - lastSendTimeNanos, TimeUnit.NANOSECONDS)
+                    : 0;
+            if (delayFromSend > 1000) {
+              log.info(
+                      "Request queued: {} {}, thread={}, activeRequests={}, delayFromSend={}us",
+                      request.getMethod(),
+                      request.getURI(),
+                      Thread.currentThread().getName(),
+                      activeRequests.get(),
+                      delayFromSend);
+            }
             synchronized (lock) {
               activeRequests.incrementAndGet();
             }
