@@ -113,6 +113,9 @@ public class Http2SolrClient extends HttpSolrClientBase {
   private static volatile SSLConfig defaultSSLConfig;
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private static final String AGENT = "Solr[" + Http2SolrClient.class.getName() + "] 2.0";
+  private static final int CLIENT_SELECTORS = Integer.getInteger("solr.http2.client.selectors", 8);
+  private static final int MAX_REQUESTS_QUEUED_PER_DESTINATION =
+      Integer.parseInt(System.getProperty("solr.http2.maxRequestsQueuedPerDestination", "3000"));
 
   private final HttpClient httpClient;
 
@@ -210,7 +213,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
     ClientConnector clientConnector = new ClientConnector();
     clientConnector.setReuseAddress(true);
     clientConnector.setSslContextFactory(sslContextFactory);
-    clientConnector.setSelectors(8);
+    clientConnector.setSelectors(CLIENT_SELECTORS);
 
     HttpClientTransport transport;
     if (builder.useHttp1_1) {
@@ -240,8 +243,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
     httpClient.setStrictEventOrdering(false);
     httpClient.setConnectBlocking(true);
     httpClient.setFollowRedirects(false);
-    httpClient.setMaxRequestsQueuedPerDestination(
-        asyncTracker.getMaxRequestsQueuedPerDestination());
+    httpClient.setMaxRequestsQueuedPerDestination(MAX_REQUESTS_QUEUED_PER_DESTINATION);
     httpClient.setUserAgentField(new HttpField(HttpHeader.USER_AGENT, AGENT));
     httpClient.setIdleTimeout(idleTimeoutMillis);
 
@@ -882,10 +884,6 @@ public class Http2SolrClient extends HttpSolrClientBase {
   }
 
   private static class AsyncTracker {
-    private static final int MAX_OUTSTANDING_REQUESTS =
-        Integer.parseInt(System.getProperty("solr.http2.maxOutstandingRequests", "1000"));
-    private static final int MAX_REQUESTS_QUEUED_PER_DESTINATION = 3000;
-
     // wait for async requests
     private final AtomicInteger activeRequests = new AtomicInteger(0);
     private final Object lock = new Object();
@@ -903,16 +901,13 @@ public class Http2SolrClient extends HttpSolrClientBase {
                     ? TimeUnit.MILLISECONDS.convert(
                         queuedTimeNanos - lastSendTimeNanos, TimeUnit.NANOSECONDS)
                     : 0;
-            if (delayFromSend > 1000) {
-              if (log.isInfoEnabled()) {
-                log.info(
-                    "Request queued: {}, thread={}, activeRequests={}, delayFromSend={}ms",
-                    request.getURI(),
-                    Thread.currentThread().getName(),
-                    activeRequests.get(),
-                    delayFromSend);
-              }
-            }
+            log.info(
+                "Request queued: {} {}, thread={}, activeRequests={}, delayFromSend={}us",
+                request.getMethod(),
+                request.getURI(),
+                Thread.currentThread().getName(),
+                activeRequests.get(),
+                delayFromSend);
             synchronized (lock) {
               activeRequests.incrementAndGet();
             }
@@ -926,14 +921,6 @@ public class Http2SolrClient extends HttpSolrClientBase {
               }
             }
           };
-    }
-
-    int getMaxRequestsQueuedPerDestination() {
-      return MAX_REQUESTS_QUEUED_PER_DESTINATION;
-    }
-
-    int getMaxOutstandingRequests() {
-      return MAX_OUTSTANDING_REQUESTS;
     }
 
     int getActiveRequests() {
