@@ -443,7 +443,6 @@ public class Http2SolrClient extends HttpSolrClientBase {
   public CompletableFuture<NamedList<Object>> requestAsync(
       final SolrRequest<?> solrRequest, String collection) {
     long requestAsyncStart = System.nanoTime();
-    log.info("Http2SolrClient.requestAsync: Entry, thread={}", Thread.currentThread().getName());
     if (ClientUtils.shouldApplyDefaultCollection(collection, solrRequest)) {
       collection = defaultCollection;
     }
@@ -905,13 +904,14 @@ public class Http2SolrClient extends HttpSolrClientBase {
                         queuedTimeNanos - lastSendTimeNanos, TimeUnit.NANOSECONDS)
                     : 0;
             if (delayFromSend > 1000) {
-              log.info(
-                      "Request queued: {} {}, thread={}, activeRequests={}, delayFromSend={}us",
-                      request.getMethod(),
-                      request.getURI(),
-                      Thread.currentThread().getName(),
-                      activeRequests.get(),
-                      delayFromSend);
+              if(log.isInfoEnabled()) {
+                log.info(
+                        "Request queued: {}, thread={}, activeRequests={}, delayFromSend={}ms",
+                        request.getURI(),
+                        Thread.currentThread().getName(),
+                        activeRequests.get(),
+                        delayFromSend);
+              }
             }
             synchronized (lock) {
               activeRequests.incrementAndGet();
