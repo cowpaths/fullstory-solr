@@ -904,13 +904,13 @@ public class Http2SolrClient extends HttpSolrClientBase {
                         queuedTimeNanos - lastSendTimeNanos, TimeUnit.NANOSECONDS)
                     : 0;
             if (delayFromSend > 1000) {
-              if(log.isInfoEnabled()) {
+              if (log.isInfoEnabled()) {
                 log.info(
-                        "Request queued: {}, thread={}, activeRequests={}, delayFromSend={}ms",
-                        request.getURI(),
-                        Thread.currentThread().getName(),
-                        activeRequests.get(),
-                        delayFromSend);
+                    "Request queued: {}, thread={}, activeRequests={}, delayFromSend={}ms",
+                    request.getURI(),
+                    Thread.currentThread().getName(),
+                    activeRequests.get(),
+                    delayFromSend);
               }
             }
             synchronized (lock) {
