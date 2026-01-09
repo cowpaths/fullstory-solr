@@ -2571,7 +2571,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     return a.intersectionSize(getDocSet(deState));
   }
 
-  public static class DocsEnumState {
+  public static class DocsEnumState implements Closeable {
     public String fieldName; // currently interned for as long as lucene requires it
     public TermsEnum termsEnum;
     public Bits liveDocs;
@@ -2580,6 +2580,14 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     public int minSetSizeCached;
 
     public SortedIntDocSet.Parts scratch;
+
+    @Override
+    public void close() throws IOException {
+      Closeable c;
+      if (scratch != null && (c = scratch.close[0]) != null) {
+        c.close();
+      }
+    }
   }
 
   /**

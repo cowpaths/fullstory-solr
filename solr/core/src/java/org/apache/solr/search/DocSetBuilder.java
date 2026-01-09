@@ -66,6 +66,11 @@ public final class DocSetBuilder {
     this.capacity = -1;
     this.buffer = null;
     this.pos = 0;
+    try (Closeable c = this.parts.close[0]) {
+      this.parts = null;
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
   }
 
   private void growBuffer(int minSize) {

@@ -17,6 +17,7 @@
 package org.apache.solr.search;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.NoSuchElementException;
@@ -116,10 +117,6 @@ public class BitDocSet extends DocSet {
     parts = new FixedBitSets(64);
   }
 
-  private BitDocSet(FixedBitSet bits) {
-    this.parts = new FixedBitSets(new FixedBitSet[] {bits});
-  }
-
   public BitDocSet(FixedBitSets parts) {
     this.parts = parts;
   }
@@ -138,7 +135,7 @@ public class BitDocSet extends DocSet {
 
   public static BitDocSet newInstance(FixedBitSet fixedBitSet) {
     if (fixedBitSet.getBits().capacity() <= MAX_BLOCK_LONGS) {
-      return new BitDocSet(fixedBitSet);
+      return new BitDocSet(new FixedBitSets(new FixedBitSet[] {fixedBitSet}));
     } else {
       FixedBitSets ret = new FixedBitSets(fixedBitSet.length());
       FixedBitSet.copyTo(fixedBitSet, ret.parts);
@@ -364,7 +361,11 @@ public class BitDocSet extends DocSet {
     }
     int newWordLen = ArrayUtil.oversize(FixedBitSet.bits2words(numBits) + 1, Long.BYTES);
     FixedBitSets ret = new FixedBitSets(newWordLen << 6);
-    ret.or(subject);
+    try (subject) {
+      ret.or(subject);
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
     return ret;
   }
 

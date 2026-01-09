@@ -143,10 +143,14 @@ public class SortedIntDocSet extends DocSet {
     IntBuffer[] arr = parts.arr;
     int i = ret.length - 1;
     int lastIdxSize = ((newSize - 1) & ARR_MASK) + 1;
-    buffercopy(arr[i], 0, ret[i], 0, lastIdxSize);
-    while (--i >= 0) {
-      // don't share content
-      buffercopy(arr[i], 0, ret[i], 0, SortedIntDocSet.MAX_ARR_SIZE);
+    try (Closeable c = parts.close[0]) {
+      buffercopy(arr[i], 0, ret[i], 0, lastIdxSize);
+      while (--i >= 0) {
+        // don't share content
+        buffercopy(arr[i], 0, ret[i], 0, SortedIntDocSet.MAX_ARR_SIZE);
+      }
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
     }
     return newParts;
   }
@@ -516,7 +520,11 @@ public class SortedIntDocSet extends DocSet {
     IntBuffer[] arr = newParts.arr;
     int sz = intersection(docs, capacity, otherSet.docs, otherSet.capacity, arr);
     if (sz == capacity) {
-      return this; // no change
+      try (Closeable c = newParts.close[0]) {
+        return this; // no change
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
     }
     return new SortedIntDocSet(newParts, sz);
   }
@@ -721,7 +729,11 @@ public class SortedIntDocSet extends DocSet {
         if (!other.exists(doc)) arr[count >> WORDS_SHIFT].put(count++ & ARR_MASK, doc);
       }
       if (count == capacity) {
-        return this; // no change
+        try (Closeable c = newParts.close[0]) {
+          return this; // no change
+        } catch (IOException e) {
+          throw new UncheckedIOException(e);
+        }
       }
       return new SortedIntDocSet(newParts, count);
     }
@@ -731,7 +743,11 @@ public class SortedIntDocSet extends DocSet {
     IntBuffer[] arr = newParts.arr;
     int sz = andNot(docs, capacity, otherSet.docs, otherSet.capacity, arr);
     if (sz == capacity) {
-      return this; // no change
+      try (Closeable c = newParts.close[0]) {
+        return this; // no change
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
     }
     return new SortedIntDocSet(newParts, sz);
   }

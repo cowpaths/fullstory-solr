@@ -47,7 +47,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
   private static final int MIN_KB = 1;
   private static final int MAX_KB_BASELINE = MAX_KB - MIN_KB + 1;
 
-  private static final int N_SECONDS = 5;
+  private static final int N_SECONDS = 30;
 
   private static final class Dummy implements Accountable {
 

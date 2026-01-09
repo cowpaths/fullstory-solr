@@ -99,19 +99,17 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public final FixedBitSet[] parts;
-  private final Closeable[] close;
+  private final Closeable[] close = new Closeable[1];
   private int cachedLength = -1;
 
   public FixedBitSets(int numBits) {
     if (numBits == 0) {
       this.parts = new FixedBitSet[0];
-      this.close = null;
       this.cachedLength = 0;
       return;
     }
     int lastIdx = (numBits - 1) >> BIT_SHIFT;
     this.parts = new FixedBitSet[lastIdx + 1];
-    this.close = new Closeable[1];
     ByteBuffer[] bb = MODIFIER.allocateBytesArr(FixedBitSet.bits2words(numBits) << 3, this.close);
     int len = ((numBits - 1) & BLOCK_BIT_MASK) + 1;
     for (int i = lastIdx; i >= 0; i--) {
@@ -122,13 +120,11 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   FixedBitSets(FixedBitSet[] parts) {
     this.parts = parts;
-    this.close = null;
   }
 
   private FixedBitSets(FixedBitSets template) {
     FixedBitSet[] otherParts = template.parts;
     this.parts = new FixedBitSet[otherParts.length];
-    this.close = new Closeable[1];
     int numBits = template.length();
     ByteBuffer[] bb = MODIFIER.allocateBytesArr(FixedBitSet.bits2words(numBits) << 3, this.close);
     for (int i = otherParts.length - 1; i >= 0; i--) {
@@ -139,8 +135,8 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   @Override
   public void close() throws IOException {
-    if (close != null) {
-      close[0].close();
+    try (Closeable c = close[0]) {
+      Arrays.fill(parts, null);
     }
   }
 
