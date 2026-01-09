@@ -113,7 +113,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
   private static volatile SSLConfig defaultSSLConfig;
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private static final String AGENT = "Solr[" + Http2SolrClient.class.getName() + "] 2.0";
-  private static final int CLIENT_SELECTORS = Integer.getInteger("solr.http2.client.selectors", 8);
+  private static final int CLIENT_SELECTORS = Integer.getInteger("solr.http2.client.selectors", 2);
   private static final int MAX_REQUESTS_QUEUED_PER_DESTINATION =
       Integer.parseInt(System.getProperty("solr.http2.maxRequestsQueuedPerDestination", "3000"));
 
