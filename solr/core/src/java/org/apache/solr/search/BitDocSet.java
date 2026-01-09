@@ -16,6 +16,7 @@
  */
 package org.apache.solr.search;
 
+import java.io.IOException;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.NoSuchElementException;
@@ -126,6 +127,11 @@ public class BitDocSet extends DocSet {
   public BitDocSet(FixedBitSets parts, int size) {
     this.parts = parts;
     this.size = size;
+  }
+
+  @Override
+  protected void doClose() throws IOException {
+    this.parts.close();
   }
 
   private static final int MAX_BLOCK_LONGS = MAX_BLOCK_BITS >> 6;

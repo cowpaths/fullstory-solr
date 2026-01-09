@@ -152,8 +152,9 @@ public class DocSetCollector extends SimpleCollector {
       }
     }
 
-    public IntBuffer[] toArray() {
-      IntBuffer[] result = SortedIntDocSet.allocate(size);
+    public SortedIntDocSet.Parts toArray() {
+      SortedIntDocSet.Parts parts = SortedIntDocSet.allocate(size);
+      IntBuffer[] result = parts.arr;
       if (size > 0) {
         int resultPos = 0;
         for (int i = 0; i < arrays.size(); i++) {
@@ -182,7 +183,7 @@ public class DocSetCollector extends SimpleCollector {
         }
         assert resultPos == size;
       }
-      return result;
+      return parts;
     }
 
     public int size() {

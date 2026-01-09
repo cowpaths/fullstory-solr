@@ -60,7 +60,7 @@ public class ReferenceHandler<T> implements Closeable {
         ExecutorUtil.newMDCAwareFixedThreadPool(execSize, new SolrNamedThreadFactory("refHandler"));
     this.onCollection = onCollection;
     for (int i = PARALLEL_HEAD_FACTOR - 1; i >= 0; i--) {
-      head[i] = new Ref<T>(null, null, null, null);
+      head[i] = new Ref<T>(null, null, null, null, null);
       removeOutstanding[i] = new ReferenceQueue<>();
     }
     Future<?>[] refQueueHandlers = new Future[execSize];
@@ -176,23 +176,30 @@ public class ReferenceHandler<T> implements Closeable {
       RamUsageEstimator.shallowSizeOfInstance(Ref.class)
           + RamUsageEstimator.shallowSizeOfInstance(AtomicReference.class);
 
-  private static final class Ref<T> extends WeakReference<Object> {
+  private static final class Ref<T> extends WeakReference<Object> implements Closeable {
+    private final ReferenceHandler<T> handler;
     private final T onCollection;
     private final AtomicReference<Ref<T>> next = new AtomicReference<>();
     private volatile Ref<T> prev;
 
-    public Ref(Object referent, ReferenceQueue<? super Object> q, T onCollection, Ref<T> prev) {
+    public Ref(Object referent, ReferenceQueue<? super Object> q, T onCollection, Ref<T> prev, ReferenceHandler<T> handler) {
       super(referent, q);
+      this.handler = handler;
       this.onCollection = onCollection;
       this.prev = prev;
+    }
+
+    @Override
+    public void close() throws IOException {
+      handler.remove(this);
     }
   }
 
   @SuppressWarnings("unchecked")
   private final Ref<T>[] head = new Ref[PARALLEL_HEAD_FACTOR];
 
-  private static final Ref<?> RESERVED = new Ref<>(null, null, null, null);
-  private static final Ref<?> REMOVED = new Ref<>(null, null, null, null);
+  private static final Ref<?> RESERVED = new Ref<>(null, null, null, null, null);
+  private static final Ref<?> REMOVED = new Ref<>(null, null, null, null, null);
 
   @SuppressWarnings("unchecked")
   private final Ref<T> reserved = (Ref<T>) RESERVED;
@@ -202,7 +209,7 @@ public class ReferenceHandler<T> implements Closeable {
 
   private static final AtomicInteger ARBITRARY_REFQUEUE = new AtomicInteger();
 
-  public void add(final Object o, T onCollection) {
+  public Closeable add(final Object o, T onCollection) {
     int parallelIdx;
     if (ASSIGN_REFQUEUE_BY_THREAD) {
       parallelIdx = Thread.currentThread().hashCode() & PARALLEL_HEAD_MASK;
@@ -212,7 +219,7 @@ public class ReferenceHandler<T> implements Closeable {
     outstandingSize.increment();
     Ref<T> head = this.head[parallelIdx];
     try {
-      final Ref<T> ref = new Ref<>(o, removeOutstanding[parallelIdx], onCollection, head);
+      final Ref<T> ref = new Ref<>(o, removeOutstanding[parallelIdx], onCollection, head, this);
       Ref<T> next = reserve(head, reserved);
       if (next != null) {
         next.prev = ref;
@@ -221,6 +228,7 @@ public class ReferenceHandler<T> implements Closeable {
       if (!head.next.compareAndSet(reserved, ref)) {
         throw new IllegalStateException();
       }
+      return ref;
     } finally {
       Reference.reachabilityFence(o);
     }
@@ -235,6 +243,10 @@ public class ReferenceHandler<T> implements Closeable {
         }
         next = ref.next.get();
       }
+      if (next == REMOVED) {
+        // this node was already removed
+        return next;
+      }
       Ref<T> extant = ref.next.compareAndExchange(next, reservation);
       if (extant == next) {
         return next;
@@ -245,28 +257,30 @@ public class ReferenceHandler<T> implements Closeable {
   }
 
   private void remove(final Ref<T> ref) {
-    try {
-      onCollection.accept(ref.onCollection);
-    } finally {
-      Ref<T> next = reserve(ref, removed);
-      outstandingSize.decrement();
-      // now we have a lock on the link to next
-      Ref<T> prev;
-      for (; ; ) {
-        prev = ref.prev;
-        if (prev.next.compareAndSet(ref, reserved)) {
-          break;
-        } else {
-          Thread.yield();
-        }
+    Ref<T> next = reserve(ref, removed);
+    if (next == REMOVED) {
+      // already removed (this can happen if the associated resource is explicitly closed)
+      System.err.println("REMOVED, wha??");
+      return;
+    }
+    onCollection.accept(ref.onCollection);
+    outstandingSize.decrement();
+    // now we have a lock on the link to next
+    Ref<T> prev;
+    for (; ; ) {
+      prev = ref.prev;
+      if (prev.next.compareAndSet(ref, reserved)) {
+        break;
+      } else {
+        Thread.yield();
       }
-      // now we have a lock on the link from prev
-      if (next != null) {
-        next.prev = prev;
-      }
-      if (!prev.next.compareAndSet(reserved, next)) {
-        throw new IllegalStateException();
-      }
+    }
+    // now we have a lock on the link from prev
+    if (next != null) {
+      next.prev = prev;
+    }
+    if (!prev.next.compareAndSet(reserved, next)) {
+      throw new IllegalStateException();
     }
   }
 

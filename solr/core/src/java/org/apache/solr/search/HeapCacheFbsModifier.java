@@ -17,6 +17,8 @@
 package org.apache.solr.search;
 
 import com.codahale.metrics.Gauge;
+
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
@@ -320,7 +322,10 @@ public class HeapCacheFbsModifier
         System.arraycopy(ret, 0, pooled, 0, pooledReserved);
         exhausted.add(ret.length - pooledReserved);
       }
-      refHandler.add(sentinel, pooled);
+      Closeable ref = refHandler.add(sentinel, pooled);
+      if (sentinel instanceof Closeable[]) {
+        ((Closeable[]) sentinel)[0] = ref;
+      }
       allocated.add(pooledReserved);
     } else {
       exhausted.add(ret.length);
