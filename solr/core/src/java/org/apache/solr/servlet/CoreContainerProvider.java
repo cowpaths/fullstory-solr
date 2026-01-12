@@ -27,6 +27,7 @@ import com.codahale.metrics.jvm.CachedThreadStatesGaugeSet;
 import com.codahale.metrics.jvm.ClassLoadingGaugeSet;
 import com.codahale.metrics.jvm.GarbageCollectorMetricSet;
 import com.codahale.metrics.jvm.MemoryUsageGaugeSet;
+import com.codahale.metrics.jvm.ThreadDeadlockDetector;
 import com.codahale.metrics.jvm.ThreadStatesGaugeSet;
 import com.google.common.annotations.VisibleForTesting;
 import java.lang.invoke.MethodHandles;
@@ -39,7 +40,9 @@ import java.util.Arrays;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 import javax.naming.Context;
 import javax.naming.InitialContext;
@@ -57,6 +60,7 @@ import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.cloud.SolrZkClient;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.core.CoreContainer;
 import org.apache.solr.core.MetricsConfig;
 import org.apache.solr.core.NodeConfig;
@@ -417,6 +421,23 @@ public class CoreContainerProvider implements ServletContextListener {
     return coreContainer;
   }
 
+  private static final Supplier<ThreadDeadlockDetector> DEADLOCK_DETECTOR_SUPPLIER;
+
+  static {
+    if (EnvUtils.getPropertyAsBool("solr.metrics.threads.deadlockdetection.enabled", true)) {
+      DEADLOCK_DETECTOR_SUPPLIER = ThreadDeadlockDetector::new;
+    } else {
+      DEADLOCK_DETECTOR_SUPPLIER =
+          () ->
+              new ThreadDeadlockDetector() {
+                @Override
+                public Set<String> getDeadlockedThreads() {
+                  return Set.of();
+                }
+              };
+    }
+  }
+
   private void setupJvmMetrics(CoreContainer coresInit, MetricsConfig config) {
     metricManager = coresInit.getMetricManager();
     registryName = SolrMetricManager.getRegistryName(Group.jvm);
@@ -443,13 +464,17 @@ public class CoreContainerProvider implements ServletContextListener {
         metricManager.registerAll(
             registryName,
             new CachedThreadStatesGaugeSet(
-                config.getCacheConfig().threadsIntervalSeconds, TimeUnit.SECONDS),
+                ManagementFactory.getThreadMXBean(),
+                DEADLOCK_DETECTOR_SUPPLIER.get(),
+                config.getCacheConfig().threadsIntervalSeconds,
+                TimeUnit.SECONDS),
             SolrMetricManager.ResolutionStrategy.IGNORE,
             "threads");
       } else {
         metricManager.registerAll(
             registryName,
-            new ThreadStatesGaugeSet(),
+            new ThreadStatesGaugeSet(
+                ManagementFactory.getThreadMXBean(), DEADLOCK_DETECTOR_SUPPLIER.get()),
             SolrMetricManager.ResolutionStrategy.IGNORE,
             "threads");
       }
