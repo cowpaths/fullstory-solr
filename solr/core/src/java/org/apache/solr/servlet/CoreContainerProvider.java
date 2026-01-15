@@ -51,7 +51,6 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 import java.util.stream.Stream;
 import javax.naming.Context;
 import javax.naming.InitialContext;
@@ -430,22 +429,10 @@ public class CoreContainerProvider implements ServletContextListener {
     return coreContainer;
   }
 
-  private static final Supplier<ThreadDeadlockDetector> DEADLOCK_DETECTOR_SUPPLIER;
-
-  static {
-    if (EnvUtils.getPropertyAsBool("solr.metrics.threads.deadlockdetection.enabled", true)) {
-      DEADLOCK_DETECTOR_SUPPLIER = ThreadDeadlockDetector::new;
-    } else {
-      DEADLOCK_DETECTOR_SUPPLIER =
-          () ->
-              new ThreadDeadlockDetector() {
-                @Override
-                public Set<String> getDeadlockedThreads() {
-                  return Set.of();
-                }
-              };
-    }
-  }
+  private static final boolean DEADLOCK_DETECTION_ENABLED =
+      EnvUtils.getPropertyAsBool("solr.metrics.threads.deadlockdetection.enabled", true);
+  private static final boolean PER_STATE_THREAD_METRICS_ENABLED =
+      EnvUtils.getPropertyAsBool("solr.metrics.threads.perstate.enabled", true);
 
   /**
    * Extends and tweaks the implementation of {@link ThreadStatesGaugeSet} to avoid repeatedly
@@ -462,7 +449,7 @@ public class CoreContainerProvider implements ServletContextListener {
     public MyThreadStatesGaugeSet() {
       super(null, null); // NPE if used unexpectedly
       this.threads = ManagementFactory.getThreadMXBean();
-      this.deadlockDetector = DEADLOCK_DETECTOR_SUPPLIER.get();
+      this.deadlockDetector = DEADLOCK_DETECTION_ENABLED ? new ThreadDeadlockDetector() : null;
     }
 
     private static final int[] ZERO_COUNT = new int[1];
@@ -471,49 +458,57 @@ public class CoreContainerProvider implements ServletContextListener {
     public Map<String, Metric> getMetrics() {
       final Map<String, Metric> gauges = new LinkedHashMap<>(); // deterministic order
 
-      // expensive methods only once, even if not "cached"
-      ThreadInfo[] threadInfos = getThreadInfos();
-      Set<String> deadlockedThreads = deadlockDetector.getDeadlockedThreads();
+      if (PER_STATE_THREAD_METRICS_ENABLED) {
+        // expensive, so call this method only once for all thread states, even if not "cached"
+        ThreadInfo[] threadInfos = getThreadInfos();
 
-      int count = 0;
-      int daemonCount = 0;
-      EnumMap<Thread.State, int[]> byState = new EnumMap<>(Thread.State.class);
-      for (ThreadInfo threadInfo : threadInfos) {
-        if (threadInfo == null) {
-          continue;
+        EnumMap<Thread.State, int[]> byState = new EnumMap<>(Thread.State.class);
+        for (ThreadInfo threadInfo : threadInfos) {
+          Thread.State tState;
+          if (threadInfo != null && (tState = threadInfo.getThreadState()) != null) {
+            byState.computeIfAbsent(tState, (k) -> new int[1])[0]++;
+          }
         }
-        count++;
-        if (threadInfo.isDaemon()) {
-          daemonCount++;
-        }
-        Thread.State tState = threadInfo.getThreadState();
-        if (tState != null) {
-          // TODO: can probably avoid this null check, but let's be paranoid for now
-          byState.computeIfAbsent(tState, (k) -> new int[1])[0]++;
+
+        for (final Thread.State state : Thread.State.values()) {
+          gauges.put(
+              name(state.toString().toLowerCase(), "count"),
+              (Gauge<Object>) () -> byState.getOrDefault(state, ZERO_COUNT)[0]);
         }
       }
 
-      int countF = count;
-      int daemonCountF = daemonCount;
-
-      for (final Thread.State state : Thread.State.values()) {
-        gauges.put(
-            name(state.toString().toLowerCase(), "count"),
-            (Gauge<Object>) () -> byState.getOrDefault(state, ZERO_COUNT)[0]);
-      }
-
-      gauges.put("count", (Gauge<Integer>) () -> countF);
-      gauges.put("daemon.count", (Gauge<Integer>) () -> daemonCountF);
+      gauges.put("count", (Gauge<Integer>) threads::getThreadCount);
+      gauges.put("daemon.count", (Gauge<Integer>) threads::getDaemonThreadCount);
       gauges.put("peak.count", (Gauge<Integer>) threads::getPeakThreadCount);
       gauges.put("total_started.count", (Gauge<Long>) threads::getTotalStartedThreadCount);
-      gauges.put("deadlock.count", (Gauge<Integer>) deadlockedThreads::size);
-      gauges.put("deadlocks", (Gauge<Set<String>>) () -> deadlockedThreads);
+
+      if (DEADLOCK_DETECTION_ENABLED) {
+        // if not enabled, don't add these fields at all, since that would implicitly
+        // assert the _absence_ of deadlocks, when in fact we simply haven't checked.
+        Set<String> deadlockedThreads = deadlockDetector.getDeadlockedThreads();
+        gauges.put("deadlock.count", (Gauge<Integer>) deadlockedThreads::size);
+        gauges.put("deadlocks", (Gauge<Set<String>>) () -> deadlockedThreads);
+      }
 
       return Collections.unmodifiableMap(gauges);
     }
 
+    // for a batch size of 64
+    private static final int BATCH_MASK = 64 - 1;
+
     ThreadInfo[] getThreadInfos() {
-      return threads.getThreadInfo(threads.getAllThreadIds(), STACK_TRACE_DEPTH);
+      long[] holder = new long[1];
+      long[] ids = threads.getAllThreadIds();
+      ThreadInfo[] ret = new ThreadInfo[ids.length];
+      for (int i = 0, lim = ids.length; i < lim; ) {
+        holder[0] = ids[i];
+        ThreadInfo ti = threads.getThreadInfo(holder, STACK_TRACE_DEPTH)[0];
+        ret[i] = ti;
+        if (((++i) & BATCH_MASK) == 0) {
+          Thread.yield(); // maybe overkill?
+        }
+      }
+      return ret;
     }
   }
 
