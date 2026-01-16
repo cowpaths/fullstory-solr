@@ -471,7 +471,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
       long afterMakeRequest = System.nanoTime();
       long makeRequestDelay =
           TimeUnit.MILLISECONDS.convert(
-              afterMakeRequest - beforeMakeRequest, TimeUnit.MILLISECONDS);
+              afterMakeRequest - beforeMakeRequest, TimeUnit.NANOSECONDS);
       if (makeRequestDelay > MAX_OPERATION_DELAY_MILLIS) {
         log.info("Http2SolrClient: makeRequest() took {} milliseconds", makeRequestDelay);
       }
