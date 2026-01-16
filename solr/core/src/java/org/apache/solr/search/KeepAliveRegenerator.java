@@ -524,7 +524,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
               assert stale instanceof SortedIntDocSet;
               SortedIntDocSet staleSorted = (SortedIntDocSet) stale;
               int capacity = staleSorted.capacity;
-              final int[][] docs = staleSorted.getDocs();
+              final SortedIntDocSet.DocIdList docs = staleSorted.getDocs();
               final int first =
                   SortedIntDocSet.binarySearch(docs, 0, staleSorted.capacity, docBase);
               disi =
@@ -542,8 +542,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
                     public int nextDoc() {
                       if (++idx >= capacity
                           || (id =
-                                  docs[idx >> SortedIntDocSet.WORDS_SHIFT][
-                                      idx & SortedIntDocSet.ARR_MASK])
+                                  docs.get(idx))
                               >= limit) {
                         return id = NO_MORE_DOCS;
                       } else {
@@ -613,7 +612,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
             if (stale instanceof SortedIntDocSet) {
               SortedIntDocSet staleSorted = (SortedIntDocSet) stale;
               int capacity = staleSorted.capacity;
-              final int[][] docs = staleSorted.getDocs();
+              final SortedIntDocSet.DocIdList docs = staleSorted.getDocs();
               final int first =
                   SortedIntDocSet.binarySearch(docs, 0, staleSorted.capacity, docBase);
               disi =
@@ -631,8 +630,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
                     public int nextDoc() {
                       if (++idx >= capacity
                           || (id =
-                                  docs[idx >> SortedIntDocSet.WORDS_SHIFT][
-                                      idx & SortedIntDocSet.ARR_MASK])
+                                  docs.get(idx))
                               >= limit) {
                         return id = NO_MORE_DOCS;
                       } else {
