@@ -35,7 +35,7 @@ public final class DocSetBuilder {
   private final int threshold;
 
   private int capacity = -1;
-  private int[][] buffer;
+  private SortedIntDocSet.DocIdList buffer;
 
   private int pos;
 
@@ -57,7 +57,7 @@ public final class DocSetBuilder {
     assert bitSet == null;
     bitSet = new FixedBitSet(maxDoc);
     for (int i = 0; i < pos; ++i) {
-      bitSet.set(buffer[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK]);
+      bitSet.set(buffer.get(i));
     }
     this.capacity = -1;
     this.buffer = null;
@@ -74,7 +74,7 @@ public final class DocSetBuilder {
     newSize = Math.min(newSize, threshold);
 
     this.capacity = newSize;
-    buffer = SortedIntDocSet.grow(buffer, pos, newSize);
+    buffer = buffer.grow(pos, newSize);
   }
 
   public void add(DocIdSetIterator iter, int base) throws IOException {
@@ -90,8 +90,7 @@ public final class DocSetBuilder {
             pos = i; // update pos
             return;
           }
-          buffer[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK] =
-              doc + base; // using the loop counter may help with removal of bounds checking
+          buffer.set(i, doc + base); // using the loop counter may help with removal of bounds checking
         }
 
         pos = capacity; // update pos
@@ -152,18 +151,18 @@ public final class DocSetBuilder {
         }
         growBuffer(pos + 1);
       }
-      buffer[pos >> SortedIntDocSet.WORDS_SHIFT][pos++ & SortedIntDocSet.ARR_MASK] = doc;
+      buffer.set(pos++, doc);
     }
   }
 
-  private static int dedup(int[][] arr, int length, FixedBitSet acceptDocs) {
+  private static int dedup(SortedIntDocSet.DocIdList arr, int length, FixedBitSet acceptDocs) {
     int pos = 0;
     int previous = -1;
     for (int i = 0; i < length; ++i) {
-      final int value = arr[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK];
+      final int value = arr.get(i);
       // assert value >= previous;
       if (value != previous && (acceptDocs == null || acceptDocs.get(value))) {
-        arr[pos >> SortedIntDocSet.WORDS_SHIFT][pos++ & SortedIntDocSet.ARR_MASK] = value;
+        arr.set(pos++, value);
         previous = value;
       }
     }

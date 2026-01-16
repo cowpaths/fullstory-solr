@@ -99,10 +99,10 @@ public class TestDocSet extends SolrTestCase {
 
   public DocSet getIntDocSet(FixedBitSet bs) {
     int size = bs.cardinality();
-    int[][] docs = SortedIntDocSet.allocate(size);
+    SortedIntDocSet.DocIdList docs = SortedIntDocSet.allocate(size);
     BitSetIterator iter = new BitSetIterator(bs, 0);
     for (int i = 0; i < size; i++) {
-      docs[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK] = iter.nextDoc();
+      docs.set(i, iter.nextDoc());
     }
     return new SortedIntDocSet(docs);
   }
@@ -243,9 +243,9 @@ public class TestDocSet extends SolrTestCase {
     if (n <= smallSetCutoff) {
       if (smallSetType == 0) {
         Arrays.sort(a);
-        int[][] dimensional = SortedIntDocSet.allocate(n);
+        SortedIntDocSet.DocIdList dimensional = SortedIntDocSet.allocate(n);
         for (int i = 0; i < n; i++) {
-          dimensional[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK] = a[i];
+          dimensional.set(i, a[i]);
         }
         return new SortedIntDocSet(dimensional);
       }
