@@ -65,6 +65,9 @@ public class HttpShardHandler extends ShardHandler {
    */
   public static String ONLY_NRT_REPLICAS = "distribOnlyRealtime";
 
+  /** Maximum delay in milliseconds before logging a warning about requestAsync() taking too long */
+  private static final long MAX_REQUEST_ASYNC_DELAY_MILLIS = 1000;
+
   private HttpShardHandlerFactory httpShardHandlerFactory;
   private Map<ShardResponse, CompletableFuture<LBSolrClient.Rsp>> responseFutureMap;
   private BlockingQueue<ShardResponse> responses;
@@ -172,7 +175,7 @@ public class HttpShardHandler extends ShardHandler {
     long afterRequestAsync = System.nanoTime();
     long delayMillis =
         TimeUnit.MILLISECONDS.convert(afterRequestAsync - startTime, TimeUnit.NANOSECONDS);
-    if (delayMillis > 1000) {
+    if (delayMillis > MAX_REQUEST_ASYNC_DELAY_MILLIS) {
       log.warn("HttpShardHandler: requestAsync() call took {} milliseconds", delayMillis);
     }
     ShardRequestCallback callback = onRequestSubmit(future, sreq, urls, params);

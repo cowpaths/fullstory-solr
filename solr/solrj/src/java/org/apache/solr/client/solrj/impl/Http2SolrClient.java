@@ -56,6 +56,7 @@ import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.params.UpdateParams;
 import org.apache.solr.common.util.ContentStream;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.ObjectReleaseTracker;
@@ -113,9 +114,13 @@ public class Http2SolrClient extends HttpSolrClientBase {
   private static volatile SSLConfig defaultSSLConfig;
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private static final String AGENT = "Solr[" + Http2SolrClient.class.getName() + "] 2.0";
-  private static final int CLIENT_SELECTORS = Integer.getInteger("solr.http2.client.selectors", 2);
+  private static final int CLIENT_SELECTORS =
+      EnvUtils.getPropertyAsInteger("solr.http2.client.selectors", 2);
   private static final int MAX_REQUESTS_QUEUED_PER_DESTINATION =
-      Integer.parseInt(System.getProperty("solr.http2.maxRequestsQueuedPerDestination", "3000"));
+      EnvUtils.getPropertyAsInteger("solr.http2.maxRequestsQueuedPerDestination", 3000);
+
+  /** Maximum delay in milliseconds before logging a warning about operation taking too long */
+  private static final long MAX_OPERATION_DELAY_MILLIS = 1000;
 
   private final HttpClient httpClient;
 
@@ -457,7 +462,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
       long afterGetUrl = System.nanoTime();
       long getUrlDelay =
           TimeUnit.MILLISECONDS.convert(afterGetUrl - beforeGetUrl, TimeUnit.NANOSECONDS);
-      if (getUrlDelay > 1000) {
+      if (getUrlDelay > MAX_OPERATION_DELAY_MILLIS) {
         log.info("Http2SolrClient: getRequestUrl() took {} milliseconds", getUrlDelay);
       }
 
@@ -465,8 +470,9 @@ public class Http2SolrClient extends HttpSolrClientBase {
       mrrv = makeRequest(solrRequest, url, true);
       long afterMakeRequest = System.nanoTime();
       long makeRequestDelay =
-          TimeUnit.MILLISECONDS.convert(afterMakeRequest - beforeMakeRequest, TimeUnit.NANOSECONDS);
-      if (makeRequestDelay > 1000) {
+          TimeUnit.MILLISECONDS.convert(
+              afterMakeRequest - beforeMakeRequest, TimeUnit.MILLISECONDS);
+      if (makeRequestDelay > MAX_OPERATION_DELAY_MILLIS) {
         log.info("Http2SolrClient: makeRequest() took {} milliseconds", makeRequestDelay);
       }
     } catch (SolrServerException | IOException e) {
@@ -478,7 +484,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
     asyncTracker.lastSendTimeNanos = beforeSend;
     long requestAsyncTotalDelay =
         TimeUnit.MILLISECONDS.convert(beforeSend - requestAsyncStart, TimeUnit.NANOSECONDS);
-    if (requestAsyncTotalDelay > 1000) {
+    if (requestAsyncTotalDelay > MAX_OPERATION_DELAY_MILLIS) {
       log.info("Http2SolrClient: Total time before send() {} milliseconds", requestAsyncTotalDelay);
     }
     mrrv.request
@@ -886,7 +892,6 @@ public class Http2SolrClient extends HttpSolrClientBase {
   private static class AsyncTracker {
     // wait for async requests
     private final AtomicInteger activeRequests = new AtomicInteger(0);
-    private final Object lock = new Object();
     private final Request.QueuedListener queuedListener;
     private final Response.CompleteListener completeListener;
     private volatile long lastSendTimeNanos = 0;
@@ -901,25 +906,27 @@ public class Http2SolrClient extends HttpSolrClientBase {
                     ? TimeUnit.MILLISECONDS.convert(
                         queuedTimeNanos - lastSendTimeNanos, TimeUnit.NANOSECONDS)
                     : 0;
-            if (log.isInfoEnabled()) {
-              log.info(
-                  "Request queued: {} {}, thread={}, activeRequests={}, delayFromSend={}us",
-                  request.getMethod(),
-                  request.getURI(),
-                  Thread.currentThread().getName(),
-                  activeRequests.get(),
-                  delayFromSend);
+            if (delayFromSend > MAX_OPERATION_DELAY_MILLIS) {
+              if (log.isInfoEnabled()) {
+                log.info(
+                    "Request queued: {} {}, thread={}, activeRequests={}, delayFromSend={}ms",
+                    request.getMethod(),
+                    request.getURI(),
+                    Thread.currentThread().getName(),
+                    activeRequests.get(),
+                    delayFromSend);
+              }
             }
-            synchronized (lock) {
+            synchronized (activeRequests) {
               activeRequests.incrementAndGet();
             }
           };
       completeListener =
           result -> {
-            synchronized (lock) {
+            synchronized (activeRequests) {
               int remaining = activeRequests.decrementAndGet();
               if (remaining == 0) {
-                lock.notifyAll();
+                activeRequests.notifyAll();
               }
             }
           };
@@ -930,12 +937,12 @@ public class Http2SolrClient extends HttpSolrClientBase {
     }
 
     public void waitForComplete() {
-      synchronized (lock) {
+      synchronized (activeRequests) {
         while (activeRequests.get() > 0) {
           try {
-            lock.wait();
+            activeRequests.wait();
           } catch (InterruptedException e) {
-            // ignore as we are closing
+            Thread.currentThread().interrupt();
           }
         }
       }
@@ -1023,7 +1030,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
 
     /**
      * Set maxConnectionsPerHost for http1 and http2 connections. For http2 connections, defaults to
-     * 4 if not specified.
+     * 16 if not specified.
      *
      * @deprecated Please use {@link #withMaxConnectionsPerHost(int)}
      */
