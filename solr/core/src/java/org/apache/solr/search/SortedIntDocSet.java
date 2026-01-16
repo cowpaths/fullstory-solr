@@ -71,7 +71,7 @@ public class SortedIntDocSet extends DocSet {
     this(docs.shrink(len));
   }
 
-  public interface DocIdList {
+    public interface DocIdList {
     int get(int index);
     void set(int index, int value);
     int length();
@@ -80,10 +80,18 @@ public class SortedIntDocSet extends DocSet {
     DocIdList grow(int limit, int newSize);
     DocIdList allocate(int size);
 
-    //TODO this could be problematic if the source and result arrays are of different types! We don't have that guarantee if we dynamically changes things
-    void copyTo(int srcIdx, DocIdList target, int destIdx, int len);
-
-
+    /**
+     * Slow implementation without knowledge of underlying structure, override where possible
+     * @param srcIdx
+     * @param target
+     * @param destIdx
+     * @param len
+     */
+    default void copyTo(int srcIdx, DocIdList target, int destIdx, int len) {
+      for (int i = 0; i < len; i++) {
+          target.set(destIdx + i, this.get(srcIdx + i));
+      }
+    }
 
     //set all values to zero while retaining the size
     void setZero();
@@ -210,7 +218,8 @@ public class SortedIntDocSet extends DocSet {
     @Override
     public void copyTo(int srcIdx, DocIdList target, int destIdx, int len) {
       if (!(target instanceof DocIdList2d)) {
-        throw new IllegalArgumentException("target must be DocIdList2d");
+        DocIdList.super.copyTo(srcIdx, target, destIdx, len);
+        return;
       }
 
       int[][] src = this.arr;
@@ -295,6 +304,79 @@ public class SortedIntDocSet extends DocSet {
       for (int[] sub : arr) {
         Arrays.fill(sub, 0);
       }
+    }
+  }
+
+  private static class DocIdList1d implements DocIdList {
+    private final int[] arr;
+    private static final DocIdList1d zeroInts = new DocIdList1d(new int[0]);
+
+    public DocIdList1d(int[] docs) {
+      this.arr = docs;
+    }
+
+    public static DocIdList build(int[] srcArray) {
+      if (srcArray.length == 0) return zeroInts;
+      return new DocIdList1d(Arrays.copyOf(srcArray, srcArray.length));
+    }
+
+    @Override
+    public int get(int index) {
+      return arr[index];
+    }
+
+    @Override
+    public void set(int index, int value) {
+      arr[index] = value;
+    }
+
+    @Override
+    public int length() {
+      return arr.length;
+    }
+
+    @Override
+    public DocIdList shrink(int newSize) {
+      if (newSize == 0) return zeroInts;
+      if (newSize == arr.length) return this;
+      return new DocIdList1d(Arrays.copyOf(arr, newSize));
+    }
+
+    @Override
+    public DocIdList shrinkClone(int newSize) {
+      if (newSize == 0) return zeroInts;
+      return new DocIdList1d(Arrays.copyOf(arr, newSize));
+    }
+
+    @Override
+    public DocIdList grow(int limit, int newSize) {
+      DocIdList1d ret = allocate(newSize);
+      if (limit > 0) {
+        System.arraycopy(arr, 0, ret.arr, 0, Math.min(limit, arr.length));
+      }
+      return ret;
+    }
+
+    // Allocate a new DocIdList1d of the given size
+    public DocIdList1d allocate(int size) {
+      if (size <= 0) return zeroInts;
+      return new DocIdList1d(new int[size]);
+    }
+
+    @Override
+    public void copyTo(int srcIdx, DocIdList target, int destIdx, int len) {
+      if (!(target instanceof DocIdList1d)) {
+        DocIdList.super.copyTo(srcIdx, target, destIdx, len);
+        return;
+      }
+
+      int[] dest = ((DocIdList1d) target).arr;
+      System.arraycopy(this.arr, srcIdx, dest, destIdx, len);
+    }
+
+    @Override
+    public void setZero() {
+      Arrays.fill(arr, 0);
     }
   }
 
