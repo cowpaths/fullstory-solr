@@ -16,14 +16,10 @@
  */
 package org.apache.solr.search;
 
-import static org.apache.solr.search.SortedIntDocSet.ARR_MASK;
-import static org.apache.solr.search.SortedIntDocSet.WORDS_SHIFT;
 import static org.apache.solr.search.SortedIntDocSet.DocIdList;
 
-import java.util.Arrays;
-
-/** Copied from {@link org.apache.lucene.util.LSBRadixSorter} */
-public final class LSBRadixSorter2D {
+/** Copied from {@link org.apache.lucene.util.LSBRadixSorter}. Modified to work with {@link DocIdList} instead of []int */
+public final class LSBRadixSorterMod {
 
   private static final int INSERTION_SORT_THRESHOLD = 30;
   private static final int HISTOGRAM_SIZE = 256;

@@ -178,7 +178,7 @@ public final class DocSetBuilder {
       // TODO - if this set will be cached, should we make it smaller if it's below
       // DocSetUtil.smallSetSize?
     } else {
-      LSBRadixSorter2D sorter = new LSBRadixSorter2D();
+      LSBRadixSorterMod sorter = new LSBRadixSorterMod();
       sorter.sort(PackedInts.bitsRequired(maxDoc - 1), buffer, pos);
       final int l = dedup(buffer, pos, filter);
       assert l <= pos;

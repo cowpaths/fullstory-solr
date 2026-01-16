@@ -97,9 +97,9 @@ public class TestDocSet extends SolrTestCase {
     return bs;
   }
 
-  public DocSet getIntDocSet(FixedBitSet bs) {
+  public DocSet getIntDocSet(FixedBitSet bs, SortedIntDocSet.DocIdListType type) {
     int size = bs.cardinality();
-    SortedIntDocSet.DocIdList docs = SortedIntDocSet.allocate(size);
+    SortedIntDocSet.DocIdList docs = SortedIntDocSet.testAllocate(size, type);
     BitSetIterator iter = new BitSetIterator(bs, 0);
     for (int i = 0; i < size; i++) {
       docs.set(i, iter.nextDoc());
@@ -136,19 +136,17 @@ public class TestDocSet extends SolrTestCase {
       case 0:
       case 1:
       case 2:
-      case 3:
         return getBitDocSet(bs);
 
+      case 3:
       case 4:
-        return getIntDocSet(bs);
       case 5:
-        return getIntDocSet(bs);
+        return getIntDocSet(bs, SortedIntDocSet.DocIdListType.ONE_DIMENSIONAL);
+
       case 6:
-        return getIntDocSet(bs);
       case 7:
-        return getIntDocSet(bs);
       case 8:
-        return getIntDocSet(bs);
+        return getIntDocSet(bs, SortedIntDocSet.DocIdListType.TWO_DIMENSIONAL);
     }
     return null;
   }
@@ -592,7 +590,7 @@ public class TestDocSet extends SolrTestCase {
     IndexReaderContext topLevelContext = reader.getContext();
     FixedBitSet bs = getRandomSet(reader.maxDoc(), rand.nextInt(reader.maxDoc() + 1));
     DocSet a = new BitDocSet(bs);
-    DocSet b = getIntDocSet(bs);
+    DocSet b = getIntDocSet(bs, SortedIntDocSet.DocIdListType.TWO_DIMENSIONAL);
 
     //    Query fa = a.makeQuery();
     //    Query fb = b.makeQuery();

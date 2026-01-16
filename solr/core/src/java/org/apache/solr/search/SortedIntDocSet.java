@@ -47,6 +47,17 @@ public class SortedIntDocSet extends DocSet {
     return DocIdList2d.zeroInts.allocate(size); //TODO
   }
 
+  static DocIdList testAllocate(int size, DocIdListType type) {
+    switch (type) {
+      case ONE_DIMENSIONAL:
+        return new DocIdList1d(new int[size]);
+      case TWO_DIMENSIONAL:
+        return DocIdList2d.zeroInts.allocate(size);
+      default:
+        throw new IllegalArgumentException("Unknown DocIdListType: " + type);
+    }
+  }
+
   public static DocIdList build(int[] srcArray) {
     return DocIdList2d.build(srcArray); //TODO
   }
@@ -82,10 +93,10 @@ public class SortedIntDocSet extends DocSet {
 
     /**
      * Slow implementation without knowledge of underlying structure, override where possible
-     * @param srcIdx
-     * @param target
-     * @param destIdx
-     * @param len
+     * @param srcIdx  reading starts from this srcIdx of the current instance (source)
+     * @param target  target DocIdList to copy to
+     * @param destIdx writing starts from this destIdx of the target
+     * @param len    number of elements to copy
      */
     default void copyTo(int srcIdx, DocIdList target, int destIdx, int len) {
       for (int i = 0; i < len; i++) {
@@ -99,6 +110,10 @@ public class SortedIntDocSet extends DocSet {
 
   public DocIdList getDocs() {
     return docs;
+  }
+
+  enum DocIdListType {
+    ONE_DIMENSIONAL, TWO_DIMENSIONAL;
   }
 
   private static class DocIdList2d implements DocIdList {
