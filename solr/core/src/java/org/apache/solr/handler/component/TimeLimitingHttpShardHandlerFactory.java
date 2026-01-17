@@ -17,6 +17,9 @@
 package org.apache.solr.handler.component;
 
 import com.codahale.metrics.Counter;
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.util.concurrent.ExecutorService;
 import org.apache.solr.common.util.ExecutorUtil;
@@ -45,7 +48,6 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
   private static final String DRY_RUN_CONFIG_KEY = "dryRun";
 
   private SlowNodeDetector slowNodeDetector;
-  private SolrMetricsContext solrMetricsContext;
   Counter cancelledSlowNodeRequests;
   Counter cancelledDryRunSlowNodeRequests;
   private ExecutorService executorService;
@@ -153,8 +155,11 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
   @Override
   public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
     super.initializeMetrics(parentContext, scope);
-    solrMetricsContext = parentContext.getChildContext(this);
+    SolrMetricsContext solrMetricsContext = getSolrMetricsContext();
+
+    // same scope as super
     String expandedScope = SolrMetricManager.mkName(scope, SolrInfoBean.Category.QUERY.name());
+
     cancelledSlowNodeRequests =
         solrMetricsContext.counter("cancelledSlowNodeRequests", expandedScope);
     cancelledDryRunSlowNodeRequests =
@@ -166,15 +171,13 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
   }
 
   @Override
-  public SolrMetricsContext getSolrMetricsContext() {
-    return solrMetricsContext;
-  }
-
-  @Override
+  @SuppressWarnings("try")
   public void close() {
-    super.close();
-    if (executorService != null) {
-      ExecutorUtil.shutdownNowAndAwaitTermination(executorService);
+    try (Closeable closeExec = () -> ExecutorUtil.shutdownNowAndAwaitTermination(executorService);
+        SlowNodeDetector closeSlowNodeDetector = slowNodeDetector) {
+      super.close();
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
     }
   }
 }
