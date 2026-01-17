@@ -56,6 +56,7 @@ import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.params.UpdateParams;
 import org.apache.solr.common.util.ContentStream;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.ObjectReleaseTracker;
@@ -113,6 +114,8 @@ public class Http2SolrClient extends HttpSolrClientBase {
   private static volatile SSLConfig defaultSSLConfig;
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private static final String AGENT = "Solr[" + Http2SolrClient.class.getName() + "] 2.0";
+  private static final int CLIENT_SELECTORS =
+      EnvUtils.getPropertyAsInteger("solr.http2.client.selectors", 2);
 
   private final HttpClient httpClient;
 
@@ -210,7 +213,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
     ClientConnector clientConnector = new ClientConnector();
     clientConnector.setReuseAddress(true);
     clientConnector.setSslContextFactory(sslContextFactory);
-    clientConnector.setSelectors(8);
+    clientConnector.setSelectors(CLIENT_SELECTORS);
 
     HttpClientTransport transport;
     if (builder.useHttp1_1) {
