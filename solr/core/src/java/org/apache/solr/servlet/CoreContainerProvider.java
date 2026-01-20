@@ -16,6 +16,7 @@
  */
 package org.apache.solr.servlet;
 
+import static com.codahale.metrics.MetricRegistry.name;
 import static org.apache.solr.core.NodeConfig.loadNodeConfig;
 import static org.apache.solr.servlet.SolrDispatchFilter.PROPERTIES_ATTRIBUTE;
 import static org.apache.solr.servlet.SolrDispatchFilter.SOLRHOME_ATTRIBUTE;
@@ -23,22 +24,32 @@ import static org.apache.solr.servlet.SolrDispatchFilter.SOLR_INSTALL_DIR_ATTRIB
 import static org.apache.solr.servlet.SolrDispatchFilter.SOLR_LOG_LEVEL;
 import static org.apache.solr.servlet.SolrDispatchFilter.SOLR_LOG_MUTECONSOLE;
 
-import com.codahale.metrics.jvm.CachedThreadStatesGaugeSet;
+import com.codahale.metrics.CachedGauge;
+import com.codahale.metrics.Gauge;
+import com.codahale.metrics.Metric;
 import com.codahale.metrics.jvm.ClassLoadingGaugeSet;
 import com.codahale.metrics.jvm.GarbageCollectorMetricSet;
 import com.codahale.metrics.jvm.MemoryUsageGaugeSet;
+import com.codahale.metrics.jvm.ThreadDeadlockDetector;
 import com.codahale.metrics.jvm.ThreadStatesGaugeSet;
 import com.google.common.annotations.VisibleForTesting;
 import java.lang.invoke.MethodHandles;
 import java.lang.management.ManagementFactory;
 import java.lang.management.RuntimeMXBean;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import javax.naming.Context;
@@ -57,6 +68,7 @@ import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.cloud.SolrZkClient;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.core.CoreContainer;
 import org.apache.solr.core.MetricsConfig;
 import org.apache.solr.core.NodeConfig;
@@ -417,6 +429,115 @@ public class CoreContainerProvider implements ServletContextListener {
     return coreContainer;
   }
 
+  private static final boolean DEADLOCK_DETECTION_ENABLED =
+      EnvUtils.getPropertyAsBool("solr.metrics.threads.deadlockdetection.enabled", true);
+  private static final boolean PER_STATE_THREAD_METRICS_ENABLED =
+      EnvUtils.getPropertyAsBool("solr.metrics.threads.perstate.enabled", true);
+
+  /**
+   * Extends and tweaks the implementation of {@link ThreadStatesGaugeSet} to avoid repeatedly
+   * calling thread dump methods.
+   */
+  private static class MyThreadStatesGaugeSet extends ThreadStatesGaugeSet {
+    // do not compute stack traces.
+    private static final int STACK_TRACE_DEPTH = 0;
+
+    private final ThreadMXBean threads;
+    private final ThreadDeadlockDetector deadlockDetector;
+
+    /** Creates a new set of gauges using the default MXBeans. */
+    public MyThreadStatesGaugeSet() {
+      super(null, null); // NPE if used unexpectedly
+      this.threads = ManagementFactory.getThreadMXBean();
+      this.deadlockDetector = DEADLOCK_DETECTION_ENABLED ? new ThreadDeadlockDetector() : null;
+    }
+
+    private static final int[] ZERO_COUNT = new int[1];
+
+    @Override
+    public Map<String, Metric> getMetrics() {
+      final Map<String, Metric> gauges = new LinkedHashMap<>(); // deterministic order
+
+      if (PER_STATE_THREAD_METRICS_ENABLED) {
+        // expensive, so call this method only once for all thread states, even if not "cached"
+        ThreadInfo[] threadInfos = getThreadInfos();
+
+        EnumMap<Thread.State, int[]> byState = new EnumMap<>(Thread.State.class);
+        for (ThreadInfo threadInfo : threadInfos) {
+          Thread.State tState;
+          if (threadInfo != null && (tState = threadInfo.getThreadState()) != null) {
+            byState.computeIfAbsent(tState, (k) -> new int[1])[0]++;
+          }
+        }
+
+        for (final Thread.State state : Thread.State.values()) {
+          gauges.put(
+              name(state.toString().toLowerCase(), "count"),
+              (Gauge<Object>) () -> byState.getOrDefault(state, ZERO_COUNT)[0]);
+        }
+      }
+
+      gauges.put("count", (Gauge<Integer>) threads::getThreadCount);
+      gauges.put("daemon.count", (Gauge<Integer>) threads::getDaemonThreadCount);
+      gauges.put("peak.count", (Gauge<Integer>) threads::getPeakThreadCount);
+      gauges.put("total_started.count", (Gauge<Long>) threads::getTotalStartedThreadCount);
+
+      if (DEADLOCK_DETECTION_ENABLED) {
+        // if not enabled, don't add these fields at all, since that would implicitly
+        // assert the _absence_ of deadlocks, when in fact we simply haven't checked.
+        Set<String> deadlockedThreads = deadlockDetector.getDeadlockedThreads();
+        gauges.put("deadlock.count", (Gauge<Integer>) deadlockedThreads::size);
+        gauges.put("deadlocks", (Gauge<Set<String>>) () -> deadlockedThreads);
+      }
+
+      return Collections.unmodifiableMap(gauges);
+    }
+
+    // for a batch size of 64
+    private static final int BATCH_MASK = 64 - 1;
+
+    ThreadInfo[] getThreadInfos() {
+      long[] holder = new long[1];
+      long[] ids = threads.getAllThreadIds();
+      ThreadInfo[] ret = new ThreadInfo[ids.length];
+      for (int i = 0, lim = ids.length; i < lim; ) {
+        holder[0] = ids[i];
+        ThreadInfo ti = threads.getThreadInfo(holder, STACK_TRACE_DEPTH)[0];
+        ret[i] = ti;
+        if (((++i) & BATCH_MASK) == 0) {
+          Thread.yield(); // maybe overkill?
+        }
+      }
+      return ret;
+    }
+  }
+
+  private static class MyCachedThreadStatesGaugeSet extends MyThreadStatesGaugeSet {
+    private final CachedGauge<ThreadInfo[]> threadInfo;
+
+    /**
+     * Creates a new set of gauges using the given MXBean and detector. Caches the information for
+     * the given interval and time unit.
+     *
+     * @param interval cache interval
+     * @param unit cache interval time unit
+     */
+    public MyCachedThreadStatesGaugeSet(long interval, TimeUnit unit) {
+      threadInfo =
+          new CachedGauge<ThreadInfo[]>(interval, unit) {
+            @Override
+            protected ThreadInfo[] loadValue() {
+              return MyCachedThreadStatesGaugeSet.super.getThreadInfos();
+            }
+          };
+    }
+
+    @Override
+    ThreadInfo[] getThreadInfos() {
+      return threadInfo.getValue();
+    }
+  }
+
   private void setupJvmMetrics(CoreContainer coresInit, MetricsConfig config) {
     metricManager = coresInit.getMetricManager();
     registryName = SolrMetricManager.getRegistryName(Group.jvm);
@@ -442,14 +563,14 @@ public class CoreContainerProvider implements ServletContextListener {
         }
         metricManager.registerAll(
             registryName,
-            new CachedThreadStatesGaugeSet(
+            new MyCachedThreadStatesGaugeSet(
                 config.getCacheConfig().threadsIntervalSeconds, TimeUnit.SECONDS),
             SolrMetricManager.ResolutionStrategy.IGNORE,
             "threads");
       } else {
         metricManager.registerAll(
             registryName,
-            new ThreadStatesGaugeSet(),
+            new MyThreadStatesGaugeSet(),
             SolrMetricManager.ResolutionStrategy.IGNORE,
             "threads");
       }
