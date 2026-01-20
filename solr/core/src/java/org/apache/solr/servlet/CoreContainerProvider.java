@@ -43,8 +43,7 @@ import java.nio.file.Paths;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.EnumMap;
-import java.util.LinkedHashMap;
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -452,28 +451,15 @@ public class CoreContainerProvider implements ServletContextListener {
       this.deadlockDetector = DEADLOCK_DETECTION_ENABLED ? new ThreadDeadlockDetector() : null;
     }
 
-    private static final int[] ZERO_COUNT = new int[1];
-
     @Override
     public Map<String, Metric> getMetrics() {
-      final Map<String, Metric> gauges = new LinkedHashMap<>(); // deterministic order
+      final Map<String, Metric> gauges = new HashMap<>();
 
       if (PER_STATE_THREAD_METRICS_ENABLED) {
-        // expensive, so call this method only once for all thread states, even if not "cached"
-        ThreadInfo[] threadInfos = getThreadInfos();
-
-        EnumMap<Thread.State, int[]> byState = new EnumMap<>(Thread.State.class);
-        for (ThreadInfo threadInfo : threadInfos) {
-          Thread.State tState;
-          if (threadInfo != null && (tState = threadInfo.getThreadState()) != null) {
-            byState.computeIfAbsent(tState, (k) -> new int[1])[0]++;
-          }
-        }
-
         for (final Thread.State state : Thread.State.values()) {
           gauges.put(
-              name(state.toString().toLowerCase(), "count"),
-              (Gauge<Object>) () -> byState.getOrDefault(state, ZERO_COUNT)[0]);
+              name(state.toString().toLowerCase(Locale.ROOT), "count"),
+              (Gauge<Object>) () -> getThreadCount(state));
         }
       }
 
@@ -485,9 +471,8 @@ public class CoreContainerProvider implements ServletContextListener {
       if (DEADLOCK_DETECTION_ENABLED) {
         // if not enabled, don't add these fields at all, since that would implicitly
         // assert the _absence_ of deadlocks, when in fact we simply haven't checked.
-        Set<String> deadlockedThreads = deadlockDetector.getDeadlockedThreads();
-        gauges.put("deadlock.count", (Gauge<Integer>) deadlockedThreads::size);
-        gauges.put("deadlocks", (Gauge<Set<String>>) () -> deadlockedThreads);
+        gauges.put("deadlock.count", (Gauge<Integer>) () -> deadlockedThreads().size());
+        gauges.put("deadlocks", (Gauge<Set<String>>) this::deadlockedThreads);
       }
 
       return Collections.unmodifiableMap(gauges);
@@ -495,6 +480,21 @@ public class CoreContainerProvider implements ServletContextListener {
 
     // for a batch size of 64
     private static final int BATCH_MASK = 64 - 1;
+
+    Set<String> deadlockedThreads() {
+      return deadlockDetector.getDeadlockedThreads();
+    }
+
+    private int getThreadCount(Thread.State state) {
+      final ThreadInfo[] allThreads = getThreadInfos();
+      int count = 0;
+      for (ThreadInfo info : allThreads) {
+        if (info != null && info.getThreadState() == state) {
+          count++;
+        }
+      }
+      return count;
+    }
 
     ThreadInfo[] getThreadInfos() {
       long[] holder = new long[1];
@@ -514,6 +514,7 @@ public class CoreContainerProvider implements ServletContextListener {
 
   private static class MyCachedThreadStatesGaugeSet extends MyThreadStatesGaugeSet {
     private final CachedGauge<ThreadInfo[]> threadInfo;
+    private final CachedGauge<Set<String>> deadlockedThreads;
 
     /**
      * Creates a new set of gauges using the given MXBean and detector. Caches the information for
@@ -530,6 +531,18 @@ public class CoreContainerProvider implements ServletContextListener {
               return MyCachedThreadStatesGaugeSet.super.getThreadInfos();
             }
           };
+      deadlockedThreads =
+          new CachedGauge<Set<String>>(interval, unit) {
+            @Override
+            protected Set<String> loadValue() {
+              return MyCachedThreadStatesGaugeSet.super.deadlockedThreads();
+            }
+          };
+    }
+
+    @Override
+    Set<String> deadlockedThreads() {
+      return deadlockedThreads.getValue();
     }
 
     @Override
