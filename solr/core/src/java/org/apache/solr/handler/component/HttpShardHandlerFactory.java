@@ -221,10 +221,9 @@ public class HttpShardHandlerFactory extends ShardHandlerFactory
                 long millis = TimeUnit.MILLISECONDS.convert(delayNanos, TimeUnit.NANOSECONDS);
                 log.warn(
                     "Remote shard request delayed by {} milliseconds (from listener creation to onBegin), "
-                        + "uri={}, thread={}",
+                        + "uri={}",
                     millis,
-                    request.getURI(),
-                    Thread.currentThread().getName());
+                    request.getURI());
                 if (delayedRequests != null) {
                   delayedRequests.update(millis);
                 }

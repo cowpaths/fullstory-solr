@@ -470,8 +470,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
       mrrv = makeRequest(solrRequest, url, true);
       long afterMakeRequest = System.nanoTime();
       long makeRequestDelay =
-          TimeUnit.MILLISECONDS.convert(
-              afterMakeRequest - beforeMakeRequest, TimeUnit.NANOSECONDS);
+          TimeUnit.MILLISECONDS.convert(afterMakeRequest - beforeMakeRequest, TimeUnit.NANOSECONDS);
       if (makeRequestDelay > MAX_OPERATION_DELAY_MILLIS) {
         log.info("Http2SolrClient: makeRequest() took {} milliseconds", makeRequestDelay);
       }
@@ -909,10 +908,9 @@ public class Http2SolrClient extends HttpSolrClientBase {
             if (delayFromSend > MAX_OPERATION_DELAY_MILLIS) {
               if (log.isInfoEnabled()) {
                 log.info(
-                    "Request queued: {} {}, thread={}, activeRequests={}, delayFromSend={}ms",
+                    "Request queued: {} {}, activeRequests={}, delayFromSend={}ms",
                     request.getMethod(),
                     request.getURI(),
-                    Thread.currentThread().getName(),
                     activeRequests.get(),
                     delayFromSend);
               }
