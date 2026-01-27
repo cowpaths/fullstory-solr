@@ -38,6 +38,7 @@ import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.ConstantScoreQuery;
 import org.apache.lucene.search.ConstantScoreScorer;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Explanation;
@@ -476,7 +477,9 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
         return DocSetUtil.createDocSetGeneric(searcher, this);
       } else {
         final Weight backingWeight =
-            backing.createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, 1f);
+            searcher
+                .rewrite(new ConstantScoreQuery(backing))
+                .createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, 1f);
         final long[][] staleBits;
         if (stale instanceof BitDocSet) {
           staleBits = ((BitDocSet) stale).getBits().getBits();
