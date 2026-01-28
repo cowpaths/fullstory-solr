@@ -246,8 +246,11 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     }
   }
 
-  @SuppressWarnings("UnnecessaryLambda")
-  private final Runnable onCached = () -> hits.increment();
+  private final Runnable onCached = this::incrementHits;
+
+  private void incrementHits() {
+    hits.increment();
+  }
 
   public static <K, V> V getV(
       K key,

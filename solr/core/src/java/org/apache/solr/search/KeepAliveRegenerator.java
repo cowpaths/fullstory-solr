@@ -159,10 +159,16 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     this.overlapThreshold = DEFAULT_OVERLAP_THRESHOLD;
   }
 
-  @SuppressWarnings({"unchecked", "UnnecessaryLambda"})
   private static <M> BiFunction<SegmentMap, DocSet, M> getWrapFunction(
       LongAdder partialHits, DoubleAdder partialHitsRatio) {
-    return (segMap, v) -> (M) new KeepAliveSegAwareValue(segMap, v, partialHits, partialHitsRatio);
+    // noinspection Convert2Lambda
+    return new BiFunction<SegmentMap, DocSet, M>() {
+      @Override
+      @SuppressWarnings("unchecked")
+      public M apply(SegmentMap segMap, DocSet v) {
+        return (M) new KeepAliveSegAwareValue(segMap, v, partialHits, partialHitsRatio);
+      }
+    };
   }
 
   static boolean isCrossDoc(Query q) {
@@ -363,8 +369,9 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     }
   }
 
-  @SuppressWarnings("UnnecessaryLambda")
-  private static final Runnable NOOP = () -> {};
+  private static void doNothing() {}
+
+  private static final Runnable NOOP = KeepAliveRegenerator::doNothing;
 
   private final LongAdder partialHits;
   private final DoubleAdder partialHitsRatio;
