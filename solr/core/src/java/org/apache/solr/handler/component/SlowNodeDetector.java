@@ -215,10 +215,9 @@ class SlowNodeDetector implements SolrMetricProducer {
   @Override
   public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
     metricsContext = parentContext.getChildContext(this);
-    String expandedScope = SolrMetricManager.mkName(scope, SolrInfoBean.Category.QUERY.name());
 
-    metricsContext.gauge(slowNodes::keySet, true, "slowNodes", expandedScope);
-    metricsContext.gauge(slowNodes::size, true, "slowNodeCount", expandedScope);
+    metricsContext.gauge(slowNodes::keySet, true, "slowNodes", scope);
+    metricsContext.gauge(slowNodes::size, true, "slowNodeCount", scope);
   }
 
   @Override
