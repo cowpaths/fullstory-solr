@@ -97,6 +97,10 @@ public class ResponseBuilder {
 
   public List<SearchComponent> components;
 
+  // Always-on per-fq filter stats aligned with original fq order.
+  // Each entry is a NamedList with keys: "time" (Long ms), "cache" (String: HIT|MISS|BYPASS_POST|BYPASS_NOCACHE)
+  private List<NamedList<Object>> filterStats;
+
   SolrRequestInfo requestInfo;
 
   public ResponseBuilder(
@@ -315,6 +319,14 @@ public class ResponseBuilder {
 
   public void setDebugInfo(NamedList<Object> debugInfo) {
     this.debugInfo = debugInfo;
+  }
+
+  public List<NamedList<Object>> getFilterStats() {
+    return filterStats;
+  }
+
+  public void setFilterStats(List<NamedList<Object>> filterStats) {
+    this.filterStats = filterStats;
   }
 
   public int getFieldFlags() {
