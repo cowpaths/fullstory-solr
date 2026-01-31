@@ -1702,9 +1702,6 @@ public class QueryComponent extends SearchComponent {
             rb.getResults() == null || rb.getResults().docList == null
                 ? 0
                 : rb.getResults().docList.matches());
-    if (rb.getFilterStats() != null) {
-      rsp.getResponseHeader().add("filtersStats", rb.getFilterStats());
-    }
 
     if (!rb.req.getParams().getBool(ShardParams.IS_SHARD, false)) {
       if (null != rb.getNextCursorMark()) {
