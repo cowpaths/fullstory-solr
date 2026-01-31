@@ -528,6 +528,11 @@ public class SearchHandler extends RequestHandlerBase
             rb.addDebugInfo("timing", timer.asNamedList());
           }
         }
+
+        if (rb.getFilterStats() != null) {
+          rsp.getResponseHeader().add("filtersStats", rb.getFilterStats());
+          rsp.getToLog().add("filtersStats", rb.getFilterStats());
+        }
       } catch (ExitableDirectoryReader.ExitingReaderException ex) {
         log.warn("Query: {}; ", req.getParamString(), ex);
         if (rb.rsp.getResponse() == null) {

@@ -1377,6 +1377,22 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       sets[end++] = docSet;
     } // end of queries
 
+    // Attach per-filter stats (aligned with original order) to current ResponseBuilder, if present.
+    // Do it as soon as possible to ensure we don't miss it due to later short-cut returns.
+    org.apache.solr.request.SolrRequestInfo sri = org.apache.solr.request.SolrRequestInfo.getRequestInfo();
+    if (sri != null) {
+      org.apache.solr.handler.component.ResponseBuilder rb = sri.getResponseBuilder();
+      if (rb != null) {
+        // fill in any missing slots (continue statement w/o setting stats etc)
+        for (int i = 0; i < perFilterCacheStats.size(); i++) {
+          if (perFilterCacheStats.get(i) == null) {
+            addCacheStats(perFilterCacheStats, i , CacheOutcome.BYPASSED, null);
+          }
+        }
+        rb.setFilterStats(perFilterCacheStats);
+      }
+    }
+
     if (end > 0) {
       // Are all of our normal cached filters negative?
       if (answer == null) {
@@ -1448,23 +1464,6 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         if (prev != null) pf.postFilter.setDelegate(prev);
       }
     }
-
-    // Attach per-filter stats (aligned with original order) to current ResponseBuilder, if present.
-    org.apache.solr.request.SolrRequestInfo sri = org.apache.solr.request.SolrRequestInfo.getRequestInfo();
-    if (sri != null) {
-      org.apache.solr.handler.component.ResponseBuilder rb = sri.getResponseBuilder();
-      if (rb != null) {
-        // fill in any missing slots (continue statement w/o setting stats etc)
-        for (int i = 0; i < perFilterCacheStats.size(); i++) {
-          if (perFilterCacheStats.get(i) == null) {
-            addCacheStats(perFilterCacheStats, i , CacheOutcome.BYPASSED, null);
-          }
-        }
-
-        rb.setFilterStats(perFilterCacheStats);
-      }
-    }
-
 
     return pf;
   }
