@@ -1275,11 +1275,13 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       java.util.List<org.apache.solr.common.util.NamedList<Object>> perFilterStats,
       int index,
       CacheOutcome cacheOutcome,
-      Long startTimeMillisec) {
+      Long startTimeNanos) {
     org.apache.solr.common.util.NamedList<Object> stat =
         new org.apache.solr.common.util.SimpleOrderedMap<>();
-    if (startTimeMillisec != null) {
-      stat.add("time", System.currentTimeMillis() - startTimeMillisec);
+    if (startTimeNanos != null) {
+      long elapsedMs =
+          java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos);
+      stat.add("time", elapsedMs);
     }
     stat.add("cache", cacheOutcome.name());
     perFilterStats.set(index, stat);
@@ -1353,7 +1355,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       }
 
       Query posQuery = QueryUtils.getAbs(q);
-      long startTime = System.currentTimeMillis();
+      long startTime = System.nanoTime();
       DocSetWithStats result = getPositiveDocSetWithStats(posQuery);
       addCacheStats(perFilterCacheStats, i, result.cacheOutcome, startTime);
 
