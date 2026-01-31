@@ -30,7 +30,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.Timer;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -96,7 +95,6 @@ import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.util.CollectionUtil;
 import org.apache.solr.common.util.EnvUtils;
-import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.ObjectReleaseTracker;
 import org.apache.solr.core.DirectoryFactory;
 import org.apache.solr.core.DirectoryFactory.DirContext;
@@ -1066,7 +1064,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     return getAndCacheDocSetWithStats(query, cache).docSet;
   }
 
-  private DocSetWithStats getAndCacheDocSetWithStats(Query query, SolrCache<Query, DocSet> cache) throws IOException {
+  private DocSetWithStats getAndCacheDocSetWithStats(Query query, SolrCache<Query, DocSet> cache)
+      throws IOException {
     assert !(query instanceof WrappedQuery) : "should have unwrapped";
     assert cache != null : "must check for caching before calling this method";
 
@@ -1093,10 +1092,13 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         cacheOutcome.set(CacheOutcome.MISS);
       }
     } else {
-      answer = cache.computeIfAbsent(query, q -> {
-        cacheOutcome.set(CacheOutcome.MISS);
-        return getDocSetNC(q, null);
-      });
+      answer =
+          cache.computeIfAbsent(
+              query,
+              q -> {
+                cacheOutcome.set(CacheOutcome.MISS);
+                return getDocSetNC(q, null);
+              });
     }
 
     assert !(answer instanceof MutableBitDocSet) : "should not be mutable";
@@ -1263,18 +1265,19 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     public DelegatingCollector postFilter; // maybe null
   }
 
-
-  private enum CacheOutcome{
+  private enum CacheOutcome {
     HIT,
     MISS,
     BYPASSED
   }
 
-  private static void addCacheStats(java.util.List<org.apache.solr.common.util.NamedList<Object>> perFilterStats,
-                                int index,
-                                CacheOutcome cacheOutcome,
-                                Long startTimeMillisec) {
-    org.apache.solr.common.util.NamedList<Object> stat = new org.apache.solr.common.util.SimpleOrderedMap<>();
+  private static void addCacheStats(
+      java.util.List<org.apache.solr.common.util.NamedList<Object>> perFilterStats,
+      int index,
+      CacheOutcome cacheOutcome,
+      Long startTimeMillisec) {
+    org.apache.solr.common.util.NamedList<Object> stat =
+        new org.apache.solr.common.util.SimpleOrderedMap<>();
     if (startTimeMillisec != null) {
       stat.add("time", System.currentTimeMillis() - startTimeMillisec);
     }
@@ -1301,7 +1304,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     // Collect per-fq timing/cache outcome aligned with original order, if possible.
     // We'll attach this to the current ResponseBuilder (if any) at the end.
     final java.util.List<org.apache.solr.common.util.NamedList<Object>> perFilterCacheStats =
-            new java.util.ArrayList<>(queries.size());
+        new java.util.ArrayList<>(queries.size());
     for (int i = 0; i < queries.size(); i++) {
       perFilterCacheStats.add(null);
     }
@@ -1321,8 +1324,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       answer = setFilter;
     } // we are done with setFilter at this point
 
-
-    for (int i = 0 ; i < queries.size(); i++) {
+    for (int i = 0; i < queries.size(); i++) {
       Query q = queries.get(i);
       if (q instanceof ExtendedQuery) {
         ExtendedQuery eq = (ExtendedQuery) q;
@@ -1353,9 +1355,9 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       Query posQuery = QueryUtils.getAbs(q);
       long startTime = System.currentTimeMillis();
       DocSetWithStats result = getPositiveDocSetWithStats(posQuery);
-      addCacheStats(perFilterCacheStats, i , result.cacheOutcome, startTime);
+      addCacheStats(perFilterCacheStats, i, result.cacheOutcome, startTime);
 
-      DocSet docSet =  result.docSet;
+      DocSet docSet = result.docSet;
       // Negative query if absolute value different from original
       if (Objects.equals(q, posQuery)) {
         // keep track of the smallest positive set; use "answer" for this.
@@ -1379,14 +1381,15 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
     // Attach per-filter stats (aligned with original order) to current ResponseBuilder, if present.
     // Do it as soon as possible to ensure we don't miss it due to later short-cut returns.
-    org.apache.solr.request.SolrRequestInfo sri = org.apache.solr.request.SolrRequestInfo.getRequestInfo();
+    org.apache.solr.request.SolrRequestInfo sri =
+        org.apache.solr.request.SolrRequestInfo.getRequestInfo();
     if (sri != null) {
       org.apache.solr.handler.component.ResponseBuilder rb = sri.getResponseBuilder();
       if (rb != null) {
         // fill in any missing slots (continue statement w/o setting stats etc)
         for (int i = 0; i < perFilterCacheStats.size(); i++) {
           if (perFilterCacheStats.get(i) == null) {
-            addCacheStats(perFilterCacheStats, i , CacheOutcome.BYPASSED, null);
+            addCacheStats(perFilterCacheStats, i, CacheOutcome.BYPASSED, null);
           }
         }
         rb.setFilterStats(perFilterCacheStats);
