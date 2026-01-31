@@ -987,9 +987,9 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     return answerBits;
   }
 
-  private class DocSetWithStats {
-    private DocSet docSet;
-    private CacheOutcome cacheOutcome;
+  private static class DocSetWithStats {
+    private final DocSet docSet;
+    private final CacheOutcome cacheOutcome;
 
     private DocSetWithStats(DocSet docSet, CacheOutcome cacheOutcome) {
       this.docSet = docSet;
