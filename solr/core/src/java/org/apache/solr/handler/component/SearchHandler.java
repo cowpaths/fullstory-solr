@@ -528,11 +528,6 @@ public class SearchHandler extends RequestHandlerBase
             rb.addDebugInfo("timing", timer.asNamedList());
           }
         }
-
-        if (rb.getFilterStats() != null) {
-          rsp.getResponseHeader().add("filtersStats", rb.getFilterStats());
-          rsp.getToLog().add("filtersStats", rb.getFilterStats());
-        }
       } catch (ExitableDirectoryReader.ExitingReaderException ex) {
         log.warn("Query: {}; ", req.getParamString(), ex);
         if (rb.rsp.getResponse() == null) {
@@ -555,6 +550,14 @@ public class SearchHandler extends RequestHandlerBase
         // An IOException on a non-distributed request is typically an issue parsing the query at
         // the lucene level
         throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, ex);
+      } finally {
+        if (rb.getFilterStats() != null) { // always attempt to add filter cache stats if possible
+          NamedList<Object> headers = rb.rsp.getResponseHeader();
+          if (headers != null) {
+            headers.add("filtersStats", rb.getFilterStats());
+          }
+          rsp.getToLog().add("filtersStats", rb.getFilterStats());
+        }
       }
     } else {
       // a distributed request
