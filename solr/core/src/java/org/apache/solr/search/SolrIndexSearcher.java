@@ -1387,7 +1387,9 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         org.apache.solr.request.SolrRequestInfo.getRequestInfo();
     if (sri != null) {
       org.apache.solr.handler.component.ResponseBuilder rb = sri.getResponseBuilder();
-      if (rb != null) {
+      if (rb != null && rb.getFilterStats() == null) {
+        // in case if getProcessedFilter is called multiple times, keep only the ones from first
+        // invocation
         // fill in any missing slots (continue statement w/o setting stats etc)
         for (int i = 0; i < perFilterCacheStats.size(); i++) {
           if (perFilterCacheStats.get(i) == null) {
