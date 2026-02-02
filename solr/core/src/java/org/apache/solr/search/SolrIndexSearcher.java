@@ -1275,6 +1275,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       java.util.List<org.apache.solr.common.util.NamedList<Object>> perFilterStats,
       int index,
       CacheOutcome cacheOutcome,
+      Integer docSetIdCount,
       Long startTimeNanos) {
     org.apache.solr.common.util.NamedList<Object> stat =
         new org.apache.solr.common.util.SimpleOrderedMap<>();
@@ -1284,6 +1285,9 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       stat.add("time", elapsedMs);
     }
     stat.add("cache", cacheOutcome.name());
+    if (docSetIdCount != null) {
+      stat.add("docSetIdCount", docSetIdCount);
+    }
     perFilterStats.set(index, stat);
   }
 
@@ -1357,9 +1361,9 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       Query posQuery = QueryUtils.getAbs(q);
       long startTime = System.nanoTime();
       DocSetWithStats result = getPositiveDocSetWithStats(posQuery);
-      addCacheStats(perFilterCacheStats, i, result.cacheOutcome, startTime);
-
       DocSet docSet = result.docSet;
+      addCacheStats(perFilterCacheStats, i, result.cacheOutcome, docSet.size(), startTime);
+
       // Negative query if absolute value different from original
       if (Objects.equals(q, posQuery)) {
         // keep track of the smallest positive set; use "answer" for this.
@@ -1393,7 +1397,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         // fill in any missing slots (continue statement w/o setting stats etc)
         for (int i = 0; i < perFilterCacheStats.size(); i++) {
           if (perFilterCacheStats.get(i) == null) {
-            addCacheStats(perFilterCacheStats, i, CacheOutcome.BYPASSED, null);
+            addCacheStats(perFilterCacheStats, i, CacheOutcome.BYPASSED, null, null);
           }
         }
         rb.setFilterStats(perFilterCacheStats);

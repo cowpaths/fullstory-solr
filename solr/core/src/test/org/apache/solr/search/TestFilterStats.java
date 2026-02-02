@@ -40,18 +40,24 @@ public class TestFilterStats extends SolrTestCaseJ4 {
     assertJQ(
         req("q", "{!cache=false}*:*", "fq", "foo_s:a", "fq", "val_i:[1 TO 3]"),
         "/responseHeader/filtersStats/[0]/cache=='MISS'",
-        "/responseHeader/filtersStats/[1]/cache=='MISS'");
+        "/responseHeader/filtersStats/[0]/docSetIdCount==2",
+        "/responseHeader/filtersStats/[1]/cache=='MISS'",
+        "/responseHeader/filtersStats/[1]/docSetIdCount==3");
 
     // Second identical request should HIT for both
     assertJQ(
         req("q", "{!cache=false}*:*", "fq", "foo_s:a", "fq", "val_i:[1 TO 3]"),
         "/responseHeader/filtersStats/[0]/cache=='HIT'",
-        "/responseHeader/filtersStats/[1]/cache=='HIT'");
+        "/responseHeader/filtersStats/[0]/docSetIdCount==2",
+        "/responseHeader/filtersStats/[1]/cache=='HIT'",
+        "/responseHeader/filtersStats/[1]/docSetIdCount==3");
 
     // 3rd request, only 2nd fq is identical, so 1st should MISS, 2nd should HIT
     assertJQ(
         req("q", "{!cache=false}*:*", "fq", "foo_s:a", "fq", "val_i:[1 TO 2]"),
         "/responseHeader/filtersStats/[0]/cache=='HIT'",
-        "/responseHeader/filtersStats/[1]/cache=='MISS'");
+        "/responseHeader/filtersStats/[0]/docSetIdCount==2",
+        "/responseHeader/filtersStats/[1]/cache=='MISS'",
+        "/responseHeader/filtersStats/[1]/docSetIdCount==2");
   }
 }
