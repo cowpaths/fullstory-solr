@@ -1060,6 +1060,8 @@ public abstract class BaseDistributedSearchTestCase extends SolrTestCaseJ4 {
     handle.put("QTime", SKIPVAL);
     // rf will be different since the control collection doesn't usually have multiple replicas
     handle.put("rf", SKIPVAL);
+    // do not check filterStats
+    handle.put("filterStats", SKIPVAL);
     String cmp = compare(a.getResponse(), b.getResponse(), flags, handle);
     if (cmp != null) {
       log.error("Mismatched responses:\n{}\n{}", a, b);
