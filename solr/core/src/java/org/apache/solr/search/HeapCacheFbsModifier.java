@@ -21,6 +21,9 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -70,11 +73,18 @@ public class HeapCacheFbsModifier
   private final ReferenceHandler<ByteBuffer[]> refHandler;
 
   public static final String POOL_TARGET_MB_PROPNAME = "solr.fbspool.targetMB";
+  public static final String POOL_BACKING_FILE_PROPNAME = "solr.fbspool.file";
+
+  private static final String POOL_BACKING_FILE =
+      EnvUtils.getProperty(POOL_BACKING_FILE_PROPNAME, "");
 
   static {
     long maxMemory = Runtime.getRuntime().maxMemory();
     long defaultTargetPoolSize = maxMemory / 16; // default to 1/16 of heap
-    long maxPoolSize = maxMemory / 2; // max of 1/2 of heap
+
+    // max of 1/2 of heap (unless file-backed)
+    long maxPoolSize = POOL_BACKING_FILE.isEmpty() ? (maxMemory / 2) : Long.MAX_VALUE;
+
     int targetPoolSizeMB =
         EnvUtils.getPropertyAsInteger(
             POOL_TARGET_MB_PROPNAME, Math.toIntExact(defaultTargetPoolSize >> 20));
@@ -108,16 +118,14 @@ public class HeapCacheFbsModifier
     int numPartitions = ((N_BLOCKS - 1) / MAX_BLOCKS_PER_PARTITION) + 1;
     pool = new ByteBuffer[POOL_ARR_SIZE];
     int blockIdx = 0;
-    for (int i = numPartitions - 1, partitionNumBlocks = ((N_BLOCKS - 1) / numPartitions) + 1;
-        i >= 0;
-        i--) {
-      ByteBuffer partition =
-          ByteBuffer.allocateDirect(partitionNumBlocks * BLOCK_SIZE_BYTES)
-              .order(FixedBitSet.BYTE_ORDER);
-      for (int j = 0; j < partitionNumBlocks; j++) {
-        pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
+    if (POOL_BACKING_FILE.isEmpty()) {
+      poolAnonymous(numPartitions, blockIdx, pool);
+    } else {
+      try {
+        poolFileBacked(numPartitions, blockIdx, pool);
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
       }
-      partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
     }
     headAndTail = new AtomicLong(N_BLOCKS);
     refHandler =
@@ -136,6 +144,49 @@ public class HeapCacheFbsModifier
                 Thread.currentThread().interrupt();
               }
             });
+  }
+
+  private static void poolAnonymous(int numPartitions, int blockIdx, ByteBuffer[] pool) {
+    for (int i = numPartitions - 1, partitionNumBlocks = ((N_BLOCKS - 1) / numPartitions) + 1;
+        i >= 0;
+        i--) {
+      ByteBuffer partition =
+          ByteBuffer.allocateDirect(partitionNumBlocks * BLOCK_SIZE_BYTES)
+              .order(FixedBitSet.BYTE_ORDER);
+      for (int j = 0; j < partitionNumBlocks; j++) {
+        pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
+      }
+      partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
+    }
+  }
+
+  private static void poolFileBacked(int numPartitions, int blockIdx, ByteBuffer[] pool)
+      throws IOException {
+    long blockSizeBytesL = BLOCK_SIZE_BYTES;
+    long partitionMaxBytes = MAX_BLOCKS_PER_PARTITION * blockSizeBytesL;
+    try (FileChannel fc =
+        FileChannel.open(
+            Path.of(POOL_BACKING_FILE),
+            StandardOpenOption.READ,
+            StandardOpenOption.WRITE,
+            StandardOpenOption.CREATE)) {
+      for (int i = numPartitions - 1, partitionNumBlocks = ((N_BLOCKS - 1) / numPartitions) + 1;
+          i >= 0;
+          i--) {
+        // NOTE: this is designed to be a single file per JVM, lasting the entire JVM lifetime,
+        // so we don't need to worry about unmapping (as we do for MMapDirectory).
+        ByteBuffer partition =
+            fc.map(
+                    FileChannel.MapMode.READ_WRITE,
+                    i * partitionMaxBytes,
+                    partitionNumBlocks * blockSizeBytesL)
+                .order(FixedBitSet.BYTE_ORDER);
+        for (int j = 0; j < partitionNumBlocks; j++) {
+          pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
+        }
+        partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
+      }
+    }
   }
 
   private static final SolrMetricsContext DISABLED = new SolrMetricsContext(null, null, null);
