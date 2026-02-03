@@ -16,9 +16,7 @@
  */
 package org.apache.solr.search;
 
-import java.io.Closeable;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.IntBuffer;
 import org.apache.lucene.index.PostingsEnum;
 import org.apache.lucene.index.TermsEnum;
@@ -37,7 +35,6 @@ public final class DocSetBuilder {
   private final int threshold;
 
   private int capacity = -1;
-  private SortedIntDocSet.Parts parts;
   private IntBuffer[] buffer;
 
   private int pos;
@@ -52,8 +49,7 @@ public final class DocSetBuilder {
       bitSet = new FixedBitSets(maxDoc);
     } else {
       this.capacity = Math.max((int) costEst, 1);
-      this.parts = SortedIntDocSet.allocate(this.capacity);
-      this.buffer = this.parts.arr;
+      this.buffer = SortedIntDocSet.allocate(this.capacity);
     }
   }
 
@@ -66,11 +62,6 @@ public final class DocSetBuilder {
     this.capacity = -1;
     this.buffer = null;
     this.pos = 0;
-    try (Closeable c = this.parts.close[0]) {
-      this.parts = null;
-    } catch (IOException e) {
-      throw new UncheckedIOException(e);
-    }
   }
 
   private void growBuffer(int minSize) {
@@ -83,12 +74,7 @@ public final class DocSetBuilder {
     newSize = Math.min(newSize, threshold);
 
     this.capacity = newSize;
-    try (Closeable c = parts.close[0]) {
-      this.parts = SortedIntDocSet.grow(buffer, pos, newSize);
-    } catch (IOException e) {
-      throw new UncheckedIOException(e);
-    }
-    buffer = this.parts.arr;
+    buffer = SortedIntDocSet.grow(buffer, pos, newSize);
   }
 
   public void add(DocIdSetIterator iter, int base) throws IOException {
@@ -193,15 +179,12 @@ public final class DocSetBuilder {
       // TODO - if this set will be cached, should we make it smaller if it's below
       // DocSetUtil.smallSetSize?
     } else {
-      try (LSBRadixSorter2D sorter = new LSBRadixSorter2D()) {
-        sorter.sort(PackedInts.bitsRequired(maxDoc - 1), buffer, pos);
-      } catch (IOException e) {
-        throw new UncheckedIOException(e);
-      }
+      LSBRadixSorter2D sorter = new LSBRadixSorter2D();
+      sorter.sort(PackedInts.bitsRequired(maxDoc - 1), buffer, pos);
       final int l = dedup(buffer, pos, filter);
       assert l <= pos;
       // TODO: have option to not shrink in the future if it will be a temporary set
-      return new SortedIntDocSet(parts, l);
+      return new SortedIntDocSet(buffer, l);
     }
   }
 
@@ -219,7 +202,7 @@ public final class DocSetBuilder {
         l = dedup(buffer, pos, filter);
       }
       // TODO: have option to not shrink in the future if it will be a temporary set
-      return new SortedIntDocSet(parts, l);
+      return new SortedIntDocSet(buffer, l);
     }
   }
 }

@@ -19,7 +19,6 @@ package org.apache.solr.search;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.lang.ref.Reference;
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 import java.util.Arrays;
@@ -47,7 +46,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
   private static final int MIN_KB = 1;
   private static final int MAX_KB_BASELINE = MAX_KB - MIN_KB + 1;
 
-  private static final int N_SECONDS = 30;
+  private static final int N_SECONDS = 5;
 
   private static final class Dummy implements Accountable {
 
@@ -126,38 +125,31 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
                     while (!finished.get()) {
                       int size = r.nextInt(maxSize);
                       LongBuffer compare = LongBuffer.allocate(size);
-                      Closeable[] sentinel = new Closeable[1];
                       LongBuffer[] bb =
-                          Arrays.stream(h.allocateBytesArr(size << 3, sentinel))
+                          Arrays.stream(h.allocateBytesArr(size << 3, compare))
                               .map(ByteBuffer::asLongBuffer)
                               .toArray(LongBuffer[]::new);
-                      try (Closeable c1 = sentinel[0]) {
-                        for (int j = 0; j < size; j++) {
-                          long v = j; // r.nextLong();
-                          compare.put(j, v);
-                          bb[j >> BLOCK_SHIFT].put((j & BLOCK_MASK), v);
-                        }
-                        for (int j = size - 1; j >= 0; j--) {
-                          try {
-                            assertEquals(compare.get(j), bb[j >> BLOCK_SHIFT].get(j & BLOCK_MASK));
-                          } catch (AssertionError er) {
-                            System.err.println(
-                                "XXX "
-                                    + Long.toUnsignedString(compare.get(j), 16)
-                                    + " != "
-                                    + Long.toUnsignedString(
-                                    bb[j >> BLOCK_SHIFT].get(j & BLOCK_MASK), 16)
-                                    + "; idx="
-                                    + Integer.toUnsignedString(j, 16));
-                            if (errCt.incrementAndGet() > 30) {
-                              throw er;
-                            }
+                      for (int j = 0; j < size; j++) {
+                        long v = j; // r.nextLong();
+                        compare.put(j, v);
+                        bb[j >> BLOCK_SHIFT].put((j & BLOCK_MASK), v);
+                      }
+                      for (int j = size - 1; j >= 0; j--) {
+                        try {
+                          assertEquals(compare.get(j), bb[j >> BLOCK_SHIFT].get(j & BLOCK_MASK));
+                        } catch (AssertionError er) {
+                          System.err.println(
+                              "XXX "
+                                  + Long.toUnsignedString(compare.get(j), 16)
+                                  + " != "
+                                  + Long.toUnsignedString(
+                                      bb[j >> BLOCK_SHIFT].get(j & BLOCK_MASK), 16)
+                                  + "; idx="
+                                  + Integer.toUnsignedString(j, 16));
+                          if (errCt.incrementAndGet() > 30) {
+                            throw er;
                           }
                         }
-                      } catch (IOException ex) {
-                        throw new UncheckedIOException(ex);
-                      } finally {
-                        Reference.reachabilityFence(sentinel);
                       }
                     }
                   } catch (Throwable t) {

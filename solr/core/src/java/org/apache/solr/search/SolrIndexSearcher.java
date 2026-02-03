@@ -1414,14 +1414,10 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   private DocSet getResult(DocsEnumState deState, int largestPossible) throws IOException {
     int smallSetSize = DocSetUtil.smallSetSize(maxDoc());
     int scratchSize = Math.min(smallSetSize, largestPossible);
-    if (deState.scratch == null || SortedIntDocSet.getCapacity(deState.scratch.arr) < scratchSize) {
-      try (Closeable c = deState.scratch == null ? null : deState.scratch.close[0]) {
-        deState.scratch = SortedIntDocSet.allocate(scratchSize);
-      }
-    }
+    if (deState.scratch == null || SortedIntDocSet.getCapacity(deState.scratch) < scratchSize)
+      deState.scratch = SortedIntDocSet.allocate(scratchSize);
 
-    final SortedIntDocSet.Parts parts = deState.scratch;
-    final IntBuffer[] docs = parts.arr;
+    final IntBuffer[] docs = deState.scratch;
     final int docsCapacity = SortedIntDocSet.getCapacity(docs);
     int upto = 0;
     int bitsSet = 0;
@@ -1478,7 +1474,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       bitsSet += upto;
       result = new BitDocSet(fbs, bitsSet);
     } else {
-      result = upto == 0 ? DocSet.empty() : new SortedIntDocSet(SortedIntDocSet.shrink(parts, upto));
+      result = upto == 0 ? DocSet.empty() : new SortedIntDocSet(SortedIntDocSet.shrink(docs, upto));
     }
     return result;
   }
@@ -2571,7 +2567,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     return a.intersectionSize(getDocSet(deState));
   }
 
-  public static class DocsEnumState implements Closeable {
+  public static class DocsEnumState {
     public String fieldName; // currently interned for as long as lucene requires it
     public TermsEnum termsEnum;
     public Bits liveDocs;
@@ -2579,15 +2575,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
     public int minSetSizeCached;
 
-    public SortedIntDocSet.Parts scratch;
-
-    @Override
-    public void close() throws IOException {
-      Closeable c;
-      if (scratch != null && (c = scratch.close[0]) != null) {
-        c.close();
-      }
-    }
+    public IntBuffer[] scratch;
   }
 
   /**

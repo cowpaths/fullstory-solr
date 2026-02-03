@@ -81,9 +81,6 @@ class FacetFieldProcessorByEnumTermsStream extends FacetFieldProcessor implement
   public void close() throws IOException {
     if (!closed) {
       closed = true;
-      if (deState != null) {
-        deState.close();
-      }
       // fcontext.base.decref();  // OFF-HEAP
     }
   }

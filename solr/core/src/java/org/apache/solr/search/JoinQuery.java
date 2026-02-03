@@ -17,7 +17,6 @@
 
 package org.apache.solr.search;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.nio.IntBuffer;
 import java.util.ArrayList;
@@ -502,10 +501,7 @@ class JoinQuery extends Query {
       DocSetBuilder dsb = new DocSetBuilder(toSearcher.maxDoc(), sz);
       dsb.add(new DisjunctionDISIApproximation(pq), 0);
 
-      try (Closeable c1 = toDeState; Closeable c2 = fromDeState) {
-        // NOTE: closing these is best-effort
-        return dsb.buildUniqueInOrder(null);
-      }
+      return dsb.buildUniqueInOrder(null);
     }
   }
 

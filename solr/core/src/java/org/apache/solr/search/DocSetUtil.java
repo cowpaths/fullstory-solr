@@ -200,8 +200,7 @@ public class DocSetUtil {
   private static DocSet createSmallSet(
       List<LeafReaderContext> leaves, PostingsEnum[] postList, int maxPossible, int firstReader)
       throws IOException {
-    SortedIntDocSet.Parts parts = SortedIntDocSet.allocate(maxPossible);
-    IntBuffer[] docs = parts.arr;
+    IntBuffer[] docs = SortedIntDocSet.allocate(maxPossible);
     int sz = 0;
     for (int i = firstReader; i < postList.length; i++) {
       PostingsEnum postings = postList[i];
@@ -218,7 +217,7 @@ public class DocSetUtil {
       }
     }
 
-    return new SortedIntDocSet(parts, sz);
+    return new SortedIntDocSet(docs, sz);
   }
 
   private static DocSet createBigSet(
@@ -256,14 +255,13 @@ public class DocSetUtil {
 
   public static DocSet toSmallSet(BitDocSet bitSet) {
     int sz = bitSet.size();
-    SortedIntDocSet.Parts parts = SortedIntDocSet.allocate(sz);
-    IntBuffer[] docs = parts.arr;
+    IntBuffer[] docs = SortedIntDocSet.allocate(sz);
     FixedBitSets bs = bitSet.getBits();
     BitDocSet.BitSetsIterator iter = new BitDocSet.BitSetsIterator(bs.parts, bs.length(), sz);
     for (int i = 0; i < sz; i++) {
       docs[i >> SortedIntDocSet.WORDS_SHIFT].put(i & SortedIntDocSet.ARR_MASK, iter.nextDoc());
     }
-    return new SortedIntDocSet(parts);
+    return new SortedIntDocSet(docs);
   }
 
   public static void collectSortedDocSet(DocSet docs, IndexReader reader, Collector collector)

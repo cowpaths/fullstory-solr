@@ -16,16 +16,12 @@
  */
 package org.apache.solr.search;
 
-import java.io.Closeable;
-import java.io.IOException;
 import java.nio.IntBuffer;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Bits;
-import org.apache.solr.request.SolrRequestInfo;
 
 /**
  * An immutable ordered set of Lucene Document Ids. It's similar to a Lucene {@link
@@ -34,59 +30,18 @@ import org.apache.solr.request.SolrRequestInfo;
  * <p>WARNING: Any DocSet returned from SolrIndexSearcher should <b>not</b> be modified as it may
  * have been retrieved from a cache and could be shared.
  */
-public abstract class DocSet implements Accountable, Cloneable, Closeable /* extends Collection<Integer> */ {
+public abstract class DocSet implements Accountable, Cloneable /* extends Collection<Integer> */ {
 
   // package accessible; guarantee known implementations
   DocSet() {
     assert this instanceof BitDocSet || this instanceof SortedIntDocSet;
-    SolrRequestInfo requestInfo = SolrRequestInfo.getRequestInfo();
-    if (requestInfo != null) {
-      AtomicInteger refCountF = refCount;
-      requestInfo.addCloseHook(() -> release(refCountF));
-    }
   }
 
   // can't use a trivial static initializer "EMPTY = new SortedIntDocSet" because it can lead to
   // classloader deadlock
   private static class EmptyLazyHolder {
-    static final DocSet INSTANCE = new SortedIntDocSet(new SortedIntDocSet.Parts(new IntBuffer[0], new Closeable[1]));
+    static final DocSet INSTANCE = new SortedIntDocSet(new IntBuffer[0]);
   }
-
-  private final AtomicInteger refCount = new AtomicInteger(1);
-
-  public final Closeable acquire() {
-    for (int extant = refCount.get(); extant > 0; ) {
-      int witness = refCount.compareAndExchange(extant, extant + 1);
-      if (witness == extant) {
-        AtomicInteger refCountF = refCount;
-        return () -> release(refCountF);
-      } else {
-        extant = witness;
-      }
-    }
-    return null;
-  }
-
-  private static boolean release(AtomicInteger refCount) {
-    for (int extant = refCount.get(); extant > 0; ) {
-      int witness = refCount.compareAndExchange(extant, extant - 1);
-      if (witness == extant) {
-        return witness == 1;
-      } else {
-        extant = witness;
-      }
-    }
-    throw new IllegalStateException();
-  }
-
-  @Override
-  public final void close() throws IOException {
-    if (release(refCount)) {
-      doClose();
-    }
-  }
-
-  protected abstract void doClose() throws IOException;
 
   /** An empty instance (has no docs). */
   public static DocSet empty() {

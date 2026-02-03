@@ -37,7 +37,7 @@ import org.apache.lucene.util.ThreadInterruptedException;
  *
  * @since solr 0.9
  */
-public class FixedBitSets implements Bits, Accountable, Closeable {
+public class FixedBitSets implements Bits, Accountable {
   // for the array object inside the FixedBitSet. long[] array won't change alignment, so no need to
   // calculate it.
   private static final long BASE_RAM_BYTES_USED =
@@ -99,7 +99,6 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public final FixedBitSet[] parts;
-  private final Closeable[] close = new Closeable[1];
   private int cachedLength = -1;
 
   public FixedBitSets(int numBits) {
@@ -110,7 +109,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
     }
     int lastIdx = (numBits - 1) >> BIT_SHIFT;
     this.parts = new FixedBitSet[lastIdx + 1];
-    ByteBuffer[] bb = MODIFIER.allocateBytesArr(FixedBitSet.bits2words(numBits) << 3, this.close);
+    ByteBuffer[] bb = MODIFIER.allocateBytesArr(FixedBitSet.bits2words(numBits) << 3, this.parts);
     int len = ((numBits - 1) & BLOCK_BIT_MASK) + 1;
     for (int i = lastIdx; i >= 0; i--) {
       parts[i] = new FixedBitSet(bb[i].asLongBuffer(), len);
@@ -126,18 +125,11 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
     FixedBitSet[] otherParts = template.parts;
     this.parts = new FixedBitSet[otherParts.length];
     int numBits = template.length();
-    ByteBuffer[] bb = MODIFIER.allocateBytesArr(FixedBitSet.bits2words(numBits) << 3, this.close);
+    ByteBuffer[] bb = MODIFIER.allocateBytesArr(FixedBitSet.bits2words(numBits) << 3, this.parts);
     for (int i = otherParts.length - 1; i >= 0; i--) {
       this.parts[i] = otherParts[i].clone(bb[i].asLongBuffer());
     }
     this.cachedLength = numBits;
-  }
-
-  @Override
-  public void close() throws IOException {
-    try (Closeable c = close[0]) {
-      Arrays.fill(parts, null);
-    }
   }
 
   public void set(int index) {
