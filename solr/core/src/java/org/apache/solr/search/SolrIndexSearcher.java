@@ -1073,9 +1073,9 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
         // Not found in the cache so compute and put in the cache
         if (answer == null) {
+          cacheHit.set(false);
           answer = getDocSetNC(query, null);
           cache.put(query, answer);
-          cacheHit.set(false);
         }
       } else {
         answer =
