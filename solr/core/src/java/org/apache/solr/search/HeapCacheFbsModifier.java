@@ -74,6 +74,7 @@ public class HeapCacheFbsModifier
 
   public static final String POOL_TARGET_MB_PROPNAME = "solr.fbspool.targetMB";
   public static final String POOL_BACKING_FILE_PROPNAME = "solr.fbspool.file";
+  public static final String POOL_ALWAYS_ONE_HEAP_PROPNAME = "solr.fbspool.alwaysOneHeap";
 
   private static final String POOL_BACKING_FILE =
       EnvUtils.getProperty(POOL_BACKING_FILE_PROPNAME, "");
@@ -295,7 +296,10 @@ public class HeapCacheFbsModifier
     if (numBytes == 0) {
       return EMPTY;
     }
-    int partitionCount = ((numBytes - 1) >> BYTE_SHIFT) + 1;
+    int adjustedPartitionCount = ((numBytes - 1) >> BYTE_SHIFT) + 1 - ADJUST;
+    if (adjustedPartitionCount == 0) {
+      return new ByteBuffer[] {ByteBuffer.allocate(numBytes).order(FixedBitSet.BYTE_ORDER)};
+    }
     for (long extant = this.headAndTail.get(); ; ) {
       int head = (int) (extant >>> Integer.SIZE);
       final int tail = (int) extant;
@@ -306,7 +310,7 @@ public class HeapCacheFbsModifier
       } else if (avail < 0) {
         throw new IllegalStateException();
       }
-      int tryReserve = Math.min(avail, partitionCount);
+      int tryReserve = Math.min(avail, adjustedPartitionCount);
       long witness =
           this.headAndTail.compareAndExchange(
               extant, ((((long) head + tryReserve) << Integer.SIZE)) | (tail & TAIL_MASK));
@@ -351,6 +355,16 @@ public class HeapCacheFbsModifier
   private static final int MAX_BYTES = 1 << BYTE_SHIFT;
   private static final int BYTE_MASK = MAX_BYTES - 1;
 
+  /**
+   * In order to provide some heap pressure, when this field is set to {@code 1}, every non-empty
+   * allocation allocates at least one heap {@link ByteBuffer}. This ensures that there is no wasted
+   * space (every pooled {@link ByteBuffer} that's used will be full), there is nominal heap
+   * pressure to drive GC (and pool entry reclamation), and that there's a consistent dimorphism to
+   * avoid JIT over-fitting.
+   */
+  private static final int ADJUST =
+      EnvUtils.getPropertyAsBool(POOL_ALWAYS_ONE_HEAP_PROPNAME, true) ? 1 : 0;
+
   private ByteBuffer[] allocateBytesArr(
       int head, int pooledReserved, int numBytes, Object sentinel) {
     int lastIdx = (numBytes - 1) >> BYTE_SHIFT;
@@ -369,12 +383,12 @@ public class HeapCacheFbsModifier
         // if any are pooled, we register the pooled ones for tracking
         pooled = new ByteBuffer[pooledReserved];
         System.arraycopy(ret, 0, pooled, 0, pooledReserved);
-        exhausted.add(ret.length - pooledReserved);
+        exhausted.add(ret.length - pooledReserved - ADJUST);
       }
       refHandler.add(sentinel, pooled);
       allocated.add(pooledReserved);
     } else {
-      exhausted.add(ret.length);
+      exhausted.add(ret.length - ADJUST);
     }
     for (; i < lastIdx; i++) {
       // full unpooled
