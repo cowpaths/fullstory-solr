@@ -17,6 +17,9 @@
 package org.apache.solr.search;
 
 import com.carrotsearch.hppc.IntHashSet;
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.util.Collection;
@@ -35,15 +38,24 @@ public class SortedIntDocSet extends DocSet {
       RamUsageEstimator.shallowSizeOfInstance(SortedIntDocSet.class)
           + RamUsageEstimator.NUM_BYTES_ARRAY_HEADER;
 
+  private final Closeable[] close;
   protected final IntBuffer[] docs;
   final int capacity;
 
   /**
-   * @param docs Sorted list of ids
+   * @param parts Sorted list of ids
    */
-  public SortedIntDocSet(IntBuffer[] docs) {
-    this.docs = docs;
+  public SortedIntDocSet(Parts parts) {
+    this.close = parts.close;
+    this.docs = parts.arr;
     this.capacity = getCapacity(docs);
+  }
+
+  @Override
+  protected void doClose() throws IOException {
+    if (close != null) {
+      close[0].close();
+    }
   }
 
   static int getCapacity(IntBuffer[] docs) {
@@ -56,23 +68,24 @@ public class SortedIntDocSet extends DocSet {
   }
 
   /**
-   * @param docs Sorted list of ids
+   * @param parts Sorted list of ids
    * @param len Number of ids in the list
    */
-  public SortedIntDocSet(IntBuffer[] docs, int len) {
-    this(shrink(docs, len));
+  public SortedIntDocSet(Parts parts, int len) {
+    this(shrink(parts, len));
   }
 
-  public static IntBuffer[] grow(IntBuffer[] buffer, int limit, int newSize) {
-    IntBuffer[] ret = allocate(newSize);
-    if (limit <= 0) return ret;
+  public static Parts grow(IntBuffer[] buffer, int limit, int newSize) {
+    Parts newParts = allocate(newSize);
+    if (limit <= 0) return newParts;
+    IntBuffer[] ret = newParts.arr;
     int lastIdx = limit - 1;
     int i = lastIdx >> SortedIntDocSet.WORDS_SHIFT;
     buffercopy(buffer[i], 0, ret[i], 0, (lastIdx & SortedIntDocSet.ARR_MASK) + 1);
     while (--i >= 0) {
       buffercopy(buffer[i], 0, ret[i], 0, SortedIntDocSet.MAX_ARR_SIZE);
     }
-    return ret;
+    return newParts;
   }
 
   public IntBuffer[] getDocs() {
@@ -84,38 +97,62 @@ public class SortedIntDocSet extends DocSet {
     return capacity;
   }
 
-  public static IntBuffer[] zeroInts = new IntBuffer[0];
-  public static SortedIntDocSet zero = new SortedIntDocSet(zeroInts);
+  private static final IntBuffer[] zeroInts = new IntBuffer[0];
+  private static final Parts zeroIntsParts = new Parts(zeroInts, new Closeable[1]);
+  private static final SortedIntDocSet zero = new SortedIntDocSet(zeroIntsParts);
 
   // -5 b/c there are 32 bits per int
   static final int WORDS_SHIFT = BitDocSet.BIT_SHIFT - 5;
   static final int MAX_ARR_SIZE = 1 << WORDS_SHIFT;
   static final int ARR_MASK = MAX_ARR_SIZE - 1;
 
-  public static IntBuffer[] allocate(int size) {
-    if (size <= 0) return zeroInts;
+  public static final class Parts {
+    public final IntBuffer[] arr;
+    public final Closeable[] close;
+
+    public Parts(IntBuffer[] arr, Closeable[] close) {
+      this.arr = arr;
+      this.close = close;
+    }
+  }
+
+  public static Parts allocate(int size) {
+    if (size <= 0) return zeroIntsParts;
     int outerSize = ((size - 1) >> WORDS_SHIFT) + 1;
     IntBuffer[] ret = new IntBuffer[outerSize];
+    Closeable[] close = new Closeable[1];
     int i = outerSize - 1;
-    ByteBuffer[] bb = FixedBitSets.MODIFIER.allocateBytesArr(size << 2, ret);
+    ByteBuffer[] bb = FixedBitSets.MODIFIER.allocateBytesArr(size << 2, close);
     ret[i] = bb[i].asIntBuffer();
     while (--i >= 0) {
       ret[i] = bb[i].asIntBuffer();
     }
-    return ret;
+    return new Parts(ret, close);
   }
 
-  public static IntBuffer[] shrink(IntBuffer[] arr, int newSize) {
-    if (newSize == 0) return zeroInts;
-    IntBuffer[] ret = allocate(newSize);
+  public static Parts shrink(Parts parts, int newSize) {
+    if (newSize == 0) {
+      try (Closeable c = parts.close[0]) {
+        return zeroIntsParts;
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
+    }
+    Parts newParts = allocate(newSize);
+    IntBuffer[] ret = newParts.arr;
+    IntBuffer[] arr = parts.arr;
     int i = ret.length - 1;
     int lastIdxSize = ((newSize - 1) & ARR_MASK) + 1;
-    buffercopy(arr[i], 0, ret[i], 0, lastIdxSize);
-    while (--i >= 0) {
-      // don't share content
-      buffercopy(arr[i], 0, ret[i], 0, SortedIntDocSet.MAX_ARR_SIZE);
+    try (Closeable c = parts.close[0]) {
+      buffercopy(arr[i], 0, ret[i], 0, lastIdxSize);
+      while (--i >= 0) {
+        // don't share content
+        buffercopy(arr[i], 0, ret[i], 0, SortedIntDocSet.MAX_ARR_SIZE);
+      }
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
     }
-    return ret;
+    return newParts;
   }
 
   public static int intersectionSize(
@@ -462,7 +499,8 @@ public class SortedIntDocSet extends DocSet {
   public DocSet intersection(DocSet other) {
     if (!(other instanceof SortedIntDocSet)) {
       int icount = 0;
-      IntBuffer[] arr = allocate(capacity);
+      Parts newParts = allocate(capacity);
+      IntBuffer[] arr = newParts.arr;
       for (int i = 0; i < capacity; i++) {
         int doc = docs[i >> WORDS_SHIFT].get(i & ARR_MASK);
         if (other.exists(doc)) {
@@ -473,17 +511,22 @@ public class SortedIntDocSet extends DocSet {
       if (icount == capacity) {
         return this; // no change
       }
-      return new SortedIntDocSet(arr, icount);
+      return new SortedIntDocSet(newParts, icount);
     }
 
     SortedIntDocSet otherSet = (SortedIntDocSet) other;
     int maxsz = Math.min(capacity, otherSet.capacity);
-    IntBuffer[] arr = allocate(maxsz);
+    Parts newParts = allocate(maxsz);
+    IntBuffer[] arr = newParts.arr;
     int sz = intersection(docs, capacity, otherSet.docs, otherSet.capacity, arr);
     if (sz == capacity) {
-      return this; // no change
+      try (Closeable c = newParts.close[0]) {
+        return this; // no change
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
     }
-    return new SortedIntDocSet(arr, sz);
+    return new SortedIntDocSet(newParts, sz);
   }
 
   protected static int andNotBinarySearch(
@@ -679,24 +722,34 @@ public class SortedIntDocSet extends DocSet {
 
     if (!(other instanceof SortedIntDocSet)) {
       int count = 0;
-      IntBuffer[] arr = allocate(capacity);
+      Parts newParts = allocate(capacity);
+      IntBuffer[] arr = newParts.arr;
       for (int i = 0; i < capacity; i++) {
         int doc = docs[i >> WORDS_SHIFT].get(i & ARR_MASK);
         if (!other.exists(doc)) arr[count >> WORDS_SHIFT].put(count++ & ARR_MASK, doc);
       }
       if (count == capacity) {
-        return this; // no change
+        try (Closeable c = newParts.close[0]) {
+          return this; // no change
+        } catch (IOException e) {
+          throw new UncheckedIOException(e);
+        }
       }
-      return new SortedIntDocSet(arr, count);
+      return new SortedIntDocSet(newParts, count);
     }
 
     SortedIntDocSet otherSet = (SortedIntDocSet) other;
-    IntBuffer[] arr = allocate(capacity);
+    Parts newParts = allocate(capacity);
+    IntBuffer[] arr = newParts.arr;
     int sz = andNot(docs, capacity, otherSet.docs, otherSet.capacity, arr);
     if (sz == capacity) {
-      return this; // no change
+      try (Closeable c = newParts.close[0]) {
+        return this; // no change
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
     }
-    return new SortedIntDocSet(arr, sz);
+    return new SortedIntDocSet(newParts, sz);
   }
 
   @Override
@@ -943,12 +996,13 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public SortedIntDocSet clone() {
+    Closeable[] close = new Closeable[1];
     IntBuffer[] newDocs = new IntBuffer[docs.length];
-    ByteBuffer[] bb = FixedBitSets.MODIFIER.allocateBytesArr(capacity << 2, newDocs);
+    ByteBuffer[] bb = FixedBitSets.MODIFIER.allocateBytesArr(capacity << 2, close);
     for (int i = docs.length - 1; i >= 0; i--) {
       newDocs[i] = bb[i].asIntBuffer().put(docs[i].slice()).clear();
     }
-    return new SortedIntDocSet(newDocs);
+    return new SortedIntDocSet(new Parts(newDocs, close));
   }
 
   @Override

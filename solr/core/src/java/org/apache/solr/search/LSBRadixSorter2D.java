@@ -19,16 +19,19 @@ package org.apache.solr.search;
 import static org.apache.solr.search.SortedIntDocSet.ARR_MASK;
 import static org.apache.solr.search.SortedIntDocSet.WORDS_SHIFT;
 
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.IntBuffer;
 
 /** Copied from {@link org.apache.lucene.util.LSBRadixSorter} */
-public final class LSBRadixSorter2D {
+public final class LSBRadixSorter2D implements Closeable {
 
   private static final int INSERTION_SORT_THRESHOLD = 30;
   private static final int HISTOGRAM_SIZE = 256;
 
-  private final IntBuffer[] histogram = SortedIntDocSet.allocate(HISTOGRAM_SIZE);
-  private IntBuffer[] buffer = new IntBuffer[0];
+  private final SortedIntDocSet.Parts histogram = SortedIntDocSet.allocate(HISTOGRAM_SIZE);
+  private SortedIntDocSet.Parts buffer = SortedIntDocSet.allocate(0);
   private int bufferCapacity = 0;
 
   private static void buildHistogram(IntBuffer[] array, int len, IntBuffer[] histogram, int shift) {
@@ -107,15 +110,19 @@ public final class LSBRadixSorter2D {
       return;
     }
 
-    buffer = SortedIntDocSet.grow(buffer, bufferCapacity, len);
+    try (Closeable c = buffer.close[0]) {
+      buffer = SortedIntDocSet.grow(buffer.arr, bufferCapacity, len);
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
     bufferCapacity = len;
 
     IntBuffer[] arr = array;
 
-    IntBuffer[] buf = buffer;
+    IntBuffer[] buf = buffer.arr;
 
     for (int shift = 0; shift < numBits; shift += 8) {
-      if (sort(arr, len, histogram, shift, buf)) {
+      if (sort(arr, len, histogram.arr, shift, buf)) {
         // swap arrays
         IntBuffer[] tmp = arr;
         arr = buf;
@@ -125,6 +132,14 @@ public final class LSBRadixSorter2D {
 
     if (array == buf) {
       SortedIntDocSet.arraycopy(arr, 0, array, 0, len);
+    }
+  }
+
+  @Override
+  public void close() throws IOException {
+    try (Closeable c1 = histogram.close[0];
+        Closeable c2 = buffer.close[0]) {
+      // close both
     }
   }
 }

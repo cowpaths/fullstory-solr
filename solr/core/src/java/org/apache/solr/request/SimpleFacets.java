@@ -18,6 +18,7 @@ package org.apache.solr.request;
 
 import static org.apache.solr.common.params.CommonParams.SORT;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Array;
@@ -1239,7 +1240,9 @@ public class SimpleFacets {
       }
     }
 
-    return finalize(res, searcher, docs, field, missing);
+    try (Closeable c = deState) {
+      return finalize(res, searcher, docs, field, missing);
+    }
   }
 
   private static NamedList<Integer> finalize(
