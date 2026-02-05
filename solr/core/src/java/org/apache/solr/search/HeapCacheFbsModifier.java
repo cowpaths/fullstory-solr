@@ -17,24 +17,30 @@
 package org.apache.solr.search;
 
 import com.codahale.metrics.Gauge;
+import java.io.Closeable;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.util.FixedBitSet;
+import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricProducer;
 import org.apache.solr.metrics.SolrMetricsContext;
+import org.apache.solr.util.FileUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -66,6 +72,7 @@ public class HeapCacheFbsModifier
 
   private final boolean unregister;
   private final ByteBuffer[] pool;
+  private final Closeable cleanup;
 
   private final AtomicLong headAndTail;
   private final BlockingQueue<ByteBuffer[]> releaseQueue = new ArrayBlockingQueue<>(1024, false);
@@ -75,6 +82,7 @@ public class HeapCacheFbsModifier
   public static final String POOL_TARGET_MB_PROPNAME = "solr.fbspool.targetMB";
   public static final String POOL_BACKING_FILE_PROPNAME = "solr.fbspool.file";
   public static final String POOL_ALWAYS_ONE_HEAP_PROPNAME = "solr.fbspool.alwaysOneHeap";
+  public static final String POOL_DUMP_STATS_ON_TEST_PROPNAME = "solr.fbspool.dumpStatsOnTest";
 
   private static final String POOL_BACKING_FILE =
       EnvUtils.getProperty(POOL_BACKING_FILE_PROPNAME, "");
@@ -96,7 +104,12 @@ public class HeapCacheFbsModifier
       targetPoolSizeSpec = ((long) targetPoolSizeMB) << 20;
     }
     long targetPoolSize = Math.min(maxPoolSize, targetPoolSizeSpec);
-    N_BLOCKS = Math.toIntExact(targetPoolSize / BLOCK_SIZE_BYTES);
+    if (EnvUtils.getProperty("tests.seed") == null) {
+      N_BLOCKS = Math.toIntExact(targetPoolSize / BLOCK_SIZE_BYTES);
+    } else {
+      // grossly undersize, to ensure re-use in test context (hacky, ignores "MB")
+      N_BLOCKS = targetPoolSizeMB;
+    }
     MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
     // NOTE: we must oversize by _at least_ 2x, to avoid concurrency issues
     POOL_ARR_SIZE = Integer.highestOneBit(N_BLOCKS - 1) << 2;
@@ -121,9 +134,14 @@ public class HeapCacheFbsModifier
     int blockIdx = 0;
     if (POOL_BACKING_FILE.isEmpty()) {
       poolAnonymous(numPartitions, blockIdx, pool);
+      cleanup = null;
     } else {
       try {
-        poolFileBacked(numPartitions, blockIdx, pool);
+        Path backing = poolFileBacked(numPartitions, blockIdx, pool, this);
+        cleanup =
+            () -> {
+              IOUtils.deleteFilesIfExist(backing);
+            };
       } catch (IOException e) {
         throw new UncheckedIOException(e);
       }
@@ -161,13 +179,30 @@ public class HeapCacheFbsModifier
     }
   }
 
-  private static void poolFileBacked(int numPartitions, int blockIdx, ByteBuffer[] pool)
-      throws IOException {
+  private static Path poolFileBacked(
+      int numPartitions, int blockIdx, ByteBuffer[] pool, Object caller) throws IOException {
     long blockSizeBytesL = BLOCK_SIZE_BYTES;
     long partitionMaxBytes = MAX_BLOCKS_PER_PARTITION * blockSizeBytesL;
+    Path backingFile;
+    String seed = EnvUtils.getProperty("tests.seed");
+    if (seed == null) {
+      // not in a test context
+      backingFile = Path.of(POOL_BACKING_FILE);
+    } else {
+      // test context; resolve relative to tmpdir, and scoped to this object in order to
+      // avoid conflicts (note: we'll ignore the possibility of hash collisions here)
+      backingFile =
+          Path.of(EnvUtils.getProperty("java.io.tmpdir"))
+              .resolve(
+                  POOL_BACKING_FILE
+                      + "_"
+                      + seed
+                      + "_"
+                      + Integer.toUnsignedString(System.identityHashCode(caller), 16));
+    }
     try (FileChannel fc =
         FileChannel.open(
-            Path.of(POOL_BACKING_FILE),
+            backingFile,
             StandardOpenOption.READ,
             StandardOpenOption.WRITE,
             StandardOpenOption.CREATE)) {
@@ -188,6 +223,7 @@ public class HeapCacheFbsModifier
         partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
       }
     }
+    return backingFile;
   }
 
   private static final SolrMetricsContext DISABLED = new SolrMetricsContext(null, null, null);
@@ -249,13 +285,31 @@ public class HeapCacheFbsModifier
     return ctx == DISABLED ? null : ctx;
   }
 
+  /**
+   * In order to verify that this codepath is active throughout tests, we provide this option to
+   * dump pool stats to disk (temp dir) upon close. Update default value to {@code true} below, or
+   * add this propname to {@code /gradle/testing/randomization.gradle} and set it to {@code true}
+   * there.
+   */
+  private static final boolean DUMP_STATS_ON_TEST =
+      EnvUtils.getPropertyAsBool(POOL_DUMP_STATS_ON_TEST_PROPNAME, false);
+
   @Override
+  @SuppressWarnings("try")
   public void close() {
     if (unregister) {
       try {
         if (FixedBitSets.unregisterModifier(this, refHandler)) {
-          try {
-            SolrMetricProducer.super.close();
+          try (Closeable c = SolrMetricProducer.super::close;
+              cleanup) {
+            SolrMetricsContext ctx;
+            String seed;
+            if (DUMP_STATS_ON_TEST
+                && (ctx = getSolrMetricsContext()) != null
+                && (seed = EnvUtils.getProperty("tests.seed")) != null) {
+              // test context, dump stats
+              dumpStats(ctx, seed);
+            }
           } finally {
             Arrays.fill(pool, null);
           }
@@ -270,6 +324,30 @@ public class HeapCacheFbsModifier
         throw new UncheckedIOException(e);
       } finally {
         Arrays.fill(pool, null);
+      }
+    }
+  }
+
+  private void dumpStats(SolrMetricsContext ctx, String seed) throws IOException {
+    Map<String, Object> snapshot = ctx.getMetricsSnapshot();
+    Object ct;
+    if (((ct = snapshot.get("DOCSET.docsetCache.exhaustedCount")) != null
+            && !Long.valueOf(0).equals(ct))
+        || ((ct = snapshot.get("DOCSET.docsetCache.allocatedCount")) != null
+            && !Long.valueOf(0).equals(ct))) {
+      Path hcfmDumpDir = Path.of(EnvUtils.getProperty("java.io.tmpdir")).resolve("hcfm_" + seed);
+      FileUtils.createDirectories(hcfmDumpDir);
+      Path dumpfile =
+          hcfmDumpDir.resolve(Integer.toUnsignedString(System.identityHashCode(this), 16));
+      try (PrintStream out =
+          new PrintStream(
+              Channels.newOutputStream(
+                  FileChannel.open(
+                      dumpfile, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW)))) {
+        snapshot.forEach(
+            (k, v) -> {
+              out.println(k + ": " + v + " (" + (v == null ? null : v.getClass()) + ")");
+            });
       }
     }
   }
