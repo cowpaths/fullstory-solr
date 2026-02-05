@@ -79,10 +79,14 @@ public class HeapCacheFbsModifier
 
   private final ReferenceHandler<ByteBuffer[]> refHandler;
 
+  public static final String POOL_OFFHEAP_PROPNAME = "solr.fbspool.offheap";
   public static final String POOL_TARGET_MB_PROPNAME = "solr.fbspool.targetMB";
   public static final String POOL_BACKING_FILE_PROPNAME = "solr.fbspool.file";
-  public static final String POOL_ALWAYS_ONE_HEAP_PROPNAME = "solr.fbspool.alwaysOneHeap";
+  public static final String POOL_ALWAYS_ONE_UNPOOLED_PROPNAME = "solr.fbspool.alwaysOneUnpooled";
   public static final String POOL_DUMP_STATS_ON_TEST_PROPNAME = "solr.fbspool.dumpStatsOnTest";
+
+  private static final boolean POOL_OFFHEAP =
+      EnvUtils.getPropertyAsBool(POOL_OFFHEAP_PROPNAME, true);
 
   private static final String POOL_BACKING_FILE =
       EnvUtils.getProperty(POOL_BACKING_FILE_PROPNAME, "");
@@ -91,8 +95,9 @@ public class HeapCacheFbsModifier
     long maxMemory = Runtime.getRuntime().maxMemory();
     long defaultTargetPoolSize = maxMemory / 16; // default to 1/16 of heap
 
-    // max of 1/2 of heap (unless file-backed)
-    long maxPoolSize = POOL_BACKING_FILE.isEmpty() ? (maxMemory / 2) : Long.MAX_VALUE;
+    // max of 1/2 of heap (off-heap), 1/4 of heap (on-heap), unlimited (off-heap file-backed)
+    long maxPoolSize =
+        POOL_BACKING_FILE.isEmpty() ? (maxMemory / (POOL_OFFHEAP ? 2 : 4)) : Long.MAX_VALUE;
 
     int targetPoolSizeMB =
         EnvUtils.getPropertyAsInteger(
@@ -108,7 +113,7 @@ public class HeapCacheFbsModifier
       N_BLOCKS = Math.toIntExact(targetPoolSize / BLOCK_SIZE_BYTES);
     } else {
       // grossly undersize, to ensure re-use in test context (hacky, ignores "MB")
-      N_BLOCKS = targetPoolSizeMB;
+      N_BLOCKS = Math.max(1, Math.toIntExact(targetPoolSizeSpec >> 20));
     }
     MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
     // NOTE: we must oversize by _at least_ 2x, to avoid concurrency issues
@@ -169,8 +174,11 @@ public class HeapCacheFbsModifier
     for (int i = numPartitions - 1, partitionNumBlocks = ((N_BLOCKS - 1) / numPartitions) + 1;
         i >= 0;
         i--) {
+      int partitionSize = partitionNumBlocks * BLOCK_SIZE_BYTES;
       ByteBuffer partition =
-          ByteBuffer.allocateDirect(partitionNumBlocks * BLOCK_SIZE_BYTES)
+          (POOL_OFFHEAP
+                  ? ByteBuffer.allocateDirect(partitionSize)
+                  : ByteBuffer.allocate(partitionSize))
               .order(FixedBitSet.BYTE_ORDER);
       for (int j = 0; j < partitionNumBlocks; j++) {
         pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
@@ -441,7 +449,7 @@ public class HeapCacheFbsModifier
    * avoid JIT over-fitting.
    */
   private static final int ADJUST =
-      EnvUtils.getPropertyAsBool(POOL_ALWAYS_ONE_HEAP_PROPNAME, true) ? 1 : 0;
+      EnvUtils.getPropertyAsBool(POOL_ALWAYS_ONE_UNPOOLED_PROPNAME, true) ? 1 : 0;
 
   private ByteBuffer[] allocateBytesArr(
       int head, int pooledReserved, int numBytes, Object sentinel) {

@@ -82,7 +82,8 @@ allprojects {
     ext {
       testOptions += [
           [propName: 'lucene.bitset.bigendian', value: "true", description: "true -> BigEndian, false -> LittleEndian ByteBuffers"],
-          [propName: 'solr.fbspool.alwaysOneHeap', value: "true", description: "If true, one ByteBuffer partition is always a heap ByteBuffer"],
+          [propName: 'solr.fbspool.offheap', value: "true", description: "If true, ByteBuffer pool is direct/off-heap"],
+          [propName: 'solr.fbspool.alwaysOneUnpooled', value: "true", description: "If true, one partition is always an unpooled heap ByteBuffer"],
           [propName: 'solr.fbspool.file', value: "", description: "If non-empty, file for mmap'd, file-backed fbspool"],
           [propName: 'solr.fbspool.targetMB', value: "-1", description: "Configures pooling of docset partitions (0 -> disabled, -1 -> default)"],
           [propName: 'solr.bitdocset.maxwordsshift', value: "7", description: "May set lower to exercise DocSet partitioning"],

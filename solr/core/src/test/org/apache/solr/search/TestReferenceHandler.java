@@ -62,6 +62,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
     }
   }
 
+  @SuppressWarnings("try")
   public void testInit() throws IOException, ExecutionException, InterruptedException {
     int nThreads = 10;
     ExecutorService exec =
@@ -105,6 +106,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
   private static final int BLOCK_SHIFT = BitDocSet.BIT_SHIFT - 6;
   private static final int BLOCK_MASK = (1 << BLOCK_SHIFT) - 1;
 
+  @SuppressWarnings("try")
   public void testHeapCacheFbs() throws InterruptedException, ExecutionException, IOException {
     int nThreads = 20;
     ExecutorService exec =
