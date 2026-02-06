@@ -1418,10 +1418,17 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     boolean useCache = filterCache != null && largestPossible >= deState.minSetSizeCached;
 
     if (useCache) {
+      log.info("getDocSet with DocsNumState", new Throwable("just to print track"));
       TermQuery key = new TermQuery(new Term(deState.fieldName, deState.termsEnum.term()));
-      return filterCache.computeIfAbsent(
+      AtomicBoolean cacheHit = new AtomicBoolean(true);
+      long startTime = System.nanoTime();
+      DocSet result = filterCache.computeIfAbsent(
           key,
-          (IOFunction<? super Query, ? extends DocSet>) k -> getResult(deState, largestPossible));
+          (IOFunction<? super Query, ? extends DocSet>) k -> {
+            cacheHit.set(false);
+            return getResult(deState, largestPossible);
+          });
+      addCacheStats(key, cacheHit.get(), result.size(), startTime);
     }
 
     return getResult(deState, largestPossible);
