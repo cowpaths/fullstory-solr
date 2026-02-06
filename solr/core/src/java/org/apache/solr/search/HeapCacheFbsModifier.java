@@ -21,6 +21,12 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.UncheckedIOException;
+import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.Linker;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.SymbolLookup;
+import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
@@ -84,9 +90,12 @@ public class HeapCacheFbsModifier
   public static final String POOL_BACKING_FILE_PROPNAME = "solr.fbspool.file";
   public static final String POOL_ALWAYS_ONE_UNPOOLED_PROPNAME = "solr.fbspool.alwaysOneUnpooled";
   public static final String POOL_DUMP_STATS_ON_TEST_PROPNAME = "solr.fbspool.dumpStatsOnTest";
+  public static final String POOL_SWAP_PROPNAME = "solr.fbspool.swap";
 
   private static final boolean POOL_OFFHEAP =
       EnvUtils.getPropertyAsBool(POOL_OFFHEAP_PROPNAME, true);
+
+  private static final boolean POOL_SWAP = EnvUtils.getPropertyAsBool(POOL_SWAP_PROPNAME, false);
 
   private static final String POOL_BACKING_FILE =
       EnvUtils.getProperty(POOL_BACKING_FILE_PROPNAME, "");
@@ -138,7 +147,11 @@ public class HeapCacheFbsModifier
     pool = new ByteBuffer[POOL_ARR_SIZE];
     int blockIdx = 0;
     if (POOL_BACKING_FILE.isEmpty()) {
-      poolAnonymous(numPartitions, blockIdx, pool);
+      if (POOL_SWAP) {
+        poolSwapped(numPartitions, blockIdx, pool);
+      } else {
+        poolAnonymous(numPartitions, blockIdx, pool);
+      }
       cleanup = null;
     } else {
       try {
@@ -511,5 +524,42 @@ public class HeapCacheFbsModifier
 
   public int activeThreadCount() {
     return refHandler.activeThreadCount();
+  }
+
+  private static final int MADV_PAGEOUT = 21;
+
+  @SuppressWarnings("preview")
+  private static void poolSwapped(int numPartitions, int blockIdx, ByteBuffer[] pool) {
+    // 1. Find the C 'madvise' function
+    Linker linker = Linker.nativeLinker();
+    SymbolLookup libc = linker.defaultLookup();
+
+    MethodHandle madvise =
+        linker.downcallHandle(
+            libc.find("madvise").get(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_INT,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_INT));
+
+    for (int i = numPartitions - 1, partitionNumBlocks = ((N_BLOCKS - 1) / numPartitions) + 1;
+        i >= 0;
+        i--) {
+      int partitionSize = partitionNumBlocks * BLOCK_SIZE_BYTES;
+      ByteBuffer partition = ByteBuffer.allocateDirect(partitionSize).order(FixedBitSet.BYTE_ORDER);
+      for (int j = 0; j < partitionNumBlocks; j++) {
+        pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
+      }
+      try {
+        MemorySegment segment = MemorySegment.ofBuffer(partition);
+        // 2. Execute the call directly on the memory segment
+        int result = (int) madvise.invokeExact(segment.address(), segment.byteSize(), MADV_PAGEOUT);
+        if (result != 0) log.warn("madvise failed");
+      } catch (Throwable t) {
+        log.error("error forcing to swap", t);
+      }
+      partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
+    }
   }
 }
