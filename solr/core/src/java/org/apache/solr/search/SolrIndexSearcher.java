@@ -1521,7 +1521,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     return getDocSet(query, null);
   }
 
-  private static void addCacheStats(
+  public static void addCacheStats(
       Query key, boolean cacheHit, int docSetIdCount, long startTimeNanos) {
     SolrRequestInfo reqInfo = SolrRequestInfo.getRequestInfo();
     if (reqInfo != null && reqInfo.getResponseBuilder() != null) {
