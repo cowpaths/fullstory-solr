@@ -1525,9 +1525,6 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       Query key, boolean cacheHit, int docSetIdCount, long startTimeNanos) {
     SolrRequestInfo reqInfo = SolrRequestInfo.getRequestInfo();
 
-    log.info("Attempt to add cache stats for query: {}, cacheHit: {}, docSetIdCount: {}, elapsedMs: {}",
-        key, cacheHit, docSetIdCount,
-        java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos));
     if (reqInfo != null && reqInfo.getResponseBuilder() != null) {
       org.apache.solr.common.util.NamedList<Object> stat =
           new org.apache.solr.common.util.SimpleOrderedMap<>();
