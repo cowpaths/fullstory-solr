@@ -1418,7 +1418,6 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     boolean useCache = filterCache != null && largestPossible >= deState.minSetSizeCached;
 
     if (useCache) {
-      log.info("getDocSet with DocsNumState", new Throwable("just to print track"));
       TermQuery key = new TermQuery(new Term(deState.fieldName, deState.termsEnum.term()));
       AtomicBoolean cacheHit = new AtomicBoolean(true);
       long startTime = System.nanoTime();
@@ -1428,6 +1427,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
             cacheHit.set(false);
             return getResult(deState, largestPossible);
           });
+      log.info("getDocSet with DocsNumState");
       addCacheStats(key, cacheHit.get(), result.size(), startTime);
     }
 
