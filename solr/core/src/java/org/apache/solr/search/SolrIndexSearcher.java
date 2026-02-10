@@ -1130,6 +1130,12 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         liveDocsHitCount.increment();
       } else {
         liveDocs = liveDocsSupplier.get();
+
+        // TODO: for now, just ensure `liveDocs` never gets collected; we may be able to collect
+        //  more proactively, but that'd require determining the context in which `liveDocs`,
+        //  was created ...
+        liveDocs.acquire();
+
         liveDocsInsertsCount.increment();
       }
     }

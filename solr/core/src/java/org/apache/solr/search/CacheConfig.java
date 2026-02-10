@@ -18,6 +18,8 @@ package org.apache.solr.search;
 
 import static org.apache.solr.common.params.CommonParams.NAME;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Constructor;
 import java.util.Collections;
@@ -25,6 +27,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 import org.apache.solr.common.ConfigNode;
 import org.apache.solr.common.MapSerializable;
@@ -33,6 +36,9 @@ import org.apache.solr.core.PluginInfo;
 import org.apache.solr.core.SolrConfig;
 import org.apache.solr.core.SolrCore;
 import org.apache.solr.core.SolrResourceLoader;
+import org.apache.solr.metrics.SolrMetricsContext;
+import org.apache.solr.request.SolrRequestInfo;
+import org.apache.solr.util.IOFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -185,13 +191,193 @@ public class CacheConfig implements MapSerializable {
   @SuppressWarnings("rawtypes")
   private static final Class<?>[] REGEN_PARAMS = new Class[] {SolrConfig.class, CacheConfig.class};
 
+  private static <T> T acquire(T val) {
+    if (val instanceof DocSet) {
+      SolrRequestInfo info;
+      Closeable c = ((DocSet) val).acquire();
+      if (c == null) {
+        return null;
+      } else if ((info = SolrRequestInfo.getRequestInfo()) != null) {
+        info.addCloseHook(((DocSet) val).acquire());
+      }
+    }
+    return val;
+  }
+
   @SuppressWarnings("rawtypes")
   public SolrCache newInstance(SolrCore core) {
     try {
       @SuppressWarnings("unchecked")
       SolrCache<?, ?> cache = newInstance(core, (Class<? extends SolrCache<?, ?>>) clazz.get());
       persistence[0] = cache.init(args, persistence[0], regenerator);
-      return cache.toExternal();
+      SolrCache delegate = cache.toExternal();
+      return new SolrCache() {
+        @Override
+        @SuppressWarnings("unchecked")
+        public Object init(Map args, Object persistence, CacheRegenerator regenerator) {
+          return delegate.init(args, persistence, regenerator);
+        }
+
+        @Override
+        public boolean isRecursionSupported() {
+          return delegate.isRecursionSupported();
+        }
+
+        @Override
+        public SegmentMap getSegmentMap() {
+          return delegate.getSegmentMap();
+        }
+
+        @Override
+        public void initialSearcher(SolrIndexSearcher initialSearcher) {
+          delegate.initialSearcher(initialSearcher);
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public void forEach(BiConsumer action) {
+          delegate.forEach(action);
+        }
+
+        @Override
+        public void close() throws IOException {
+          delegate.close();
+        }
+
+        @Override
+        public SolrCache<?, ?> toInternal() {
+          return delegate.toInternal();
+        }
+
+        @Override
+        public String name() {
+          return delegate.name();
+        }
+
+        @Override
+        public int size() {
+          return delegate.size();
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public Object put(Object key, Object value) {
+          if (value instanceof DocSet) {
+            if (((DocSet) value).acquire() == null) {
+              // we should be able to acquire a reference at the time of insertion
+              throw new IllegalStateException();
+            }
+            return acquire(delegate.put(key, value));
+          } else {
+            return delegate.put(key, value);
+          }
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public Object get(Object key) {
+          return acquire(delegate.get(key));
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public Object remove(Object key) {
+          return acquire(delegate.remove(key));
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public Object computeIfAbsent(Object key, IOFunction mappingFunction) throws IOException {
+          Object ret;
+          boolean[] weComputed = new boolean[1];
+          IOFunction local =
+              (k) -> {
+                Object computed = mappingFunction.apply(k);
+                if (computed instanceof DocSet) {
+                  // acquire a ref _for the cache_
+                  Closeable c = ((DocSet) computed).acquire();
+                  assert c != null;
+                }
+                weComputed[0] = true;
+                return computed;
+              };
+          do {
+            ret = delegate.computeIfAbsent(key, local);
+            if (weComputed[0]) {
+              // if we computed the result, then it should already be registered with this
+              // request scope (`SolrRequestInfo`), if applicable.
+              return ret;
+            }
+          } while ((ret = acquire(ret)) == null);
+          return ret;
+        }
+
+        @Override
+        public void clear() {
+          delegate.clear();
+        }
+
+        @Override
+        public void setState(State state) {
+          delegate.setState(state);
+        }
+
+        @Override
+        public State getState() {
+          return delegate.getState();
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public void warm(SolrIndexSearcher searcher, SolrCache old) {
+          delegate.warm(searcher, old);
+        }
+
+        @Override
+        public int getMaxSize() {
+          return delegate.getMaxSize();
+        }
+
+        @Override
+        public void setMaxSize(int maxSize) {
+          delegate.setMaxSize(maxSize);
+        }
+
+        @Override
+        public int getMaxRamMB() {
+          return delegate.getMaxRamMB();
+        }
+
+        @Override
+        public void setMaxRamMB(int maxRamMB) {
+          delegate.setMaxRamMB(maxRamMB);
+        }
+
+        @Override
+        public String getName() {
+          return delegate.getName();
+        }
+
+        @Override
+        public String getDescription() {
+          return delegate.getDescription();
+        }
+
+        @Override
+        public Category getCategory() {
+          return delegate.getCategory();
+        }
+
+        @Override
+        public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
+          delegate.initializeMetrics(parentContext, scope);
+        }
+
+        @Override
+        public SolrMetricsContext getSolrMetricsContext() {
+          return delegate.getSolrMetricsContext();
+        }
+      };
     } catch (Exception e) {
       log.error("Error instantiating cache", e);
       // we can carry on without a cache... but should we?

@@ -24,6 +24,7 @@ import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import com.google.common.annotations.VisibleForTesting;
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
@@ -205,6 +206,13 @@ public class CaffeineCache<K, V> extends SolrCacheBase
             + RamUsageEstimator.LINKED_HASHTABLE_RAM_BYTES_PER_ENTRY));
     if (async) {
       ramBytes.add(-RAM_BYTES_PER_FUTURE);
+    }
+    if (value instanceof Closeable) {
+      try {
+        ((Closeable) value).close();
+      } catch (IOException e) {
+        log.warn("error closing cache object", e);
+      }
     }
   }
 
