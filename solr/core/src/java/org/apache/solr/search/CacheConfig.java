@@ -296,7 +296,7 @@ public class CacheConfig implements MapSerializable {
                 if (computed instanceof DocSet) {
                   // acquire a ref _for the cache_
                   Closeable c = ((DocSet) computed).acquire();
-                  assert c != null;
+                  assert c != null : "nope! " + ((DocSet) computed).size();
                 }
                 weComputed[0] = true;
                 return computed;

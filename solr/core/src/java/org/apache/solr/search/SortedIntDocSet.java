@@ -46,6 +46,7 @@ public class SortedIntDocSet extends DocSet {
    * @param parts Sorted list of ids
    */
   public SortedIntDocSet(Parts parts) {
+    super(parts.arr.length > 0);
     this.close = parts.close;
     this.docs = parts.arr;
     this.capacity = getCapacity(docs);
@@ -98,7 +99,8 @@ public class SortedIntDocSet extends DocSet {
   }
 
   private static final IntBuffer[] zeroInts = new IntBuffer[0];
-  private static final Parts zeroIntsParts = new Parts(zeroInts, new Closeable[1]);
+  private static final Parts zeroIntsParts =
+      new Parts(zeroInts, new Closeable[] {DocSet.NOOP_CLOSEABLE});
   private static final SortedIntDocSet zero = new SortedIntDocSet(zeroIntsParts);
 
   // -5 b/c there are 32 bits per int

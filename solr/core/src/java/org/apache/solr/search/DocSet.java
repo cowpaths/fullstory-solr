@@ -38,12 +38,17 @@ public abstract class DocSet
     implements Accountable, Cloneable, Closeable /* extends Collection<Integer> */ {
 
   // package accessible; guarantee known implementations
-  DocSet() {
+  DocSet(boolean tracked) {
     assert this instanceof BitDocSet || this instanceof SortedIntDocSet;
-    SolrRequestInfo requestInfo = SolrRequestInfo.getRequestInfo();
-    if (requestInfo != null) {
-      AtomicInteger refCountF = refCount;
-      requestInfo.addCloseHook(() -> release(refCountF));
+    if (tracked) {
+      refCount = new AtomicInteger(1);
+      SolrRequestInfo requestInfo = SolrRequestInfo.getRequestInfo();
+      if (requestInfo != null) {
+        AtomicInteger refCountF = refCount;
+        requestInfo.addCloseHook(() -> release(refCountF));
+      }
+    } else {
+      refCount = null;
     }
   }
 
@@ -51,12 +56,20 @@ public abstract class DocSet
   // classloader deadlock
   private static class EmptyLazyHolder {
     static final DocSet INSTANCE =
-        new SortedIntDocSet(new SortedIntDocSet.Parts(new IntBuffer[0], new Closeable[1]));
+        new SortedIntDocSet(
+            new SortedIntDocSet.Parts(new IntBuffer[0], new Closeable[] {NOOP_CLOSEABLE}));
   }
 
-  private final AtomicInteger refCount = new AtomicInteger(1);
+  static final Closeable NOOP_CLOSEABLE = DocSet::doNothing;
+
+  private static void doNothing() {}
+
+  private final AtomicInteger refCount;
 
   public final Closeable acquire() {
+    if (refCount == null) {
+      return NOOP_CLOSEABLE;
+    }
     for (int extant = refCount.get(); extant > 0; ) {
       int witness = refCount.compareAndExchange(extant, extant + 1);
       if (witness == extant) {

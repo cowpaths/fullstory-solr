@@ -114,14 +114,17 @@ public class BitDocSet extends DocSet {
   int size = -1; // number of docs in the set (cached for perf)
 
   public BitDocSet() {
+    super(true);
     parts = new FixedBitSets(64);
   }
 
   public BitDocSet(FixedBitSets parts) {
+    super(parts.parts.length > 0);
     this.parts = parts;
   }
 
   public BitDocSet(FixedBitSets parts, int size) {
+    super(size > 0);
     this.parts = parts;
     this.size = size;
   }
