@@ -1530,8 +1530,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
           new org.apache.solr.common.util.SimpleOrderedMap<>();
 
       String keyString = key.toString();
-      if (keyString.length() > 50) {
-        keyString = keyString.substring(0, 50) + "...";
+      if (keyString.length() > 500) {
+        keyString = keyString.substring(0, 500) + "...";
       }
       stat.add("key", keyString);
 
