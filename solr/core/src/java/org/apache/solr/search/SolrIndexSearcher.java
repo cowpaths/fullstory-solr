@@ -1421,14 +1421,17 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       TermQuery key = new TermQuery(new Term(deState.fieldName, deState.termsEnum.term()));
       AtomicBoolean cacheHit = new AtomicBoolean(true);
       long startTime = System.nanoTime();
-      DocSet result = filterCache.computeIfAbsent(
-          key,
-          (IOFunction<? super Query, ? extends DocSet>) k -> {
-            cacheHit.set(false);
-            return getResult(deState, largestPossible);
-          });
+      DocSet result =
+          filterCache.computeIfAbsent(
+              key,
+              (IOFunction<? super Query, ? extends DocSet>)
+                  k -> {
+                    cacheHit.set(false);
+                    return getResult(deState, largestPossible);
+                  });
       log.info("getDocSet with DocsNumState");
-      addCacheStats(key, cacheHit.get(), result.size(), startTime);
+      addCacheStats(key, cacheHit.get(), result != null ? result.size() : -1, startTime);
+      return result;
     }
 
     return getResult(deState, largestPossible);
@@ -1544,9 +1547,12 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
       reqInfo.getResponseBuilder().addFilterStats(stat);
 
-      log.info("Added cache stats for query: {}, cacheHit: {}, docSetIdCount: {}, elapsedMs: {}",
-              key, cacheHit, docSetIdCount,
-              java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos));
+      log.info(
+          "Added cache stats for query: {}, cacheHit: {}, docSetIdCount: {}, elapsedMs: {}",
+          key,
+          cacheHit,
+          docSetIdCount,
+          java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos));
     }
   }
 

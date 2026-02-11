@@ -444,7 +444,8 @@ public final class SolrRangeQuery extends ExtendedQueryBase implements DocSetPro
           long start = System.nanoTime();
           answer = solrSearcher.getFilterCache().get(SolrRangeQuery.this);
           log.info("SolrRangeQuery reading filter cache");
-          SolrIndexSearcher.addCacheStats(SolrRangeQuery.this, answer != null, answer != null ? answer.size() : -1, start);
+          SolrIndexSearcher.addCacheStats(
+              SolrRangeQuery.this, answer != null, answer != null ? answer.size() : -1, start);
         }
       } else {
         doCheck = false;
