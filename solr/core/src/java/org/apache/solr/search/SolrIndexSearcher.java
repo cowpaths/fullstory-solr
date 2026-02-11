@@ -1528,14 +1528,15 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       Query key, boolean cacheHit, int docSetIdCount, long startTimeNanos) {
     SolrRequestInfo reqInfo = SolrRequestInfo.getRequestInfo();
 
+    String keyString = key != null ? key.toString() : "null";
+    if (keyString.length() > 500) {
+      keyString = keyString.substring(0, 500) + "...";
+    }
+
     if (reqInfo != null && reqInfo.getResponseBuilder() != null) {
       org.apache.solr.common.util.NamedList<Object> stat =
           new org.apache.solr.common.util.SimpleOrderedMap<>();
 
-      String keyString = key.toString();
-      if (keyString.length() > 500) {
-        keyString = keyString.substring(0, 500) + "...";
-      }
       stat.add("key", keyString);
 
       long elapsedMs =
@@ -1546,13 +1547,10 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       stat.add("docSetIdCount", docSetIdCount);
 
       reqInfo.getResponseBuilder().addFilterStats(stat);
-
-      log.info(
-          "Added cache stats for query: {}, cacheHit: {}, docSetIdCount: {}, elapsedMs: {}",
-          key,
-          cacheHit,
-          docSetIdCount,
-          java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos));
+    } else {
+      log.warn(
+          "Unexpected filter cache that has no request info or response builder: key {}",
+          keyString);
     }
   }
 
