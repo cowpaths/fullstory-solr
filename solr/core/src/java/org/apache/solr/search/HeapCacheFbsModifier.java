@@ -28,6 +28,7 @@ import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
@@ -125,8 +126,7 @@ public class HeapCacheFbsModifier
       N_BLOCKS = Math.max(1, Math.toIntExact(targetPoolSizeSpec >> 20));
     }
     MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
-    // NOTE: we must oversize by _at least_ 2x, to avoid concurrency issues
-    POOL_ARR_SIZE = Integer.highestOneBit(N_BLOCKS - 1) << 2;
+    POOL_ARR_SIZE = Integer.highestOneBit(N_BLOCKS - 1) << 1;
     POOL_SIZE_MASK = POOL_ARR_SIZE - 1;
     if (log.isInfoEnabled()) {
       log.info(
@@ -424,12 +424,19 @@ public class HeapCacheFbsModifier
 
   private final LongAdder collected = new LongAdder();
 
+  private static final VarHandle H = MethodHandles.arrayElementVarHandle(ByteBuffer[].class);
+
   private void releaseLoop() throws InterruptedException {
     int destOff = N_BLOCKS;
     for (; ; ) {
       ByteBuffer[] toRelease = releaseQueue.take();
       for (ByteBuffer bb : toRelease) {
-        pool[destOff++ & POOL_SIZE_MASK] = bb;
+        // pool[destOff++ & POOL_SIZE_MASK] = bb;
+        int idx = destOff++ & POOL_SIZE_MASK;
+        while (!H.compareAndSet(pool, idx, null, bb)) {
+          // we have lapped and have to wait for consumer threads to catch up
+          Thread.yield();
+        }
       }
       collected.add(toRelease.length);
       for (long extant = headAndTail.get(); ; ) {
@@ -501,7 +508,9 @@ public class HeapCacheFbsModifier
   }
 
   private ByteBuffer initBuf(int head, int size) {
-    ByteBuffer ret = pool[head & POOL_SIZE_MASK].clear().limit(size);
+    // ByteBuffer ret = pool[head & POOL_SIZE_MASK].clear().limit(size);
+    ByteBuffer ret = (ByteBuffer) H.getAndSetAcquire(pool, head & POOL_SIZE_MASK, null);
+    ret.clear().limit(size);
     // zero it out
     return ret.put(FRESH.slice(0, size)).flip();
   }
