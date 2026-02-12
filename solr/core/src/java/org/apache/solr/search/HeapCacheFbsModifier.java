@@ -65,7 +65,7 @@ public class HeapCacheFbsModifier
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private static final int BLOCK_SIZE_BYTES = SortedIntDocSet.MAX_ARR_SIZE << 2;
-  private static final int MAX_BLOCKS_PER_PARTITION;
+  private static final int MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
   private final int nBlocks;
   private static final long TAIL_MASK = -1L >>> Integer.SIZE;
 
@@ -87,48 +87,49 @@ public class HeapCacheFbsModifier
 
   private final ReferenceHandler<ByteBuffer[]> refHandler;
 
-  public static final String POOL_OFFHEAP_PROPNAME = "solr.fbspool.offheap";
-  public static final String POOL_TARGET_MB_PROPNAME = "solr.fbspool.targetMB";
+  public static final String POOL_OFFHEAP_TARGET_MB_PROPNAME = "solr.fbspool.offheap.targetMB";
+  public static final String POOL_ONHEAP_TARGET_MB_PROPNAME = "solr.fbspool.onheap.targetMB";
   public static final String POOL_ALWAYS_ONE_UNPOOLED_PROPNAME = "solr.fbspool.alwaysOneUnpooled";
   public static final String POOL_DUMP_STATS_ON_TEST_PROPNAME = "solr.fbspool.dumpStatsOnTest";
-  public static final String POOL_SWAP_PROPNAME = "solr.fbspool.swap";
-
-  private static final boolean POOL_OFFHEAP =
-      EnvUtils.getPropertyAsBool(POOL_OFFHEAP_PROPNAME, true);
-
-  private static final boolean POOL_SWAP = EnvUtils.getPropertyAsBool(POOL_SWAP_PROPNAME, false);
 
   private static final long TPS;
+  private static final long TPS_OFFHEAP;
 
   static {
     long maxMemory = Runtime.getRuntime().maxMemory();
     long defaultTargetPoolSize = maxMemory / 16; // default to 1/16 of heap
+    long defaultOffheapTargetPoolSize = maxMemory / 4; // default to 1/4 of heap
 
     int targetPoolSizeMB =
         EnvUtils.getPropertyAsInteger(
-            POOL_TARGET_MB_PROPNAME, Math.toIntExact(defaultTargetPoolSize >> 20));
-    long targetPoolSizeSpec;
+            POOL_ONHEAP_TARGET_MB_PROPNAME, Math.toIntExact(defaultTargetPoolSize >> 20));
+    int targetOffheapPoolSizeMB =
+        EnvUtils.getPropertyAsInteger(
+            POOL_OFFHEAP_TARGET_MB_PROPNAME, Math.toIntExact(defaultOffheapTargetPoolSize >> 20));
     if (targetPoolSizeMB == -1) {
-      targetPoolSizeSpec = defaultTargetPoolSize;
+      TPS = defaultTargetPoolSize;
     } else {
-      targetPoolSizeSpec = ((long) targetPoolSizeMB) << 20;
+      TPS = ((long) targetPoolSizeMB) << 20;
     }
-    TPS = Math.min(maxMemory, targetPoolSizeSpec);
-    MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
+    if (targetPoolSizeMB == -1) {
+      TPS_OFFHEAP = defaultOffheapTargetPoolSize;
+    } else {
+      TPS_OFFHEAP = ((long) targetOffheapPoolSizeMB) << 20;
+    }
     if (log.isInfoEnabled()) {
       log.info("block_size={}", RamUsageEstimator.humanReadableUnits(BLOCK_SIZE_BYTES));
     }
   }
 
   private HeapCacheFbsModifier() {
-    this(true, TPS);
+    this(true, TPS, false);
   }
 
-  HeapCacheFbsModifier(boolean unregister) {
-    this(unregister, TPS);
+  HeapCacheFbsModifier(boolean unregister, boolean offheap) {
+    this(unregister, TPS, offheap);
   }
 
-  HeapCacheFbsModifier(boolean unregister, long targetPoolSize) {
+  HeapCacheFbsModifier(boolean unregister, long targetPoolSize, boolean offheap) {
     this.unregister = unregister;
     if (EnvUtils.getProperty("tests.seed") == null) {
       nBlocks = Math.toIntExact(targetPoolSize / BLOCK_SIZE_BYTES);
@@ -145,10 +146,10 @@ public class HeapCacheFbsModifier
     int numPartitions = ((nBlocks - 1) / MAX_BLOCKS_PER_PARTITION) + 1;
     pool = new ByteBuffer[nBlocks];
     int blockIdx = 0;
-    if (POOL_SWAP) {
-      poolSwapped(nBlocks, numPartitions, blockIdx, pool);
+    if (offheap) {
+      poolOffheap(nBlocks, numPartitions, blockIdx, pool);
     } else {
-      poolAnonymous(nBlocks, numPartitions, blockIdx, pool);
+      poolOnheap(nBlocks, numPartitions, blockIdx, pool);
     }
     top = new AtomicInteger(nBlocks);
     refHandler =
@@ -169,17 +170,13 @@ public class HeapCacheFbsModifier
             });
   }
 
-  private static void poolAnonymous(
-      int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
+  private static void poolOnheap(int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
     for (int i = numPartitions - 1, partitionNumBlocks = ((nBlocks - 1) / numPartitions) + 1;
         i >= 0;
         i--) {
       int partitionSize = partitionNumBlocks * BLOCK_SIZE_BYTES;
-      int overAlloc = Math.max(ALIGN_ALLOC_MINSIZE, partitionSize + ALIGN_OVERHEAD);
       ByteBuffer partition =
-          (POOL_OFFHEAP ? ByteBuffer.allocateDirect(overAlloc) : ByteBuffer.allocate(overAlloc))
-              .alignedSlice(ALIGN_SIZE)
-              .order(FixedBitSet.BYTE_ORDER);
+          ByteBuffer.allocate(partitionSize + ALIGN_OVERHEAD).order(FixedBitSet.BYTE_ORDER);
       for (int j = 0; j < partitionNumBlocks; j++) {
         pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
       }
@@ -478,7 +475,7 @@ public class HeapCacheFbsModifier
   private static final int MADV_PAGEOUT = 21;
 
   @SuppressWarnings("preview")
-  private static void poolSwapped(int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
+  private static void poolOffheap(int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
     // 1. Find the C 'madvise' function
     Linker linker = Linker.nativeLinker();
     SymbolLookup libc = linker.defaultLookup();
@@ -506,7 +503,7 @@ public class HeapCacheFbsModifier
       try {
         MemorySegment segment = MemorySegment.ofBuffer(partition);
         // 2. Execute the call directly on the memory segment
-        int result = (int) madvise.invokeExact(segment.address(), segment.byteSize(), MADV_PAGEOUT);
+        int result = (int) madvise.invokeExact(segment, segment.byteSize(), MADV_PAGEOUT);
         if (result != 0) log.warn("madvise failed");
       } catch (Throwable t) {
         log.error("error forcing to swap", t);

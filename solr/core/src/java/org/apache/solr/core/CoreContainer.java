@@ -416,7 +416,7 @@ public class CoreContainer {
   }
 
   private static final boolean POOL_DOCSET_BLOCKS =
-      EnvUtils.getPropertyAsInteger(HeapCacheFbsModifier.POOL_TARGET_MB_PROPNAME, 0) != 0;
+      EnvUtils.getPropertyAsInteger(HeapCacheFbsModifier.POOL_ONHEAP_TARGET_MB_PROPNAME, 0) != 0;
 
   public CoreContainer(NodeConfig config, CoresLocator locator, boolean asyncSolrCoreLoad) {
     this.cfg = requireNonNull(config);

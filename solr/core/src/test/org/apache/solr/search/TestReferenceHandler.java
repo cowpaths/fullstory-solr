@@ -114,7 +114,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
         ExecutorUtil.newMDCAwareFixedThreadPool(
             nThreads, new SolrNamedThreadFactory("testHeapCache"));
     try (Closeable c = () -> ExecutorUtil.shutdownAndAwaitTermination(exec);
-        HeapCacheFbsModifier h = new HeapCacheFbsModifier(false)) {
+        HeapCacheFbsModifier h = new HeapCacheFbsModifier(false, random().nextBoolean())) {
       AtomicBoolean finished = new AtomicBoolean(false);
       Future<?>[] futures = new Future[nThreads];
       AtomicInteger errCt = new AtomicInteger();
