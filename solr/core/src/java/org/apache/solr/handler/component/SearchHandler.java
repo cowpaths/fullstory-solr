@@ -56,6 +56,7 @@ import org.apache.solr.common.params.ShardParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.NamedList;
+import org.apache.solr.common.util.Utils;
 import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.common.util.StrUtils;
 import org.apache.solr.core.CloseHook;
@@ -557,7 +558,7 @@ public class SearchHandler extends RequestHandlerBase
           if (headers != null) {
             headers.add("filtersStats", rb.getFilterStats());
           }
-          rsp.getToLog().add("filtersStats", rb.getFilterStats());
+          rsp.getToLog().add("filtersStats", Utils.toJSONString(rb.getFilterStats(), -1));
         }
       }
     } else {
