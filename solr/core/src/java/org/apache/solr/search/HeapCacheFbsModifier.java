@@ -41,7 +41,6 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.util.FixedBitSet;
-import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.metrics.MetricsMap;
@@ -67,9 +66,8 @@ public class HeapCacheFbsModifier
 
   private static final int BLOCK_SIZE_BYTES = SortedIntDocSet.MAX_ARR_SIZE << 2;
   private static final int MAX_BLOCKS_PER_PARTITION;
-  static final int N_BLOCKS;
+  private final int nBlocks;
   private static final long TAIL_MASK = -1L >>> Integer.SIZE;
-  private static final long HEAD_MASK = ~TAIL_MASK;
 
   private static final int ALIGN_SIZE = 4096; // 4k
   private static final int ALIGN_OVERHEAD = ALIGN_SIZE - 1; // 4k - 1
@@ -83,7 +81,6 @@ public class HeapCacheFbsModifier
 
   private final boolean unregister;
   private final ByteBuffer[] pool;
-  private final Closeable cleanup;
 
   private final AtomicInteger top;
   private final BlockingQueue<ByteBuffer[]> releaseQueue = new ArrayBlockingQueue<>(1024, false);
@@ -92,7 +89,6 @@ public class HeapCacheFbsModifier
 
   public static final String POOL_OFFHEAP_PROPNAME = "solr.fbspool.offheap";
   public static final String POOL_TARGET_MB_PROPNAME = "solr.fbspool.targetMB";
-  public static final String POOL_BACKING_FILE_PROPNAME = "solr.fbspool.file";
   public static final String POOL_ALWAYS_ONE_UNPOOLED_PROPNAME = "solr.fbspool.alwaysOneUnpooled";
   public static final String POOL_DUMP_STATS_ON_TEST_PROPNAME = "solr.fbspool.dumpStatsOnTest";
   public static final String POOL_SWAP_PROPNAME = "solr.fbspool.swap";
@@ -102,16 +98,11 @@ public class HeapCacheFbsModifier
 
   private static final boolean POOL_SWAP = EnvUtils.getPropertyAsBool(POOL_SWAP_PROPNAME, false);
 
-  private static final String POOL_BACKING_FILE =
-      EnvUtils.getProperty(POOL_BACKING_FILE_PROPNAME, "");
+  private static final long TPS;
 
   static {
     long maxMemory = Runtime.getRuntime().maxMemory();
     long defaultTargetPoolSize = maxMemory / 16; // default to 1/16 of heap
-
-    // max of 1/2 of heap (off-heap), 1/4 of heap (on-heap), unlimited (off-heap file-backed)
-    long maxPoolSize =
-        POOL_BACKING_FILE.isEmpty() ? (maxMemory / (POOL_OFFHEAP ? 2 : 4)) : Long.MAX_VALUE;
 
     int targetPoolSizeMB =
         EnvUtils.getPropertyAsInteger(
@@ -122,51 +113,44 @@ public class HeapCacheFbsModifier
     } else {
       targetPoolSizeSpec = ((long) targetPoolSizeMB) << 20;
     }
-    long targetPoolSize = Math.min(maxPoolSize, targetPoolSizeSpec);
-    if (EnvUtils.getProperty("tests.seed") == null) {
-      N_BLOCKS = Math.toIntExact(targetPoolSize / BLOCK_SIZE_BYTES);
-    } else {
-      // grossly undersize, to ensure re-use in test context (hacky, ignores "MB")
-      N_BLOCKS = Math.max(1, Math.toIntExact(targetPoolSizeSpec >> 20));
-    }
+    TPS = Math.min(maxMemory, targetPoolSizeSpec);
     MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
     if (log.isInfoEnabled()) {
-      log.info(
-          "block_size={}, n_blocks={}, pool_size_bytes={}",
-          RamUsageEstimator.humanReadableUnits(BLOCK_SIZE_BYTES),
-          N_BLOCKS,
-          RamUsageEstimator.humanReadableUnits((long) N_BLOCKS * BLOCK_SIZE_BYTES));
+      log.info("block_size={}", RamUsageEstimator.humanReadableUnits(BLOCK_SIZE_BYTES));
     }
   }
 
   private HeapCacheFbsModifier() {
-    this(true);
+    this(true, TPS);
   }
 
   HeapCacheFbsModifier(boolean unregister) {
+    this(unregister, TPS);
+  }
+
+  HeapCacheFbsModifier(boolean unregister, long targetPoolSize) {
     this.unregister = unregister;
-    int numPartitions = ((N_BLOCKS - 1) / MAX_BLOCKS_PER_PARTITION) + 1;
-    pool = new ByteBuffer[N_BLOCKS];
-    int blockIdx = 0;
-    if (POOL_BACKING_FILE.isEmpty()) {
-      if (POOL_SWAP) {
-        poolSwapped(numPartitions, blockIdx, pool);
-      } else {
-        poolAnonymous(numPartitions, blockIdx, pool);
-      }
-      cleanup = null;
+    if (EnvUtils.getProperty("tests.seed") == null) {
+      nBlocks = Math.toIntExact(targetPoolSize / BLOCK_SIZE_BYTES);
     } else {
-      try {
-        Path backing = poolFileBacked(numPartitions, blockIdx, pool, this);
-        cleanup =
-            () -> {
-              IOUtils.deleteFilesIfExist(backing);
-            };
-      } catch (IOException e) {
-        throw new UncheckedIOException(e);
-      }
+      // grossly undersize, to ensure re-use in test context (hacky, ignores "MB")
+      nBlocks = Math.max(1, Math.toIntExact(targetPoolSize >> 20));
     }
-    top = new AtomicInteger(N_BLOCKS);
+    if (log.isInfoEnabled()) {
+      log.info(
+          "n_blocks={}, pool_size_bytes={}",
+          nBlocks,
+          RamUsageEstimator.humanReadableUnits((long) nBlocks * BLOCK_SIZE_BYTES));
+    }
+    int numPartitions = ((nBlocks - 1) / MAX_BLOCKS_PER_PARTITION) + 1;
+    pool = new ByteBuffer[nBlocks];
+    int blockIdx = 0;
+    if (POOL_SWAP) {
+      poolSwapped(nBlocks, numPartitions, blockIdx, pool);
+    } else {
+      poolAnonymous(nBlocks, numPartitions, blockIdx, pool);
+    }
+    top = new AtomicInteger(nBlocks);
     refHandler =
         new ReferenceHandler<>(
             (toRelease) -> {
@@ -185,8 +169,9 @@ public class HeapCacheFbsModifier
             });
   }
 
-  private static void poolAnonymous(int numPartitions, int blockIdx, ByteBuffer[] pool) {
-    for (int i = numPartitions - 1, partitionNumBlocks = ((N_BLOCKS - 1) / numPartitions) + 1;
+  private static void poolAnonymous(
+      int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
+    for (int i = numPartitions - 1, partitionNumBlocks = ((nBlocks - 1) / numPartitions) + 1;
         i >= 0;
         i--) {
       int partitionSize = partitionNumBlocks * BLOCK_SIZE_BYTES;
@@ -200,53 +185,6 @@ public class HeapCacheFbsModifier
       }
       partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
     }
-  }
-
-  private static Path poolFileBacked(
-      int numPartitions, int blockIdx, ByteBuffer[] pool, Object caller) throws IOException {
-    long blockSizeBytesL = BLOCK_SIZE_BYTES;
-    long partitionMaxBytes = MAX_BLOCKS_PER_PARTITION * blockSizeBytesL;
-    Path backingFile;
-    String seed = EnvUtils.getProperty("tests.seed");
-    if (seed == null) {
-      // not in a test context
-      backingFile = Path.of(POOL_BACKING_FILE);
-    } else {
-      // test context; resolve relative to tmpdir, and scoped to this object in order to
-      // avoid conflicts (note: we'll ignore the possibility of hash collisions here)
-      backingFile =
-          Path.of(EnvUtils.getProperty("java.io.tmpdir"))
-              .resolve(
-                  POOL_BACKING_FILE
-                      + "_"
-                      + seed
-                      + "_"
-                      + Integer.toUnsignedString(System.identityHashCode(caller), 16));
-    }
-    try (FileChannel fc =
-        FileChannel.open(
-            backingFile,
-            StandardOpenOption.READ,
-            StandardOpenOption.WRITE,
-            StandardOpenOption.CREATE)) {
-      for (int i = numPartitions - 1, partitionNumBlocks = ((N_BLOCKS - 1) / numPartitions) + 1;
-          i >= 0;
-          i--) {
-        // NOTE: this is designed to be a single file per JVM, lasting the entire JVM lifetime,
-        // so we don't need to worry about unmapping (as we do for MMapDirectory).
-        ByteBuffer partition =
-            fc.map(
-                    FileChannel.MapMode.READ_WRITE,
-                    i * partitionMaxBytes,
-                    partitionNumBlocks * blockSizeBytesL)
-                .order(FixedBitSet.BYTE_ORDER);
-        for (int j = 0; j < partitionNumBlocks; j++) {
-          pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
-        }
-        partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
-      }
-    }
-    return backingFile;
   }
 
   private static final SolrMetricsContext DISABLED = new SolrMetricsContext(null, null, null);
@@ -294,7 +232,7 @@ public class HeapCacheFbsModifier
                 map.put("exhaustedCount", exhausted);
                 map.put("allocatedRatio", (double) allocated / (allocated + exhausted));
                 map.put("availableBlockCount", avail);
-                map.put("availableBlockRatio", (double) avail / N_BLOCKS);
+                map.put("availableBlockRatio", (double) avail / nBlocks);
               });
       getSolrMetricsContext().gauge(cacheMap, true, scope, "DOCSET");
     }
@@ -321,8 +259,7 @@ public class HeapCacheFbsModifier
     if (unregister) {
       try {
         if (FixedBitSets.unregisterModifier(this, refHandler)) {
-          try (Closeable c = SolrMetricProducer.super::close;
-              cleanup) {
+          try (Closeable c = SolrMetricProducer.super::close) {
             SolrMetricsContext ctx;
             String seed;
             if (DUMP_STATS_ON_TEST
@@ -541,7 +478,7 @@ public class HeapCacheFbsModifier
   private static final int MADV_PAGEOUT = 21;
 
   @SuppressWarnings("preview")
-  private static void poolSwapped(int numPartitions, int blockIdx, ByteBuffer[] pool) {
+  private static void poolSwapped(int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
     // 1. Find the C 'madvise' function
     Linker linker = Linker.nativeLinker();
     SymbolLookup libc = linker.defaultLookup();
@@ -555,7 +492,7 @@ public class HeapCacheFbsModifier
                 ValueLayout.JAVA_LONG,
                 ValueLayout.JAVA_INT));
 
-    for (int i = numPartitions - 1, partitionNumBlocks = ((N_BLOCKS - 1) / numPartitions) + 1;
+    for (int i = numPartitions - 1, partitionNumBlocks = ((nBlocks - 1) / numPartitions) + 1;
         i >= 0;
         i--) {
       int partitionSize = partitionNumBlocks * BLOCK_SIZE_BYTES;
