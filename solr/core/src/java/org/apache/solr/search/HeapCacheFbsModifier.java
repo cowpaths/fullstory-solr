@@ -38,7 +38,7 @@ import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.IOUtils;
@@ -70,8 +70,6 @@ public class HeapCacheFbsModifier
   static final int N_BLOCKS;
   private static final long TAIL_MASK = -1L >>> Integer.SIZE;
   private static final long HEAD_MASK = ~TAIL_MASK;
-  private static final int POOL_ARR_SIZE;
-  private static final int POOL_SIZE_MASK;
 
   // dummy, for efficiently clearing buffers
   private static final ByteBuffer FRESH =
@@ -81,7 +79,7 @@ public class HeapCacheFbsModifier
   private final ByteBuffer[] pool;
   private final Closeable cleanup;
 
-  private final AtomicLong headAndTail;
+  private final AtomicInteger top;
   private final BlockingQueue<ByteBuffer[]> releaseQueue = new ArrayBlockingQueue<>(1024, false);
 
   private final ReferenceHandler<ByteBuffer[]> refHandler;
@@ -126,8 +124,6 @@ public class HeapCacheFbsModifier
       N_BLOCKS = Math.max(1, Math.toIntExact(targetPoolSizeSpec >> 20));
     }
     MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
-    POOL_ARR_SIZE = N_BLOCKS == 1 ? 1 : Integer.highestOneBit(N_BLOCKS - 1) << 1;
-    POOL_SIZE_MASK = POOL_ARR_SIZE - 1;
     if (log.isInfoEnabled()) {
       log.info(
           "block_size={}, n_blocks={}, pool_size_bytes={}",
@@ -144,7 +140,7 @@ public class HeapCacheFbsModifier
   HeapCacheFbsModifier(boolean unregister) {
     this.unregister = unregister;
     int numPartitions = ((N_BLOCKS - 1) / MAX_BLOCKS_PER_PARTITION) + 1;
-    pool = new ByteBuffer[POOL_ARR_SIZE];
+    pool = new ByteBuffer[N_BLOCKS];
     int blockIdx = 0;
     if (POOL_BACKING_FILE.isEmpty()) {
       if (POOL_SWAP) {
@@ -164,7 +160,7 @@ public class HeapCacheFbsModifier
         throw new UncheckedIOException(e);
       }
     }
-    headAndTail = new AtomicLong(N_BLOCKS);
+    top = new AtomicInteger(N_BLOCKS);
     refHandler =
         new ReferenceHandler<>(
             (toRelease) -> {
@@ -261,7 +257,7 @@ public class HeapCacheFbsModifier
   @Override
   public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
     // sync on some arbitrary private object
-    synchronized (headAndTail) {
+    synchronized (top) {
       if (solrMetricsContext != null) {
         if (solrMetricsContext != DISABLED) {
           if (log.isInfoEnabled()) {
@@ -284,10 +280,8 @@ public class HeapCacheFbsModifier
               map -> {
                 long allocated = this.allocated.sum();
                 long exhausted = this.exhausted.sum();
-                long extant = this.headAndTail.get();
-                int head = (int) (extant >>> Integer.SIZE);
-                final int tail = (int) extant;
-                int avail = tail - head;
+                int extant = this.top.get();
+                int avail = extant < 0 ? ~extant : extant;
                 map.put("outstandingRefCount", refHandler.getOutstandingSize());
                 map.put("activeRefProcessingThreads", refHandler.activeThreadCount());
                 map.put("allocatedCount", allocated);
@@ -384,10 +378,8 @@ public class HeapCacheFbsModifier
   private static final ByteBuffer[] EMPTY = new ByteBuffer[0];
 
   public int available() {
-    long extant = this.headAndTail.get();
-    int head = (int) (extant >>> Integer.SIZE);
-    final int tail = (int) extant;
-    return tail - head;
+    int extant = this.top.get();
+    return extant < 0 ? ~extant : extant;
   }
 
   @Override
@@ -399,25 +391,22 @@ public class HeapCacheFbsModifier
     if (adjustedPartitionCount == 0) {
       return new ByteBuffer[] {ByteBuffer.allocate(numBytes).order(FixedBitSet.BYTE_ORDER)};
     }
-    for (long extant = this.headAndTail.get(); ; ) {
-      int head = (int) (extant >>> Integer.SIZE);
-      final int tail = (int) extant;
-      int avail = tail - head;
+    for (int avail = this.top.get(); ; ) {
       if (avail == 0) {
         // exhausted; fallback to main heap allocation
         return allocateBytesArr(-1, 0, numBytes, null);
       } else if (avail < 0) {
-        throw new IllegalStateException();
+        Thread.yield(); // let producer thread complete
+        avail = this.top.get();
+        continue;
       }
       int tryReserve = Math.min(avail, adjustedPartitionCount);
-      long witness =
-          this.headAndTail.compareAndExchange(
-              extant, ((((long) head + tryReserve) << Integer.SIZE)) | (tail & TAIL_MASK));
-      if (witness == extant) {
+      int witness = this.top.compareAndExchange(avail, avail - tryReserve);
+      if (witness == avail) {
         // we have a batch reservation; now actually allocate
-        return allocateBytesArr(head, tryReserve, numBytes, sentinel);
+        return allocateBytesArr(avail - 1, tryReserve, numBytes, sentinel);
       } else {
-        extant = witness;
+        avail = witness;
       }
     }
   }
@@ -427,27 +416,32 @@ public class HeapCacheFbsModifier
   private static final VarHandle H = MethodHandles.arrayElementVarHandle(ByteBuffer[].class);
 
   private void releaseLoop() throws InterruptedException {
-    int destOff = N_BLOCKS;
     for (; ; ) {
       ByteBuffer[] toRelease = releaseQueue.take();
+      int newTop;
+      for (int top = this.top.get(); ; ) {
+        newTop = top + toRelease.length;
+        int witness = this.top.compareAndExchange(top, ~newTop);
+        if (witness == top) {
+          break;
+        }
+        top = witness;
+      }
+      int idx = newTop;
       for (ByteBuffer bb : toRelease) {
         // pool[destOff++ & POOL_SIZE_MASK] = bb;
-        int idx = destOff++ & POOL_SIZE_MASK;
+        idx--;
         while (!H.compareAndSet(pool, idx, null, bb)) {
-          // we have lapped and have to wait for consumer threads to catch up
+          // wait for consumer thread(s) to catch up
           Thread.yield();
         }
       }
       collected.add(toRelease.length);
-      for (long extant = headAndTail.get(); ; ) {
-        long witness =
-            headAndTail.compareAndExchange(extant, (extant & HEAD_MASK) | (destOff & TAIL_MASK));
-        if (witness == extant) {
-          break;
-        } else {
-          extant = witness;
-        }
+      if (!this.top.compareAndSet(~newTop, newTop)) {
+        // single-threaded producer, so this should literally never happen.
+        throw new IllegalStateException();
       }
+      Thread.yield(); // background; try not to monopolize CPU
     }
   }
 
@@ -472,16 +466,16 @@ public class HeapCacheFbsModifier
       EnvUtils.getPropertyAsBool(POOL_ALWAYS_ONE_UNPOOLED_PROPNAME, true) ? 1 : 0;
 
   private ByteBuffer[] allocateBytesArr(
-      int head, int pooledReserved, int numBytes, Object sentinel) {
+      int top, int pooledReserved, int numBytes, Object sentinel) {
     int lastIdx = (numBytes - 1) >> BYTE_SHIFT;
     ByteBuffer[] ret = new ByteBuffer[lastIdx + 1];
     int i = 0;
     for (int fullPooledLim = Math.min(pooledReserved - 1, lastIdx); i < fullPooledLim; i++) {
-      ret[i] = initBuf(head++, MAX_BYTES);
+      ret[i] = initBuf(top--, MAX_BYTES);
     }
     int lastLen = ((numBytes - 1) & BYTE_MASK) + 1;
     if (i < pooledReserved) {
-      ret[i] = initBuf(head, i++ == lastIdx ? lastLen : MAX_BYTES);
+      ret[i] = initBuf(top, i++ == lastIdx ? lastLen : MAX_BYTES);
       ByteBuffer[] pooled;
       if (i == ret.length) {
         pooled = ret;
@@ -510,9 +504,9 @@ public class HeapCacheFbsModifier
     return ret;
   }
 
-  private ByteBuffer initBuf(int head, int size) {
+  private ByteBuffer initBuf(int idx, int size) {
     // ByteBuffer ret = pool[head & POOL_SIZE_MASK].clear().limit(size);
-    ByteBuffer ret = (ByteBuffer) H.getAndSetAcquire(pool, head & POOL_SIZE_MASK, null);
+    ByteBuffer ret = (ByteBuffer) H.getAndSetAcquire(pool, idx, null);
     ret.clear().limit(size);
     // zero it out
     return ret.put(FRESH.slice(0, size)).flip();
