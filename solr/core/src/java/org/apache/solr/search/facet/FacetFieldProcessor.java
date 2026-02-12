@@ -42,7 +42,7 @@ import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.schema.FieldType;
 import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.DocSet;
-import org.apache.solr.search.ExtendedQuery;
+import org.apache.solr.search.WrappedQuery;
 import org.apache.solr.search.facet.SlotAcc.SlotContext;
 import org.apache.solr.search.facet.SlotAcc.SweepableSlotAcc;
 import org.apache.solr.search.facet.SlotAcc.SweepingCountSlotAcc;
@@ -627,11 +627,9 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
     if (otherAccs == null && freq.subFacets.isEmpty()) return;
 
     assert null != slot.bucketFilter;
-    final Query filter = slot.bucketFilter;
+    final Query filter = skipfilterCacheSubDomain ? getWrappedNonCacheFilter(slot.bucketFilter) : slot.bucketFilter;
 
-    if (skipfilterCacheSubDomain && filter instanceof ExtendedQuery) {
-      ((ExtendedQuery) filter).setCache(false);
-    }
+
     final DocSet subDomain = fcontext.searcher.getDocSet(filter, fcontext.base);
 
     // if no subFacets, we only need a DocSet
@@ -662,6 +660,12 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
     }
 
     processSubs(target, filter, subDomain, false, null);
+  }
+
+  private Query getWrappedNonCacheFilter(Query bucketFilter) {
+    WrappedQuery wq = new WrappedQuery(bucketFilter);
+    wq.setCache(false);
+    return wq;
   }
 
   /**
@@ -748,15 +752,14 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
 
       assert null != slot.bucketFilter : "null filter for slot=" + slot.bucketVal;
 
-      if (skipfilterCacheSubDomain && slot.bucketFilter instanceof ExtendedQuery) {
-        ((ExtendedQuery) slot.bucketFilter).setCache(false);
-      }
-      final DocSet subDomain = fcontext.searcher.getDocSet(slot.bucketFilter, fcontext.base);
+      final Query bucketFilter = skipfilterCacheSubDomain ? getWrappedNonCacheFilter(slot.bucketFilter) : slot.bucketFilter;
+
+      final DocSet subDomain = fcontext.searcher.getDocSet(bucketFilter, fcontext.base);
       acc.collect(
           subDomain,
           slotNum,
           s -> {
-            return new SlotContext(slot.bucketFilter);
+            return new SlotContext(bucketFilter);
           });
     }
 
