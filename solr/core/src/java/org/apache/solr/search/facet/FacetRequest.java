@@ -464,7 +464,10 @@ public abstract class FacetRequest {
     FacetProcessor<?> facetProcessor = createFacetProcessor(fcontext);
 
     FacetDebugInfo debugInfo = fcontext.getDebugInfo();
-    ResponseBuilder rb = SolrRequestInfo.getRequestInfo() != null ? SolrRequestInfo.getRequestInfo().getResponseBuilder() : null;
+    ResponseBuilder rb =
+        SolrRequestInfo.getRequestInfo() != null
+            ? SolrRequestInfo.getRequestInfo().getResponseBuilder()
+            : null;
     try {
       if (rb != null) {
         rb.setFilterStatsTriggerType(ResponseBuilder.FilterStatsTriggerType.FACET);

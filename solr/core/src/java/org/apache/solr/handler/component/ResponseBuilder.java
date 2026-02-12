@@ -105,7 +105,8 @@ public class ResponseBuilder {
   private FilterStatsTriggerType filterStatsTriggerType;
 
   public enum FilterStatsTriggerType {
-    FACET, SESSION_STITCH
+    FACET,
+    SESSION_STITCH
   }
 
   SolrRequestInfo requestInfo;
