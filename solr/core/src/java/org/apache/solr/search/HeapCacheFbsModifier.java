@@ -71,9 +71,15 @@ public class HeapCacheFbsModifier
   private static final long TAIL_MASK = -1L >>> Integer.SIZE;
   private static final long HEAD_MASK = ~TAIL_MASK;
 
+  private static final int ALIGN_SIZE = 4096; // 4k
+  private static final int ALIGN_OVERHEAD = ALIGN_SIZE - 1; // 4k - 1
+  private static final int ALIGN_ALLOC_MINSIZE = ALIGN_SIZE + ALIGN_OVERHEAD; // 4k - 1
+
   // dummy, for efficiently clearing buffers
   private static final ByteBuffer FRESH =
-      ByteBuffer.allocate(BLOCK_SIZE_BYTES).order(FixedBitSet.BYTE_ORDER);
+      ByteBuffer.allocateDirect(Math.max(ALIGN_ALLOC_MINSIZE, BLOCK_SIZE_BYTES + ALIGN_OVERHEAD))
+          .alignedSlice(ALIGN_SIZE)
+          .order(FixedBitSet.BYTE_ORDER);
 
   private final boolean unregister;
   private final ByteBuffer[] pool;
@@ -184,10 +190,10 @@ public class HeapCacheFbsModifier
         i >= 0;
         i--) {
       int partitionSize = partitionNumBlocks * BLOCK_SIZE_BYTES;
+      int overAlloc = Math.max(ALIGN_ALLOC_MINSIZE, partitionSize + ALIGN_OVERHEAD);
       ByteBuffer partition =
-          (POOL_OFFHEAP
-                  ? ByteBuffer.allocateDirect(partitionSize)
-                  : ByteBuffer.allocate(partitionSize))
+          (POOL_OFFHEAP ? ByteBuffer.allocateDirect(overAlloc) : ByteBuffer.allocate(overAlloc))
+              .alignedSlice(ALIGN_SIZE)
               .order(FixedBitSet.BYTE_ORDER);
       for (int j = 0; j < partitionNumBlocks; j++) {
         pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
@@ -553,7 +559,10 @@ public class HeapCacheFbsModifier
         i >= 0;
         i--) {
       int partitionSize = partitionNumBlocks * BLOCK_SIZE_BYTES;
-      ByteBuffer partition = ByteBuffer.allocateDirect(partitionSize).order(FixedBitSet.BYTE_ORDER);
+      ByteBuffer partition =
+          ByteBuffer.allocateDirect(Math.max(ALIGN_ALLOC_MINSIZE, partitionSize + ALIGN_OVERHEAD))
+              .alignedSlice(ALIGN_SIZE)
+              .order(FixedBitSet.BYTE_ORDER);
       for (int j = 0; j < partitionNumBlocks; j++) {
         pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
       }
