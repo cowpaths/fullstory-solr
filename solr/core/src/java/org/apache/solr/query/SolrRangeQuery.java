@@ -17,6 +17,7 @@
 package org.apache.solr.query;
 
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -59,11 +60,14 @@ import org.apache.solr.search.DocSetUtil;
 import org.apache.solr.search.ExtendedQueryBase;
 import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.util.TestInjection;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * @lucene.experimental
  */
 public final class SolrRangeQuery extends ExtendedQueryBase implements DocSetProducer {
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private final String field;
   private final BytesRef lower;
   private final BytesRef upper;
@@ -437,7 +441,11 @@ public final class SolrRangeQuery extends ExtendedQueryBase implements DocSetPro
         if (solrSearcher.getFilterCache() == null) {
           doCheck = false;
         } else {
+          long start = System.nanoTime();
           answer = solrSearcher.getFilterCache().get(SolrRangeQuery.this);
+          log.info("SolrRangeQuery reading filter cache");
+          SolrIndexSearcher.addCacheStats(
+              SolrRangeQuery.this, answer != null, answer != null ? answer.size() : -1, start);
         }
       } else {
         doCheck = false;

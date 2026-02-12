@@ -1419,9 +1419,19 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
     if (useCache) {
       TermQuery key = new TermQuery(new Term(deState.fieldName, deState.termsEnum.term()));
-      return filterCache.computeIfAbsent(
-          key,
-          (IOFunction<? super Query, ? extends DocSet>) k -> getResult(deState, largestPossible));
+      AtomicBoolean cacheHit = new AtomicBoolean(true);
+      long startTime = System.nanoTime();
+      DocSet result =
+          filterCache.computeIfAbsent(
+              key,
+              (IOFunction<? super Query, ? extends DocSet>)
+                  k -> {
+                    cacheHit.set(false);
+                    return getResult(deState, largestPossible);
+                  });
+      log.info("getDocSet with DocsNumState");
+      addCacheStats(key, cacheHit.get(), result != null ? result.size() : -1, startTime);
+      return result;
     }
 
     return getResult(deState, largestPossible);
@@ -1514,17 +1524,19 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     return getDocSet(query, null);
   }
 
-  private static void addCacheStats(
+  public static void addCacheStats(
       Query key, boolean cacheHit, int docSetIdCount, long startTimeNanos) {
     SolrRequestInfo reqInfo = SolrRequestInfo.getRequestInfo();
+
+    String keyString = key != null ? key.toString() : "null";
+    if (keyString.length() > 500) {
+      keyString = keyString.substring(0, 500) + "...";
+    }
+
     if (reqInfo != null && reqInfo.getResponseBuilder() != null) {
       org.apache.solr.common.util.NamedList<Object> stat =
           new org.apache.solr.common.util.SimpleOrderedMap<>();
 
-      String keyString = key.toString();
-      if (keyString.length() > 50) {
-        keyString = keyString.substring(0, 50) + "...";
-      }
       stat.add("key", keyString);
 
       long elapsedMs =
@@ -1534,7 +1546,15 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       stat.add("cacheHit", cacheHit);
       stat.add("docSetIdCount", docSetIdCount);
 
+      if (reqInfo.getResponseBuilder().getFilterStatsTriggerType() != null) {
+        stat.add("triggerType", reqInfo.getResponseBuilder().getFilterStatsTriggerType());
+      }
+
       reqInfo.getResponseBuilder().addFilterStats(stat);
+    } else {
+      log.warn(
+          "Unexpected filter cache that has no request info or response builder: key {}",
+          keyString);
     }
   }
 
