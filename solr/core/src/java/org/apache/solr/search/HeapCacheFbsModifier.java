@@ -340,7 +340,11 @@ public class HeapCacheFbsModifier
     for (int avail = this.top.get(); ; ) {
       if (avail == 0) {
         // exhausted; fallback to main heap allocation
-        return allocateBytesArr(-1, 0, numBytes, null);
+        if (fallback == null) {
+          return allocateBytesArr(-1, 0, numBytes, null);
+        } else {
+          return fallback.allocateBytesArr(numBytes, sentinel);
+        }
       } else if (avail < 0) {
         Thread.yield(); // let producer thread complete
         avail = this.top.get();
