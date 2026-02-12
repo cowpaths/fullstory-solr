@@ -42,6 +42,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.solr.common.MapWriter;
 import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricProducer;
@@ -223,20 +224,29 @@ public class HeapCacheFbsModifier
       Gauge<?> cacheMap =
           new MetricsMap(
               map -> {
-                long allocated = this.allocated.sum();
-                long exhausted = this.exhausted.sum();
-                int extant = this.top.get();
-                int avail = extant < 0 ? ~extant : extant;
-                map.put("outstandingRefCount", refHandler.getOutstandingSize());
-                map.put("activeRefProcessingThreads", refHandler.activeThreadCount());
-                map.put("allocatedCount", allocated);
-                map.put("exhaustedCount", exhausted);
-                map.put("allocatedRatio", (double) allocated / (allocated + exhausted));
-                map.put("availableBlockCount", avail);
-                map.put("availableBlockRatio", (double) avail / nBlocks);
+                writeStats(this, map);
+                if (fallback != null) {
+                  map.put("fallback", (MapWriter) fmap -> writeStats(fallback, fmap));
+                  assert fallback.fallback == null;
+                }
               });
       getSolrMetricsContext().gauge(cacheMap, true, scope, "DOCSET");
     }
+  }
+
+  private static void writeStats(HeapCacheFbsModifier h, MapWriter.EntryWriter map)
+      throws IOException {
+    long allocated = h.allocated.sum();
+    long exhausted = h.exhausted.sum();
+    int extant = h.top.get();
+    int avail = extant < 0 ? ~extant : extant;
+    map.put("outstandingRefCount", h.refHandler.getOutstandingSize());
+    map.put("activeRefProcessingThreads", h.refHandler.activeThreadCount());
+    map.put("allocatedCount", allocated);
+    map.put("exhaustedCount", exhausted);
+    map.put("allocatedRatio", (double) allocated / (allocated + exhausted));
+    map.put("availableBlockCount", avail);
+    map.put("availableBlockRatio", (double) avail / h.nBlocks);
   }
 
   @Override
@@ -325,6 +335,11 @@ public class HeapCacheFbsModifier
 
   public int available() {
     int extant = this.top.get();
+    return extant < 0 ? ~extant : extant;
+  }
+
+  public int favailable() {
+    int extant = fallback == null ? 0 : fallback.top.get();
     return extant < 0 ? ~extant : extant;
   }
 
@@ -480,6 +495,26 @@ public class HeapCacheFbsModifier
 
   public int activeThreadCount() {
     return refHandler.activeThreadCount();
+  }
+
+  public long fexhaustedCount() {
+    return fallback == null ? 0 : fallback.exhausted.sum();
+  }
+
+  public long fallocatedCount() {
+    return fallback == null ? 0 : fallback.allocated.sum();
+  }
+
+  public long fcollectedCount() {
+    return fallback == null ? 0 : fallback.collected.sum();
+  }
+
+  public long foutstandingCount() {
+    return fallback == null ? 0 : fallback.refHandler.getOutstandingSize();
+  }
+
+  public int factiveThreadCount() {
+    return fallback == null ? 0 : fallback.refHandler.activeThreadCount();
   }
 
   private static final int MADV_PAGEOUT = 21;

@@ -185,6 +185,20 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
                 + h.collectedCount()
                 + ", exhausted="
                 + h.exhaustedCount());
+        System.out.println(
+            "seconds remaining: "
+                + TimeUnit.NANOSECONDS.toSeconds(remainingNanos)
+                + ", factiveThreads="
+                + h.factiveThreadCount()
+                + ", foutstanding="
+                + h.foutstandingCount()
+                + ", fallocated="
+                + h.fallocatedCount()
+                + ", fcollected="
+                + h.fcollectedCount()
+                + ", fexhausted="
+                + h.fexhaustedCount());
+        System.out.println();
         Thread.sleep(Math.min(1000, TimeUnit.NANOSECONDS.toMillis(remainingNanos)));
       }
       finished.set(true);
@@ -209,6 +223,26 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
                 + (collected = h.collectedCount())
                 + ", exhausted="
                 + h.exhaustedCount());
+        long foutstanding;
+        long fallocated;
+        long fcollected;
+        System.out.println(
+            "factiveThreads="
+                + h.factiveThreadCount()
+                + ", favailable="
+                + h.favailable()
+                + ", foutstanding="
+                + (foutstanding = h.foutstandingCount())
+                + ", fallocated="
+                + (fallocated = h.fallocatedCount())
+                + ", fcollected="
+                + (fcollected = h.fcollectedCount())
+                + ", fexhausted="
+                + h.fexhaustedCount());
+        System.out.println();
+        outstanding += foutstanding;
+        allocated += fallocated;
+        collected += fcollected;
         Thread.sleep(500);
       }
     }
