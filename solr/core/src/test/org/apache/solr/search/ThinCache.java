@@ -212,7 +212,8 @@ public class ThinCache<S, K, V> extends SolrCacheBase
       this.scope = scope;
       @SuppressWarnings("unchecked")
       NodeLevelCache<S, K, V> backing =
-          (NodeLevelCache<S, K, V>) searcher.getCore().getCoreContainer().getCache(parentCacheName);
+          (NodeLevelCache<S, K, V>)
+              searcher.getCore().getCoreContainer().getCache(parentCacheName).toInternal();
       this.backing = backing;
     }
     description = generateDescription();

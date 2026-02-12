@@ -639,11 +639,11 @@ public class TestSolrConfigHandler extends RestTestBase {
         getRespMap("/dump101?cacheNames=lfuCacheDecayFalse&cacheNames=perSegFilter", writeHarness);
     assertEquals(
         "Actual output " + Utils.toJSONString(map),
-        "org.apache.solr.search.CaffeineCache",
+        "org.apache.solr.search.CacheConfig$2",
         getObjectByPath(map, true, List.of("caches", "perSegFilter")));
     assertEquals(
         "Actual output " + Utils.toJSONString(map),
-        "org.apache.solr.search.CaffeineCache",
+        "org.apache.solr.search.CacheConfig$2",
         getObjectByPath(map, true, List.of("caches", "lfuCacheDecayFalse")));
   }
 

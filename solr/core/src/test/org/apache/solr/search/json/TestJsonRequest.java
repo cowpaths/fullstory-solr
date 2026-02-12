@@ -28,8 +28,8 @@ import org.apache.solr.common.SolrException;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.request.SolrQueryRequest;
-import org.apache.solr.search.CaffeineCache;
 import org.apache.solr.search.DocSet;
+import org.apache.solr.search.SolrCache;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -649,8 +649,7 @@ public class TestJsonRequest extends SolrTestCaseHS {
     if (client.getClientProvider() == null) {
       final SolrQueryRequest request = req();
       try {
-        final CaffeineCache<Query, DocSet> filterCache =
-            (CaffeineCache<Query, DocSet>) request.getSearcher().getFilterCache();
+        final SolrCache<Query, DocSet> filterCache = request.getSearcher().getFilterCache();
         filterCache.clear();
         final TermQuery catA = new TermQuery(new Term("cat_s", "A"));
         assertNull("cache is empty", filterCache.get(catA));

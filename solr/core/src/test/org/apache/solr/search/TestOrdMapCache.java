@@ -130,7 +130,7 @@ public class TestOrdMapCache extends SolrTestCaseJ4 {
     assertEquals(0L, metrics.get("cumulative_hits"));
 
     SolrCache<String, OrdinalMap> ordMapCache = getOrdMapCache(client, name);
-    assertEquals(CaffeineCache.class, ordMapCache.getClass());
+    assertEquals(CaffeineCache.class, ordMapCache.toInternal().getClass());
   }
 
   public void testLongKeepAlive() throws Exception {
@@ -223,7 +223,7 @@ public class TestOrdMapCache extends SolrTestCaseJ4 {
     assertEquals(1L, metrics.get("cumulative_hits"));
 
     SolrCache<String, OrdinalMap> ordMapCache = getOrdMapCache(client, name);
-    assertEquals(MetaSolrCache.class, ordMapCache.getClass());
+    assertEquals(MetaSolrCache.class, ordMapCache.toInternal().toExternal().getClass());
   }
 
   public void testShortKeepAlive() throws Exception {
@@ -328,7 +328,7 @@ public class TestOrdMapCache extends SolrTestCaseJ4 {
     assertEquals(1L, metrics.get("cumulative_hits"));
 
     SolrCache<String, OrdinalMap> ordMapCache = getOrdMapCache(client, name);
-    assertEquals(MetaSolrCache.class, ordMapCache.getClass());
+    assertEquals(MetaSolrCache.class, ordMapCache.toInternal().toExternal().getClass());
   }
 
   public void testSizeLimited() throws Exception {
@@ -389,6 +389,6 @@ public class TestOrdMapCache extends SolrTestCaseJ4 {
     assertEquals(0L, metrics.get("hits"));
 
     SolrCache<String, OrdinalMap> ordMapCache = getOrdMapCache(client, name);
-    assertEquals(CaffeineCache.class, ordMapCache.getClass());
+    assertEquals(CaffeineCache.class, ordMapCache.toInternal().getClass());
   }
 }
