@@ -102,6 +102,12 @@ public class ResponseBuilder {
   // and docSetIdCount (docSet size)
   private final List<NamedList<Object>> filterStats = new ArrayList<>();
 
+  private FilterStatsTriggerType filterStatsTriggerType;
+
+  public enum FilterStatsTriggerType {
+    FACET, SESSION_STITCH
+  }
+
   SolrRequestInfo requestInfo;
 
   public ResponseBuilder(
@@ -328,6 +334,14 @@ public class ResponseBuilder {
 
   public void addFilterStats(NamedList<Object> entry) {
     this.filterStats.add(entry);
+  }
+
+  public void setFilterStatsTriggerType(FilterStatsTriggerType filterStatsTriggerType) {
+    this.filterStatsTriggerType = filterStatsTriggerType;
+  }
+
+  public FilterStatsTriggerType getFilterStatsTriggerType() {
+    return filterStatsTriggerType;
   }
 
   public int getFieldFlags() {
