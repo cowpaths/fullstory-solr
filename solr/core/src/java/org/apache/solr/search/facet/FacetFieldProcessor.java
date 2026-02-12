@@ -37,10 +37,12 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.PriorityQueue;
 import org.apache.solr.common.SolrException;
+import org.apache.solr.common.cloud.ClusterProperties;
 import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.schema.FieldType;
 import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.DocSet;
+import org.apache.solr.search.ExtendedQuery;
 import org.apache.solr.search.facet.SlotAcc.SlotContext;
 import org.apache.solr.search.facet.SlotAcc.SweepableSlotAcc;
 import org.apache.solr.search.facet.SlotAcc.SweepingCountSlotAcc;
@@ -60,6 +62,10 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
   final FacetRequest.FacetSort resort; // typically null (unless the user specified a prelim_sort)
 
   final Map<String, AggValueSource> deferredAggs = new HashMap<String, AggValueSource>();
+
+  final boolean skipfilterCacheSubDomain;
+  private static final String CLUSTER_PROP_SKIP_FILTER_CACHE_SUBDOMAIN =
+      ClusterProperties.EXT_PROPRTTY_PREFIX + "facet.skipFilterCacheSubDomain";
 
   // TODO: push any of this down to base class?
 
@@ -117,7 +123,36 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
         }
       }
     }
+
+    skipfilterCacheSubDomain = shouldSkipFilterCacheSubDomain(fcontext);
+
     assert null != this.sort;
+  }
+
+  private static boolean shouldSkipFilterCacheSubDomain(FacetContext fcontext) {
+    if (fcontext == null || fcontext.req == null) {
+      return false;
+    }
+    if (fcontext.req.getCore() == null
+        || fcontext.req.getCore().getCoreContainer() == null
+        || fcontext.req.getCore().getCoreContainer().getZkController() == null) {
+      return false;
+    }
+    Object propValue =
+        fcontext
+            .req
+            .getCore()
+            .getCoreContainer()
+            .getZkController()
+            .zkStateReader
+            .getClusterProperty(CLUSTER_PROP_SKIP_FILTER_CACHE_SUBDOMAIN, null);
+    if (propValue == null) {
+      return false;
+    }
+    if (propValue instanceof Boolean) {
+      return (Boolean) propValue;
+    }
+    return Boolean.parseBoolean(propValue.toString());
   }
 
   /** This is used to create accs for second phase (or to create accs for all aggs) */
@@ -593,6 +628,10 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
 
     assert null != slot.bucketFilter;
     final Query filter = slot.bucketFilter;
+
+    if (skipfilterCacheSubDomain && filter instanceof ExtendedQuery) {
+      ((ExtendedQuery) filter).setCache(false);
+    }
     final DocSet subDomain = fcontext.searcher.getDocSet(filter, fcontext.base);
 
     // if no subFacets, we only need a DocSet
@@ -709,6 +748,9 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
 
       assert null != slot.bucketFilter : "null filter for slot=" + slot.bucketVal;
 
+      if (skipfilterCacheSubDomain && slot.bucketFilter instanceof ExtendedQuery) {
+        ((ExtendedQuery) slot.bucketFilter).setCache(false);
+      }
       final DocSet subDomain = fcontext.searcher.getDocSet(slot.bucketFilter, fcontext.base);
       acc.collect(
           subDomain,
