@@ -121,15 +121,19 @@ public class HeapCacheFbsModifier
     }
   }
 
+  private final HeapCacheFbsModifier fallback;
+
   private HeapCacheFbsModifier() {
-    this(true, TPS, false);
+    this(true, TPS, false, new HeapCacheFbsModifier(false, TPS_OFFHEAP, true, null));
   }
 
-  HeapCacheFbsModifier(boolean unregister, boolean offheap) {
-    this(unregister, TPS, offheap);
+  HeapCacheFbsModifier(boolean offheap) {
+    this(false, TPS, offheap, new HeapCacheFbsModifier(false, TPS_OFFHEAP, !offheap, null));
   }
 
-  HeapCacheFbsModifier(boolean unregister, long targetPoolSize, boolean offheap) {
+  HeapCacheFbsModifier(
+      boolean unregister, long targetPoolSize, boolean offheap, HeapCacheFbsModifier fallback) {
+    this.fallback = fallback;
     this.unregister = unregister;
     if (EnvUtils.getProperty("tests.seed") == null) {
       nBlocks = Math.toIntExact(targetPoolSize / BLOCK_SIZE_BYTES);
@@ -256,7 +260,8 @@ public class HeapCacheFbsModifier
     if (unregister) {
       try {
         if (FixedBitSets.unregisterModifier(this, refHandler)) {
-          try (Closeable c = SolrMetricProducer.super::close) {
+          try (Closeable c = SolrMetricProducer.super::close;
+              fallback) {
             SolrMetricsContext ctx;
             String seed;
             if (DUMP_STATS_ON_TEST
@@ -273,7 +278,8 @@ public class HeapCacheFbsModifier
         throw new UncheckedIOException(e);
       }
     } else {
-      try (refHandler) {
+      try (refHandler;
+          fallback) {
         SolrMetricProducer.super.close();
       } catch (IOException e) {
         throw new UncheckedIOException(e);
