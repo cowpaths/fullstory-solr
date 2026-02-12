@@ -1546,6 +1546,10 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       stat.add("cacheHit", cacheHit);
       stat.add("docSetIdCount", docSetIdCount);
 
+      if (reqInfo.getResponseBuilder().getFilterStatsTriggerType() != null) {
+        stat.add("triggerType", reqInfo.getResponseBuilder().getFilterStatsTriggerType());
+      }
+
       reqInfo.getResponseBuilder().addFilterStats(stat);
     } else {
       log.warn(

@@ -28,7 +28,9 @@ import java.util.Set;
 import org.apache.lucene.search.Query;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.params.SolrParams;
+import org.apache.solr.handler.component.ResponseBuilder;
 import org.apache.solr.request.SolrQueryRequest;
+import org.apache.solr.request.SolrRequestInfo;
 import org.apache.solr.search.DocSet;
 import org.apache.solr.search.JoinQParserPlugin;
 import org.apache.solr.search.QueryContext;
@@ -462,20 +464,30 @@ public abstract class FacetRequest {
     FacetProcessor<?> facetProcessor = createFacetProcessor(fcontext);
 
     FacetDebugInfo debugInfo = fcontext.getDebugInfo();
-    if (debugInfo == null) {
-      facetProcessor.process();
-    } else {
-      if (fcontext.filter != null) {
-        debugInfo.setFilter(fcontext.filter.toString());
+    ResponseBuilder rb = SolrRequestInfo.getRequestInfo() != null ? SolrRequestInfo.getRequestInfo().getResponseBuilder() : null;
+    try {
+      if (rb != null) {
+        rb.setFilterStatsTriggerType(ResponseBuilder.FilterStatsTriggerType.FACET);
       }
-      debugInfo.setReqDescription(getFacetDescription());
-      debugInfo.setProcessor(facetProcessor.getClass().getSimpleName());
-      debugInfo.putInfoItem("domainSize", (long) fcontext.base.size());
-      RTimer timer = new RTimer();
-      try {
+      if (debugInfo == null) {
         facetProcessor.process();
-      } finally {
-        debugInfo.setElapse((long) timer.getTime());
+      } else {
+        if (fcontext.filter != null) {
+          debugInfo.setFilter(fcontext.filter.toString());
+        }
+        debugInfo.setReqDescription(getFacetDescription());
+        debugInfo.setProcessor(facetProcessor.getClass().getSimpleName());
+        debugInfo.putInfoItem("domainSize", (long) fcontext.base.size());
+        RTimer timer = new RTimer();
+        try {
+          facetProcessor.process();
+        } finally {
+          debugInfo.setElapse((long) timer.getTime());
+        }
+      }
+    } finally {
+      if (rb != null) {
+        rb.setFilterStatsTriggerType(null);
       }
     }
 
