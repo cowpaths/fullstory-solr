@@ -126,7 +126,7 @@ public class HeapCacheFbsModifier
       N_BLOCKS = Math.max(1, Math.toIntExact(targetPoolSizeSpec >> 20));
     }
     MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
-    POOL_ARR_SIZE = Integer.highestOneBit(N_BLOCKS - 1) << 1;
+    POOL_ARR_SIZE = N_BLOCKS == 1 ? 1 : Integer.highestOneBit(N_BLOCKS - 1) << 1;
     POOL_SIZE_MASK = POOL_ARR_SIZE - 1;
     if (log.isInfoEnabled()) {
       log.info(
