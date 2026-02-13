@@ -42,6 +42,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
 import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.metrics.MetricsMap;
@@ -98,7 +99,17 @@ public class HeapCacheFbsModifier
   private final AtomicInteger top;
   private final BlockingQueue<ByteBuffer[]> releaseQueue = new ArrayBlockingQueue<>(1024, false);
 
-  private final ReferenceHandler<ByteBuffer[]> refHandler;
+  private static final class RefHandlerPacket {
+    private final ByteBuffer[] buf;
+    private final boolean[] closed;
+
+    private RefHandlerPacket(ByteBuffer[] buf, boolean[] closed) {
+      this.buf = buf;
+      this.closed = closed;
+    }
+  }
+
+  private final ReferenceHandler<RefHandlerPacket> refHandler;
 
   public static final String POOL_OFFHEAP_TARGET_MB_PROPNAME = "solr.fbspool.offheap.targetMB";
   public static final String POOL_ONHEAP_TARGET_MB_PROPNAME = "solr.fbspool.onheap.targetMB";
@@ -172,9 +183,11 @@ public class HeapCacheFbsModifier
         new ReferenceHandler<>(
             (toRelease) -> {
               try {
-                releaseQueue.put(toRelease);
+                toRelease.closed[0] = true;
+                releaseQueue.put(toRelease.buf);
               } catch (InterruptedException e) {
-                throw new RuntimeException(e);
+                Thread.currentThread().interrupt();
+                throw new ThreadInterruptedException(e);
               }
             },
             () -> {
@@ -182,6 +195,7 @@ public class HeapCacheFbsModifier
                 releaseLoop();
               } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                throw new ThreadInterruptedException(e);
               }
             });
   }
@@ -461,7 +475,15 @@ public class HeapCacheFbsModifier
         System.arraycopy(ret, 0, pooled, 0, pooledReserved);
         exhausted.add(ret.length - pooledReserved - ADJUST);
       }
-      Closeable ref = refHandler.add(sentinel, pooled);
+      boolean[] closed;
+      if (sentinel instanceof SentinelPacket) {
+        SentinelPacket sp = (SentinelPacket) sentinel;
+        closed = sp.closed;
+        sentinel = sp.sentinel;
+      } else {
+        closed = new boolean[1]; // dummy
+      }
+      Closeable ref = refHandler.add(sentinel, new RefHandlerPacket(pooled, closed));
       if (sentinel instanceof Closeable[]) {
         ((Closeable[]) sentinel)[0] = ref;
       }
@@ -478,6 +500,16 @@ public class HeapCacheFbsModifier
       ret[i] = ByteBuffer.allocate(lastLen).order(FixedBitSet.BYTE_ORDER);
     }
     return ret;
+  }
+
+  public static final class SentinelPacket {
+    private final Object sentinel;
+    private final boolean[] closed;
+
+    public SentinelPacket(Object sentinel, boolean[] closed) {
+      this.sentinel = sentinel;
+      this.closed = closed;
+    }
   }
 
   private ByteBuffer initBuf(int idx, int size) {
