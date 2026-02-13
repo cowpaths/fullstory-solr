@@ -53,6 +53,8 @@ public class ReferenceHandler<T> implements Closeable {
 
   private final LongAdder activeThreads = new LongAdder();
 
+  private final LongAdder explicitlyClosed = new LongAdder();
+
   @SuppressWarnings("unchecked")
   public ReferenceHandler(Consumer<T> onCollection, Runnable output) {
     int execSize = PARALLEL_HEAD_FACTOR + (output == null ? 0 : 1);
@@ -196,8 +198,14 @@ public class ReferenceHandler<T> implements Closeable {
 
     @Override
     public void close() {
-      handler.remove(this);
+      if (handler.remove(this)) {
+        handler.explicitlyClosed.increment();
+      }
     }
+  }
+
+  public long explicitCloseCount() {
+    return explicitlyClosed.sum();
   }
 
   @SuppressWarnings("unchecked")
@@ -261,12 +269,11 @@ public class ReferenceHandler<T> implements Closeable {
     }
   }
 
-  private void remove(final Ref<T> ref) {
+  private boolean remove(final Ref<T> ref) {
     Ref<T> next = reserve(ref, removed);
     if (next == REMOVED) {
       // already removed (this can happen if the associated resource is explicitly closed)
-      System.err.println("REMOVED, wha??");
-      return;
+      return false;
     }
     onCollection.accept(ref.onCollection);
     outstandingSize.decrement();
@@ -287,6 +294,7 @@ public class ReferenceHandler<T> implements Closeable {
     if (!prev.next.compareAndSet(reserved, next)) {
       throw new IllegalStateException();
     }
+    return true;
   }
 
   // visible for testing

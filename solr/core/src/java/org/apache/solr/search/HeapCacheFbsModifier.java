@@ -186,6 +186,7 @@ public class HeapCacheFbsModifier
             (toRelease) -> {
               try {
                 toRelease.closed[0] = true;
+                totalClosedBatches.increment();
                 releaseQueue.put(toRelease.buf);
               } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -263,6 +264,8 @@ public class HeapCacheFbsModifier
 
   private static void writeStats(HeapCacheFbsModifier h, MapWriter.EntryWriter map)
       throws IOException {
+    long totalClosedBatches = h.totalClosedBatches.sum();
+    long explicitBatchCloseCount = h.refHandler.explicitCloseCount();
     long allocated = h.allocated.sum();
     long exhausted = h.exhausted.sum();
     int extant = h.top.get();
@@ -278,6 +281,9 @@ public class HeapCacheFbsModifier
     map.put(
         "totalBlockSize",
         RamUsageEstimator.humanReadableUnits((long) h.nBlocks * BLOCK_SIZE_BYTES));
+    map.put("explicitBatchCloseCount", explicitBatchCloseCount);
+    map.put("totalBatchCloseCount", totalClosedBatches);
+    map.put("explicitBatchCloseRatio", (double) explicitBatchCloseCount / totalClosedBatches);
   }
 
   @Override
@@ -356,6 +362,7 @@ public class HeapCacheFbsModifier
 
   private final LongAdder allocated = new LongAdder();
   private final LongAdder exhausted = new LongAdder();
+  private final LongAdder totalClosedBatches = new LongAdder();
 
   @Override
   public ByteBuffer allocateBytes(int size) {
