@@ -31,6 +31,7 @@ import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.solr.search.HeapCacheFbsModifier.SentinelPacket;
 
 /** A simple sorted int[] array implementation of {@link DocSet}, good for small sets. */
 public class SortedIntDocSet extends DocSet {
@@ -39,6 +40,7 @@ public class SortedIntDocSet extends DocSet {
           + RamUsageEstimator.NUM_BYTES_ARRAY_HEADER;
 
   private final Closeable[] close;
+  private final boolean[] closed;
   protected final IntBuffer[] docs;
   final int capacity;
 
@@ -48,6 +50,7 @@ public class SortedIntDocSet extends DocSet {
   public SortedIntDocSet(Parts parts) {
     super(parts.arr.length > 0);
     this.close = parts.close;
+    this.closed = parts.closed;
     this.docs = parts.arr;
     this.capacity = getCapacity(docs);
   }
@@ -109,7 +112,7 @@ public class SortedIntDocSet extends DocSet {
 
   private static final IntBuffer[] zeroInts = new IntBuffer[0];
   private static final Parts zeroIntsParts =
-      new Parts(zeroInts, new Closeable[] {DocSet.NOOP_CLOSEABLE});
+      new Parts(zeroInts, new Closeable[] {DocSet.NOOP_CLOSEABLE}, new boolean[1]);
   private static final SortedIntDocSet zero = new SortedIntDocSet(zeroIntsParts);
 
   // -5 b/c there are 32 bits per int
@@ -120,10 +123,12 @@ public class SortedIntDocSet extends DocSet {
   public static final class Parts {
     public final IntBuffer[] arr;
     public final Closeable[] close;
+    public final boolean[] closed;
 
-    public Parts(IntBuffer[] arr, Closeable[] close) {
+    public Parts(IntBuffer[] arr, Closeable[] close, boolean[] closed) {
       this.arr = arr;
       this.close = close;
+      this.closed = closed;
     }
   }
 
@@ -132,13 +137,15 @@ public class SortedIntDocSet extends DocSet {
     int outerSize = ((size - 1) >> WORDS_SHIFT) + 1;
     IntBuffer[] ret = new IntBuffer[outerSize];
     Closeable[] close = new Closeable[1];
+    boolean[] closed = new boolean[1];
     int i = outerSize - 1;
-    ByteBuffer[] bb = FixedBitSets.MODIFIER.allocateBytesArr(size << 2, close);
+    ByteBuffer[] bb =
+        FixedBitSets.MODIFIER.allocateBytesArr(size << 2, new SentinelPacket(close, closed));
     ret[i] = bb[i].asIntBuffer();
     while (--i >= 0) {
       ret[i] = bb[i].asIntBuffer();
     }
-    return new Parts(ret, close);
+    return new Parts(ret, close, closed);
   }
 
   public static Parts shrink(Parts parts, int newSize) {
@@ -1004,12 +1011,14 @@ public class SortedIntDocSet extends DocSet {
   @Override
   public SortedIntDocSet clone() {
     Closeable[] close = new Closeable[1];
+    boolean[] closed = new boolean[1];
     IntBuffer[] newDocs = new IntBuffer[docs.length];
-    ByteBuffer[] bb = FixedBitSets.MODIFIER.allocateBytesArr(capacity << 2, close);
+    ByteBuffer[] bb =
+        FixedBitSets.MODIFIER.allocateBytesArr(capacity << 2, new SentinelPacket(close, closed));
     for (int i = docs.length - 1; i >= 0; i--) {
       newDocs[i] = bb[i].asIntBuffer().put(docs[i].slice()).clear();
     }
-    return new SortedIntDocSet(new Parts(newDocs, close));
+    return new SortedIntDocSet(new Parts(newDocs, close, closed));
   }
 
   @Override

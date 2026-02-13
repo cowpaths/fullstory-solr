@@ -73,7 +73,8 @@ public abstract class DocSet
   private static class EmptyLazyHolder {
     static final DocSet INSTANCE =
         new SortedIntDocSet(
-            new SortedIntDocSet.Parts(new IntBuffer[0], new Closeable[] {NOOP_CLOSEABLE}));
+            new SortedIntDocSet.Parts(
+                new IntBuffer[0], new Closeable[] {NOOP_CLOSEABLE}, new boolean[1]));
   }
 
   static final Closeable NOOP_CLOSEABLE = DocSet::doNothing;
