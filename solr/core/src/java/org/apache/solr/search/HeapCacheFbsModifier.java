@@ -82,6 +82,7 @@ public class HeapCacheFbsModifier
   private static final int BLOCK_SIZE_BYTES = SortedIntDocSet.MAX_ARR_SIZE << 2;
   private static final int MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
   private final int nBlocks;
+  private final boolean offheap;
 
   private static final int ALIGN_SIZE = 4096; // 4k
   private static final int ALIGN_OVERHEAD = ALIGN_SIZE - 1; // 4k - 1
@@ -157,6 +158,7 @@ public class HeapCacheFbsModifier
   private HeapCacheFbsModifier(
       boolean unregister, long targetPoolSize, boolean offheap, HeapCacheFbsModifier fallback) {
     this.fallback = fallback;
+    this.offheap = offheap;
     this.unregister = unregister;
     if (EnvUtils.getProperty("tests.seed") == null) {
       nBlocks = Math.toIntExact(targetPoolSize / BLOCK_SIZE_BYTES);
@@ -265,6 +267,7 @@ public class HeapCacheFbsModifier
     long exhausted = h.exhausted.sum();
     int extant = h.top.get();
     int avail = extant < 0 ? ~extant : extant;
+    map.put("offheap", h.offheap);
     map.put("outstandingRefCount", h.refHandler.getOutstandingSize());
     map.put("activeRefProcessingThreads", h.refHandler.activeThreadCount());
     map.put("allocatedCount", allocated);
@@ -272,6 +275,9 @@ public class HeapCacheFbsModifier
     map.put("allocatedRatio", (double) allocated / (allocated + exhausted));
     map.put("availableBlockCount", avail);
     map.put("availableBlockRatio", (double) avail / h.nBlocks);
+    map.put(
+        "totalBlockSize",
+        RamUsageEstimator.humanReadableUnits((long) h.nBlocks * BLOCK_SIZE_BYTES));
   }
 
   @Override
