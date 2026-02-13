@@ -96,7 +96,7 @@ public abstract class DocSet
 
   @Override
   public final void close() throws IOException {
-    if (release(refCount)) {
+    if (refCount != null && release(refCount)) {
       doClose();
     }
   }

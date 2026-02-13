@@ -54,8 +54,9 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   protected void doClose() throws IOException {
-    if (close != null) {
-      close[0].close();
+    Closeable c;
+    if (close != null && (c = close[0]) != null) {
+      c.close();
     }
   }
 
