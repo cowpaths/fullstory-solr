@@ -106,7 +106,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   private void check() {
     if (closed[0]) {
-      throw new IllegalStateException("docset already closed");
+      throw new IllegalStateException("docset already closed " + System.identityHashCode(closed));
     }
   }
 
@@ -201,6 +201,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   public void and(FixedBitSets other) {
     check();
+    other.check();
     FixedBitSet[] otherParts = other.parts;
     int i = 0;
     for (int lim = Math.min(parts.length, otherParts.length); i < lim; i++) {
@@ -213,6 +214,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   public int andCount(FixedBitSets other) {
     check();
+    other.check();
     FixedBitSet[] otherParts = other.parts;
     long ret = 0;
     for (int i = 0, lim = Math.min(parts.length, otherParts.length); i < lim; i++) {
@@ -223,6 +225,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   public boolean intersects(FixedBitSets other) {
     check();
+    other.check();
     FixedBitSet[] otherBits = other.parts;
     for (int i = 0, lim = Math.min(parts.length, otherBits.length); i < lim; i++) {
       if (parts[i].intersects(otherBits[i])) {
@@ -234,6 +237,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   public void or(FixedBitSets other) {
     check();
+    other.check();
     FixedBitSet[] otherParts = other.parts;
     for (int i = 0, lim = Math.min(parts.length, otherParts.length); i < lim; i++) {
       parts[i].or(otherParts[i]);
@@ -242,6 +246,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   public int unionCount(FixedBitSets other) {
     check();
+    other.check();
     FixedBitSet[] otherParts = other.parts;
     long ret = 0;
     int i = 0;
@@ -259,6 +264,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   public void andNot(FixedBitSets other) {
     check();
+    other.check();
     FixedBitSet[] otherParts = other.parts;
     for (int i = 0, lim = Math.min(parts.length, otherParts.length); i < lim; i++) {
       parts[i].andNot(otherParts[i]);
@@ -267,6 +273,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   public int andNotCount(FixedBitSets other) {
     check();
+    other.check();
     FixedBitSet[] otherParts = other.parts;
     long ret = 0;
     int i = 0;

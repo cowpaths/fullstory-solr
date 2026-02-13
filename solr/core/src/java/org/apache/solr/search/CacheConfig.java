@@ -194,7 +194,7 @@ public class CacheConfig implements MapSerializable {
   @SuppressWarnings("rawtypes")
   private static final Class<?>[] REGEN_PARAMS = new Class[] {SolrConfig.class, CacheConfig.class};
 
-  private static <T> T acquire(T val) {
+  public static <T> T acquire(T val) {
     if (val instanceof DocSet) {
       DocSet docs = (DocSet) val;
       SolrRequestInfo info;
