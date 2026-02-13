@@ -66,6 +66,9 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
   final boolean skipfilterCacheSubDomain;
   private static final String CLUSTER_PROP_SKIP_FILTER_CACHE_SUBDOMAIN =
       ClusterProperties.EXT_PROPRTTY_PREFIX + "facet.skipFilterCacheSubDomain";
+  private static final String CLUSTER_PROP_FILTER_COLLECTIONS = "collections";
+  private static final String CLUSTER_PROP_FILTER_NODES = "nodes";
+  private static final String CLUSTER_PROP_FILTER_ENABLED = "enabled";
 
   // TODO: push any of this down to base class?
 
@@ -146,13 +149,54 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
             .getZkController()
             .zkStateReader
             .getClusterProperty(CLUSTER_PROP_SKIP_FILTER_CACHE_SUBDOMAIN, null);
+    return matchesSkipFilterCacheSubDomain(propValue, fcontext);
+  }
+
+  private static boolean matchesSkipFilterCacheSubDomain(Object propValue, FacetContext fcontext) {
     if (propValue == null) {
       return false;
     }
     if (propValue instanceof Boolean) {
       return (Boolean) propValue;
     }
-    return Boolean.parseBoolean(propValue.toString());
+    if (!(propValue instanceof Map)) {
+      return Boolean.parseBoolean(propValue.toString());
+    }
+
+    @SuppressWarnings("unchecked")
+    Map<String, Object> config = (Map<String, Object>) propValue;
+    Object enabledVal = config.get(CLUSTER_PROP_FILTER_ENABLED);
+    if (enabledVal != null && !Boolean.parseBoolean(enabledVal.toString())) {
+      return false;
+    }
+
+    String collection = fcontext.req.getCore().getCoreDescriptor().getCollectionName();
+    String nodeName = fcontext.req.getCore().getCoreContainer().getZkController().getNodeName();
+
+    if (!matchesFilterList(config.get(CLUSTER_PROP_FILTER_COLLECTIONS), collection)) {
+      return false;
+    }
+    if (!matchesFilterList(config.get(CLUSTER_PROP_FILTER_NODES), nodeName)) {
+      return false;
+    }
+    return true;
+  }
+
+  private static boolean matchesFilterList(Object filterValue, String value) {
+    if (filterValue == null) {
+      return true;
+    }
+    if (filterValue instanceof List) {
+      @SuppressWarnings("unchecked")
+      List<Object> list = (List<Object>) filterValue;
+      for (Object entry : list) {
+        if (entry != null && entry.toString().equals(value)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    return filterValue.toString().equals(value);
   }
 
   /** This is used to create accs for second phase (or to create accs for all aggs) */
