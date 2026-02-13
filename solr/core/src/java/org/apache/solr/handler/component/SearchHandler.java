@@ -106,7 +106,6 @@ public class SearchHandler extends RequestHandlerBase
           DATA_NODE_ALLOW_RATE_LIMIT_ALWAYS_KEY, DATA_NODE_ALLOW_RATE_LIMIT_ALWAYS_DEFAULT);
 
   protected static final String SHARD_HANDLER_SUFFIX = "[shard]";
-  private static final String FILTER_STATS_TRIGGER_TYPE_PARAM = "filterStatsTriggerType";
 
   private static final Set<SolrException.ErrorCode> NONTOLERANT_ERROR_CODES =
       Set.of(SolrException.ErrorCode.BAD_REQUEST);
@@ -433,19 +432,6 @@ public class SearchHandler extends RequestHandlerBase
     if (rb.requestInfo != null) {
       rb.requestInfo.setResponseBuilder(rb);
     }
-
-    //temp change start filter cache investigation
-    //See if upstream pass any explicit type. If so, set it to the request scope info
-    //So we can print the type in the filtersStats
-    String triggerTypeParam = req.getParams().get(FILTER_STATS_TRIGGER_TYPE_PARAM);
-    if (triggerTypeParam != null) {
-      try {
-        rb.setFilterStatsTriggerType(ResponseBuilder.FilterStatsTriggerType.valueOf(triggerTypeParam));
-      } catch (IllegalArgumentException e) {
-        log.debug("Ignoring unknown filterStatsTriggerType param {}", triggerTypeParam);
-      }
-    }
-    //temp change end
 
     rb.isDistrib = isDistrib(req);
     tagRequestWithRequestId(rb);
