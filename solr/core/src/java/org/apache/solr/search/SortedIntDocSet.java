@@ -44,6 +44,12 @@ public class SortedIntDocSet extends DocSet {
   protected final IntBuffer[] docs;
   final int capacity;
 
+  private void check() {
+    if (closed[0]) {
+      throw new IllegalStateException("docset already closed");
+    }
+  }
+
   /**
    * @param parts Sorted list of ids
    */
@@ -57,6 +63,7 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   protected void doClose() throws IOException {
+    check();
     Closeable c;
     if (close != null && (c = close[0]) != null) {
       c.close();
@@ -304,6 +311,7 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public int intersectionSize(DocSet other) {
+    check();
     if (!(other instanceof SortedIntDocSet)) {
       // BitDocSet is  better at random access than we are
       int icount = 0;
@@ -359,6 +367,7 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public boolean intersects(DocSet other) {
+    check();
     if (!(other instanceof SortedIntDocSet)) {
       // assume BitDocSet is better at random access than we are
       for (IntBuffer sub : docs) {
@@ -371,6 +380,7 @@ public class SortedIntDocSet extends DocSet {
 
     // make "a" the smaller set.
     SortedIntDocSet otherSet = (SortedIntDocSet) other;
+    otherSet.check();
     final SortedIntDocSet a = capacity < otherSet.capacity ? this : otherSet;
     final SortedIntDocSet b = capacity < otherSet.capacity ? otherSet : this;
 
@@ -511,6 +521,7 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public DocSet intersection(DocSet other) {
+    check();
     if (!(other instanceof SortedIntDocSet)) {
       int icount = 0;
       Parts newParts = allocate(capacity);
@@ -732,6 +743,7 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public DocSet andNot(DocSet other) {
+    check();
     if (other.size() == 0) return this;
 
     if (!(other instanceof SortedIntDocSet)) {
@@ -768,6 +780,7 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public void addAllTo(FixedBitSets target) {
+    check();
     for (IntBuffer sub : docs) {
       for (int i = 0, lim = sub.capacity(); i < lim; i++) {
         target.set(sub.get(i));
@@ -777,6 +790,7 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public boolean exists(int doc) {
+    check();
     // this could be faster by estimating where in the list the doc is likely to appear,
     // but we should get away from using exists() anyway.
     int low = 0;
@@ -799,6 +813,7 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public DocIterator iterator() {
+    check();
     return new DocIterator() {
       int pos = 0;
 
@@ -833,6 +848,7 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public Bits getBits() {
+    check();
     IntHashSet hashSet = new IntHashSet(capacity);
     for (IntBuffer sub : docs) {
       for (int i = 0, lim = sub.capacity(); i < lim; i++) {
@@ -878,6 +894,7 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public DocSet union(DocSet other) {
+    check();
     // TODO could be more efficient if both are SortedIntDocSet
     FixedBitSets otherBits = other.getFixedBitSet();
     FixedBitSets newbits = BitDocSet.ensureCapacity(getFixedBitSetClone(), otherBits.length());
@@ -922,6 +939,7 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public DocIdSetIterator iterator(LeafReaderContext context) {
+    check();
 
     if (capacity == 0 || context.reader().maxDoc() < 1) {
       // empty docset or entirely empty segment (verified that the latter actually happens)
@@ -1010,6 +1028,7 @@ public class SortedIntDocSet extends DocSet {
 
   @Override
   public SortedIntDocSet clone() {
+    check();
     Closeable[] close = new Closeable[1];
     boolean[] closed = new boolean[1];
     IntBuffer[] newDocs = new IntBuffer[docs.length];

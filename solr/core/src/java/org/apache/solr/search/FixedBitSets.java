@@ -104,6 +104,12 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   private final boolean[] closed = new boolean[1];
   private int cachedLength = -1;
 
+  private void check() {
+    if (closed[0]) {
+      throw new IllegalStateException("docset already closed");
+    }
+  }
+
   public FixedBitSets(int numBits) {
     if (numBits == 0) {
       this.parts = new FixedBitSet[0];
@@ -139,24 +145,29 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   @Override
   public void close() throws IOException {
+    check();
     try (Closeable c = close[0]) {
       Arrays.fill(parts, null);
     }
   }
 
   public void set(int index) {
+    check();
     parts[index >> BitDocSet.BIT_SHIFT].set(index & BLOCK_BIT_MASK);
   }
 
   public boolean get(int index) {
+    check();
     return parts[index >> BitDocSet.BIT_SHIFT].get(index & BLOCK_BIT_MASK);
   }
 
   public void clear(int index) {
+    check();
     parts[index >> BitDocSet.BIT_SHIFT].clear(index & BLOCK_BIT_MASK);
   }
 
   public void set(int from, int to) {
+    check();
     int firstOuterIdx = from >> BIT_SHIFT;
     int lastOuterIdx = (to - 1) >> BIT_SHIFT;
     int fromInner = from & BLOCK_BIT_MASK;
@@ -173,6 +184,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public int length() {
+    check();
     if (cachedLength == -1) {
       return cachedLength =
           Math.toIntExact(Arrays.stream(parts).mapToLong(FixedBitSet::length).sum());
@@ -188,6 +200,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public void and(FixedBitSets other) {
+    check();
     FixedBitSet[] otherParts = other.parts;
     int i = 0;
     for (int lim = Math.min(parts.length, otherParts.length); i < lim; i++) {
@@ -199,6 +212,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public int andCount(FixedBitSets other) {
+    check();
     FixedBitSet[] otherParts = other.parts;
     long ret = 0;
     for (int i = 0, lim = Math.min(parts.length, otherParts.length); i < lim; i++) {
@@ -208,6 +222,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public boolean intersects(FixedBitSets other) {
+    check();
     FixedBitSet[] otherBits = other.parts;
     for (int i = 0, lim = Math.min(parts.length, otherBits.length); i < lim; i++) {
       if (parts[i].intersects(otherBits[i])) {
@@ -218,6 +233,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public void or(FixedBitSets other) {
+    check();
     FixedBitSet[] otherParts = other.parts;
     for (int i = 0, lim = Math.min(parts.length, otherParts.length); i < lim; i++) {
       parts[i].or(otherParts[i]);
@@ -225,6 +241,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public int unionCount(FixedBitSets other) {
+    check();
     FixedBitSet[] otherParts = other.parts;
     long ret = 0;
     int i = 0;
@@ -241,6 +258,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public void andNot(FixedBitSets other) {
+    check();
     FixedBitSet[] otherParts = other.parts;
     for (int i = 0, lim = Math.min(parts.length, otherParts.length); i < lim; i++) {
       parts[i].andNot(otherParts[i]);
@@ -248,6 +266,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public int andNotCount(FixedBitSets other) {
+    check();
     FixedBitSet[] otherParts = other.parts;
     long ret = 0;
     int i = 0;
@@ -262,6 +281,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   @Override
   public FixedBitSets clone() {
+    check();
     return new FixedBitSets(this);
   }
 
@@ -271,6 +291,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public int prevSetBit(int from) {
+    check();
     for (int i = from >> BIT_SHIFT, fromLocal = from & BLOCK_BIT_MASK; i >= 0; i--) {
       int nextLocal = parts[i].prevSetBit(fromLocal);
       if (nextLocal == -1) {
@@ -283,6 +304,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public int nextSetBit(int from) {
+    check();
     for (int i = from >> BIT_SHIFT, fromLocal = from & BLOCK_BIT_MASK; i < parts.length; i++) {
       int nextLocal = parts[i].nextSetBit(fromLocal);
       if (nextLocal == DocIdSetIterator.NO_MORE_DOCS) {
@@ -295,6 +317,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public void flip(int from, int to) {
+    check();
     int firstOuterIdx = from >> BIT_SHIFT;
     int lastOuterIdx = (to - 1) >> BIT_SHIFT;
     int fromInner = from & BLOCK_BIT_MASK;
@@ -311,6 +334,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public Bits asReadOnlyBits() {
+    check();
     return new Bits() {
       @Override
       public boolean get(int index) {
@@ -381,6 +405,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public void or(DocIdSetIterator iter) throws IOException {
+    check();
     ResettableDocIdSetIterator partIter = new ResettableDocIdSetIterator(iter);
     for (FixedBitSet part : parts) {
       part.or(partIter);
