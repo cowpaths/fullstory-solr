@@ -1519,8 +1519,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     SolrRequestInfo reqInfo = SolrRequestInfo.getRequestInfo();
 
     String keyString = key != null ? key.toString() : "null";
-    if (keyString.length() > 100) {
-      keyString = keyString.substring(0, 100) + "...";
+    if (keyString.length() > 200) {
+      keyString = keyString.substring(0, 200) + "...";
     }
 
     if (reqInfo != null && reqInfo.getResponseBuilder() != null) {
