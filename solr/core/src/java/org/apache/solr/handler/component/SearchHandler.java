@@ -554,10 +554,6 @@ public class SearchHandler extends RequestHandlerBase
       } finally {
         if (!rb.getFilterStats()
             .isEmpty()) { // always attempt to add filter cache stats if possible
-          NamedList<Object> headers = rb.rsp.getResponseHeader();
-          if (headers != null) {
-            headers.add("filtersStats", rb.getFilterStats());
-          }
           rsp.getToLog().add("filtersStats", Utils.toJSONString(rb.getFilterStats(), -1));
         }
       }
