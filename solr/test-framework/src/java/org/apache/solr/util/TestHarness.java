@@ -374,25 +374,34 @@ public class TestHarness extends BaseTestHarness {
     }
   }
 
+  public SolrQueryResponse queryAndResponse(String handler, SolrQueryRequest req) throws Exception {
+    return queryAndResponse(handler, req, true);
+  }
+
   /**
    * It is the users responsibility to close the request object when done with it. This method does
    * not set/clear SolrRequestInfo
    */
-  public SolrQueryResponse queryAndResponse(String handler, SolrQueryRequest req) throws Exception {
+  public SolrQueryResponse queryAndResponse(String handler, SolrQueryRequest req, boolean sri)
+      throws Exception {
     try (var mdcSnap = MDCSnapshot.create();
         SolrCore core = getCoreInc()) {
       assert null != mdcSnap; // prevent compiler warning of unused var
       SolrQueryResponse rsp = new SolrQueryResponse();
-      SolrRequestInfo.setRequestInfo(
-          new SolrRequestInfo(
-              req, rsp)); // needed for limits to be valid. Normally invoked by HttpSolrCall
+      if (sri) {
+        SolrRequestInfo.setRequestInfo(
+            new SolrRequestInfo(
+                req, rsp)); // needed for limits to be valid. Normally invoked by HttpSolrCall
+      }
       core.execute(core.getRequestHandler(handler), req, rsp);
       if (rsp.getException() != null) {
         throw rsp.getException();
       }
       return rsp;
     } finally {
-      SolrRequestInfo.clearRequestInfo();
+      if (sri) {
+        SolrRequestInfo.clearRequestInfo();
+      }
     }
   }
 

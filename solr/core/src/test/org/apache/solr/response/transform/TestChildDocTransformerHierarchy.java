@@ -166,7 +166,7 @@ public class TestChildDocTransformerHierarchy extends SolrTestCaseJ4 {
             "fq",
             fqToExcludeNonTestedDocs)) {
       BasicResultContext res =
-          (BasicResultContext) h.queryAndResponse("/select", req).getResponse();
+          (BasicResultContext) h.queryAndResponse("/select", req, false).getResponse();
       Iterator<SolrDocument> docsStreamer = res.getProcessedDocuments();
       while (docsStreamer.hasNext()) {
         SolrDocument doc = docsStreamer.next();
@@ -273,7 +273,7 @@ public class TestChildDocTransformerHierarchy extends SolrTestCaseJ4 {
             "fq",
             fqToExcludeNonTestedDocs)) {
       BasicResultContext res =
-          (BasicResultContext) h.queryAndResponse("/select", req).getResponse();
+          (BasicResultContext) h.queryAndResponse("/select", req, false).getResponse();
       Iterator<SolrDocument> docsStreamer = res.getProcessedDocuments();
       while (docsStreamer.hasNext()) {
         SolrDocument doc = docsStreamer.next();
@@ -378,7 +378,7 @@ public class TestChildDocTransformerHierarchy extends SolrTestCaseJ4 {
             "fq",
             fqToExcludeNonTestedDocs)) {
       BasicResultContext res =
-          (BasicResultContext) h.queryAndResponse("/select", req).getResponse();
+          (BasicResultContext) h.queryAndResponse("/select", req, false).getResponse();
       Iterator<SolrDocument> docsStreamer = res.getProcessedDocuments();
       while (docsStreamer.hasNext()) {
         SolrDocument doc = docsStreamer.next();
