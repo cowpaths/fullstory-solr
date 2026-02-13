@@ -57,7 +57,20 @@ public class HeapCacheFbsModifier
 
   public static HeapCacheFbsModifier getInstance() {
     try {
-      return FixedBitSets.registerModifier(HeapCacheFbsModifier::new);
+      return FixedBitSets.registerModifier(
+          () -> {
+            if (TPS > 0 && TPS_OFFHEAP > 0) {
+              HeapCacheFbsModifier offheap =
+                  new HeapCacheFbsModifier(false, TPS_OFFHEAP, true, null);
+              return new HeapCacheFbsModifier(true, TPS, false, offheap);
+            } else if (TPS > 0) {
+              return new HeapCacheFbsModifier(true, TPS, false, null);
+            } else if (TPS_OFFHEAP > 0) {
+              return new HeapCacheFbsModifier(true, TPS_OFFHEAP, true, null);
+            } else {
+              throw new IllegalStateException();
+            }
+          });
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }
@@ -96,6 +109,10 @@ public class HeapCacheFbsModifier
   private static final long TPS;
   private static final long TPS_OFFHEAP;
 
+  public static boolean isEnabled() {
+    return TPS > 0 || TPS_OFFHEAP > 0;
+  }
+
   static {
     long maxMemory = Runtime.getRuntime().maxMemory();
 
@@ -123,15 +140,11 @@ public class HeapCacheFbsModifier
 
   private final HeapCacheFbsModifier fallback;
 
-  private HeapCacheFbsModifier() {
-    this(true, TPS, false, new HeapCacheFbsModifier(false, TPS_OFFHEAP, true, null));
-  }
-
   HeapCacheFbsModifier(boolean offheap) {
     this(false, TPS, offheap, new HeapCacheFbsModifier(false, TPS_OFFHEAP, !offheap, null));
   }
 
-  HeapCacheFbsModifier(
+  private HeapCacheFbsModifier(
       boolean unregister, long targetPoolSize, boolean offheap, HeapCacheFbsModifier fallback) {
     this.fallback = fallback;
     this.unregister = unregister;

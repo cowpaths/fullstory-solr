@@ -415,9 +415,6 @@ public class CoreContainer {
     this(config, locator, false);
   }
 
-  private static final boolean POOL_DOCSET_BLOCKS =
-      EnvUtils.getPropertyAsInteger(HeapCacheFbsModifier.POOL_ONHEAP_TARGET_MB_PROPNAME, 0) != 0;
-
   public CoreContainer(NodeConfig config, CoresLocator locator, boolean asyncSolrCoreLoad) {
     this.cfg = requireNonNull(config);
     this.loader = config.getSolrResourceLoader();
@@ -838,7 +835,7 @@ public class CoreContainer {
     String registryName = SolrMetricManager.getRegistryName(SolrInfoBean.Group.node);
     solrMetricsContext = new SolrMetricsContext(metricManager, registryName, metricTag);
 
-    if (POOL_DOCSET_BLOCKS) {
+    if (HeapCacheFbsModifier.isEnabled()) {
       objectCache.computeIfAbsent(
           "docsetCache",
           (k) -> {
