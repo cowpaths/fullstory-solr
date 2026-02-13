@@ -20,6 +20,7 @@ package org.apache.solr.search.facet;
 import static org.apache.solr.search.facet.FacetContext.SKIP_FACET;
 
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -46,6 +47,8 @@ import org.apache.solr.search.WrappedQuery;
 import org.apache.solr.search.facet.SlotAcc.SlotContext;
 import org.apache.solr.search.facet.SlotAcc.SweepableSlotAcc;
 import org.apache.solr.search.facet.SlotAcc.SweepingCountSlotAcc;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Facet processing based on field values. (not range nor by query)
@@ -53,6 +56,7 @@ import org.apache.solr.search.facet.SlotAcc.SweepingCountSlotAcc;
  * @see FacetField
  */
 abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   SchemaField sf;
   SlotAcc indexOrderAcc;
   int effectiveMincount;
@@ -128,6 +132,9 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
     }
 
     skipfilterCacheSubDomain = shouldSkipFilterCacheSubDomain(fcontext);
+    String collection = fcontext.req.getCore().getCoreDescriptor().getCollectionName();
+    String nodeName = fcontext.req.getCore().getCoreContainer().getZkController().getNodeName();
+    log.info("skip filter cache? {} coll name {} node name {}", skipfilterCacheSubDomain, collection, nodeName);
 
     assert null != this.sort;
   }
