@@ -98,27 +98,26 @@ public class HeapCacheFbsModifier
 
   static {
     long maxMemory = Runtime.getRuntime().maxMemory();
-    long defaultTargetPoolSize = maxMemory / 16; // default to 1/16 of heap
-    long defaultOffheapTargetPoolSize = maxMemory / 4; // default to 1/4 of heap
 
-    int targetPoolSizeMB =
-        EnvUtils.getPropertyAsInteger(
-            POOL_ONHEAP_TARGET_MB_PROPNAME, Math.toIntExact(defaultTargetPoolSize >> 20));
-    int targetOffheapPoolSizeMB =
-        EnvUtils.getPropertyAsInteger(
-            POOL_OFFHEAP_TARGET_MB_PROPNAME, Math.toIntExact(defaultOffheapTargetPoolSize >> 20));
-    if (targetPoolSizeMB == -1) {
-      TPS = defaultTargetPoolSize;
-    } else {
-      TPS = ((long) targetPoolSizeMB) << 20;
-    }
-    if (targetPoolSizeMB == -1) {
-      TPS_OFFHEAP = defaultOffheapTargetPoolSize;
-    } else {
-      TPS_OFFHEAP = ((long) targetOffheapPoolSizeMB) << 20;
-    }
+    // default to 1/16 of heap
+    TPS = getTargetPoolSize(POOL_ONHEAP_TARGET_MB_PROPNAME, maxMemory, 16);
+
+    // default to 1/4 of heap
+    TPS_OFFHEAP = getTargetPoolSize(POOL_OFFHEAP_TARGET_MB_PROPNAME, maxMemory, 4);
+
     if (log.isInfoEnabled()) {
       log.info("block_size={}", RamUsageEstimator.humanReadableUnits(BLOCK_SIZE_BYTES));
+    }
+  }
+
+  private static long getTargetPoolSize(String propName, long maxMemory, int divisor) {
+    long defaultTargetPoolSize = maxMemory / divisor; // default to 1/<divisor> of heap
+    int targetPoolSizeMB =
+        EnvUtils.getPropertyAsInteger(propName, Math.toIntExact(defaultTargetPoolSize >> 20));
+    if (targetPoolSizeMB == -1) {
+      return defaultTargetPoolSize;
+    } else {
+      return ((long) targetPoolSizeMB) << 20;
     }
   }
 
