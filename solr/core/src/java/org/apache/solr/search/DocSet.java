@@ -19,6 +19,8 @@ package org.apache.solr.search;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.IntBuffer;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.DocIdSetIterator;
@@ -44,8 +46,17 @@ public abstract class DocSet
       refCount = new AtomicInteger(1);
       SolrRequestInfo requestInfo = SolrRequestInfo.getRequestInfo();
       if (requestInfo != null) {
-        AtomicInteger refCountF = refCount;
-        requestInfo.addCloseHook(() -> release(refCountF));
+        @SuppressWarnings("unchecked")
+        Set<DocSet> registered =
+            (Set<DocSet>)
+                requestInfo
+                    .getReq()
+                    .getContext()
+                    .computeIfAbsent("docSetCloseHooks", (k) -> new HashSet<>());
+        if (registered.add(this)) {
+          AtomicInteger refCountF = refCount;
+          requestInfo.addCloseHook(() -> release(refCountF));
+        }
       }
     } else {
       refCount = null;

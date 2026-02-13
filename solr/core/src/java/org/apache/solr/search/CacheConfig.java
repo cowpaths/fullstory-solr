@@ -20,13 +20,16 @@ import static org.apache.solr.common.params.CommonParams.NAME;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Constructor;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 import org.apache.solr.common.ConfigNode;
@@ -193,12 +196,28 @@ public class CacheConfig implements MapSerializable {
 
   private static <T> T acquire(T val) {
     if (val instanceof DocSet) {
+      DocSet docs = (DocSet) val;
       SolrRequestInfo info;
-      Closeable c = ((DocSet) val).acquire();
+      Closeable c = docs.acquire();
       if (c == null) {
         return null;
       } else if ((info = SolrRequestInfo.getRequestInfo()) != null) {
-        info.addCloseHook(((DocSet) val).acquire());
+        @SuppressWarnings("unchecked")
+        Set<DocSet> registered =
+            (Set<DocSet>)
+                info.getReq()
+                    .getContext()
+                    .computeIfAbsent("docSetCloseHooks", (k) -> new HashSet<>());
+        if (registered.add(docs)) {
+          info.addCloseHook(c);
+        } else {
+          // already registered; release duplicate reservation now
+          try {
+            c.close();
+          } catch (IOException e) {
+            throw new UncheckedIOException(e);
+          }
+        }
       }
     }
     return val;
