@@ -195,7 +195,7 @@ public class ReferenceHandler<T> implements Closeable {
     }
 
     @Override
-    public void close() throws IOException {
+    public void close() {
       handler.remove(this);
     }
   }

@@ -74,7 +74,15 @@ public class SortedIntDocSet extends DocSet {
    * @param len Number of ids in the list
    */
   public SortedIntDocSet(Parts parts, int len) {
-    this(shrink(parts, len));
+    this(shrinkAndClose(parts, len));
+  }
+
+  private static Parts shrinkAndClose(Parts parts, int len) {
+    try (Closeable c = parts.close[0]) {
+      return shrink(parts, len);
+    } catch (IOException ex) {
+      throw new UncheckedIOException(ex);
+    }
   }
 
   public static Parts grow(IntBuffer[] buffer, int limit, int newSize) {
@@ -146,14 +154,10 @@ public class SortedIntDocSet extends DocSet {
     IntBuffer[] arr = parts.arr;
     int i = ret.length - 1;
     int lastIdxSize = ((newSize - 1) & ARR_MASK) + 1;
-    try (Closeable c = parts.close[0]) {
-      buffercopy(arr[i], 0, ret[i], 0, lastIdxSize);
-      while (--i >= 0) {
-        // don't share content
-        buffercopy(arr[i], 0, ret[i], 0, SortedIntDocSet.MAX_ARR_SIZE);
-      }
-    } catch (IOException e) {
-      throw new UncheckedIOException(e);
+    buffercopy(arr[i], 0, ret[i], 0, lastIdxSize);
+    while (--i >= 0) {
+      // don't share content
+      buffercopy(arr[i], 0, ret[i], 0, SortedIntDocSet.MAX_ARR_SIZE);
     }
     return newParts;
   }

@@ -55,7 +55,12 @@ public abstract class DocSet
                     .computeIfAbsent("docSetCloseHooks", (k) -> new HashSet<>());
         if (registered.add(this)) {
           AtomicInteger refCountF = refCount;
-          requestInfo.addCloseHook(() -> release(refCountF));
+          requestInfo.addCloseHook(
+              () -> {
+                if (release(refCountF)) {
+                  doClose();
+                }
+              });
         }
       }
     } else {
@@ -85,7 +90,11 @@ public abstract class DocSet
       int witness = refCount.compareAndExchange(extant, extant + 1);
       if (witness == extant) {
         AtomicInteger refCountF = refCount;
-        return () -> release(refCountF);
+        return () -> {
+          if (release(refCountF)) {
+            doClose();
+          }
+        };
       } else {
         extant = witness;
       }
