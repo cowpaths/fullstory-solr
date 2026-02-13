@@ -81,7 +81,6 @@ public class HeapCacheFbsModifier
   private static final int BLOCK_SIZE_BYTES = SortedIntDocSet.MAX_ARR_SIZE << 2;
   private static final int MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
   private final int nBlocks;
-  private static final long TAIL_MASK = -1L >>> Integer.SIZE;
 
   private static final int ALIGN_SIZE = 4096; // 4k
   private static final int ALIGN_OVERHEAD = ALIGN_SIZE - 1; // 4k - 1
