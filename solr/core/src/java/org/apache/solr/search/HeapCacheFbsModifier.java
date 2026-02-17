@@ -204,7 +204,8 @@ public class HeapCacheFbsModifier
   }
 
   private static void poolOnheap(int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
-    for (int i = numPartitions - 1, partitionNumBlocks = ((nBlocks - 1) / numPartitions) + 1;
+    for (int i = numPartitions - 1,
+            partitionNumBlocks = ((nBlocks - 1) % MAX_BLOCKS_PER_PARTITION) + 1;
         i >= 0;
         i--) {
       int partitionSize = partitionNumBlocks * BLOCK_SIZE_BYTES;
@@ -590,7 +591,8 @@ public class HeapCacheFbsModifier
                 ValueLayout.JAVA_LONG,
                 ValueLayout.JAVA_INT));
 
-    for (int i = numPartitions - 1, partitionNumBlocks = ((nBlocks - 1) / numPartitions) + 1;
+    for (int i = numPartitions - 1,
+            partitionNumBlocks = ((nBlocks - 1) % MAX_BLOCKS_PER_PARTITION) + 1;
         i >= 0;
         i--) {
       int partitionSize = partitionNumBlocks * BLOCK_SIZE_BYTES;
