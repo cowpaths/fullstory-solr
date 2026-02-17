@@ -63,12 +63,12 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
 
   final Map<String, AggValueSource> deferredAggs = new HashMap<String, AggValueSource>();
 
-  final boolean skipfilterCacheSubDomain;
+  final int skipFilterCacheSubDomainSlotThreshold;
   private static final String CLUSTER_PROP_SKIP_FILTER_CACHE_SUBDOMAIN =
       ClusterProperties.EXT_PROPRTTY_PREFIX + "facet.skipFilterCacheSubDomain";
   private static final String CLUSTER_PROP_FILTER_COLLECTIONS = "collections";
   private static final String CLUSTER_PROP_FILTER_NODES = "nodes";
-  private static final String CLUSTER_PROP_FILTER_ENABLED = "enabled";
+  private static final String CLUSTER_PROP_SLOT_THRESHOLD = "slotThreshold";
 
   // TODO: push any of this down to base class?
 
@@ -127,19 +127,19 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
       }
     }
 
-    skipfilterCacheSubDomain = shouldSkipFilterCacheSubDomain(fcontext);
+    skipFilterCacheSubDomainSlotThreshold = resolveSkipFilterCacheSubDomainSlotThreshold(fcontext);
 
     assert null != this.sort;
   }
 
-  private static boolean shouldSkipFilterCacheSubDomain(FacetContext fcontext) {
+  private static int resolveSkipFilterCacheSubDomainSlotThreshold(FacetContext fcontext) {
     if (fcontext == null || fcontext.req == null) {
-      return false;
+      return -1;
     }
     if (fcontext.req.getCore() == null
         || fcontext.req.getCore().getCoreContainer() == null
         || fcontext.req.getCore().getCoreContainer().getZkController() == null) {
-      return false;
+      return -1;
     }
     Object propValue =
         fcontext
@@ -149,37 +149,47 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
             .getZkController()
             .zkStateReader
             .getClusterProperty(CLUSTER_PROP_SKIP_FILTER_CACHE_SUBDOMAIN, null);
-    return matchesSkipFilterCacheSubDomain(propValue, fcontext);
+    return resolveSlotThreshold(propValue, fcontext);
   }
 
-  private static boolean matchesSkipFilterCacheSubDomain(Object propValue, FacetContext fcontext) {
+  private static int resolveSlotThreshold(Object propValue, FacetContext fcontext) {
     if (propValue == null) {
-      return false;
+      return -1;
     }
-    if (propValue instanceof Boolean) {
-      return (Boolean) propValue;
+    if (propValue instanceof Number) {
+      return ((Number) propValue).intValue();
     }
     if (!(propValue instanceof Map)) {
-      return Boolean.parseBoolean(propValue.toString());
+      try {
+        return Integer.parseInt(propValue.toString());
+      } catch (NumberFormatException e) {
+        return -1;
+      }
     }
 
     @SuppressWarnings("unchecked")
     Map<String, Object> config = (Map<String, Object>) propValue;
-    Object enabledVal = config.get(CLUSTER_PROP_FILTER_ENABLED);
-    if (enabledVal != null && !Boolean.parseBoolean(enabledVal.toString())) {
-      return false;
+    Object slotThresholdVal = config.get(CLUSTER_PROP_SLOT_THRESHOLD);
+    if (slotThresholdVal == null) {
+      return -1;
     }
-
     String collection = fcontext.req.getCore().getCoreDescriptor().getCollectionName();
     String nodeName = fcontext.req.getCore().getCoreContainer().getZkController().getNodeName();
 
     if (!matchesFilterList(config.get(CLUSTER_PROP_FILTER_COLLECTIONS), collection)) {
-      return false;
+      return -1;
     }
     if (!matchesFilterList(config.get(CLUSTER_PROP_FILTER_NODES), nodeName)) {
-      return false;
+      return -1;
     }
-    return true;
+    if (slotThresholdVal instanceof Number) {
+      return ((Number) slotThresholdVal).intValue();
+    }
+    try {
+      return Integer.parseInt(slotThresholdVal.toString());
+    } catch (NumberFormatException e) {
+      return -1;
+    }
   }
 
   private static boolean matchesFilterList(Object filterValue, String value) {
@@ -197,6 +207,13 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
       return false;
     }
     return filterValue.toString().equals(value);
+  }
+
+  private boolean shouldSkipFilterCacheSubDomain(int slotCount) {
+    if (skipFilterCacheSubDomainSlotThreshold < 0) { //-1 means no changes - do not skip
+      return false;
+    }
+    return slotCount > skipFilterCacheSubDomainSlotThreshold;
   }
 
   /** This is used to create accs for second phase (or to create accs for all aggs) */
@@ -593,7 +610,7 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
       SimpleOrderedMap<Object> bucket = new SimpleOrderedMap<>();
       bucket.add("val", slot.bucketVal);
 
-      fillBucketFromSlot(bucket, slot, resortAccForFill);
+      fillBucketFromSlot(bucket, slot, resortAccForFill, sortedSlots.length);
 
       bucketList.add(bucket);
     }
@@ -658,7 +675,7 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
   }
 
   /** Helper method used solely when looping over buckets to be returned in findTopSlots */
-  private void fillBucketFromSlot(SimpleOrderedMap<Object> target, Slot slot, SlotAcc resortAcc)
+  private void fillBucketFromSlot(SimpleOrderedMap<Object> target, Slot slot, SlotAcc resortAcc, int slotCount)
       throws IOException {
     final int slotOrd = slot.slot;
     countAcc.setValues(target, slotOrd);
@@ -671,7 +688,10 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
     if (otherAccs == null && freq.subFacets.isEmpty()) return;
 
     assert null != slot.bucketFilter;
-    final Query filter = skipfilterCacheSubDomain ? getWrappedNonCacheFilter(slot.bucketFilter) : slot.bucketFilter;
+    final Query filter =
+        shouldSkipFilterCacheSubDomain(slotCount)
+            ? getWrappedNonCacheFilter(slot.bucketFilter)
+            : slot.bucketFilter;
 
 
     final DocSet subDomain = fcontext.searcher.getDocSet(filter, fcontext.base);
@@ -796,7 +816,10 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
 
       assert null != slot.bucketFilter : "null filter for slot=" + slot.bucketVal;
 
-      final Query bucketFilter = skipfilterCacheSubDomain ? getWrappedNonCacheFilter(slot.bucketFilter) : slot.bucketFilter;
+      final Query bucketFilter =
+          shouldSkipFilterCacheSubDomain(slots.length)
+              ? getWrappedNonCacheFilter(slot.bucketFilter)
+              : slot.bucketFilter;
 
       final DocSet subDomain = fcontext.searcher.getDocSet(bucketFilter, fcontext.base);
       acc.collect(
