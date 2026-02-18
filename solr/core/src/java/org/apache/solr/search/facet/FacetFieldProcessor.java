@@ -210,7 +210,7 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
   }
 
   private boolean shouldSkipFilterCacheSubDomain(int slotCount) {
-    if (skipFilterCacheSubDomainSlotThreshold < 0) { //-1 means no changes - do not skip
+    if (skipFilterCacheSubDomainSlotThreshold < 0) { // -1 means no changes - do not skip
       return false;
     }
     return slotCount > skipFilterCacheSubDomainSlotThreshold;
@@ -675,7 +675,8 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
   }
 
   /** Helper method used solely when looping over buckets to be returned in findTopSlots */
-  private void fillBucketFromSlot(SimpleOrderedMap<Object> target, Slot slot, SlotAcc resortAcc, int slotCount)
+  private void fillBucketFromSlot(
+      SimpleOrderedMap<Object> target, Slot slot, SlotAcc resortAcc, int slotCount)
       throws IOException {
     final int slotOrd = slot.slot;
     countAcc.setValues(target, slotOrd);
@@ -692,7 +693,6 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
         shouldSkipFilterCacheSubDomain(slotCount)
             ? getWrappedNonCacheFilter(slot.bucketFilter)
             : slot.bucketFilter;
-
 
     final DocSet subDomain = fcontext.searcher.getDocSet(filter, fcontext.base);
 
