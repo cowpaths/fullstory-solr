@@ -55,9 +55,12 @@ public class ReferenceHandler<T> implements Closeable {
 
   private final LongAdder explicitlyClosed = new LongAdder();
 
+  private final boolean allowExplicitClose;
+
   @SuppressWarnings("unchecked")
-  public ReferenceHandler(Consumer<T> onCollection, Runnable output) {
+  public ReferenceHandler(boolean allowExplicitClose, Consumer<T> onCollection, Runnable output) {
     int execSize = PARALLEL_HEAD_FACTOR + (output == null ? 0 : 1);
+    this.allowExplicitClose = allowExplicitClose;
     this.exec =
         ExecutorUtil.newMDCAwareFixedThreadPool(execSize, new SolrNamedThreadFactory("refHandler"));
     this.onCollection = onCollection;
@@ -198,7 +201,7 @@ public class ReferenceHandler<T> implements Closeable {
 
     @Override
     public void close() {
-      if (handler.remove(this)) {
+      if (handler.allowExplicitClose && handler.remove(this)) {
         handler.explicitlyClosed.increment();
       }
     }

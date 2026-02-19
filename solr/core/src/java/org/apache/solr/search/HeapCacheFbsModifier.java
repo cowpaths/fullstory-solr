@@ -132,6 +132,10 @@ public class HeapCacheFbsModifier
   public static final String POOL_ONHEAP_TARGET_MB_PROPNAME = "solr.fbspool.onheap.targetMB";
   public static final String POOL_ALWAYS_ONE_UNPOOLED_PROPNAME = "solr.fbspool.alwaysOneUnpooled";
   public static final String POOL_DUMP_STATS_ON_TEST_PROPNAME = "solr.fbspool.dumpStatsOnTest";
+  public static final String POOL_ALLOW_EXPLICIT_CLOSE_PROPNAME = "solr.fbspool.allowExplicitClose";
+
+  private static final boolean ALLOW_EXPLICIT_CLOSE =
+      EnvUtils.getPropertyAsBool(POOL_ALLOW_EXPLICIT_CLOSE_PROPNAME, true);
 
   private static final long TPS;
   private static final long TPS_OFFHEAP;
@@ -199,6 +203,7 @@ public class HeapCacheFbsModifier
     top = new AtomicInteger(nBlocks);
     refHandler =
         new ReferenceHandler<>(
+            ALLOW_EXPLICIT_CLOSE,
             (toRelease) -> {
               try {
                 toRelease.closed.isClosed = true;

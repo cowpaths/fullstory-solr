@@ -259,6 +259,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
     LongAdder totalBytesOut = new LongAdder();
     ReferenceHandler<Dummy> rh =
         new ReferenceHandler<>(
+            usually(),
             (a) -> {
               collectedRefs.increment();
               totalBytesOut.add(a.ramBytesUsed());
