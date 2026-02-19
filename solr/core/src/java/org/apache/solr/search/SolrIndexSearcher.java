@@ -61,6 +61,7 @@ import org.apache.lucene.search.Collector;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.FieldDoc;
+import org.apache.lucene.search.IndexOrDocValuesQuery;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.LeafCollector;
 import org.apache.lucene.search.MatchAllDocsQuery;
@@ -1518,7 +1519,19 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       Query key, boolean cacheHit, int docSetIdCount, long startTimeNanos) {
     SolrRequestInfo reqInfo = SolrRequestInfo.getRequestInfo();
 
-    String keyString = key != null ? key.toString() : "null";
+    String keyString;
+
+    if (key != null) {
+      if (key instanceof IndexOrDocValuesQuery) {
+        // just pick index query for shorter string. it should NOT be null
+        keyString = ((IndexOrDocValuesQuery) key).getIndexQuery().toString();
+      } else {
+        keyString = key.toString();
+      }
+    } else {
+      keyString = "null";
+    }
+
     if (keyString.length() > 200) {
       keyString = keyString.substring(0, 200) + "...";
     }
