@@ -40,14 +40,12 @@ public class SortedIntDocSet extends DocSet {
           + RamUsageEstimator.NUM_BYTES_ARRAY_HEADER;
 
   private final Closeable[] close;
-  private final boolean[] closed;
+  private final HeapCacheFbsModifier.State closed;
   protected final IntBuffer[] docs;
   final int capacity;
 
   private void check() {
-    if (closed[0]) {
-      throw new IllegalStateException("docset already closed");
-    }
+    closed.check();
   }
 
   /**
@@ -119,7 +117,8 @@ public class SortedIntDocSet extends DocSet {
 
   private static final IntBuffer[] zeroInts = new IntBuffer[0];
   private static final Parts zeroIntsParts =
-      new Parts(zeroInts, new Closeable[] {DocSet.NOOP_CLOSEABLE}, new boolean[1]);
+      new Parts(
+          zeroInts, new Closeable[] {DocSet.NOOP_CLOSEABLE}, new HeapCacheFbsModifier.State());
   private static final SortedIntDocSet zero = new SortedIntDocSet(zeroIntsParts);
 
   // -5 b/c there are 32 bits per int
@@ -130,9 +129,9 @@ public class SortedIntDocSet extends DocSet {
   public static final class Parts {
     public final IntBuffer[] arr;
     public final Closeable[] close;
-    public final boolean[] closed;
+    public final HeapCacheFbsModifier.State closed;
 
-    public Parts(IntBuffer[] arr, Closeable[] close, boolean[] closed) {
+    public Parts(IntBuffer[] arr, Closeable[] close, HeapCacheFbsModifier.State closed) {
       this.arr = arr;
       this.close = close;
       this.closed = closed;
@@ -144,7 +143,7 @@ public class SortedIntDocSet extends DocSet {
     int outerSize = ((size - 1) >> WORDS_SHIFT) + 1;
     IntBuffer[] ret = new IntBuffer[outerSize];
     Closeable[] close = new Closeable[1];
-    boolean[] closed = new boolean[1];
+    HeapCacheFbsModifier.State closed = new HeapCacheFbsModifier.State();
     int i = outerSize - 1;
     ByteBuffer[] bb =
         FixedBitSets.MODIFIER.allocateBytesArr(size << 2, new SentinelPacket(close, closed));
@@ -788,13 +787,13 @@ public class SortedIntDocSet extends DocSet {
       for (int i = 0, lim = sub.capacity(); i < lim; i++) {
         target.set(sub.get(i));
       }
-      assert !closed[0] : "docset already closed";
+      assert closed.notClosed() : "docset already closed";
     }
   }
 
   @Override
   public boolean exists(int doc) {
-    assert !closed[0] : "docset already closed";
+    assert closed.notClosed() : "docset already closed";
     // this could be faster by estimating where in the list the doc is likely to appear,
     // but we should get away from using exists() anyway.
     int low = 0;
@@ -840,7 +839,7 @@ public class SortedIntDocSet extends DocSet {
 
       @Override
       public int nextDoc() {
-        assert !closed[0] : "docset already closed";
+        assert closed.notClosed() : "docset already closed";
         return docs[pos >> WORDS_SHIFT].get(pos++ & ARR_MASK);
       }
 
@@ -859,7 +858,7 @@ public class SortedIntDocSet extends DocSet {
       for (int i = 0, lim = sub.capacity(); i < lim; i++) {
         hashSet.add(sub.get(i));
       }
-      assert !closed[0] : "docset already closed";
+      assert closed.notClosed() : "docset already closed";
     }
 
     return new Bits() {
@@ -1036,7 +1035,7 @@ public class SortedIntDocSet extends DocSet {
   public SortedIntDocSet clone() {
     check();
     Closeable[] close = new Closeable[1];
-    boolean[] closed = new boolean[1];
+    HeapCacheFbsModifier.State closed = new HeapCacheFbsModifier.State();
     IntBuffer[] newDocs = new IntBuffer[docs.length];
     ByteBuffer[] bb =
         FixedBitSets.MODIFIER.allocateBytesArr(capacity << 2, new SentinelPacket(close, closed));

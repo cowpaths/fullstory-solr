@@ -101,13 +101,11 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   public final FixedBitSet[] parts;
   private final Closeable[] close = new Closeable[1];
-  private final boolean[] closed = new boolean[1];
+  private final HeapCacheFbsModifier.State closed = new HeapCacheFbsModifier.State();
   private int cachedLength = -1;
 
   private void check() {
-    if (closed[0]) {
-      throw new IllegalStateException("docset already closed " + System.identityHashCode(closed));
-    }
+    closed.check();
   }
 
   public FixedBitSets(int numBits) {
@@ -152,17 +150,17 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public void set(int index) {
-    assert !closed[0] : "docset already closed";
+    assert closed.notClosed() : "docset already closed";
     parts[index >> BitDocSet.BIT_SHIFT].set(index & BLOCK_BIT_MASK);
   }
 
   public boolean get(int index) {
-    assert !closed[0] : "docset already closed";
+    assert closed.notClosed() : "docset already closed";
     return parts[index >> BitDocSet.BIT_SHIFT].get(index & BLOCK_BIT_MASK);
   }
 
   public void clear(int index) {
-    assert !closed[0] : "docset already closed";
+    assert closed.notClosed() : "docset already closed";
     parts[index >> BitDocSet.BIT_SHIFT].clear(index & BLOCK_BIT_MASK);
   }
 

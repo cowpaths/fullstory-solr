@@ -100,11 +100,27 @@ public class HeapCacheFbsModifier
   private final AtomicInteger top;
   private final BlockingQueue<ByteBuffer[]> releaseQueue = new ArrayBlockingQueue<>(1024, false);
 
+  public static final class State {
+    // NOTE: could be volatile, but that's not really the failure mode we care about here.
+    // so for performance we'll leave this non-volatile.
+    private boolean isClosed = false;
+
+    boolean notClosed() {
+      return !isClosed;
+    }
+
+    void check() {
+      if (isClosed) {
+        throw new IllegalStateException("already closed " + System.identityHashCode(this));
+      }
+    }
+  }
+
   private static final class RefHandlerPacket {
     private final ByteBuffer[] buf;
-    private final boolean[] closed;
+    private final State closed;
 
-    private RefHandlerPacket(ByteBuffer[] buf, boolean[] closed) {
+    private RefHandlerPacket(ByteBuffer[] buf, State closed) {
       this.buf = buf;
       this.closed = closed;
     }
@@ -185,7 +201,7 @@ public class HeapCacheFbsModifier
         new ReferenceHandler<>(
             (toRelease) -> {
               try {
-                toRelease.closed[0] = true;
+                toRelease.closed.isClosed = true;
                 totalClosedBatches.increment();
                 releaseQueue.put(toRelease.buf);
               } catch (InterruptedException e) {
@@ -489,13 +505,13 @@ public class HeapCacheFbsModifier
         System.arraycopy(ret, 0, pooled, 0, pooledReserved);
         exhausted.add(ret.length - pooledReserved - ADJUST);
       }
-      boolean[] closed;
+      State closed;
       if (sentinel instanceof SentinelPacket) {
         SentinelPacket sp = (SentinelPacket) sentinel;
         closed = sp.closed;
         sentinel = sp.sentinel;
       } else {
-        closed = new boolean[1]; // dummy
+        closed = new State(); // dummy
       }
       Closeable ref = refHandler.add(sentinel, new RefHandlerPacket(pooled, closed));
       if (sentinel instanceof Closeable[]) {
@@ -518,9 +534,9 @@ public class HeapCacheFbsModifier
 
   public static final class SentinelPacket {
     private final Object sentinel;
-    private final boolean[] closed;
+    private final State closed;
 
-    public SentinelPacket(Object sentinel, boolean[] closed) {
+    public SentinelPacket(Object sentinel, State closed) {
       this.sentinel = sentinel;
       this.closed = closed;
     }

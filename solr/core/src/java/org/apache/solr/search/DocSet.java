@@ -74,7 +74,9 @@ public abstract class DocSet
     static final DocSet INSTANCE =
         new SortedIntDocSet(
             new SortedIntDocSet.Parts(
-                new IntBuffer[0], new Closeable[] {NOOP_CLOSEABLE}, new boolean[1]));
+                new IntBuffer[0],
+                new Closeable[] {NOOP_CLOSEABLE},
+                new HeapCacheFbsModifier.State()));
   }
 
   static final Closeable NOOP_CLOSEABLE = DocSet::doNothing;
