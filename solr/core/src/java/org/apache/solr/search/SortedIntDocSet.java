@@ -326,6 +326,7 @@ public class SortedIntDocSet extends DocSet {
 
     // make "a" the smaller set.
     SortedIntDocSet otherSet = (SortedIntDocSet) other;
+    otherSet.check();
     final SortedIntDocSet a = capacity < otherSet.capacity ? this : otherSet;
     final SortedIntDocSet b = capacity < otherSet.capacity ? otherSet : this;
 
@@ -540,6 +541,7 @@ public class SortedIntDocSet extends DocSet {
     }
 
     SortedIntDocSet otherSet = (SortedIntDocSet) other;
+    otherSet.check();
     int maxsz = Math.min(capacity, otherSet.capacity);
     Parts newParts = allocate(maxsz);
     IntBuffer[] arr = newParts.arr;
@@ -765,6 +767,7 @@ public class SortedIntDocSet extends DocSet {
     }
 
     SortedIntDocSet otherSet = (SortedIntDocSet) other;
+    otherSet.check();
     Parts newParts = allocate(capacity);
     IntBuffer[] arr = newParts.arr;
     int sz = andNot(docs, capacity, otherSet.docs, otherSet.capacity, arr);
@@ -785,12 +788,13 @@ public class SortedIntDocSet extends DocSet {
       for (int i = 0, lim = sub.capacity(); i < lim; i++) {
         target.set(sub.get(i));
       }
+      assert !closed[0] : "docset already closed";
     }
   }
 
   @Override
   public boolean exists(int doc) {
-    check();
+    assert !closed[0] : "docset already closed";
     // this could be faster by estimating where in the list the doc is likely to appear,
     // but we should get away from using exists() anyway.
     int low = 0;
@@ -836,6 +840,7 @@ public class SortedIntDocSet extends DocSet {
 
       @Override
       public int nextDoc() {
+        assert !closed[0] : "docset already closed";
         return docs[pos >> WORDS_SHIFT].get(pos++ & ARR_MASK);
       }
 
@@ -854,6 +859,7 @@ public class SortedIntDocSet extends DocSet {
       for (int i = 0, lim = sub.capacity(); i < lim; i++) {
         hashSet.add(sub.get(i));
       }
+      assert !closed[0] : "docset already closed";
     }
 
     return new Bits() {

@@ -152,17 +152,17 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public void set(int index) {
-    check();
+    assert !closed[0] : "docset already closed";
     parts[index >> BitDocSet.BIT_SHIFT].set(index & BLOCK_BIT_MASK);
   }
 
   public boolean get(int index) {
-    check();
+    assert !closed[0] : "docset already closed";
     return parts[index >> BitDocSet.BIT_SHIFT].get(index & BLOCK_BIT_MASK);
   }
 
   public void clear(int index) {
-    check();
+    assert !closed[0] : "docset already closed";
     parts[index >> BitDocSet.BIT_SHIFT].clear(index & BLOCK_BIT_MASK);
   }
 
