@@ -63,7 +63,9 @@ import org.apache.solr.core.NodeRoles;
 import org.apache.solr.core.SolrCore;
 import org.apache.solr.core.SyntheticSolrCore;
 import org.apache.solr.embedded.JettySolrRunner;
+import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.servlet.CoordinatorHttpSolrCall;
+import org.apache.solr.servlet.HttpSolrCall;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -859,6 +861,97 @@ public class TestCoordinatorRole extends SolrCloudTestCase {
               .process(client, COLLECTION_NAME);
 
       assertEquals(DOC_PER_COLLECTION_COUNT, response.getResults().getNumFound());
+    } finally {
+      cluster.shutdown();
+    }
+  }
+
+  /**
+   * Unit test that verifies CoordinatorHttpSolrCall.wrappedReq() provides correct CloudDescriptor
+   * values through req.getCore().getCoreDescriptor().getCloudDescriptor().
+   *
+   * <p>This test simulates what happens during a coordinator request and verifies that
+   * HttpShardHandler.prepDistributed() would see the correct CloudDescriptor values.
+   */
+  public void testWrappedRequestReturnsCorrectCloudDescriptor() throws Exception {
+    MiniSolrCloudCluster cluster =
+        configureCluster(1).addConfig("conf", configset("cloud-minimal")).configure();
+
+    try {
+      String REAL_COLLECTION = "my_collection";
+
+      // Create collection
+      CollectionAdminRequest.createCollection(REAL_COLLECTION, "conf", 1, 1)
+          .process(cluster.getSolrClient());
+      cluster.waitForActiveCollection(REAL_COLLECTION, 1, 1);
+
+      // Start coordinator
+      System.setProperty(NodeRoles.NODE_ROLES_PROP, "coordinator:on");
+      JettySolrRunner coordinatorJetty;
+      try {
+        coordinatorJetty = cluster.startJettySolrRunner();
+      } finally {
+        System.clearProperty(NodeRoles.NODE_ROLES_PROP);
+      }
+
+      // Use the actual HttpSolrCall flow to create synthetic core
+      CoordinatorHttpSolrCall.Factory factory = new CoordinatorHttpSolrCall.Factory();
+
+      // Create a mock HttpServletRequest
+      jakarta.servlet.http.HttpServletRequest mockRequest =
+          org.mockito.Mockito.mock(jakarta.servlet.http.HttpServletRequest.class);
+
+      HttpSolrCall httpSolrCall =
+          new HttpSolrCall(null, coordinatorJetty.getCoreContainer(), mockRequest, null, false) {
+            @Override
+            protected String getCoreOrColName() {
+              return REAL_COLLECTION;
+            }
+          };
+      // Simulate the coordinator getting/creating a synthetic core for this collection
+      SolrCore syntheticCore =
+          CoordinatorHttpSolrCall.getCore(factory, httpSolrCall, REAL_COLLECTION);
+
+      assertNotNull("Synthetic core should be created", syntheticCore);
+      assertTrue("Should be a SyntheticSolrCore", syntheticCore instanceof SyntheticSolrCore);
+
+      try {
+        // Create a SolrQueryRequest with the synthetic core
+        SolrQueryRequest originalReq =
+            new org.apache.solr.request.SolrQueryRequestBase(
+                syntheticCore, new org.apache.solr.common.params.ModifiableSolrParams()) {};
+
+        // Wrap the request as CoordinatorHttpSolrCall does
+        SolrQueryRequest wrappedReq = CoordinatorHttpSolrCall.wrappedReq(originalReq, httpSolrCall);
+
+        // THIS IS WHAT HttpShardHandler.prepDistributed() DOES:
+        org.apache.solr.core.CoreDescriptor coreDescriptor =
+            wrappedReq.getCore().getCoreDescriptor();
+        org.apache.solr.cloud.CloudDescriptor cloudDescriptor = coreDescriptor.getCloudDescriptor();
+
+        assertNotNull("CloudDescriptor should not be null", cloudDescriptor);
+
+        // KEY ASSERTIONS: Verify the CloudDescriptor has correct values
+        // These will FAIL with current implementation because wrappedReq doesn't override getCore()
+        assertEquals(
+            "CloudDescriptor should return REAL collection name, not synthetic",
+            REAL_COLLECTION,
+            cloudDescriptor.getCollectionName());
+
+        assertEquals(
+            "CloudDescriptor should return shard ID '_' for coordinator",
+            "_",
+            cloudDescriptor.getShardId());
+
+        assertEquals(
+            "CloudDescriptor should return PULL replica type for coordinator",
+            org.apache.solr.common.cloud.Replica.Type.PULL,
+            cloudDescriptor.getReplicaType());
+
+      } finally {
+        syntheticCore.close();
+      }
+
     } finally {
       cluster.shutdown();
     }
