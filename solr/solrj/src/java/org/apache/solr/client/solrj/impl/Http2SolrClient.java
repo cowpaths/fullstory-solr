@@ -35,10 +35,9 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Phaser;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import org.apache.solr.client.solrj.ResponseParser;
 import org.apache.solr.client.solrj.SolrRequest;
@@ -57,6 +56,7 @@ import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.params.UpdateParams;
 import org.apache.solr.common.util.ContentStream;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.ObjectReleaseTracker;
@@ -114,6 +114,13 @@ public class Http2SolrClient extends HttpSolrClientBase {
   private static volatile SSLConfig defaultSSLConfig;
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private static final String AGENT = "Solr[" + Http2SolrClient.class.getName() + "] 2.0";
+  private static final int CLIENT_SELECTORS =
+      EnvUtils.getPropertyAsInteger("solr.http2.client.selectors", 2);
+  private static final int MAX_REQUESTS_QUEUED_PER_DESTINATION =
+      EnvUtils.getPropertyAsInteger("solr.http2.maxRequestsQueuedPerDestination", 3000);
+
+  /** Maximum delay in milliseconds before logging a warning about operation taking too long */
+  private static final long MAX_OPERATION_DELAY_MILLIS = 1000;
 
   private final HttpClient httpClient;
 
@@ -211,7 +218,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
     ClientConnector clientConnector = new ClientConnector();
     clientConnector.setReuseAddress(true);
     clientConnector.setSslContextFactory(sslContextFactory);
-    clientConnector.setSelectors(2);
+    clientConnector.setSelectors(CLIENT_SELECTORS);
 
     HttpClientTransport transport;
     if (builder.useHttp1_1) {
@@ -232,15 +239,16 @@ public class Http2SolrClient extends HttpSolrClientBase {
       HTTP2Client http2client = new HTTP2Client(clientConnector);
       transport = new HttpClientTransportOverHTTP2(http2client);
       httpClient = new HttpClient(transport);
-      httpClient.setMaxConnectionsPerDestination(4);
+      int maxConnections =
+          (builder.maxConnectionsPerHost != null) ? builder.maxConnectionsPerHost : 16;
+      httpClient.setMaxConnectionsPerDestination(maxConnections);
     }
 
     httpClient.setExecutor(this.executor);
     httpClient.setStrictEventOrdering(false);
     httpClient.setConnectBlocking(true);
     httpClient.setFollowRedirects(false);
-    httpClient.setMaxRequestsQueuedPerDestination(
-        asyncTracker.getMaxRequestsQueuedPerDestination());
+    httpClient.setMaxRequestsQueuedPerDestination(MAX_REQUESTS_QUEUED_PER_DESTINATION);
     httpClient.setUserAgentField(new HttpField(HttpHeader.USER_AGENT, AGENT));
     httpClient.setIdleTimeout(idleTimeoutMillis);
 
@@ -441,6 +449,7 @@ public class Http2SolrClient extends HttpSolrClientBase {
   @Override
   public CompletableFuture<NamedList<Object>> requestAsync(
       final SolrRequest<?> solrRequest, String collection) {
+    long requestAsyncStart = System.nanoTime();
     if (ClientUtils.shouldApplyDefaultCollection(collection, solrRequest)) {
       collection = defaultCollection;
     }
@@ -448,11 +457,34 @@ public class Http2SolrClient extends HttpSolrClientBase {
     final MakeRequestReturnValue mrrv;
     final String url;
     try {
+      long beforeGetUrl = System.nanoTime();
       url = getRequestUrl(solrRequest, collection);
+      long afterGetUrl = System.nanoTime();
+      long getUrlDelay =
+          TimeUnit.MILLISECONDS.convert(afterGetUrl - beforeGetUrl, TimeUnit.NANOSECONDS);
+      if (getUrlDelay > MAX_OPERATION_DELAY_MILLIS) {
+        log.info("Http2SolrClient: getRequestUrl() took {} milliseconds", getUrlDelay);
+      }
+
+      long beforeMakeRequest = System.nanoTime();
       mrrv = makeRequest(solrRequest, url, true);
+      long afterMakeRequest = System.nanoTime();
+      long makeRequestDelay =
+          TimeUnit.MILLISECONDS.convert(afterMakeRequest - beforeMakeRequest, TimeUnit.NANOSECONDS);
+      if (makeRequestDelay > MAX_OPERATION_DELAY_MILLIS) {
+        log.info("Http2SolrClient: makeRequest() took {} milliseconds", makeRequestDelay);
+      }
     } catch (SolrServerException | IOException e) {
       future.completeExceptionally(e);
       return future;
+    }
+
+    long beforeSend = System.nanoTime();
+    asyncTracker.lastSendTimeNanos = beforeSend;
+    long requestAsyncTotalDelay =
+        TimeUnit.MILLISECONDS.convert(beforeSend - requestAsyncStart, TimeUnit.NANOSECONDS);
+    if (requestAsyncTotalDelay > MAX_OPERATION_DELAY_MILLIS) {
+      log.info("Http2SolrClient: Total time before send() {} milliseconds", requestAsyncTotalDelay);
     }
     mrrv.request
         .onRequestQueued(asyncTracker.queuedListener)
@@ -857,45 +889,67 @@ public class Http2SolrClient extends HttpSolrClientBase {
   }
 
   private static class AsyncTracker {
-    private static final int MAX_OUTSTANDING_REQUESTS =
-        Integer.parseInt(System.getProperty("solr.http2.maxOutstandingRequests", "1000"));
-    private static final int MAX_REQUESTS_QUEUED_PER_DESTINATION = 3000;
-
     // wait for async requests
-    private final Phaser phaser;
-    // maximum outstanding requests left
-    private final Semaphore available;
+    private final AtomicInteger activeRequests = new AtomicInteger(0);
     private final Request.QueuedListener queuedListener;
     private final Response.CompleteListener completeListener;
+    private volatile long lastSendTimeNanos = 0;
 
     AsyncTracker() {
       // TODO: what about shared instances?
-      phaser = new Phaser(1);
-      available = new Semaphore(MAX_OUTSTANDING_REQUESTS, false);
       queuedListener =
           request -> {
-            phaser.register();
-            try {
-              available.acquire();
-            } catch (InterruptedException ignored) {
-
+            long queuedTimeNanos = System.nanoTime();
+            long delayFromSend =
+                lastSendTimeNanos > 0
+                    ? TimeUnit.MILLISECONDS.convert(
+                        queuedTimeNanos - lastSendTimeNanos, TimeUnit.NANOSECONDS)
+                    : 0;
+            if (delayFromSend > MAX_OPERATION_DELAY_MILLIS) {
+              if (log.isInfoEnabled()) {
+                log.info(
+                    "Request queued: {} {}, activeRequests={}, delayFromSend={}ms",
+                    request.getMethod(),
+                    request.getURI(),
+                    activeRequests.get(),
+                    delayFromSend);
+              }
+            }
+            synchronized (activeRequests) {
+              activeRequests.incrementAndGet();
             }
           };
       completeListener =
           result -> {
-            phaser.arriveAndDeregister();
-            available.release();
+            synchronized (activeRequests) {
+              int remaining = activeRequests.decrementAndGet();
+              if (remaining == 0) {
+                activeRequests.notifyAll();
+              }
+            }
           };
     }
 
-    int getMaxRequestsQueuedPerDestination() {
-      return MAX_REQUESTS_QUEUED_PER_DESTINATION;
+    int getActiveRequests() {
+      return activeRequests.get();
     }
 
     public void waitForComplete() {
-      phaser.arriveAndAwaitAdvance();
-      phaser.arriveAndDeregister();
+      synchronized (activeRequests) {
+        while (activeRequests.get() > 0) {
+          try {
+            activeRequests.wait();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        }
+      }
     }
+  }
+
+  public int getOutstandingRequests() {
+    int count = this.asyncTracker.getActiveRequests();
+    return count;
   }
 
   public static class Builder
@@ -973,8 +1027,8 @@ public class Http2SolrClient extends HttpSolrClientBase {
     }
 
     /**
-     * Set maxConnectionsPerHost for http1 connections, maximum number http2 connections is limited
-     * to 4
+     * Set maxConnectionsPerHost for http1 and http2 connections. For http2 connections, defaults to
+     * 16 if not specified.
      *
      * @deprecated Please use {@link #withMaxConnectionsPerHost(int)}
      */

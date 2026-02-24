@@ -17,6 +17,8 @@
 package org.apache.solr.search;
 
 import java.io.Closeable;
+import java.io.IOException;
+import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -29,6 +31,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.lucene.index.ExitableDirectoryReader;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
@@ -36,20 +39,26 @@ import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TermQuery;
+import org.apache.lucene.search.TimeLimitingCollector;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.SolrNamedThreadFactory;
 import org.apache.solr.core.SolrCore;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricManager;
+import org.apache.solr.request.LocalSolrQueryRequest;
+import org.apache.solr.request.SolrRequestInfo;
+import org.apache.solr.response.SolrQueryResponse;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Verify caching impacts of FiltersQParser and FilterQuery */
 public class TestSegAwareCachingParity extends SolrTestCaseJ4 {
 
-  // fails: `-Ptests.seed=152284B971099372`
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private static final int NUM_DOCS = 100;
   private static final String FILTER_CACHE_IMPL_CLASS_PROPNAME = "solr.filterCache.class";
@@ -144,6 +153,31 @@ public class TestSegAwareCachingParity extends SolrTestCaseJ4 {
     return builder.build();
   }
 
+  /**
+   * We need to make sure that timeout exceptions don't propagate to other callers, and that any
+   * threads blocking for the computation of an exceptional result get the propagated exception and
+   * fallback appropriately.
+   */
+  private static DocSet getDocSet(SolrIndexSearcher s, Query q, Random r) throws IOException {
+    if (r.nextInt(10) == 0) {
+      try {
+        SolrRequestInfo.setRequestInfo(
+            new SolrRequestInfo(
+                new LocalSolrQueryRequest(null, Map.of("timeAllowed", new String[] {"0"})),
+                new SolrQueryResponse()));
+        DocSet ret = s.getDocSet(q);
+        log.info("No Timeout!");
+        return ret;
+      } catch (TimeLimitingCollector.TimeExceededException
+          | ExitableDirectoryReader.ExitingReaderException ex) {
+        log.info("Yes Timeout!"); // swallow
+      } finally {
+        SolrRequestInfo.clearRequestInfo();
+      }
+    }
+    return s.getDocSet(q);
+  }
+
   private static Callable<Integer> sustainedQuerying(
       Random r,
       AtomicBoolean exit,
@@ -164,11 +198,11 @@ public class TestSegAwareCachingParity extends SolrTestCaseJ4 {
                 DocSet docSet;
                 DocSet uncachedDocSet;
                 if (r.nextBoolean()) {
-                  docSet = s.getDocSet(queries[i]);
+                  docSet = getDocSet(s, queries[i], r);
                   uncachedDocSet = s.getDocSet(noCacheQueries[i]);
                 } else {
                   uncachedDocSet = s.getDocSet(noCacheQueries[i]);
-                  docSet = s.getDocSet(queries[i]);
+                  docSet = getDocSet(s, queries[i], r);
                 }
                 if (i == 1 || s.numDocs() == 0) {
                   // special case for MatchAllDocsQuery and empty index

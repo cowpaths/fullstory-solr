@@ -35,10 +35,12 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiFunction;
 import java.util.function.Supplier;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.ExitableDirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.ConstantScoreQuery;
 import org.apache.lucene.search.ConstantScoreScorer;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Explanation;
@@ -47,6 +49,7 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryVisitor;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.TimeLimitingCollector;
 import org.apache.lucene.search.TwoPhaseIterator;
 import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.Bits;
@@ -156,10 +159,16 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     this.overlapThreshold = DEFAULT_OVERLAP_THRESHOLD;
   }
 
-  @SuppressWarnings({"unchecked", "UnnecessaryLambda"})
   private static <M> BiFunction<SegmentMap, DocSet, M> getWrapFunction(
       LongAdder partialHits, DoubleAdder partialHitsRatio) {
-    return (segMap, v) -> (M) new KeepAliveSegAwareValue(segMap, v, partialHits, partialHitsRatio);
+    // noinspection Convert2Lambda
+    return new BiFunction<SegmentMap, DocSet, M>() {
+      @Override
+      @SuppressWarnings("unchecked")
+      public M apply(SegmentMap segMap, DocSet v) {
+        return (M) new KeepAliveSegAwareValue(segMap, v, partialHits, partialHitsRatio);
+      }
+    };
   }
 
   static boolean isCrossDoc(Query q) {
@@ -278,9 +287,19 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
         throws IOException {
       AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> ref = this.ref.get();
       accessTimestampNanos = System.nanoTime();
+      DocSet[] weComputed = new DocSet[1];
+      IOFunction<? super Query, ? extends DocSet> wrappedMappingFunction =
+          (k) -> {
+            if (mappingFunction == null) {
+              return null;
+            }
+            DocSet ret = mappingFunction.apply(k);
+            weComputed[0] = ret;
+            return ret;
+          };
       try {
         if (ref.getKey() == segMap) {
-          return ref.getValue().get();
+          return CaffeineCache.getV(key, wrappedMappingFunction, ref.getValue(), NOOP);
         } else if (mappingFunction == null) {
           return null;
         }
@@ -291,27 +310,55 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
             this.ref.compareAndExchange(ref, newRef);
         if (witness == ref) {
           // we compute
-          Query frankenstein =
-              new FrankensteinQuery(key, ref.getKey().segments, ref.getValue().get());
-          DocSet computed = mappingFunction.apply(frankenstein);
-          f.complete(computed);
-          partialHits.increment();
-          partialHitsRatio.add(ref.getKey().getOverlap(segMap.key));
-          return computed;
+          try {
+            DocSet stale = CaffeineCache.getV(key, (k) -> null, ref.getValue(), NOOP);
+            DocSet computed;
+            if (stale == null) {
+              // nothing to reconstruct from; just run the query
+              computed = mappingFunction.apply(key);
+              f.complete(computed);
+            } else {
+              Query frankenstein = new FrankensteinQuery(key, ref.getKey().segments, stale);
+              computed = mappingFunction.apply(frankenstein);
+              f.complete(computed); // asap
+              partialHits.increment();
+              partialHitsRatio.add(ref.getKey().getOverlap(segMap.key));
+            }
+            return computed;
+          } catch (TimeLimitingCollector.TimeExceededException
+              | CancellableCollector.QueryCancelledException
+              | ExitableDirectoryReader.ExitingReaderException e) {
+            // These exceptions are related to the calling thread, so are "recoverable" from other
+            // threads
+            // that might be waiting for our computation to complete.
+            f.completeExceptionally(CaffeineCache.REQUEST_SCOPED_EXCEPTION);
+            throw e;
+          } catch (Error | RuntimeException | IOException e) {
+            f.completeExceptionally(e); // This will remove the future from the cache
+            throw e;
+          }
         } else if (witness.getKey() == segMap) {
-          return witness.getValue().get();
+          return CaffeineCache.getV(key, wrappedMappingFunction, witness.getValue(), NOOP);
         } else {
-          return mappingFunction.apply(key);
+          return wrappedMappingFunction.apply(key);
         }
-      } catch (InterruptedException ex) {
-        Thread.currentThread().interrupt();
-        throw new RuntimeException(ex);
-      } catch (ExecutionException ex) {
-        Throwable cause = ex.getCause();
-        if (cause instanceof IOException) {
-          throw (IOException) cause;
-        } else {
-          throw new RuntimeException(ex);
+      } finally {
+        // Here we attempt to avoid a situation where we have successfully computed a result, but
+        // somehow have a stored exceptional result. We already have the `KeepAliveSegAwareValue`
+        // cache entry, and a valid value. Replace the extant value if it's stale, or completed
+        // exceptionally.
+        DocSet outOfBandComputed = weComputed[0];
+        if (outOfBandComputed != null) {
+          this.ref.updateAndGet(
+              (extant) -> {
+                if (extant.getKey() != segMap || extant.getValue().isCompletedExceptionally()) {
+                  CompletableFuture<DocSet> opportunistic = new CompletableFuture<>();
+                  opportunistic.complete(outOfBandComputed);
+                  return new AbstractMap.SimpleImmutableEntry<>(segMap, opportunistic);
+                } else {
+                  return extant;
+                }
+              });
         }
       }
     }
@@ -321,6 +368,10 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
       return ramBytesUsed;
     }
   }
+
+  private static void doNothing() {}
+
+  private static final Runnable NOOP = KeepAliveRegenerator::doNothing;
 
   private final LongAdder partialHits;
   private final DoubleAdder partialHitsRatio;
@@ -476,7 +527,9 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
         return DocSetUtil.createDocSetGeneric(searcher, this);
       } else {
         final Weight backingWeight =
-            backing.createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, 1f);
+            searcher
+                .rewrite(new ConstantScoreQuery(backing))
+                .createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, 1f);
         final FixedBitSets staleBits;
         if (stale instanceof BitDocSet) {
           staleBits = ((BitDocSet) stale).getBits();

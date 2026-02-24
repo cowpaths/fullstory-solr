@@ -106,8 +106,8 @@ public abstract class HttpSolrClientBuilderBase<
   }
 
   /**
-   * Set maxConnectionsPerHost for http1 connections, maximum number http2 connections is limited to
-   * 4
+   * Set maxConnectionsPerHost for http1 and http2 connections. For http2 connections in
+   * Http2SolrClient, defaults to 8 if not specified.
    */
   @SuppressWarnings("unchecked")
   public B withMaxConnectionsPerHost(int max) {

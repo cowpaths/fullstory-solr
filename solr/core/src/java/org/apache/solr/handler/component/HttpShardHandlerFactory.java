@@ -215,10 +215,15 @@ public class HttpShardHandlerFactory extends ShardHandlerFactory
               // the request. Here we add extra logging to notify us if this assumption is
               // violated. See: SOLR-16099, SOLR-16129,
               // https://github.com/fullstorydev/lucene-solr/commit/445508adb4a
-              long delayNanos = System.nanoTime() - start;
+              long beginTime = System.nanoTime();
+              long delayNanos = beginTime - start;
               if (delayNanos > DELAY_WARN_THRESHOLD) {
                 long millis = TimeUnit.MILLISECONDS.convert(delayNanos, TimeUnit.NANOSECONDS);
-                log.info("Remote shard request delayed by {} milliseconds", millis);
+                log.warn(
+                    "Remote shard request delayed by {} milliseconds (from listener creation to onBegin), "
+                        + "uri={}",
+                    millis,
+                    request.getURI());
                 if (delayedRequests != null) {
                   delayedRequests.update(millis);
                 }
@@ -454,5 +459,10 @@ public class HttpShardHandlerFactory extends ShardHandlerFactory
             null,
             solrMetricsContext.getMetricRegistry(),
             SolrMetricManager.mkName("httpShardExecutor", expandedScope, "threadPool"));
+    solrMetricsContext.gauge(
+        () -> defaultClient.getOutstandingRequests(),
+        false,
+        "httpClientOutstandingRequests",
+        expandedScope);
   }
 }
