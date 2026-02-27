@@ -119,6 +119,10 @@ allprojects {
         jvmArgs '--illegal-access=deny'
       }
 
+      if (rootProject.runtimeJavaVersion >= JavaVersion.VERSION_21) {
+        jvmArgs '--enable-preview'
+      }
+
       def loggingConfigFile = layout.projectDirectory.file("${resources}/logging.properties")
       def tempDir = layout.projectDirectory.dir(testsTmpDir.toString())
       jvmArgumentProviders.add(
