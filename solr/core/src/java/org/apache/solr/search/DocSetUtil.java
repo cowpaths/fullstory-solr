@@ -310,6 +310,12 @@ public class DocSetUtil {
    */
   static void copyTo(
       Bits src, final int srcOffset, int srcLimit, FixedBitSets dest, int destOffset) {
+    FixedBitSet fixed = FixedBitSet.unsafeReadOnlyViewOf(src);
+    if (fixed != null) {
+      FixedBitSet[] arr = FixedBitSets.wrap(fixed);
+      copyBitRange(arr, srcOffset, dest.parts, destOffset, srcLimit - srcOffset);
+      return;
+    }
     /*
     NOTE: `adjustedSegDocBase` +1 to compensate for the fact that `segOrd` always has to "read
     ahead" by 1. Adding 1 to set `adjustedSegDocBase` once allows us to use `segOrd` as-is (with

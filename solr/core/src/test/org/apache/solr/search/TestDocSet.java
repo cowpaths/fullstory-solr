@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
 import org.apache.lucene.index.BinaryDocValues;
@@ -671,6 +672,55 @@ public class TestDocSet extends SolrTestCase {
       DocSetUtil.copyTo(src.asReadOnlyBits(), 0, sz, dest, destOffset);
       DocSetUtil.copyTo(dest.asReadOnlyBits(), destOffset, destOffset + sz, roundTrip, 0);
       assertArrayEquals(partition(src).parts, roundTrip.parts);
+    }
+  }
+
+  public void testCopyTo() {
+    Random r = random();
+    // test edge cases
+    int[] sizes =
+        new int[] {
+          0,
+          1,
+          BitDocSet.MAX_BLOCK_BITS - 1,
+          BitDocSet.MAX_BLOCK_BITS,
+          BitDocSet.MAX_BLOCK_BITS + 1,
+          (BitDocSet.MAX_BLOCK_BITS << 1) - 1,
+          BitDocSet.MAX_BLOCK_BITS << 1,
+          (BitDocSet.MAX_BLOCK_BITS << 1) + 1
+        };
+    for (int size : sizes) {
+      testCopyTo0(size, r.nextLong());
+    }
+    // now test big
+    for (int i = 0; i < 10; i++) {
+      testCopyTo0(100_000_000, r.nextLong());
+    }
+  }
+
+  private void testCopyTo0(int size, long seed) {
+    Random r = new Random(seed);
+    long[] options = new long[Long.SIZE];
+    for (int i = options.length - 1; i >= 0; i--) {
+      options[i] = ~(1L << i);
+    }
+    long[] vals = new long[FixedBitSet.bits2words(size)];
+    if (vals.length > 0) {
+      // ghost bits must be clear
+      vals[vals.length - 1] = options[r.nextInt(options.length)] & ~(-1L << size);
+    }
+
+    for (int i = vals.length - 2; i >= 0; i--) {
+      vals[i] = options[r.nextInt(options.length)];
+    }
+    FixedBitSet src = new FixedBitSet(LongBuffer.wrap(vals), size);
+    FixedBitSets dest = new FixedBitSets(size);
+    long start = System.nanoTime();
+    DocSetUtil.copyTo(src, 0, size, dest, 0);
+    System.err.println(
+        "copyTo duration: " + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) + "ms");
+    for (int i = size - 1; i >= 0; i--) {
+      assertEquals(src.get(i), dest.get(i));
     }
   }
 

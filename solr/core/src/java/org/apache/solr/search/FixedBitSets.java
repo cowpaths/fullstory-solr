@@ -23,6 +23,7 @@ import static org.apache.solr.search.BitDocSet.MAX_BLOCK_BITS;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.LongBuffer;
 import java.util.Arrays;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Accountable;
@@ -106,6 +107,31 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
 
   private void check() {
     closed.check();
+  }
+
+  private static final int WORD_SHIFT = BIT_SHIFT - 6; // 64 bits per word
+  private static final int MAX_BLOCK_WORDS = 1 << WORD_SHIFT;
+  private static final int BLOCK_WORD_MASK = MAX_BLOCK_WORDS - 1;
+
+  public static FixedBitSet[] wrap(FixedBitSet raw) {
+    LongBuffer words = raw.getBits();
+    int numBits = raw.length();
+    if (numBits == 0) {
+      return new FixedBitSet[0];
+    }
+    int numWords = FixedBitSet.bits2words(numBits);
+    int wordOffset = (numWords - 1) & ~BLOCK_WORD_MASK;
+    int lastIdx = (numBits - 1) >> BIT_SHIFT;
+    FixedBitSet[] parts = new FixedBitSet[lastIdx + 1];
+    int len = ((numBits - 1) & BLOCK_BIT_MASK) + 1;
+    int wordLen = ((numWords - 1) & BLOCK_WORD_MASK) + 1;
+    for (int i = lastIdx; i >= 0; i--) {
+      parts[i] = new FixedBitSet(words.slice(wordOffset, wordLen), len);
+      len = MAX_BLOCK_BITS;
+      wordLen = MAX_BLOCK_WORDS;
+      wordOffset -= MAX_BLOCK_WORDS;
+    }
+    return parts;
   }
 
   public FixedBitSets(int numBits) {
