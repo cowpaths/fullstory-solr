@@ -88,6 +88,7 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
 
   private final Map<String, PrometheusMetricType> cacheMetricTypes =
       Map.of(
+          "size", PrometheusMetricType.GAUGE,
           "ramBytesUsed", PrometheusMetricType.GAUGE,
           "lookups", PrometheusMetricType.COUNTER,
           "hits", PrometheusMetricType.COUNTER,
