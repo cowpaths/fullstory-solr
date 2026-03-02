@@ -456,6 +456,9 @@ public class HeapCacheFbsModifier
       for (ByteBuffer bb : toRelease) {
         // pool[destOff++ & POOL_SIZE_MASK] = bb;
         idx--;
+        if (offheap) {
+          madviseFree(bb);
+        }
         while (!H.compareAndSet(pool, idx, null, bb)) {
           // wait for consumer thread(s) to catch up
           Thread.yield();
@@ -595,23 +598,49 @@ public class HeapCacheFbsModifier
     return fallback == null ? 0 : fallback.refHandler.activeThreadCount();
   }
 
-  private static final int MADV_PAGEOUT = 21;
+  private static final int MADV_FREE = 8;
+  private static final int MADV_NOHUGEPAGE = 15;
+
+  private static final MethodHandle MADVISE_HANDLE = getMadviseHandle();
 
   @SuppressWarnings("preview")
-  private static void poolOffheap(int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
-    // 1. Find the C 'madvise' function
+  private static MethodHandle getMadviseHandle() {
     Linker linker = Linker.nativeLinker();
-    SymbolLookup libc = linker.defaultLookup();
+    // Look up the symbol once during class loading
+    SymbolLookup stdlib = linker.defaultLookup();
 
-    MethodHandle madvise =
-        linker.downcallHandle(
-            libc.find("madvise").get(),
-            FunctionDescriptor.of(
-                ValueLayout.JAVA_INT,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.JAVA_INT));
+    MemorySegment madviseAddress =
+        stdlib.find("madvise").orElseThrow(() -> new RuntimeException("madvise not found"));
 
+    // Function signature: int madvise(void *addr, size_t length, int advice)
+    FunctionDescriptor descriptor =
+        FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, // Return type
+            ValueLayout.ADDRESS, // addr
+            ValueLayout.JAVA_LONG, // length (size_t)
+            ValueLayout.JAVA_INT // advice
+            );
+
+    return linker.downcallHandle(madviseAddress, descriptor);
+  }
+
+  private static void madviseFree(ByteBuffer bb) {
+    madvise(bb, MADV_FREE);
+  }
+
+  @SuppressWarnings("preview")
+  private static void madvise(ByteBuffer bb, int advice) {
+    try {
+      MemorySegment segment = MemorySegment.ofBuffer(bb);
+      // 2. Execute the call directly on the memory segment
+      int result = (int) MADVISE_HANDLE.invokeExact(segment, segment.byteSize(), advice);
+      if (result != 0) log.warn("madvise {} failed", advice);
+    } catch (Throwable t) {
+      log.error("exception calling madvise {}", advice, t);
+    }
+  }
+
+  private static void poolOffheap(int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
     for (int i = numPartitions - 1,
             partitionNumBlocks = ((nBlocks - 1) % MAX_BLOCKS_PER_PARTITION) + 1;
         i >= 0;
@@ -624,14 +653,14 @@ public class HeapCacheFbsModifier
       for (int j = 0; j < partitionNumBlocks; j++) {
         pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
       }
-      try {
-        MemorySegment segment = MemorySegment.ofBuffer(partition);
-        // 2. Execute the call directly on the memory segment
-        int result = (int) madvise.invokeExact(segment, segment.byteSize(), MADV_PAGEOUT);
-        if (result != 0) log.warn("madvise failed");
-      } catch (Throwable t) {
-        log.error("error forcing to swap", t);
-      }
+      madviseFree(partition);
+
+      // We do _not_ want transparent hugepages, since our granularity currently maxes out
+      // at 1M (half a hugepage). Might be some TLB benefit to properly aligned _2M_ blocks
+      // in conjunction with THP. But for now stick with default 4k pages.
+      // If we choose to experiment with THP here in the future, proceed with caution.
+      madvise(partition, MADV_NOHUGEPAGE);
+
       partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
     }
   }
