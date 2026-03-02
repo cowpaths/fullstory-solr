@@ -32,6 +32,7 @@ import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
@@ -128,6 +129,7 @@ public class HeapCacheFbsModifier
 
   private final ReferenceHandler<RefHandlerPacket> refHandler;
 
+  public static final String POOL_BACKING_FILE_PROPNAME = "solr.fbspool.file";
   public static final String POOL_OFFHEAP_TARGET_MB_PROPNAME = "solr.fbspool.offheap.targetMB";
   public static final String POOL_ONHEAP_TARGET_MB_PROPNAME = "solr.fbspool.onheap.targetMB";
   public static final String POOL_ALWAYS_ONE_UNPOOLED_PROPNAME = "solr.fbspool.alwaysOneUnpooled";
@@ -137,6 +139,9 @@ public class HeapCacheFbsModifier
   private static final boolean ALLOW_EXPLICIT_CLOSE =
       EnvUtils.getPropertyAsBool(POOL_ALLOW_EXPLICIT_CLOSE_PROPNAME, true);
 
+  private static final String POOL_BACKING_FILE =
+      EnvUtils.getProperty(POOL_BACKING_FILE_PROPNAME, "");
+
   private static final long TPS;
   private static final long TPS_OFFHEAP;
 
@@ -144,11 +149,34 @@ public class HeapCacheFbsModifier
     return TPS > 0 || TPS_OFFHEAP > 0;
   }
 
+  private static final Path HUGEPAGES_SYSFS_PATH =
+      Path.of("/sys/kernel/mm/hugepages/hugepages-2048kB/");
+
   static {
     long maxMemory = Runtime.getRuntime().maxMemory();
 
     // default to 1/16 of heap
-    TPS = getTargetPoolSize(POOL_ONHEAP_TARGET_MB_PROPNAME, maxMemory, 16);
+    long onHeapTarget = getTargetPoolSize(POOL_ONHEAP_TARGET_MB_PROPNAME, maxMemory, 16);
+    if (POOL_BACKING_FILE.isEmpty() || EnvUtils.getProperty("tests.seed") != null) {
+      TPS = onHeapTarget;
+    } else {
+      try {
+        if (!"hugetlbfs"
+            .equals(Files.getFileStore(Path.of(POOL_BACKING_FILE).getParent()).type())) {
+          TPS = onHeapTarget;
+        } else {
+          // if hugetlbfs, then just use all the remaining allocated hugepages
+          Path freePath = HUGEPAGES_SYSFS_PATH.resolve("free_hugepages");
+          Path resvPath = HUGEPAGES_SYSFS_PATH.resolve("resv_hugepages");
+          long free = Long.parseLong(Files.readString(freePath).trim());
+          long resv = Long.parseLong(Files.readString(resvPath).trim());
+          long availableHugePages = free - resv;
+          TPS = availableHugePages << 21; // 2M per hugepage
+        }
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
+    }
 
     // default to 1/4 of heap
     TPS_OFFHEAP = getTargetPoolSize(POOL_OFFHEAP_TARGET_MB_PROPNAME, maxMemory, 4);
@@ -197,8 +225,14 @@ public class HeapCacheFbsModifier
     int blockIdx = 0;
     if (offheap) {
       poolOffheap(nBlocks, numPartitions, blockIdx, pool);
-    } else {
+    } else if (POOL_BACKING_FILE.isEmpty()) {
       poolOnheap(nBlocks, numPartitions, blockIdx, pool);
+    } else {
+      try {
+        poolFileBacked(nBlocks, numPartitions, blockIdx, pool, this);
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
     }
     top = new AtomicInteger(nBlocks);
     refHandler =
@@ -230,13 +264,68 @@ public class HeapCacheFbsModifier
         i >= 0;
         i--) {
       int partitionSize = partitionNumBlocks * BLOCK_SIZE_BYTES;
-      ByteBuffer partition =
-          ByteBuffer.allocate(partitionSize + ALIGN_OVERHEAD).order(FixedBitSet.BYTE_ORDER);
+      ByteBuffer partition = ByteBuffer.allocate(partitionSize).order(FixedBitSet.BYTE_ORDER);
       for (int j = 0; j < partitionNumBlocks; j++) {
         pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
       }
       partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
     }
+  }
+
+  private static Path poolFileBacked(
+      int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool, Object caller)
+      throws IOException {
+    long blockSizeBytesL = BLOCK_SIZE_BYTES;
+
+    // truncate to 2M blocks
+    long partitionMaxBytes = ((MAX_BLOCKS_PER_PARTITION * blockSizeBytesL) >> 21) << 21;
+
+    int effectiveMaxBlocksPerPartition = Math.toIntExact(partitionMaxBytes / blockSizeBytesL);
+    Path backingFile;
+    String seed = EnvUtils.getProperty("tests.seed");
+    if (seed == null) {
+      // not in a test context
+      backingFile = Path.of(POOL_BACKING_FILE);
+    } else {
+      // test context; resolve relative to tmpdir, and scoped to this object in order to
+      // avoid conflicts (note: we'll ignore the possibility of hash collisions here)
+      backingFile =
+          Path.of(EnvUtils.getProperty("java.io.tmpdir"))
+              .resolve(
+                  POOL_BACKING_FILE
+                      + "_"
+                      + seed
+                      + "_"
+                      + Integer.toUnsignedString(System.identityHashCode(caller), 16));
+    }
+    try (FileChannel fc =
+        FileChannel.open(
+            backingFile,
+            StandardOpenOption.READ,
+            StandardOpenOption.WRITE,
+            StandardOpenOption.CREATE_NEW)) {
+      fc.truncate(nBlocks * (long) BLOCK_SIZE_BYTES);
+      for (int i = numPartitions - 1,
+              partitionNumBlocks = ((nBlocks - 1) % effectiveMaxBlocksPerPartition) + 1;
+          i >= 0;
+          i--) {
+        // NOTE: this is designed to be a single file per JVM, lasting the entire JVM lifetime,
+        // so we don't need to worry about unmapping (as we do for MMapDirectory).
+        ByteBuffer partition =
+            fc.map(
+                    FileChannel.MapMode.READ_WRITE,
+                    i * partitionMaxBytes,
+                    partitionNumBlocks * blockSizeBytesL)
+                .order(FixedBitSet.BYTE_ORDER);
+        for (int j = 0; j < partitionNumBlocks; j++) {
+          pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
+        }
+        partitionNumBlocks = effectiveMaxBlocksPerPartition;
+      }
+    } finally {
+      Files.delete(backingFile); // delete, but mapping will stay open
+    }
+    return backingFile;
   }
 
   private static final SolrMetricsContext DISABLED = new SolrMetricsContext(null, null, null);

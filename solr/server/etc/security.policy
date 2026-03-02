@@ -219,6 +219,8 @@ grant {
   permission java.io.FilePermission "${solr.allowPaths}", "read,write,delete,readlink";
   permission java.io.FilePermission "${solr.allowPaths}${/}-", "read,write,delete,readlink";
 
+  permission java.io.FilePermission "/sys/kernel/mm/hugepages/hugepages-2048kB/-", "read";
+
   permission java.io.FilePermission "${solr.sharedLib}", "read,readlink";
   permission java.io.FilePermission "${solr.sharedLib}${/}-", "read,readlink";
 

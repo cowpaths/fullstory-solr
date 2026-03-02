@@ -86,6 +86,7 @@ allprojects {
           [propName: 'solr.fbspool.onheap.targetMB', value: "-1", description: "Configures onheap pooling of docset partitions (0 -> disabled, -1 -> default)"],
           [propName: 'solr.fbspool.offheap.targetMB', value: "-1", description: "Configures offheap pooling of docset partitions (0 -> disabled, -1 -> default)"],
           [propName: 'solr.fbspool.allowExplicitClose', value: "true", description: "false forces GC-driven pool resource reclaim"],
+          [propName: 'solr.fbspool.file', value: "", description: "If non-empty, file for mmap'd, file-backed fbspool"],
           [propName: 'solr.bitdocset.maxwordsshift', value: "7", description: "May set lower to exercise DocSet partitioning"],
           // seed, repetition and amplification.
           [propName: 'tests.seed', value: { -> rootSeed }, description: "Sets the master randomization seed."],
