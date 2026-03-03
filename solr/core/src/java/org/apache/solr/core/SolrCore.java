@@ -2870,7 +2870,12 @@ public class SolrCore implements SolrInfoBean, Closeable {
           return; // still execute the finally block to notify anyone waiting.
         }
 
+        // When replacing a searcher, skip the old searcher's metric cleanup.
+        // The new searcher will replace the metrics via force=true in cache registration,
+        // eliminating the gap in metric availability during the transition.
         if (_searcher != null) {
+          SolrIndexSearcher oldSearcher = _searcher.get();
+          oldSearcher.setSkipMetricsCleanupOnClose();
           _searcher.decref(); // dec refcount for this._searcher
           _searcher = null;
         }

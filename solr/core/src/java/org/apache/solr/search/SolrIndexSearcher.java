@@ -190,6 +190,13 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   private Set<String> metricNames = ConcurrentHashMap.newKeySet();
   private SolrMetricsContext solrMetricsContext;
 
+  /**
+   * When true, this searcher will skip metrics cleanup during close(). This is set when the
+   * searcher is being replaced by a new one that will immediately re-register the same metrics
+   * with force=true, preventing a gap in metric availability during the transition.
+   */
+  private volatile boolean skipMetricsCleanupOnClose = false;
+
   private static DirectoryReader getReader(
       SolrCore core, SolrIndexConfig config, DirectoryFactory directoryFactory, String path)
       throws IOException {
@@ -576,6 +583,15 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     return reader;
   }
 
+  /**
+   * Tells this searcher to skip metrics cleanup when it closes. This should be called when the
+   * searcher is being replaced by a new one that will immediately re-register the same metrics,
+   * preventing a gap in metric availability during the transition.
+   */
+  public void setSkipMetricsCleanupOnClose() {
+    this.skipMetricsCleanupOnClose = true;
+  }
+
   /** Register sub-objects such as caches and our own metrics */
   public void register() {
     final Map<String, SolrInfoBean> infoRegistry = core.getInfoRegistry();
@@ -645,10 +661,15 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       directoryFactory.release(getIndexReader().directory());
     }
 
-    try {
-      SolrInfoBean.super.close();
-    } catch (Exception e) {
-      log.warn("Exception closing", e);
+    // Skip metrics cleanup if this searcher is being replaced by a new one.
+    // The new searcher will immediately re-register the same metrics with force=true,
+    // so unregistering here would create a gap in metric availability.
+    if (!skipMetricsCleanupOnClose) {
+      try {
+        SolrInfoBean.super.close();
+      } catch (Exception e) {
+        log.warn("Exception closing", e);
+      }
     }
 
     // do this at the end so it only gets done if there are no exceptions
