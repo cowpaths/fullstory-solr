@@ -131,6 +131,7 @@ public class HeapCacheFbsModifier
 
   public static final String POOL_MADV_SOFTRELEASE_PROPNAME = "solr.fbspool.softRelease";
   public static final String POOL_BULK_FAULT_IN_PROPNAME = "solr.fbspool.bulkFaultIn";
+  public static final String POOL_SYNCHRONOUS_FAULT_IN_PROPNAME = "solr.fbspool.synchronousFaultIn";
   public static final String POOL_BACKING_FILE_PROPNAME = "solr.fbspool.file";
   public static final String POOL_OFFHEAP_TARGET_MB_PROPNAME = "solr.fbspool.offheap.targetMB";
   public static final String POOL_ONHEAP_TARGET_MB_PROPNAME = "solr.fbspool.onheap.targetMB";
@@ -146,6 +147,9 @@ public class HeapCacheFbsModifier
 
   private static final boolean BULK_FAULT_IN =
       EnvUtils.getPropertyAsBool(POOL_BULK_FAULT_IN_PROPNAME, false);
+
+  private static final boolean SYNCHRONOUS_FAULT_IN =
+      EnvUtils.getPropertyAsBool(POOL_SYNCHRONOUS_FAULT_IN_PROPNAME, true);
 
   private static final long TPS;
   private static final long TPS_OFFHEAP;
@@ -656,7 +660,7 @@ public class HeapCacheFbsModifier
     ByteBuffer ret = (ByteBuffer) H.getAndSetAcquire(pool, idx, null);
     ret.clear().limit(size);
     if (BULK_FAULT_IN && offheap) {
-      madvise(ret, MADV_WILLNEED); // bulk fault in if necessary
+      madvise(ret, MADV_BULK_FAULTIN); // bulk fault in if necessary
     }
     return ret;
   }
@@ -704,6 +708,9 @@ public class HeapCacheFbsModifier
   private static final int MADV_FREE = 8;
   private static final int MADV_DONTNEED = 4;
   private static final int MADV_WILLNEED = 3;
+  private static final int MADV_POPULATE_WRITE = 23;
+  private static final int MADV_BULK_FAULTIN =
+      SYNCHRONOUS_FAULT_IN ? MADV_POPULATE_WRITE : MADV_WILLNEED;
 
   /**
    * If {@link #POOL_MADV_SOFTRELEASE_PROPNAME} (the default), buffers are released via {@link
