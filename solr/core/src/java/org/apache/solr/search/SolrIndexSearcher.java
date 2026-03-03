@@ -192,8 +192,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
   /**
    * When true, this searcher will skip metrics cleanup during close(). This is set when the
-   * searcher is being replaced by a new one that will immediately re-register the same metrics
-   * with force=true, preventing a gap in metric availability during the transition.
+   * searcher is being replaced by a new one that will immediately re-register the same metrics with
+   * force=true, preventing a gap in metric availability during the transition.
    */
   private volatile boolean skipMetricsCleanupOnClose = false;
 
