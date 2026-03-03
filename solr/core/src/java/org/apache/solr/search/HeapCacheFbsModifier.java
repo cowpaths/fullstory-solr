@@ -545,6 +545,12 @@ public class HeapCacheFbsModifier
       for (ByteBuffer bb : toRelease) {
         // pool[destOff++ & POOL_SIZE_MASK] = bb;
         idx--;
+
+        // NOTE: now we're calling `madviseFree()`, we no longer have to worry about zeroing out
+        // the buffer on reclaim causing the blocks to be "dirty" (and potentially written back to
+        // swap). So we're better off zeroing on the reclaiming side (here).
+        bb.put(FRESH.slice(0, bb.remaining()));
+
         if (offheap) {
           madviseFree(bb);
         }
@@ -642,9 +648,7 @@ public class HeapCacheFbsModifier
   private ByteBuffer initBuf(int idx, int size) {
     // ByteBuffer ret = pool[head & POOL_SIZE_MASK].clear().limit(size);
     ByteBuffer ret = (ByteBuffer) H.getAndSetAcquire(pool, idx, null);
-    ret.clear().limit(size);
-    // zero it out
-    return ret.put(FRESH.slice(0, size)).flip();
+    return ret.clear().limit(size);
   }
 
   public long exhaustedCount() {
