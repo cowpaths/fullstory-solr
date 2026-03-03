@@ -129,6 +129,7 @@ public class HeapCacheFbsModifier
 
   private final ReferenceHandler<RefHandlerPacket> refHandler;
 
+  public static final String POOL_MADV_SOFTRELEASE_PROPNAME = "solr.fbspool.softRelease";
   public static final String POOL_BACKING_FILE_PROPNAME = "solr.fbspool.file";
   public static final String POOL_OFFHEAP_TARGET_MB_PROPNAME = "solr.fbspool.offheap.targetMB";
   public static final String POOL_ONHEAP_TARGET_MB_PROPNAME = "solr.fbspool.onheap.targetMB";
@@ -549,10 +550,11 @@ public class HeapCacheFbsModifier
         // NOTE: now we're calling `madviseFree()`, we no longer have to worry about zeroing out
         // the buffer on reclaim causing the blocks to be "dirty" (and potentially written back to
         // swap). So we're better off zeroing on the reclaiming side (here).
+        // TODO: we should not need to zero out for `offheap` when `MADV_RELEASE == MADV_DONTNEED`
         bb.put(FRESH.slice(0, bb.remaining()));
 
         if (offheap) {
-          madviseFree(bb);
+          madviseRelease(bb);
         }
         while (!H.compareAndSet(pool, idx, null, bb)) {
           // wait for consumer thread(s) to catch up
@@ -692,6 +694,17 @@ public class HeapCacheFbsModifier
   }
 
   private static final int MADV_FREE = 8;
+  private static final int MADV_DONTNEED = 4;
+
+  /**
+   * If {@link #POOL_MADV_SOFTRELEASE_PROPNAME} (the default), buffers are released via {@link
+   * #MADV_FREE}, which can be higher throughput, but does not guarantee that physical memory will
+   * immediately be released. Setting sysprop {@value #POOL_MADV_SOFTRELEASE_PROPNAME} to {@code
+   * false} ensures that memory is immediately released.
+   */
+  private static final int MADV_RELEASE =
+      EnvUtils.getPropertyAsBool(POOL_MADV_SOFTRELEASE_PROPNAME, true) ? MADV_FREE : MADV_DONTNEED;
+
   private static final int MADV_NOHUGEPAGE = 15;
 
   private static final MethodHandle MADVISE_HANDLE = getMadviseHandle();
@@ -717,8 +730,8 @@ public class HeapCacheFbsModifier
     return linker.downcallHandle(madviseAddress, descriptor);
   }
 
-  private static void madviseFree(ByteBuffer bb) {
-    madvise(bb, MADV_FREE);
+  private static void madviseRelease(ByteBuffer bb) {
+    madvise(bb, MADV_RELEASE);
   }
 
   @SuppressWarnings("preview")
@@ -746,13 +759,14 @@ public class HeapCacheFbsModifier
       for (int j = 0; j < partitionNumBlocks; j++) {
         pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
       }
-      madviseFree(partition);
 
       // We do _not_ want transparent hugepages, since our granularity currently maxes out
       // at 1M (half a hugepage). Might be some TLB benefit to properly aligned _2M_ blocks
       // in conjunction with THP. But for now stick with default 4k pages.
       // If we choose to experiment with THP here in the future, proceed with caution.
       madvise(partition, MADV_NOHUGEPAGE);
+
+      madvise(partition, MADV_DONTNEED); // force release of physical memory
 
       partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
     }
