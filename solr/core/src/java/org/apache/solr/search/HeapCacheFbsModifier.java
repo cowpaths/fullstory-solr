@@ -130,6 +130,7 @@ public class HeapCacheFbsModifier
   private final ReferenceHandler<RefHandlerPacket> refHandler;
 
   public static final String POOL_MADV_SOFTRELEASE_PROPNAME = "solr.fbspool.softRelease";
+  public static final String POOL_BULK_FAULT_IN_PROPNAME = "solr.fbspool.bulkFaultIn";
   public static final String POOL_BACKING_FILE_PROPNAME = "solr.fbspool.file";
   public static final String POOL_OFFHEAP_TARGET_MB_PROPNAME = "solr.fbspool.offheap.targetMB";
   public static final String POOL_ONHEAP_TARGET_MB_PROPNAME = "solr.fbspool.onheap.targetMB";
@@ -142,6 +143,9 @@ public class HeapCacheFbsModifier
 
   private static final String POOL_BACKING_FILE =
       EnvUtils.getProperty(POOL_BACKING_FILE_PROPNAME, "");
+
+  private static final boolean BULK_FAULT_IN =
+      EnvUtils.getPropertyAsBool(POOL_BULK_FAULT_IN_PROPNAME, false);
 
   private static final long TPS;
   private static final long TPS_OFFHEAP;
@@ -650,7 +654,11 @@ public class HeapCacheFbsModifier
   private ByteBuffer initBuf(int idx, int size) {
     // ByteBuffer ret = pool[head & POOL_SIZE_MASK].clear().limit(size);
     ByteBuffer ret = (ByteBuffer) H.getAndSetAcquire(pool, idx, null);
-    return ret.clear().limit(size);
+    ret.clear().limit(size);
+    if (BULK_FAULT_IN && offheap) {
+      madvise(ret, MADV_WILLNEED); // bulk fault in if necessary
+    }
+    return ret;
   }
 
   public long exhaustedCount() {
@@ -695,6 +703,7 @@ public class HeapCacheFbsModifier
 
   private static final int MADV_FREE = 8;
   private static final int MADV_DONTNEED = 4;
+  private static final int MADV_WILLNEED = 3;
 
   /**
    * If {@link #POOL_MADV_SOFTRELEASE_PROPNAME} (the default), buffers are released via {@link
