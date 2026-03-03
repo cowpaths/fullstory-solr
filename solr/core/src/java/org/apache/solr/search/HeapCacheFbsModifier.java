@@ -551,7 +551,7 @@ public class HeapCacheFbsModifier
         // the buffer on reclaim causing the blocks to be "dirty" (and potentially written back to
         // swap). So we're better off zeroing on the reclaiming side (here).
         // TODO: we should not need to zero out for `offheap` when `MADV_RELEASE == MADV_DONTNEED`
-        bb.put(FRESH.slice(0, bb.remaining()));
+        bb.put(FRESH.slice(0, bb.remaining())).clear();
 
         if (offheap) {
           madviseRelease(bb);
