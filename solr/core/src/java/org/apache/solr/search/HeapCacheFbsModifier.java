@@ -129,7 +129,6 @@ public class HeapCacheFbsModifier
 
   private final ReferenceHandler<RefHandlerPacket> refHandler;
 
-  public static final String POOL_MADV_SOFTRELEASE_PROPNAME = "solr.fbspool.softRelease";
   public static final String POOL_BULK_FAULT_IN_PROPNAME = "solr.fbspool.bulkFaultIn";
   public static final String POOL_SYNCHRONOUS_FAULT_IN_PROPNAME = "solr.fbspool.synchronousFaultIn";
   public static final String POOL_BACKING_FILE_PROPNAME = "solr.fbspool.file";
@@ -712,15 +711,6 @@ public class HeapCacheFbsModifier
   private static final int MADV_BULK_FAULTIN =
       SYNCHRONOUS_FAULT_IN ? MADV_POPULATE_WRITE : MADV_WILLNEED;
 
-  /**
-   * If {@link #POOL_MADV_SOFTRELEASE_PROPNAME} (the default), buffers are released via {@link
-   * #MADV_FREE}, which can be higher throughput, but does not guarantee that physical memory will
-   * immediately be released. Setting sysprop {@value #POOL_MADV_SOFTRELEASE_PROPNAME} to {@code
-   * false} ensures that memory is immediately released.
-   */
-  private static final int MADV_RELEASE =
-      EnvUtils.getPropertyAsBool(POOL_MADV_SOFTRELEASE_PROPNAME, true) ? MADV_FREE : MADV_DONTNEED;
-
   private static final int MADV_NOHUGEPAGE = 15;
 
   private static final MethodHandle MADVISE_HANDLE = getMadviseHandle();
@@ -747,7 +737,7 @@ public class HeapCacheFbsModifier
   }
 
   private static void madviseRelease(ByteBuffer bb) {
-    madvise(bb, MADV_RELEASE);
+    madvise(bb, MADV_FREE);
   }
 
   @SuppressWarnings("preview")
