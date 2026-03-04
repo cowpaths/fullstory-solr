@@ -28,6 +28,7 @@ import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.BitSetIterator;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.solr.common.util.EnvUtils;
 
 /**
  * A {@link FixedBitSet} based implementation of a {@link DocSet}. Good for medium/large sets.
@@ -49,6 +50,7 @@ public class BitDocSet extends DocSet {
    * of edge cases. TODO: maybe set this dynamically according to configured G1HeapRegionSize?
    *
    * <ul>
+   *   <li>24 -&gt; 2M blocks
    *   <li>23 -&gt; 1M blocks
    *   <li>22 -&gt; 512K blocks
    *   <li>21 -&gt; 256K blocks
@@ -71,14 +73,14 @@ public class BitDocSet extends DocSet {
    */
   public static final int BIT_SHIFT;
 
-  private static final int DEFAULT_MAX_BIT_SHIFT = 23; // 1M blocks
+  private static final int DEFAULT_MAX_BIT_SHIFT = 24; // 2M blocks
 
   static {
     // here we work based on the assumption that the min and max heap sizes will be the same, and
     // will guide the heap region sizing
     long maxMemory = Runtime.getRuntime().maxMemory();
     int exp = 64 - Long.numberOfLeadingZeros(maxMemory) - 1; // round down to nearest power of 2
-    String tmp = System.getProperty("solr.bitdocset.maxwordsshift");
+    String tmp = EnvUtils.getProperty("solr.bitdocset.maxwordsshift");
     int maxBitShift;
     if (tmp == null || "-1".equals(tmp)) {
       maxBitShift = DEFAULT_MAX_BIT_SHIFT;
@@ -90,7 +92,12 @@ public class BitDocSet extends DocSet {
         maxBitShift = DEFAULT_MAX_BIT_SHIFT;
       }
     }
-    BIT_SHIFT = Math.min(maxBitShift, Math.max(6, (exp - 11)));
+    tmp = EnvUtils.getProperty("solr.bitdocset.wordsshift");
+    if (tmp == null || "-1".equals(tmp)) {
+      BIT_SHIFT = Math.min(maxBitShift, Math.max(6, (exp - 11)));
+    } else {
+      BIT_SHIFT = Integer.parseInt(tmp);
+    }
     System.err.println("exp=" + exp);
     long maxBlockBytes = 1L << (BIT_SHIFT - 3);
     System.err.println(

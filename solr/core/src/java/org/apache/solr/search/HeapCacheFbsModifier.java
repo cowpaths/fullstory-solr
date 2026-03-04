@@ -85,9 +85,11 @@ public class HeapCacheFbsModifier
   private final int nBlocks;
   private final boolean offheap;
 
-  private static final int ALIGN_SIZE = 4096; // 4k
-  private static final int ALIGN_OVERHEAD = ALIGN_SIZE - 1; // 4k - 1
-  private static final int ALIGN_ALLOC_MINSIZE = ALIGN_SIZE + ALIGN_OVERHEAD; // 4k - 1
+  private static final int MIN_BLOCK_SIZE = 4096; // 4k
+
+  private static final int ALIGN_SIZE = 1 << 21; // 2m
+  private static final int ALIGN_OVERHEAD = ALIGN_SIZE - 1; // 2m - 1
+  private static final int ALIGN_ALLOC_MINSIZE = ALIGN_SIZE + ALIGN_OVERHEAD;
 
   // dummy, for efficiently clearing buffers
   private static final ByteBuffer FRESH =
@@ -132,11 +134,16 @@ public class HeapCacheFbsModifier
   public static final String POOL_BULK_FAULT_IN_PROPNAME = "solr.fbspool.bulkFaultIn";
   public static final String POOL_SYNCHRONOUS_FAULT_IN_PROPNAME = "solr.fbspool.synchronousFaultIn";
   public static final String POOL_BACKING_FILE_PROPNAME = "solr.fbspool.file";
+  public static final String POOL_FORCE_TRANSPARENT_HUGEPAGE = "solr.fbspool.offheap.thp";
   public static final String POOL_OFFHEAP_TARGET_MB_PROPNAME = "solr.fbspool.offheap.targetMB";
   public static final String POOL_ONHEAP_TARGET_MB_PROPNAME = "solr.fbspool.onheap.targetMB";
   public static final String POOL_ALWAYS_ONE_UNPOOLED_PROPNAME = "solr.fbspool.alwaysOneUnpooled";
   public static final String POOL_DUMP_STATS_ON_TEST_PROPNAME = "solr.fbspool.dumpStatsOnTest";
   public static final String POOL_ALLOW_EXPLICIT_CLOSE_PROPNAME = "solr.fbspool.allowExplicitClose";
+
+  /** 0 -> disable thp, 1 -> enable thp, -1 -> ergonomic default */
+  private static final int OFFHEAP_THP =
+      EnvUtils.getPropertyAsInteger(POOL_FORCE_TRANSPARENT_HUGEPAGE, -1);
 
   private static final boolean ALLOW_EXPLICIT_CLOSE =
       EnvUtils.getPropertyAsBool(POOL_ALLOW_EXPLICIT_CLOSE_PROPNAME, true);
@@ -715,7 +722,7 @@ public class HeapCacheFbsModifier
   private static final boolean SUPPORT_MADV_POPULATE_WRITE;
 
   static {
-    ByteBuffer bb = ByteBuffer.allocateDirect(ALIGN_SIZE);
+    ByteBuffer bb = ByteBuffer.allocateDirect(MIN_BLOCK_SIZE);
     SUPPORT_MADV_POPULATE_WRITE = madvise(bb, MADV_POPULATE_WRITE);
     log.warn("disabling support for MADV_POPULATE_WRITE");
   }
@@ -724,6 +731,7 @@ public class HeapCacheFbsModifier
       (SUPPORT_MADV_POPULATE_WRITE && SYNCHRONOUS_FAULT_IN) ? MADV_POPULATE_WRITE : MADV_WILLNEED;
 
   private static final int MADV_NOHUGEPAGE = 15;
+  private static final int MADV_HUGEPAGE = 14;
 
   private static final MethodHandle MADVISE_HANDLE = getMadviseHandle();
 
@@ -770,8 +778,29 @@ public class HeapCacheFbsModifier
   }
 
   private static void poolOffheap(int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
+    // truncate to 2M blocks
+    int partitionMaxBytes = ((MAX_BLOCKS_PER_PARTITION * BLOCK_SIZE_BYTES) >> 21) << 21;
+
+    int effectiveMaxBlocksPerPartition = partitionMaxBytes / BLOCK_SIZE_BYTES;
+
+    final boolean doTHP;
+    switch (OFFHEAP_THP) {
+      case 0:
+        doTHP = false;
+        break;
+      case 1:
+        doTHP = true;
+        break;
+      case -1:
+        doTHP = BLOCK_SIZE_BYTES == ALIGN_SIZE;
+        break;
+      default:
+        throw new IllegalArgumentException(
+            POOL_FORCE_TRANSPARENT_HUGEPAGE + "must be one of [-1, 0, 1]; found " + OFFHEAP_THP);
+    }
+
     for (int i = numPartitions - 1,
-            partitionNumBlocks = ((nBlocks - 1) % MAX_BLOCKS_PER_PARTITION) + 1;
+            partitionNumBlocks = ((nBlocks - 1) % effectiveMaxBlocksPerPartition) + 1;
         i >= 0;
         i--) {
       int partitionSize = partitionNumBlocks * BLOCK_SIZE_BYTES;
@@ -780,11 +809,11 @@ public class HeapCacheFbsModifier
               .alignedSlice(ALIGN_SIZE)
               .order(FixedBitSet.BYTE_ORDER);
 
-      // We do _not_ want transparent hugepages, since our granularity currently maxes out
-      // at 1M (half a hugepage). Might be some TLB benefit to properly aligned _2M_ blocks
-      // in conjunction with THP. But for now stick with default 4k pages.
-      // If we choose to experiment with THP here in the future, proceed with caution.
-      madvise(partition, MADV_NOHUGEPAGE);
+      if (doTHP) {
+        madvise(partition, MADV_HUGEPAGE);
+      } else {
+        madvise(partition, MADV_NOHUGEPAGE);
+      }
 
       // NOTE: below, `MADV_POPULATE_WRITE` and `MADV_DONTNEED` in smaller chunks to avoid blowing
       // out memory (which would happen if we did this in larger chunks). It's important to
@@ -797,7 +826,7 @@ public class HeapCacheFbsModifier
         } else {
           // touch every block manually
           madvise(block, MADV_WILLNEED);
-          for (int k = 0, lim = block.remaining(); k < lim; k += ALIGN_SIZE) {
+          for (int k = 0, lim = block.remaining(); k < lim; k += MIN_BLOCK_SIZE) {
             block.get(k);
           }
         }
@@ -805,7 +834,7 @@ public class HeapCacheFbsModifier
         pool[blockIdx++] = block;
       }
 
-      partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
+      partitionNumBlocks = effectiveMaxBlocksPerPartition;
     }
   }
 }
