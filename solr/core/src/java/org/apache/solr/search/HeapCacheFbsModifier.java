@@ -554,14 +554,17 @@ public class HeapCacheFbsModifier
         // pool[destOff++ & POOL_SIZE_MASK] = bb;
         idx--;
 
-        // NOTE: now we're calling `madviseFree()`, we no longer have to worry about zeroing out
-        // the buffer on reclaim causing the blocks to be "dirty" (and potentially written back to
-        // swap). So we're better off zeroing on the reclaiming side (here).
-        // TODO: we should not need to zero out for `offheap` when `MADV_RELEASE == MADV_DONTNEED`
-        bb.put(FRESH.slice(0, bb.remaining())).clear();
-
         if (offheap) {
+          // NOTE: for off-heap we only need to zero out the buffer if bulk-faultin is
+          // disabled OR doesn't call MADV_POPULATE_WRITE (which would zero out the buffer
+          // upon acquire).
+          if (!BULK_FAULT_IN || MADV_BULK_FAULTIN != MADV_POPULATE_WRITE) {
+            bb.put(FRESH.slice(0, bb.remaining())).clear();
+          }
           madviseRelease(bb);
+        } else {
+          // on-heap buffers never get zeroed out at the OS level, so we have to do it ourselves.
+          bb.put(FRESH.slice(0, bb.remaining())).clear();
         }
         while (!H.compareAndSet(pool, idx, null, bb)) {
           // wait for consumer thread(s) to catch up
