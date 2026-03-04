@@ -711,8 +711,17 @@ public class HeapCacheFbsModifier
   private static final int MADV_DONTNEED = 4;
   private static final int MADV_WILLNEED = 3;
   private static final int MADV_POPULATE_WRITE = 23;
+
+  private static final boolean SUPPORT_MADV_POPULATE_WRITE;
+
+  static {
+    ByteBuffer bb = ByteBuffer.allocateDirect(ALIGN_SIZE);
+    SUPPORT_MADV_POPULATE_WRITE = madvise(bb, MADV_POPULATE_WRITE);
+    log.warn("disabling support for MADV_POPULATE_WRITE");
+  }
+
   private static final int MADV_BULK_FAULTIN =
-      SYNCHRONOUS_FAULT_IN ? MADV_POPULATE_WRITE : MADV_WILLNEED;
+      (SUPPORT_MADV_POPULATE_WRITE && SYNCHRONOUS_FAULT_IN) ? MADV_POPULATE_WRITE : MADV_WILLNEED;
 
   private static final int MADV_NOHUGEPAGE = 15;
 
@@ -744,15 +753,20 @@ public class HeapCacheFbsModifier
   }
 
   @SuppressWarnings("preview")
-  private static void madvise(ByteBuffer bb, int advice) {
+  private static boolean madvise(ByteBuffer bb, int advice) {
     try {
       MemorySegment segment = MemorySegment.ofBuffer(bb);
       // 2. Execute the call directly on the memory segment
       int result = (int) MADVISE_HANDLE.invokeExact(segment, segment.byteSize(), advice);
-      if (result != 0) log.warn("madvise {} failed", advice);
+      if (result == 0) {
+        return true;
+      } else {
+        log.warn("madvise {} failed", advice);
+      }
     } catch (Throwable t) {
       log.error("exception calling madvise {}", advice, t);
     }
+    return false;
   }
 
   private static void poolOffheap(int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
@@ -772,13 +786,21 @@ public class HeapCacheFbsModifier
       // If we choose to experiment with THP here in the future, proceed with caution.
       madvise(partition, MADV_NOHUGEPAGE);
 
-      // NOTE: below, `MADV_POPULATE_WRITE` and `MADV_DONTNEED` in smaller chunks to avoid blowing out
-      // memory (which would happen if we did this in larger chunks). It's important to pre-allocate
-      // the pagetable entries because we don't want synchronous callers to incur that hit a little at
-      // a time as the pool "warms up".
+      // NOTE: below, `MADV_POPULATE_WRITE` and `MADV_DONTNEED` in smaller chunks to avoid blowing
+      // out memory (which would happen if we did this in larger chunks). It's important to
+      // pre-allocate the pagetable entries because we don't want synchronous callers to incur that
+      // hit a little at a time as the pool "warms up".
       for (int j = 0; j < partitionNumBlocks; j++) {
         ByteBuffer block = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
-        madvise(block, MADV_POPULATE_WRITE); // pre-build pagetable entries
+        if (SUPPORT_MADV_POPULATE_WRITE) {
+          madvise(block, MADV_POPULATE_WRITE); // pre-build pagetable entries
+        } else {
+          // touch every block manually
+          madvise(block, MADV_WILLNEED);
+          for (int k = 0, lim = block.remaining(); k < lim; k += ALIGN_SIZE) {
+            block.get(k);
+          }
+        }
         madvise(block, MADV_DONTNEED); // force release of physical memory
         pool[blockIdx++] = block;
       }
