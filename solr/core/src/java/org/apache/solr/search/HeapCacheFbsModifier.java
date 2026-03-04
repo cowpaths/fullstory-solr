@@ -762,9 +762,6 @@ public class HeapCacheFbsModifier
           ByteBuffer.allocateDirect(Math.max(ALIGN_ALLOC_MINSIZE, partitionSize + ALIGN_OVERHEAD))
               .alignedSlice(ALIGN_SIZE)
               .order(FixedBitSet.BYTE_ORDER);
-      for (int j = 0; j < partitionNumBlocks; j++) {
-        pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
-      }
 
       // We do _not_ want transparent hugepages, since our granularity currently maxes out
       // at 1M (half a hugepage). Might be some TLB benefit to properly aligned _2M_ blocks
@@ -772,7 +769,16 @@ public class HeapCacheFbsModifier
       // If we choose to experiment with THP here in the future, proceed with caution.
       madvise(partition, MADV_NOHUGEPAGE);
 
-      madvise(partition, MADV_DONTNEED); // force release of physical memory
+      // NOTE: below, `MADV_POPULATE_WRITE` and `MADV_DONTNEED` in smaller chunks to avoid blowing out
+      // memory (which would happen if we did this in larger chunks). It's important to pre-allocate
+      // the pagetable entries because we don't want synchronous callers to incur that hit a little at
+      // a time as the pool "warms up".
+      for (int j = 0; j < partitionNumBlocks; j++) {
+        ByteBuffer block = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
+        madvise(block, MADV_POPULATE_WRITE); // pre-build pagetable entries
+        madvise(block, MADV_DONTNEED); // force release of physical memory
+        pool[blockIdx++] = block;
+      }
 
       partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
     }
