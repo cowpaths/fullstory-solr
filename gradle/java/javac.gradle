@@ -71,7 +71,6 @@ allprojects {
         options.compilerArgs += "-Werror"
       } else {
         options.compilerArgs += "--enable-preview"
-        options.compilerArgs += ["--add-modules", "jdk.incubator.vector"]
       }
     }
   }
