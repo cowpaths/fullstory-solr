@@ -19,6 +19,13 @@ package org.apache.solr.search;
 import static org.apache.solr.search.DocSetUtil.copyBitRange;
 
 import java.io.IOException;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.util.Arrays;
@@ -28,6 +35,8 @@ import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
+import jdk.incubator.vector.LongVector;
+import jdk.incubator.vector.VectorSpecies;
 import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.FieldInfos;
@@ -743,6 +752,273 @@ public class TestDocSet extends SolrTestCase {
         return length;
       }
     };
+  }
+
+  public void testBlah() {
+    for (int j = 0; j < 5; j++) {
+      long nanos = 0;
+      for (int i = 10; i > 0; i--) {
+        nanos += testBlah0();
+      }
+      System.err.println("blah0 "+TimeUnit.NANOSECONDS.toMillis(nanos / 10));
+      nanos = 0;
+      for (int i = 10; i > 0; i--) {
+        nanos += testBlah1();
+      }
+      System.err.println("blah1 "+TimeUnit.NANOSECONDS.toMillis(nanos / 10));
+      nanos = 0;
+      for (int i = 10; i > 0; i--) {
+        nanos += testBlah1a();
+      }
+      System.err.println("blah1a "+TimeUnit.NANOSECONDS.toMillis(nanos / 10));
+      nanos = 0;
+      for (int i = 10; i > 0; i--) {
+        nanos += testBlah1b();
+      }
+      System.err.println("blah1b "+TimeUnit.NANOSECONDS.toMillis(nanos / 10));
+      nanos = 0;
+      for (int i = 10; i > 0; i--) {
+        nanos += testBlah1c();
+      }
+      System.err.println("blah1c "+TimeUnit.NANOSECONDS.toMillis(nanos / 10));
+      nanos = 0;
+      for (int i = 10; i > 0; i--) {
+        nanos += testBlah2();
+      }
+      System.err.println("blah2 "+TimeUnit.NANOSECONDS.toMillis(nanos / 10));
+    }
+    if (true) return;
+    System.err.println("blahQ");
+    for (int i = 10; i > 0; i--) {
+      testBlahQ();
+    }
+    System.err.println("blah0");
+    for (int i = 10; i > 0; i--) {
+      testBlah0();
+    }
+    System.err.println("blah1");
+    for (int i = 10; i > 0; i--) {
+      testBlah1();
+    }
+    System.err.println("blah2");
+    for (int i = 10; i > 0; i--) {
+      testBlah2();
+    }
+    System.err.println("blah3");
+    for (int i = 10; i > 0; i--) {
+      testBlah3();
+    }
+    System.err.println("blah4");
+    for (int i = 10; i > 0; i--) {
+      testBlah4();
+    }
+  }
+
+  private static long testBlahQ() {
+    int reps = 1000;
+    int size = 1 << 22; // 4m
+    long[] data = new long[size];
+    long start = System.nanoTime();
+    for (int i = reps; i > 0; i--) {
+      for (int j = size - 1; j >= 0; j--) {
+        data[j]++;
+      }
+    }
+    long ret = System.nanoTime() - start;
+    System.err.println("\tDONE! "+TimeUnit.NANOSECONDS.toMillis(ret));
+    for (int i = size - 1; i >= 0; i--) {
+      assertEquals(reps, data[i]);
+    }
+    return ret;
+  }
+
+  private static long testBlah0() {
+    int reps = 1000;
+    int size = 1 << 22; // 4m
+    long[] data = new long[size];
+    long start = System.nanoTime();
+    for (int i = reps; i > 0; i--) {
+      for (int j = size - 1; j >= 0; j--) {
+        data[j] += 1;
+      }
+    }
+    long ret = System.nanoTime() - start;
+    System.err.println("\tDONE! "+TimeUnit.NANOSECONDS.toMillis(ret));
+    for (int i = size - 1; i >= 0; i--) {
+      assertEquals(reps, data[i]);
+    }
+    return ret;
+  }
+
+  private static long testBlah1() {
+    int reps = 1000;
+    int size = 1 << 22; // 4m
+    LongBuffer data = LongBuffer.allocate(size);
+    long start = System.nanoTime();
+    for (int i = reps; i > 0; i--) {
+      for (int j = size - 1; j >= 0; j--) {
+        data.put(j, data.get(j) + 1);
+      }
+    }
+    long ret = System.nanoTime() - start;
+    System.err.println("\tDONE! "+TimeUnit.NANOSECONDS.toMillis(ret));
+    for (int i = size - 1; i >= 0; i--) {
+      assertEquals(reps, data.get(i));
+    }
+    return ret;
+  }
+
+  private static long testBlah1a() {
+    int reps = 1000;
+    final int size = 1 << 22; // 4m
+    LongBuffer data = LongBuffer.allocate(size);
+    long start = System.nanoTime();
+    for (int i = reps; i > 0; i--) {
+      for (int j = 0; j < size; j++) {
+        data.put(j, data.get(j) + 1);
+      }
+    }
+    long ret = System.nanoTime() - start;
+    System.err.println("\tDONE! "+TimeUnit.NANOSECONDS.toMillis(ret));
+    for (int i = size - 1; i >= 0; i--) {
+      assertEquals(reps, data.get(i));
+    }
+    return ret;
+  }
+
+  private static long testBlah1b() {
+    int reps = 1000;
+    int size = 1 << 22; // 4m
+    LongBuffer data = ByteBuffer.allocate(size * Long.BYTES).asLongBuffer();
+    long start = System.nanoTime();
+    for (int i = reps; i > 0; i--) {
+      for (int j = size - 1; j >= 0; j--) {
+        data.put(j, data.get(j) + 1);
+      }
+    }
+    long ret = System.nanoTime() - start;
+    System.err.println("\tDONE! "+TimeUnit.NANOSECONDS.toMillis(ret));
+    for (int i = size - 1; i >= 0; i--) {
+      assertEquals(reps, data.get(i));
+    }
+    return ret;
+  }
+
+  @SuppressWarnings("preview")
+  private static long testBlah1c() {
+    int reps = 1000;
+    int size = 1 << 22; // 4m
+    ByteBuffer bb = ByteBuffer.allocateDirect(size * Long.BYTES).order(ByteOrder.nativeOrder());
+    MemorySegment seg = MemorySegment.ofBuffer(bb);
+    LongBuffer data = bb.asLongBuffer();
+    long start = System.nanoTime();
+    for (int i = reps; i > 0; i--) {
+      for (int j = (size - 1) * Long.BYTES; j >= 0; j -= Long.BYTES) {
+        long val = (long) VH_LONG.getOpaque(seg, j); // offset in bytes
+        VH_LONG.setOpaque(seg, j, val + 1);
+      }
+    }
+    long ret = System.nanoTime() - start;
+    System.err.println("\tDONE! "+TimeUnit.NANOSECONDS.toMillis(ret));
+    for (int i = size - 1; i >= 0; i--) {
+      assertEquals(reps, data.get(i));
+    }
+    return ret;
+  }
+
+  @SuppressWarnings("preview")
+  private static final VarHandle VH_LONG = MethodHandles.memorySegmentViewVarHandle(ValueLayout.JAVA_LONG);
+
+  private static long testBlah2() {
+    int reps = 1000;
+    int size = 1 << 22; // 4m
+    LongBuffer data = ByteBuffer.allocateDirect(size * Long.BYTES).asLongBuffer();
+    long start = System.nanoTime();
+    for (int i = reps; i > 0; i--) {
+      for (int j = size - 1; j >= 0; j--) {
+        data.put(j, data.get(j) + 1);
+      }
+    }
+    long ret = System.nanoTime() - start;
+    System.err.println("\tDONE! "+TimeUnit.NANOSECONDS.toMillis(ret));
+    for (int i = size - 1; i >= 0; i--) {
+      assertEquals(reps, data.get(i));
+    }
+    return ret;
+  }
+
+  @SuppressWarnings("preview")
+  static long testBlah3() {
+    int reps = 1000;
+    int size = 1 << 22;
+    // Use MemorySegment for off-heap performance
+    try (Arena arena = Arena.ofShared()) {
+      MemorySegment data = arena.allocate(size * 8L, 8L);
+      int vectorByteSize = LongVector.SPECIES_PREFERRED.vectorByteSize();
+      int alignmentOffset = data.asByteBuffer().alignmentOffset(0, vectorByteSize);
+      System.err.println("\tvbs="+vectorByteSize+", aOffset="+alignmentOffset);
+      VectorSpecies<Long> SPECIES = LongVector.SPECIES_PREFERRED;
+      LongVector plusOne = LongVector.broadcast(SPECIES, 1L);
+
+      long start = System.nanoTime();
+      for (int i = 0; i < reps; i++) {
+        int limit = SPECIES.loopBound(size);
+        int j = 0;
+        // Vectorized loop
+        for (; j < limit; j += SPECIES.length()) {
+          var v = LongVector.fromMemorySegment(SPECIES, data, (long) j * 8, ByteOrder.nativeOrder());
+          v.add(plusOne).intoMemorySegment(data, (long) j * 8, ByteOrder.nativeOrder());
+        }
+        // Tail cleanup (for sizes not divisible by species length)
+        for (; j < size; j++) {
+          long val = data.get(ValueLayout.JAVA_LONG, (long) j * 8);
+          data.set(ValueLayout.JAVA_LONG, (long) j * 8, val + 1);
+        }
+      }
+      long ret = System.nanoTime() - start;
+      System.err.println("\tDONE(v1)! " + TimeUnit.NANOSECONDS.toMillis(ret));
+      for (int i = size - 1; i >= 0; i--) {
+        assertEquals(reps, data.get(ValueLayout.JAVA_LONG, i * 8L));
+      }
+      return ret;
+    }
+  }
+
+  @SuppressWarnings("preview")
+  private static long testBlah4() {
+    int reps = 1000;
+    int size = 1 << 22;
+    // Use MemorySegment for off-heap performance
+    ByteBuffer bb = ByteBuffer.allocateDirect((size + 1) * Long.BYTES).slice(0, size * Long.BYTES).order(ByteOrder.nativeOrder());
+    int vectorByteSize = LongVector.SPECIES_PREFERRED.vectorByteSize();
+    int alignmentOffset = bb.alignmentOffset(0, vectorByteSize);
+    System.err.println("\tvbs="+vectorByteSize+", aOffset="+alignmentOffset);
+    LongBuffer lb = bb.asLongBuffer();
+    MemorySegment data = MemorySegment.ofBuffer(bb);
+    VectorSpecies<Long> SPECIES = LongVector.SPECIES_PREFERRED;
+    LongVector plusOne = LongVector.broadcast(SPECIES, 1L);
+
+    long start = System.nanoTime();
+    for (int i = 0; i < reps; i++) {
+      int limit = SPECIES.loopBound(size);
+      int j = 0;
+      // Vectorized loop
+      for (; j < limit; j += SPECIES.length()) {
+        var v = LongVector.fromMemorySegment(SPECIES, data, (long) j * 8, ByteOrder.nativeOrder());
+        v.add(plusOne).intoMemorySegment(data, (long) j * 8, ByteOrder.nativeOrder());
+      }
+      // Tail cleanup (for sizes not divisible by species length)
+      for (; j < size; j++) {
+        long val = data.get(ValueLayout.JAVA_LONG, (long) j * 8);
+        data.set(ValueLayout.JAVA_LONG, (long) j * 8, val + 1);
+      }
+    }
+    long ret = System.nanoTime() - start;
+    System.err.println("\tDONE(v2)! " + TimeUnit.NANOSECONDS.toMillis(ret));
+    for (int i = size - 1; i >= 0; i--) {
+      assertEquals(reps, lb.get(i));
+    }
+    return ret;
   }
 
   public void testCopyBitRange() {
