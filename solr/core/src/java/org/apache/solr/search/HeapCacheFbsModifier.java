@@ -719,6 +719,8 @@ public class HeapCacheFbsModifier
   private static final int MADV_WILLNEED = 3;
   private static final int MADV_POPULATE_WRITE = 23;
 
+  private static final MethodHandle MADVISE_HANDLE = getMadviseHandle();
+
   private static final boolean SUPPORT_MADV_POPULATE_WRITE;
 
   static {
@@ -732,8 +734,6 @@ public class HeapCacheFbsModifier
 
   private static final int MADV_NOHUGEPAGE = 15;
   private static final int MADV_HUGEPAGE = 14;
-
-  private static final MethodHandle MADVISE_HANDLE = getMadviseHandle();
 
   @SuppressWarnings("preview")
   private static MethodHandle getMadviseHandle() {
