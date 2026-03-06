@@ -62,12 +62,21 @@ public class DocSetCollector extends SimpleCollector {
     } else {
       // this conditional could be removed if BitSet was preallocated, but that
       // would take up more memory, and add more GC time...
-      if (bits == null) bits = new FixedBitSets(maxDoc);
-      bits.set(doc);
+      if (bits == null) {
+        bits = new FixedBitSets(maxDoc);
+        bufferTo = bufferFrom = doc;
+      } else if (doc > ++bufferTo) {
+        DocSetUtil.set(bits, bufferFrom, bufferTo);
+        bufferTo = bufferFrom = doc;
+      }
     }
 
     pos++;
   }
+
+  /* Buffer ranges to use bulk set */
+  private int bufferFrom = -1;
+  private int bufferTo = -2;
 
   /** The number of documents that have been collected */
   public int size() {
@@ -84,6 +93,9 @@ public class DocSetCollector extends SimpleCollector {
     } else {
       // set the bits for ids that were collected in the array
       scratch.copyTo(bits);
+      if (++bufferTo > bufferFrom) {
+        DocSetUtil.set(bits, bufferFrom, bufferTo);
+      }
       return new BitDocSet(bits, pos);
     }
   }
@@ -143,8 +155,17 @@ public class DocSetCollector extends SimpleCollector {
           int[] srcArray = arrays.get(i);
           int intsToCopy =
               (i < (arrays.size() - 1)) ? srcArray.length : indexForNextAddInCurrentAddArray;
-          for (int j = 0; j < intsToCopy; j++) {
-            bits.set(srcArray[j]);
+          int from = srcArray[0];
+          int to = from;
+          for (int j = 1; j < intsToCopy; j++) {
+            int subId = srcArray[j];
+            if (subId > ++to) {
+              DocSetUtil.set(bits, from, to);
+              to = from = subId;
+            }
+          }
+          if (++to > from) {
+            DocSetUtil.set(bits, from, to);
           }
           resultPos += intsToCopy;
         }

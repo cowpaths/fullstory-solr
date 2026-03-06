@@ -191,7 +191,7 @@ public class DocSetUtil {
     } else if (maxCount <= smallSetSize) {
       answer = createSmallSet(leaves, postList, maxCount, firstReader);
     } else {
-      answer = createBigSet(leaves, postList, maxDoc, firstReader);
+      answer = createBigSet(searcher.getLiveDocSet(), leaves, postList, maxDoc, firstReader);
     }
 
     return DocSetUtil.getDocSet(answer, searcher);
@@ -209,9 +209,9 @@ public class DocSetUtil {
       LeafReaderContext ctx = leaves.get(i);
       Bits liveDocs = ctx.reader().getLiveDocs();
       int base = ctx.docBase;
-      for (; ; ) {
-        int subId = postings.nextDoc();
-        if (subId == DocIdSetIterator.NO_MORE_DOCS) break;
+      for (int subId = postings.nextDoc();
+          subId != DocIdSetIterator.NO_MORE_DOCS;
+          subId = postings.nextDoc()) {
         if (liveDocs != null && !liveDocs.get(subId)) continue;
         int globalId = subId + base;
         docs[sz >> SortedIntDocSet.WORDS_SHIFT].put(sz++ & SortedIntDocSet.ARR_MASK, globalId);
@@ -222,7 +222,11 @@ public class DocSetUtil {
   }
 
   private static DocSet createBigSet(
-      List<LeafReaderContext> leaves, PostingsEnum[] postList, int maxDoc, int firstReader)
+      DocSet liveDocs,
+      List<LeafReaderContext> leaves,
+      PostingsEnum[] postList,
+      int maxDoc,
+      int firstReader)
       throws IOException {
     FixedBitSets bits = new FixedBitSets(maxDoc);
     int sz = 0;
@@ -230,16 +234,28 @@ public class DocSetUtil {
       PostingsEnum postings = postList[i];
       if (postings == null) continue;
       LeafReaderContext ctx = leaves.get(i);
-      Bits liveDocs = ctx.reader().getLiveDocs();
       int base = ctx.docBase;
-      for (; ; ) {
-        int subId = postings.nextDoc();
-        if (subId == DocIdSetIterator.NO_MORE_DOCS) break;
-        if (liveDocs != null && !liveDocs.get(subId)) continue;
-        bits.set(subId + base);
+      int from = postings.nextDoc();
+      sz++; // empty postings will be null
+      int to = from;
+      for (int subId = postings.nextDoc();
+          subId != DocIdSetIterator.NO_MORE_DOCS;
+          subId = postings.nextDoc()) {
+        if (subId > ++to) {
+          set(bits, base + from, base + to);
+          to = from = subId;
+        }
         sz++;
       }
+      if (++to > from) {
+        set(bits, base + from, base + to);
+      }
     }
+    // NOTE: for bulk set and vectorized bulk ops, it's more efficient to
+    // correct for live docs in bulk after main collection
+    FixedBitSets liveFbs = liveDocs.getFixedBitSet();
+    sz -= bits.andNotCount(liveFbs);
+    bits.and(liveFbs);
 
     BitDocSet docSet = new BitDocSet(bits, sz);
 
@@ -252,6 +268,14 @@ public class DocSetUtil {
     }
 
     return docSet;
+  }
+
+  public static void set(FixedBitSets bits, int from, int to) {
+    if (from + 1 == to) {
+      bits.set(from);
+    } else {
+      bits.set(from, to);
+    }
   }
 
   public static DocSet toSmallSet(BitDocSet bitSet) {
