@@ -88,6 +88,7 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
 
   private final Map<String, PrometheusMetricType> cacheMetricTypes =
       Map.of(
+          "size", PrometheusMetricType.GAUGE,
           "ramBytesUsed", PrometheusMetricType.GAUGE,
           "lookups", PrometheusMetricType.COUNTER,
           "hits", PrometheusMetricType.COUNTER,
@@ -957,6 +958,30 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         "Bytes used from local fcache-docs-hot cache store (vs backing shared cache store)",
         "ramBytesUsed",
         PrometheusMetricType.GAUGE),
+    DOCUMENT_CACHE_LOCAL_SIZE(
+        "CACHE.searcher.documentCache",
+        "document_cache_store_local_size",
+        "Number of entries in local document cache store (vs backing shared cache store)",
+        "size",
+        PrometheusMetricType.GAUGE),
+    FILTER_CACHE_LOCAL_SIZE(
+        "CACHE.searcher.filterCache",
+        "filter_cache_store_local_size",
+        "Number of entries in local filter cache store (vs backing shared cache store)",
+        "size",
+        PrometheusMetricType.GAUGE),
+    QUERY_RESULT_CACHE_LOCAL_SIZE(
+        "CACHE.searcher.queryResultCache",
+        "query_result_cache_store_local_size",
+        "Number of entries in local query result cache store (vs backing shared cache store)",
+        "size",
+        PrometheusMetricType.GAUGE),
+    FCACHE_DOCS_HOT_LOCAL_SIZE(
+        "CACHE.searcher.fcache-docs-hot",
+        "fcache_docs_hot_local_size",
+        "Number of entries in local fcache-docs-hot cache store (vs backing shared cache store)",
+        "size",
+        PrometheusMetricType.GAUGE),
     HTTP_CLIENT_OUTSTANDING_REQUESTS(
         "QUERY.httpShardHandler.httpClientOutstandingRequests",
         "http_client_outstanding_requests",
@@ -1200,7 +1225,11 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
             CoreMetric.QUERY_RESULT_CACHE_LOCAL_BYTES_USED,
             CoreMetric.DOCUMENT_CACHE_LOCAL_BYTES_USED,
             CoreMetric.FILTER_CACHE_LOCAL_BYTES_USED,
-            CoreMetric.FCACHE_DOCS_HOT_LOCAL_BYTES_USED);
+            CoreMetric.FCACHE_DOCS_HOT_LOCAL_BYTES_USED,
+            CoreMetric.DOCUMENT_CACHE_LOCAL_SIZE,
+            CoreMetric.FILTER_CACHE_LOCAL_SIZE,
+            CoreMetric.QUERY_RESULT_CACHE_LOCAL_SIZE,
+            CoreMetric.FCACHE_DOCS_HOT_LOCAL_SIZE);
 
     @Override
     protected String buildQueryString(ResultContext resultContext) {
