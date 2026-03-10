@@ -762,6 +762,10 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         "UPDATE./update[local].requestTimes",
         "local_requests_update",
         "cumulative number of local updates across cores"),
+    LOCAL_JSON_UPDATE(
+            "UPDATE./update/json[local].requestTimes",
+            "local_json_requests_update",
+            "cumulative number of local json updates across cores"),
     LOCAL_UPDATE_DURATION_P50(
         "UPDATE./update[local].requestTimes",
         "local_requests_update_duration_p50",
