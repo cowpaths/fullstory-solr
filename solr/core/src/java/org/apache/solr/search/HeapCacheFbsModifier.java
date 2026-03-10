@@ -30,6 +30,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
@@ -41,6 +42,8 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
+import jdk.incubator.vector.ByteVector;
+import jdk.incubator.vector.VectorSpecies;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.FixedBitSet.ByteBufferStruct;
 import org.apache.lucene.util.RamUsageEstimator;
@@ -91,12 +94,6 @@ public class HeapCacheFbsModifier
   private static final int ALIGN_SIZE = 1 << 21; // 2m
   private static final int ALIGN_OVERHEAD = ALIGN_SIZE - 1; // 2m - 1
   private static final int ALIGN_ALLOC_MINSIZE = ALIGN_SIZE + ALIGN_OVERHEAD;
-
-  // dummy, for efficiently clearing buffers
-  private static final ByteBuffer FRESH =
-      ByteBuffer.allocateDirect(Math.max(ALIGN_ALLOC_MINSIZE, BLOCK_SIZE_BYTES + ALIGN_OVERHEAD))
-          .alignedSlice(ALIGN_SIZE)
-          .order(FixedBitSet.BYTE_ORDER);
 
   private final boolean unregister;
   private final ByteBufferStruct[] pool;
@@ -574,12 +571,12 @@ public class HeapCacheFbsModifier
           // disabled OR doesn't call MADV_POPULATE_WRITE (which would zero out the buffer
           // upon acquire).
           if (!BULK_FAULT_IN || MADV_BULK_FAULTIN != MADV_POPULATE_WRITE) {
-            bb.buf.put(FRESH.slice(0, bb.buf.remaining())).clear();
+            clear(bb);
           }
           madviseRelease(bb.buf);
         } else {
           // on-heap buffers never get zeroed out at the OS level, so we have to do it ourselves.
-          bb.buf.put(FRESH.slice(0, bb.buf.remaining())).clear();
+          clear(bb);
         }
         while (!H.compareAndSet(pool, idx, null, bb)) {
           // wait for consumer thread(s) to catch up
@@ -593,6 +590,18 @@ public class HeapCacheFbsModifier
       }
       Thread.yield(); // background; try not to monopolize CPU
     }
+  }
+
+  private static final ByteOrder NATIVE_ORDER = ByteOrder.nativeOrder();
+  private static final VectorSpecies<Byte> S = ByteVector.SPECIES_PREFERRED;
+  private static final int INC = S.length();
+
+  public static void clear(ByteBufferStruct bb) {
+    ByteVector clear = ByteVector.broadcast(S, (byte) 0);
+    for (int i = S.loopBound(bb.buf.remaining() - 1); i >= 0; i -= INC) {
+      clear.intoMemorySegment(bb.m, i, NATIVE_ORDER);
+    }
+    bb.buf.clear();
   }
 
   @Override
