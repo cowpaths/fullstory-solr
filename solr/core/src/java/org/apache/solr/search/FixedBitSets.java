@@ -22,13 +22,14 @@ import static org.apache.solr.search.BitDocSet.MAX_BLOCK_BITS;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 import java.util.Arrays;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.FixedBitSet;
+import org.apache.lucene.util.FixedBitSet.ByteBufferStruct;
+import org.apache.lucene.util.FixedBitSet.LongBufferStruct;
 import org.apache.lucene.util.IOSupplier;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
@@ -126,7 +127,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
     int len = ((numBits - 1) & BLOCK_BIT_MASK) + 1;
     int wordLen = ((numWords - 1) & BLOCK_WORD_MASK) + 1;
     for (int i = lastIdx; i >= 0; i--) {
-      parts[i] = new FixedBitSet(words.slice(wordOffset, wordLen), len);
+      parts[i] = new FixedBitSet(new LongBufferStruct(words.slice(wordOffset, wordLen)), len);
       len = MAX_BLOCK_BITS;
       wordLen = MAX_BLOCK_WORDS;
       wordOffset -= MAX_BLOCK_WORDS;
@@ -143,10 +144,11 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
     int lastIdx = (numBits - 1) >> BIT_SHIFT;
     this.parts = new FixedBitSet[lastIdx + 1];
     SentinelPacket sentinel = new SentinelPacket(this.close, this.closed);
-    ByteBuffer[] bb = MODIFIER.allocateBytesArr(FixedBitSet.bits2words(numBits) << 3, sentinel);
+    ByteBufferStruct[] bb =
+        MODIFIER.allocateBytesArr(FixedBitSet.bits2words(numBits) << 3, sentinel, true);
     int len = ((numBits - 1) & BLOCK_BIT_MASK) + 1;
     for (int i = lastIdx; i >= 0; i--) {
-      parts[i] = new FixedBitSet(bb[i].asLongBuffer(), len);
+      parts[i] = new FixedBitSet(bb[i].asLongBufferStruct(), len);
       len = MAX_BLOCK_BITS;
     }
   }
@@ -160,9 +162,10 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
     this.parts = new FixedBitSet[otherParts.length];
     int numBits = template.length();
     SentinelPacket sentinel = new SentinelPacket(this.close, this.closed);
-    ByteBuffer[] bb = MODIFIER.allocateBytesArr(FixedBitSet.bits2words(numBits) << 3, sentinel);
+    ByteBufferStruct[] bb =
+        MODIFIER.allocateBytesArr(FixedBitSet.bits2words(numBits) << 3, sentinel, true);
     for (int i = otherParts.length - 1; i >= 0; i--) {
-      this.parts[i] = otherParts[i].clone(bb[i].asLongBuffer());
+      this.parts[i] = otherParts[i].clone(bb[i].asLongBufferStruct());
     }
     this.cachedLength = numBits;
   }

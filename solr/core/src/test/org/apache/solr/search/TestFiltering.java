@@ -418,7 +418,8 @@ public class TestFiltering extends SolrTestCaseJ4 {
     } else {
       // term or boolean query
       int numWords = FixedBitSet.bits2words(model.indexSize);
-      LongBuffer psetBits = FixedBitSet.DEFAULT_MODIFIER.allocate(numWords);
+      FixedBitSet.LongBufferStruct lbs = FixedBitSet.DEFAULT_MODIFIER.allocate(numWords);
+      LongBuffer psetBits = lbs.buf;
       for (int i = 0, lim = psetBits.capacity(); i < lim; i++) {
         psetBits.put(i, random().nextLong()); // set 50% of the bits on average
       }
@@ -430,7 +431,7 @@ public class TestFiltering extends SolrTestCaseJ4 {
         int idx = numWords - 1;
         psetBits.put(idx, psetBits.get(idx) & ~mask);
       }
-      FixedBitSet pset = new FixedBitSet(psetBits, model.indexSize);
+      FixedBitSet pset = new FixedBitSet(lbs, model.indexSize);
       if (positive) {
         for (FixedBitSet set : sets) {
           set.and(pset);

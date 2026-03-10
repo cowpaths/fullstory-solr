@@ -42,6 +42,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.util.FixedBitSet;
+import org.apache.lucene.util.FixedBitSet.ByteBufferStruct;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
@@ -98,10 +99,11 @@ public class HeapCacheFbsModifier
           .order(FixedBitSet.BYTE_ORDER);
 
   private final boolean unregister;
-  private final ByteBuffer[] pool;
+  private final ByteBufferStruct[] pool;
 
   private final AtomicInteger top;
-  private final BlockingQueue<ByteBuffer[]> releaseQueue = new ArrayBlockingQueue<>(1024, false);
+  private final BlockingQueue<ByteBufferStruct[]> releaseQueue =
+      new ArrayBlockingQueue<>(1024, false);
 
   public static final class State {
     // NOTE: could be volatile, but that's not really the failure mode we care about here.
@@ -120,10 +122,10 @@ public class HeapCacheFbsModifier
   }
 
   private static final class RefHandlerPacket {
-    private final ByteBuffer[] buf;
+    private final ByteBufferStruct[] buf;
     private final State closed;
 
-    private RefHandlerPacket(ByteBuffer[] buf, State closed) {
+    private RefHandlerPacket(ByteBufferStruct[] buf, State closed) {
       this.buf = buf;
       this.closed = closed;
     }
@@ -236,7 +238,7 @@ public class HeapCacheFbsModifier
           RamUsageEstimator.humanReadableUnits((long) nBlocks * BLOCK_SIZE_BYTES));
     }
     int numPartitions = ((nBlocks - 1) / MAX_BLOCKS_PER_PARTITION) + 1;
-    pool = new ByteBuffer[nBlocks];
+    pool = new ByteBufferStruct[nBlocks];
     int blockIdx = 0;
     if (offheap) {
       poolOffheap(nBlocks, numPartitions, blockIdx, pool);
@@ -273,7 +275,8 @@ public class HeapCacheFbsModifier
             });
   }
 
-  private static void poolOnheap(int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
+  private static void poolOnheap(
+      int nBlocks, int numPartitions, int blockIdx, ByteBufferStruct[] pool) {
     for (int i = numPartitions - 1,
             partitionNumBlocks = ((nBlocks - 1) % MAX_BLOCKS_PER_PARTITION) + 1;
         i >= 0;
@@ -281,14 +284,15 @@ public class HeapCacheFbsModifier
       int partitionSize = partitionNumBlocks * BLOCK_SIZE_BYTES;
       ByteBuffer partition = ByteBuffer.allocate(partitionSize).order(FixedBitSet.BYTE_ORDER);
       for (int j = 0; j < partitionNumBlocks; j++) {
-        pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
+        pool[blockIdx++] =
+            new ByteBufferStruct(partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES));
       }
       partitionNumBlocks = MAX_BLOCKS_PER_PARTITION;
     }
   }
 
   private static Path poolFileBacked(
-      int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool, Object caller)
+      int nBlocks, int numPartitions, int blockIdx, ByteBufferStruct[] pool, Object caller)
       throws IOException {
     long blockSizeBytesL = BLOCK_SIZE_BYTES;
 
@@ -333,7 +337,8 @@ public class HeapCacheFbsModifier
                     partitionNumBlocks * blockSizeBytesL)
                 .order(FixedBitSet.BYTE_ORDER);
         for (int j = 0; j < partitionNumBlocks; j++) {
-          pool[blockIdx++] = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
+          pool[blockIdx++] =
+              new ByteBufferStruct(partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES));
         }
         partitionNumBlocks = effectiveMaxBlocksPerPartition;
       }
@@ -491,11 +496,11 @@ public class HeapCacheFbsModifier
   private final LongAdder totalClosedBatches = new LongAdder();
 
   @Override
-  public ByteBuffer allocateBytes(int size) {
+  public ByteBufferStruct allocateBytes(int size, boolean withMemorySegment) {
     throw new UnsupportedOperationException();
   }
 
-  private static final ByteBuffer[] EMPTY = new ByteBuffer[0];
+  private static final ByteBufferStruct[] EMPTY = new ByteBufferStruct[0];
 
   public int available() {
     int extant = this.top.get();
@@ -508,21 +513,24 @@ public class HeapCacheFbsModifier
   }
 
   @Override
-  public ByteBuffer[] allocateBytesArr(int numBytes, Object sentinel) {
+  public ByteBufferStruct[] allocateBytesArr(
+      int numBytes, Object sentinel, boolean withMemorySegment) {
     if (numBytes == 0) {
       return EMPTY;
     }
     int adjustedPartitionCount = ((numBytes - 1) >> BYTE_SHIFT) + 1 - ADJUST;
     if (adjustedPartitionCount == 0) {
-      return new ByteBuffer[] {ByteBuffer.allocate(numBytes).order(FixedBitSet.BYTE_ORDER)};
+      return new ByteBufferStruct[] {
+        new ByteBufferStruct(ByteBuffer.allocate(numBytes).order(FixedBitSet.BYTE_ORDER))
+      };
     }
     for (int avail = this.top.get(); ; ) {
       if (avail == 0) {
         // exhausted; fallback to main heap allocation
         if (fallback == null) {
-          return allocateBytesArr(-1, 0, numBytes, null);
+          return allocateBytesArr(-1, 0, numBytes, null, withMemorySegment);
         } else {
-          return fallback.allocateBytesArr(numBytes, sentinel);
+          return fallback.allocateBytesArr(numBytes, sentinel, withMemorySegment);
         }
       } else if (avail < 0) {
         Thread.yield(); // let producer thread complete
@@ -533,7 +541,7 @@ public class HeapCacheFbsModifier
       int witness = this.top.compareAndExchange(avail, avail - tryReserve);
       if (witness == avail) {
         // we have a batch reservation; now actually allocate
-        return allocateBytesArr(avail - 1, tryReserve, numBytes, sentinel);
+        return allocateBytesArr(avail - 1, tryReserve, numBytes, sentinel, withMemorySegment);
       } else {
         avail = witness;
       }
@@ -542,11 +550,11 @@ public class HeapCacheFbsModifier
 
   private final LongAdder collected = new LongAdder();
 
-  private static final VarHandle H = MethodHandles.arrayElementVarHandle(ByteBuffer[].class);
+  private static final VarHandle H = MethodHandles.arrayElementVarHandle(ByteBufferStruct[].class);
 
   private void releaseLoop() throws InterruptedException {
     for (; ; ) {
-      ByteBuffer[] toRelease = releaseQueue.take();
+      ByteBufferStruct[] toRelease = releaseQueue.take();
       int newTop;
       for (int top = this.top.get(); ; ) {
         newTop = top + toRelease.length;
@@ -557,7 +565,7 @@ public class HeapCacheFbsModifier
         top = witness;
       }
       int idx = newTop;
-      for (ByteBuffer bb : toRelease) {
+      for (ByteBufferStruct bb : toRelease) {
         // pool[destOff++ & POOL_SIZE_MASK] = bb;
         idx--;
 
@@ -566,12 +574,12 @@ public class HeapCacheFbsModifier
           // disabled OR doesn't call MADV_POPULATE_WRITE (which would zero out the buffer
           // upon acquire).
           if (!BULK_FAULT_IN || MADV_BULK_FAULTIN != MADV_POPULATE_WRITE) {
-            bb.put(FRESH.slice(0, bb.remaining())).clear();
+            bb.buf.put(FRESH.slice(0, bb.buf.remaining())).clear();
           }
-          madviseRelease(bb);
+          madviseRelease(bb.buf);
         } else {
           // on-heap buffers never get zeroed out at the OS level, so we have to do it ourselves.
-          bb.put(FRESH.slice(0, bb.remaining())).clear();
+          bb.buf.put(FRESH.slice(0, bb.buf.remaining())).clear();
         }
         while (!H.compareAndSet(pool, idx, null, bb)) {
           // wait for consumer thread(s) to catch up
@@ -607,10 +615,10 @@ public class HeapCacheFbsModifier
   private static final int ADJUST =
       EnvUtils.getPropertyAsBool(POOL_ALWAYS_ONE_UNPOOLED_PROPNAME, true) ? 1 : 0;
 
-  private ByteBuffer[] allocateBytesArr(
-      int top, int pooledReserved, int numBytes, Object sentinel) {
+  private ByteBufferStruct[] allocateBytesArr(
+      int top, int pooledReserved, int numBytes, Object sentinel, boolean withMemorySegment) {
     int lastIdx = (numBytes - 1) >> BYTE_SHIFT;
-    ByteBuffer[] ret = new ByteBuffer[lastIdx + 1];
+    ByteBufferStruct[] ret = new ByteBufferStruct[lastIdx + 1];
     int i = 0;
     for (int fullPooledLim = Math.min(pooledReserved - 1, lastIdx); i < fullPooledLim; i++) {
       ret[i] = initBuf(top--, MAX_BYTES);
@@ -618,12 +626,12 @@ public class HeapCacheFbsModifier
     int lastLen = ((numBytes - 1) & BYTE_MASK) + 1;
     if (i < pooledReserved) {
       ret[i] = initBuf(top, i++ == lastIdx ? lastLen : MAX_BYTES);
-      ByteBuffer[] pooled;
+      ByteBufferStruct[] pooled;
       if (i == ret.length) {
         pooled = ret;
       } else {
         // if any are pooled, we register the pooled ones for tracking
-        pooled = new ByteBuffer[pooledReserved];
+        pooled = new ByteBufferStruct[pooledReserved];
         System.arraycopy(ret, 0, pooled, 0, pooledReserved);
         exhausted.add(ret.length - pooledReserved - ADJUST);
       }
@@ -645,11 +653,15 @@ public class HeapCacheFbsModifier
     }
     for (; i < lastIdx; i++) {
       // full unpooled
-      ret[i] = ByteBuffer.allocate(MAX_BYTES).order(FixedBitSet.BYTE_ORDER);
+      ret[i] =
+          new ByteBufferStruct(
+              ByteBuffer.allocate(MAX_BYTES).order(FixedBitSet.BYTE_ORDER), withMemorySegment);
     }
     if (i == lastIdx) {
       // last idx is unpooled
-      ret[i] = ByteBuffer.allocate(lastLen).order(FixedBitSet.BYTE_ORDER);
+      ret[i] =
+          new ByteBufferStruct(
+              ByteBuffer.allocate(lastLen).order(FixedBitSet.BYTE_ORDER), withMemorySegment);
     }
     return ret;
   }
@@ -664,12 +676,12 @@ public class HeapCacheFbsModifier
     }
   }
 
-  private ByteBuffer initBuf(int idx, int size) {
+  private ByteBufferStruct initBuf(int idx, int size) {
     // ByteBuffer ret = pool[head & POOL_SIZE_MASK].clear().limit(size);
-    ByteBuffer ret = (ByteBuffer) H.getAndSetAcquire(pool, idx, null);
-    ret.clear().limit(size);
+    ByteBufferStruct ret = (ByteBufferStruct) H.getAndSetAcquire(pool, idx, null);
+    ret.buf.clear().limit(size);
     if (BULK_FAULT_IN && offheap) {
-      madvise(ret, MADV_BULK_FAULTIN); // bulk fault in if necessary
+      madvise(ret.buf, MADV_BULK_FAULTIN); // bulk fault in if necessary
     }
     return ret;
   }
@@ -777,7 +789,8 @@ public class HeapCacheFbsModifier
     return false;
   }
 
-  private static void poolOffheap(int nBlocks, int numPartitions, int blockIdx, ByteBuffer[] pool) {
+  private static void poolOffheap(
+      int nBlocks, int numPartitions, int blockIdx, ByteBufferStruct[] pool) {
     // truncate to 2M blocks
     int partitionMaxBytes = ((MAX_BLOCKS_PER_PARTITION * BLOCK_SIZE_BYTES) >> 21) << 21;
 
@@ -831,7 +844,7 @@ public class HeapCacheFbsModifier
           }
         }
         madvise(block, MADV_DONTNEED); // force release of physical memory
-        pool[blockIdx++] = block;
+        pool[blockIdx++] = new ByteBufferStruct(block);
       }
 
       partitionNumBlocks = effectiveMaxBlocksPerPartition;

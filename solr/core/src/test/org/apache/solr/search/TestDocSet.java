@@ -713,7 +713,8 @@ public class TestDocSet extends SolrTestCase {
     for (int i = vals.length - 2; i >= 0; i--) {
       vals[i] = options[r.nextInt(options.length)];
     }
-    FixedBitSet src = new FixedBitSet(LongBuffer.wrap(vals), size);
+    FixedBitSet src =
+        new FixedBitSet(new FixedBitSet.LongBufferStruct(LongBuffer.wrap(vals)), size);
     FixedBitSets dest = new FixedBitSets(size);
     long start = System.nanoTime();
     DocSetUtil.copyTo(src, 0, size, dest, 0);

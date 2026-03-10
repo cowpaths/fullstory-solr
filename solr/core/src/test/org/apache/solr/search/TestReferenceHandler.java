@@ -20,7 +20,6 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.ref.Reference;
-import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 import java.util.Arrays;
 import java.util.Random;
@@ -130,8 +129,9 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
                       LongBuffer compare = LongBuffer.allocate(size);
                       Closeable[] sentinel = new Closeable[1];
                       LongBuffer[] bb =
-                          Arrays.stream(h.allocateBytesArr(size << 3, sentinel))
-                              .map(ByteBuffer::asLongBuffer)
+                          Arrays.stream(h.allocateBytesArr(size << 3, sentinel, false))
+                              .map(FixedBitSet.ByteBufferStruct::asLongBufferStruct)
+                              .map((lbs) -> lbs.buf)
                               .toArray(LongBuffer[]::new);
                       try (Closeable c1 = sentinel[0]) {
                         for (int j = 0; j < size; j++) {

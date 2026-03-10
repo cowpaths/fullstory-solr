@@ -20,7 +20,6 @@ import com.carrotsearch.hppc.IntHashSet;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.util.Collection;
 import java.util.Collections;
@@ -30,6 +29,7 @@ import org.apache.lucene.index.ReaderUtil;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Bits;
+import org.apache.lucene.util.FixedBitSet.ByteBufferStruct;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.search.HeapCacheFbsModifier.SentinelPacket;
 
@@ -145,11 +145,11 @@ public class SortedIntDocSet extends DocSet {
     Closeable[] close = new Closeable[1];
     HeapCacheFbsModifier.State closed = new HeapCacheFbsModifier.State();
     int i = outerSize - 1;
-    ByteBuffer[] bb =
-        FixedBitSets.MODIFIER.allocateBytesArr(size << 2, new SentinelPacket(close, closed));
-    ret[i] = bb[i].asIntBuffer();
+    ByteBufferStruct[] bb =
+        FixedBitSets.MODIFIER.allocateBytesArr(size << 2, new SentinelPacket(close, closed), false);
+    ret[i] = bb[i].buf.asIntBuffer();
     while (--i >= 0) {
-      ret[i] = bb[i].asIntBuffer();
+      ret[i] = bb[i].buf.asIntBuffer();
     }
     return new Parts(ret, close, closed);
   }
@@ -1037,10 +1037,11 @@ public class SortedIntDocSet extends DocSet {
     Closeable[] close = new Closeable[1];
     HeapCacheFbsModifier.State closed = new HeapCacheFbsModifier.State();
     IntBuffer[] newDocs = new IntBuffer[docs.length];
-    ByteBuffer[] bb =
-        FixedBitSets.MODIFIER.allocateBytesArr(capacity << 2, new SentinelPacket(close, closed));
+    ByteBufferStruct[] bb =
+        FixedBitSets.MODIFIER.allocateBytesArr(
+            capacity << 2, new SentinelPacket(close, closed), false);
     for (int i = docs.length - 1; i >= 0; i--) {
-      newDocs[i] = bb[i].asIntBuffer().put(docs[i].slice()).clear();
+      newDocs[i] = bb[i].buf.asIntBuffer().put(docs[i].slice()).clear();
     }
     return new SortedIntDocSet(new Parts(newDocs, close, closed));
   }
