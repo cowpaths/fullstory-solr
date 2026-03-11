@@ -685,13 +685,18 @@ public class HeapCacheFbsModifier
     }
   }
 
+  private static final int MIN_BLOCK_SIZE_MASK = MIN_BLOCK_SIZE - 1;
+  private static final int MIN_BLOCK_SIZE_ANTIMASK = ~MIN_BLOCK_SIZE_MASK;
+
   private ByteBufferStruct initBuf(int idx, int size) {
     // ByteBuffer ret = pool[head & POOL_SIZE_MASK].clear().limit(size);
     ByteBufferStruct ret = (ByteBufferStruct) H.getAndSetAcquire(pool, idx, null);
-    ret.buf.clear().limit(size);
+    ret.buf.clear();
     if (BULK_FAULT_IN && offheap) {
+      ret.buf.limit((size + MIN_BLOCK_SIZE_MASK) & MIN_BLOCK_SIZE_ANTIMASK); // 4k-block-aligned
       madvise(ret.buf, MADV_BULK_FAULTIN); // bulk fault in if necessary
     }
+    ret.buf.limit(size);
     return ret;
   }
 
@@ -745,9 +750,14 @@ public class HeapCacheFbsModifier
   private static final boolean SUPPORT_MADV_POPULATE_WRITE;
 
   static {
-    ByteBuffer bb = ByteBuffer.allocateDirect(MIN_BLOCK_SIZE);
+    ByteBuffer bb =
+        ByteBuffer.allocateDirect((MIN_BLOCK_SIZE << 1) - 1).alignedSlice(MIN_BLOCK_SIZE);
     SUPPORT_MADV_POPULATE_WRITE = madvise(bb, MADV_POPULATE_WRITE);
-    log.warn("disabling support for MADV_POPULATE_WRITE");
+    if (SUPPORT_MADV_POPULATE_WRITE) {
+      log.info("enabled support for MADV_POPULATE_WRITE");
+    } else {
+      log.warn("disabling support for MADV_POPULATE_WRITE");
+    }
   }
 
   private static final int MADV_BULK_FAULTIN =
