@@ -580,7 +580,7 @@ public class HeapCacheFbsModifier
           if (!BULK_FAULT_IN || MADV_BULK_FAULTIN != MADV_POPULATE_WRITE) {
             clear(bb);
           }
-          madviseRelease(bb.buf);
+          madviseRelease(bb);
         } else {
           // on-heap buffers never get zeroed out at the OS level, so we have to do it ourselves.
           clear(bb);
@@ -698,7 +698,7 @@ public class HeapCacheFbsModifier
     ret.buf.clear();
     if (BULK_FAULT_IN && offheap) {
       ret.buf.limit((size + MIN_BLOCK_SIZE_MASK) & MIN_BLOCK_SIZE_ANTIMASK); // 4k-block-aligned
-      madvise(ret.buf, MADV_BULK_FAULTIN); // bulk fault in if necessary
+      madvise(ret, MADV_BULK_FAULTIN); // bulk fault in if necessary
     }
     ret.buf.limit(size);
     return ret;
@@ -756,7 +756,7 @@ public class HeapCacheFbsModifier
   static {
     ByteBuffer bb =
         ByteBuffer.allocateDirect((MIN_BLOCK_SIZE << 1) - 1).alignedSlice(MIN_BLOCK_SIZE);
-    SUPPORT_MADV_POPULATE_WRITE = madvise(bb, MADV_POPULATE_WRITE);
+    SUPPORT_MADV_POPULATE_WRITE = madvise(new ByteBufferStruct(bb), MADV_POPULATE_WRITE);
     if (SUPPORT_MADV_POPULATE_WRITE) {
       log.info("enabled support for MADV_POPULATE_WRITE");
     } else {
@@ -791,14 +791,14 @@ public class HeapCacheFbsModifier
     return linker.downcallHandle(madviseAddress, descriptor);
   }
 
-  private static void madviseRelease(ByteBuffer bb) {
+  private static void madviseRelease(ByteBufferStruct bb) {
     madvise(bb, MADV_FREE);
   }
 
   @SuppressWarnings("preview")
-  private static boolean madvise(ByteBuffer bb, int advice) {
+  private static boolean madvise(ByteBufferStruct bb, int advice) {
     try {
-      MemorySegment segment = MemorySegment.ofBuffer(bb);
+      MemorySegment segment = bb.m;
       // 2. Execute the call directly on the memory segment
       int result = (int) MADVISE_HANDLE.invokeExact(segment, segment.byteSize(), advice);
       if (result == 0) {
@@ -846,9 +846,9 @@ public class HeapCacheFbsModifier
               .order(FixedBitSet.BYTE_ORDER);
 
       if (doTHP) {
-        madvise(partition, MADV_HUGEPAGE);
+        madvise(new ByteBufferStruct(partition), MADV_HUGEPAGE);
       } else {
-        madvise(partition, MADV_NOHUGEPAGE);
+        madvise(new ByteBufferStruct(partition), MADV_NOHUGEPAGE);
       }
 
       // NOTE: below, `MADV_POPULATE_WRITE` and `MADV_DONTNEED` in smaller chunks to avoid blowing
@@ -857,17 +857,18 @@ public class HeapCacheFbsModifier
       // hit a little at a time as the pool "warms up".
       for (int j = 0; j < partitionNumBlocks; j++) {
         ByteBuffer block = partition.slice(j * BLOCK_SIZE_BYTES, BLOCK_SIZE_BYTES);
+        ByteBufferStruct bbs = new ByteBufferStruct(block);
         if (SUPPORT_MADV_POPULATE_WRITE) {
-          madvise(block, MADV_POPULATE_WRITE); // pre-build pagetable entries
+          madvise(bbs, MADV_POPULATE_WRITE); // pre-build pagetable entries
         } else {
           // touch every block manually
-          madvise(block, MADV_WILLNEED);
+          madvise(bbs, MADV_WILLNEED);
           for (int k = 0, lim = block.remaining(); k < lim; k += MIN_BLOCK_SIZE) {
             block.get(k);
           }
         }
-        madvise(block, MADV_DONTNEED); // force release of physical memory
-        pool[blockIdx++] = new ByteBufferStruct(block);
+        madvise(bbs, MADV_DONTNEED); // force release of physical memory
+        pool[blockIdx++] = bbs;
       }
 
       partitionNumBlocks = effectiveMaxBlocksPerPartition;
