@@ -579,6 +579,8 @@ public class HeapCacheFbsModifier
           // upon acquire).
           if (!BULK_FAULT_IN || MADV_BULK_FAULTIN != MADV_POPULATE_WRITE) {
             clear(bb);
+          } else {
+            bb.buf.clear();
           }
           madviseRelease(bb);
         } else {
