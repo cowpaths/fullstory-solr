@@ -44,6 +44,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import jdk.incubator.vector.ByteVector;
 import jdk.incubator.vector.VectorSpecies;
+import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.FixedBitSet.ByteBufferStruct;
 import org.apache.lucene.util.RamUsageEstimator;
@@ -429,12 +430,15 @@ public class HeapCacheFbsModifier
   private static final boolean DUMP_STATS_ON_TEST =
       EnvUtils.getPropertyAsBool(POOL_DUMP_STATS_ON_TEST_PROPNAME, false);
 
+  private boolean closing = false;
+
   @Override
   @SuppressWarnings("try")
   public void close() {
     if (unregister) {
       try {
         if (FixedBitSets.unregisterModifier(this, refHandler)) {
+          closing = true;
           try (Closeable c = SolrMetricProducer.super::close;
               fallback) {
             SolrMetricsContext ctx;
@@ -453,6 +457,7 @@ public class HeapCacheFbsModifier
         throw new UncheckedIOException(e);
       }
     } else {
+      closing = true;
       try (refHandler;
           fallback) {
         SolrMetricProducer.super.close();
@@ -530,6 +535,11 @@ public class HeapCacheFbsModifier
           return fallback.allocateBytesArr(numBytes, sentinel, withMemorySegment);
         }
       } else if (avail < 0) {
+        if (closing) {
+          throw new AlreadyClosedException(getClass().getSimpleName() + " is closing");
+        } else if (Thread.currentThread().isInterrupted()) {
+          throw new ThreadInterruptedException(new InterruptedException());
+        }
         Thread.yield(); // let producer thread complete
         avail = this.top.get();
         continue;
