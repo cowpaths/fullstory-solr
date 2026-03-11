@@ -30,7 +30,6 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
@@ -42,8 +41,6 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
-import jdk.incubator.vector.ByteVector;
-import jdk.incubator.vector.VectorSpecies;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.FixedBitSet.ByteBufferStruct;
@@ -602,16 +599,13 @@ public class HeapCacheFbsModifier
     }
   }
 
-  private static final ByteOrder NATIVE_ORDER = ByteOrder.nativeOrder();
-  private static final VectorSpecies<Byte> S = ByteVector.SPECIES_PREFERRED;
-  private static final int INC = S.length();
-
   public static void clear(ByteBufferStruct bb) {
-    ByteVector clear = ByteVector.broadcast(S, (byte) 0);
-    for (int i = S.loopBound(bb.buf.remaining() - 1); i >= 0; i -= INC) {
-      clear.intoMemorySegment(bb.m, i, NATIVE_ORDER);
+    // auto-vectorized; this is fast.
+    ByteBuffer buf = bb.buf;
+    for (int i = 0, lim = buf.remaining(); i < lim; i++) {
+      buf.put(i, (byte) 0);
     }
-    bb.buf.clear();
+    buf.clear();
   }
 
   @Override
