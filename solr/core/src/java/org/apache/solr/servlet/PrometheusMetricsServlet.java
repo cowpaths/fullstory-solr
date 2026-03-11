@@ -81,6 +81,7 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         new ThreadMetricsApiCaller(),
         new StatusCodeMetricsApiCaller(),
         new NodeMetricsApiCaller(),
+        new DocSetBlockCacheMetricsApiCaller(),
         new AggregateMetricsApiCaller(),
         new CoresMetricsApiCaller(),
         new CollectionCacheMetricsApiCaller());
@@ -628,6 +629,77 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
                 "cumulative count of requests to shard would have cancelled due to slow node but did not, due to dry-run mode",
                 value));
       }
+    }
+  }
+
+  static class DocSetBlockCacheMetricsApiCaller extends MetricsByPrefixApiCaller {
+
+    DocSetBlockCacheMetricsApiCaller() {
+      super("solr.node", "DOCSET.docsetCache");
+    }
+
+    /*
+    "metrics":{
+      "solr.node":{
+        "DOCSET.docsetCache":{
+          "allocatedCount":241950,
+          "exhaustedCount":2347,
+          "availableBlockCount":1753,
+          "fallback":{
+            "allocatedCount":64131,
+            "exhaustedCount":9051,
+            "availableBlockCount":6144,
+         */
+    @Override
+    protected void handle(ResultContext resultContext, JsonNode metrics) throws IOException {
+      List<PrometheusMetric> results = resultContext.resultMetrics;
+      JsonNode parent = metrics.path("solr.node");
+      JsonNode primary = parent.get("DOCSET.docsetCache");
+      if (primary != null) {
+        handleCacheLayer(primary, results, "primary_");
+        JsonNode fallback = primary.get("fallback");
+        Number exhausted = getNumber(primary, "exhaustedCount");
+        if (fallback != null) {
+          handleCacheLayer(primary, results, "fallback_");
+          Number fallbackExhausted = getNumber(fallback, "exhaustedCount");
+          if (exhausted.equals(INVALID_NUMBER)) {
+            exhausted = fallbackExhausted;
+          } else if (!fallbackExhausted.equals(INVALID_NUMBER)) {
+            exhausted = exhausted.longValue() + fallbackExhausted.longValue();
+          }
+        }
+        if (!exhausted.equals(INVALID_NUMBER)) {
+          results.add(
+              new PrometheusMetric(
+                  "exhausted_count",
+                  PrometheusMetricType.COUNTER,
+                  "cumulative number of unpooled docset blocks allocated",
+                  exhausted));
+        }
+      }
+    }
+  }
+
+  private static void handleCacheLayer(JsonNode parent, List<PrometheusMetric> results, String type)
+      throws IOException {
+    Number value;
+    value = getNumber(parent, "allocatedCount");
+    if (!value.equals(INVALID_NUMBER)) {
+      results.add(
+          new PrometheusMetric(
+              type.concat("allocated_count"),
+              PrometheusMetricType.COUNTER,
+              "cumulative number of docset blocks allocated",
+              value));
+    }
+    value = getNumber(parent, "availableBlockCount");
+    if (!value.equals(INVALID_NUMBER)) {
+      results.add(
+          new PrometheusMetric(
+              type.concat("available_blocks"),
+              PrometheusMetricType.GAUGE,
+              "current number of docset blocks available",
+              value));
     }
   }
 
