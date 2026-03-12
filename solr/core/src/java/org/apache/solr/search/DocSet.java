@@ -18,16 +18,21 @@ package org.apache.solr.search;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
 import java.nio.IntBuffer;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Bits;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.request.SolrRequestInfo;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * An immutable ordered set of Lucene Document Ids. It's similar to a Lucene {@link
@@ -38,6 +43,8 @@ import org.apache.solr.request.SolrRequestInfo;
  */
 public abstract class DocSet
     implements Accountable, Cloneable, Closeable /* extends Collection<Integer> */ {
+
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   // package accessible; guarantee known implementations
   DocSet(boolean tracked) {
@@ -105,16 +112,38 @@ public abstract class DocSet
     return null;
   }
 
-  private static boolean release(AtomicInteger refCount) {
+  /**
+   * For debugging; should we capture stack trace upon close, in order to log if an unexpected
+   * subsequent attempt to close?
+   */
+  private static final boolean TRACK_CLOSED_FROM =
+      EnvUtils.getPropertyAsBool("solr.docset.trackClosedFrom", false);
+
+  private volatile long closedAt;
+  private volatile Exception closedFrom;
+
+  private boolean release(AtomicInteger refCount) {
     for (int extant = refCount.get(); extant > 0; ) {
       int witness = refCount.compareAndExchange(extant, extant - 1);
       if (witness == extant) {
+        if (TRACK_CLOSED_FROM && witness == 1) {
+          closedAt = System.nanoTime();
+          closedFrom = new Exception();
+        }
         return witness == 1;
       } else {
         extant = witness;
       }
     }
-    throw new IllegalStateException();
+    if (TRACK_CLOSED_FROM) {
+      String ago =
+          closedFrom == null
+              ? "?"
+              : Long.toString(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - closedAt));
+      log.error(
+          "unexpected double-close; already closed {} ms ago, from stack trace:", ago, closedFrom);
+    }
+    throw new IllegalStateException("unexpected double-close");
   }
 
   @Override
