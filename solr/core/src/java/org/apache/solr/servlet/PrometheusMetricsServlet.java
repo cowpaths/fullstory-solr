@@ -660,7 +660,7 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         JsonNode fallback = primary.get("fallback");
         Number exhausted = getNumber(primary, "exhaustedCount");
         if (fallback != null) {
-          handleCacheLayer(primary, results, "fallback_");
+          handleCacheLayer(fallback, results, "fallback_");
           Number fallbackExhausted = getNumber(fallback, "exhaustedCount");
           if (exhausted.equals(INVALID_NUMBER)) {
             exhausted = fallbackExhausted;
