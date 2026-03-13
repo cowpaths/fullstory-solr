@@ -520,7 +520,8 @@ public class HeapCacheFbsModifier
     int adjustedPartitionCount = ((numBytes - 1) >> BYTE_SHIFT) + 1 - ADJUST;
     if (adjustedPartitionCount == 0) {
       return new ByteBufferStruct[] {
-        new ByteBufferStruct(ByteBuffer.allocate(numBytes).order(FixedBitSet.BYTE_ORDER))
+        new ByteBufferStruct(
+            ByteBuffer.allocate(numBytes).order(FixedBitSet.BYTE_ORDER), withMemorySegment)
       };
     }
     for (int avail = this.top.get(); ; ) {
