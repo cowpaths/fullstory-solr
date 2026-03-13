@@ -140,10 +140,27 @@ public abstract class DocSet
           closedFrom == null
               ? "?"
               : Long.toString(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - closedAt));
-      log.error(
-          "unexpected double-close; already closed {} ms ago, from stack trace:", ago, closedFrom);
+      if (HeapCacheFbsModifier.ALLOW_EXPLICIT_CLOSE) {
+        // error level is explicit closing is enabled, in which case this is potentially a
+        // problem with practical impact.
+        log.error(
+            "unexpected double-close; already closed {} ms ago, stack trace:", ago, closedFrom);
+      } else {
+        // otherwise we warn, for diagnostic purposes
+        log.warn(
+            "unexpected double-close; already closed {} ms ago, stack trace:", ago, closedFrom);
+      }
     }
-    throw new IllegalStateException("unexpected double-close");
+    IllegalStateException e = new IllegalStateException("unexpected double-close");
+    if (HeapCacheFbsModifier.ALLOW_EXPLICIT_CLOSE) {
+      // we only want to throw here if there's a real risk of data corruption, which is only the
+      // case (however unlikely) if explicit closing is enabled.
+      throw e;
+    } else {
+      // otherwise we warn, for diagnostic purposes
+      log.warn(e.getMessage(), e);
+    }
+    return false;
   }
 
   @Override

@@ -142,7 +142,8 @@ public class HeapCacheFbsModifier
   private static final int OFFHEAP_THP =
       EnvUtils.getPropertyAsInteger(POOL_FORCE_TRANSPARENT_HUGEPAGE, -1);
 
-  private static final boolean ALLOW_EXPLICIT_CLOSE =
+  /** TODO: temporarily package-visible */
+  static final boolean ALLOW_EXPLICIT_CLOSE =
       EnvUtils.getPropertyAsBool(POOL_ALLOW_EXPLICIT_CLOSE_PROPNAME, true);
 
   private static final String POOL_BACKING_FILE =
