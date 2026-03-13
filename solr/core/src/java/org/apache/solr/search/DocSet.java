@@ -155,6 +155,11 @@ public abstract class DocSet
     if (HeapCacheFbsModifier.ALLOW_EXPLICIT_CLOSE) {
       // we only want to throw here if there's a real risk of data corruption, which is only the
       // case (however unlikely) if explicit closing is enabled.
+      if (TRACK_CLOSED_FROM) {
+        // TODO: remove this log message. Seems this exception is getting swallowed, so we're
+        //  logging it here to ensure we know where it's coming from (and fix it!)
+        log.error(e.getMessage(), e);
+      }
       throw e;
     } else {
       // otherwise we warn, for diagnostic purposes
