@@ -151,10 +151,10 @@ public abstract class DocSet
             "unexpected double-close; already closed {} ms ago, stack trace:", ago, closedFrom);
       }
     }
-    IllegalStateException e = new IllegalStateException("unexpected double-close");
     if (HeapCacheFbsModifier.ALLOW_EXPLICIT_CLOSE) {
       // we only want to throw here if there's a real risk of data corruption, which is only the
       // case (however unlikely) if explicit closing is enabled.
+      IllegalStateException e = new IllegalStateException(UNEXPECTED_DOUBLE_CLOSE_MESSAGE);
       if (TRACK_CLOSED_FROM) {
         // TODO: remove this log message. Seems this exception is getting swallowed, so we're
         //  logging it here to ensure we know where it's coming from (and fix it!)
@@ -163,10 +163,21 @@ public abstract class DocSet
       throw e;
     } else {
       // otherwise we warn, for diagnostic purposes
-      log.warn(e.getMessage(), e);
+      if (TRACK_CLOSED_FROM) {
+        IllegalStateException e = new IllegalStateException(UNEXPECTED_DOUBLE_CLOSE_MESSAGE);
+        log.warn(e.getMessage(), e);
+      } else {
+        // for now, we know there's at least an issue with AbstractSharedCache that will
+        // spam logs. So since this is known, and there's no practical impact, simply
+        // log at info level that it _happened_. Skip the stack trace too. They're almost
+        // all the same, and if/when we need it we'll log in a more limited/targeted way.
+        log.info(UNEXPECTED_DOUBLE_CLOSE_MESSAGE);
+      }
     }
     return false;
   }
+
+  private static final String UNEXPECTED_DOUBLE_CLOSE_MESSAGE = "unexpected double-close";
 
   @Override
   public final void close() throws IOException {
