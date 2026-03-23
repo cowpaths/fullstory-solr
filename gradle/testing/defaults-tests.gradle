@@ -120,7 +120,6 @@ allprojects {
       }
 
       if (rootProject.runtimeJavaVersion >= JavaVersion.VERSION_21) {
-        jvmArgs '--enable-preview'
         jvmArgs '--add-modules', 'jdk.incubator.vector'
       }
 

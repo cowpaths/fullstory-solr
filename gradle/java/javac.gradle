@@ -67,11 +67,8 @@ allprojects {
         ]
       }
 
-      if (propertyOrDefault("javac.failOnWarnings", true).toBoolean() && false) {
+      if (propertyOrDefault("javac.failOnWarnings", true).toBoolean()) {
         options.compilerArgs += "-Werror"
-      } else {
-        options.compilerArgs += "--enable-preview"
-        options.compilerArgs += ['--add-modules', 'jdk.incubator.vector']
       }
     }
   }

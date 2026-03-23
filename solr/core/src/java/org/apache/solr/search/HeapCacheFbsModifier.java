@@ -21,12 +21,6 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.UncheckedIOException;
-import java.lang.foreign.FunctionDescriptor;
-import java.lang.foreign.Linker;
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.SymbolLookup;
-import java.lang.foreign.ValueLayout;
-import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
@@ -750,18 +744,34 @@ public class HeapCacheFbsModifier
   private static final int MADV_WILLNEED = 3;
   private static final int MADV_POPULATE_WRITE = 23;
 
-  private static final MethodHandle MADVISE_HANDLE = getMadviseHandle();
-
+  private static final boolean SUPPORT_MADV;
   private static final boolean SUPPORT_MADV_POPULATE_WRITE;
 
   static {
     ByteBuffer bb =
         ByteBuffer.allocateDirect((MIN_BLOCK_SIZE << 1) - 1).alignedSlice(MIN_BLOCK_SIZE);
-    SUPPORT_MADV_POPULATE_WRITE = madvise(new ByteBufferStruct(bb), MADV_POPULATE_WRITE);
-    if (SUPPORT_MADV_POPULATE_WRITE) {
-      log.info("enabled support for MADV_POPULATE_WRITE");
+    ByteBufferStruct bbs = new ByteBufferStruct(bb);
+    boolean support;
+    try {
+      support = FixedBitSet.madvise(bbs, MADV_DONTNEED); // try a standard advice
+    } catch (Throwable e) {
+      support = false;
+    }
+    SUPPORT_MADV = support;
+    log.info("support for madvise(): {}", SUPPORT_MADV);
+    if (SUPPORT_MADV) {
+      try {
+        SUPPORT_MADV_POPULATE_WRITE = FixedBitSet.madvise(bbs, MADV_POPULATE_WRITE);
+      } catch (Throwable e) {
+        throw new AssertionError(e);
+      }
+      if (SUPPORT_MADV_POPULATE_WRITE) {
+        log.info("enabled support for MADV_POPULATE_WRITE");
+      } else {
+        log.warn("disabling support for MADV_POPULATE_WRITE");
+      }
     } else {
-      log.warn("disabling support for MADV_POPULATE_WRITE");
+      SUPPORT_MADV_POPULATE_WRITE = false;
     }
   }
 
@@ -771,49 +781,22 @@ public class HeapCacheFbsModifier
   private static final int MADV_NOHUGEPAGE = 15;
   private static final int MADV_HUGEPAGE = 14;
 
-  @SuppressWarnings("preview")
-  private static MethodHandle getMadviseHandle() {
-    Linker linker = Linker.nativeLinker();
-    // Look up the symbol once during class loading
-    SymbolLookup stdlib = linker.defaultLookup();
-
-    MemorySegment madviseAddress =
-        stdlib.find("madvise").orElseThrow(() -> new RuntimeException("madvise not found"));
-
-    // Function signature: int madvise(void *addr, size_t length, int advice)
-    FunctionDescriptor descriptor =
-        FunctionDescriptor.of(
-            ValueLayout.JAVA_INT, // Return type
-            ValueLayout.ADDRESS, // addr
-            ValueLayout.JAVA_LONG, // length (size_t)
-            ValueLayout.JAVA_INT // advice
-            );
-
-    return linker.downcallHandle(madviseAddress, descriptor);
-  }
-
   private static void madviseRelease(ByteBufferStruct bb) {
     madvise(bb, MADV_FREE);
   }
 
   @SuppressWarnings("preview")
-  private static boolean madvise(ByteBufferStruct bb, int advice) {
-    try {
-      MemorySegment segment = (MemorySegment) bb.m;
-      if (segment == null) {
-        return false;
+  private static void madvise(ByteBufferStruct bb, int advice) {
+    if (SUPPORT_MADV && bb.m != null) {
+      try {
+        // 2. Execute the call directly on the memory segment
+        if (!FixedBitSet.madvise(bb.m, advice)) {
+          log.warn("madvise {} failed", advice);
+        }
+      } catch (Throwable t) {
+        log.error("exception calling madvise {}", advice, t);
       }
-      // 2. Execute the call directly on the memory segment
-      int result = (int) MADVISE_HANDLE.invokeExact(segment, segment.byteSize(), advice);
-      if (result == 0) {
-        return true;
-      } else {
-        log.warn("madvise {} failed", advice);
-      }
-    } catch (Throwable t) {
-      log.error("exception calling madvise {}", advice, t);
     }
-    return false;
   }
 
   private static void poolOffheap(
