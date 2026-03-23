@@ -1054,6 +1054,7 @@ public class SimpleFacets {
    * @see FacetParams#FACET_ZEROS
    * @see FacetParams#FACET_MISSING
    */
+  @SuppressWarnings("try")
   public NamedList<Integer> getFacetTermEnumCounts(
       SolrIndexSearcher searcher,
       DocSet docs,

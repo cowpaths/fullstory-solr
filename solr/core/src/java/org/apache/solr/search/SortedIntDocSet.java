@@ -85,6 +85,7 @@ public class SortedIntDocSet extends DocSet {
     this(shrinkAndClose(parts, len));
   }
 
+  @SuppressWarnings("try")
   private static Parts shrinkAndClose(Parts parts, int len) {
     try (Closeable c = parts.close[0]) {
       return shrink(parts, len);
@@ -154,6 +155,7 @@ public class SortedIntDocSet extends DocSet {
     return new Parts(ret, close, closed);
   }
 
+  @SuppressWarnings("try")
   public static Parts shrink(Parts parts, int newSize) {
     if (newSize == 0) {
       try (Closeable c = parts.close[0]) {
@@ -520,6 +522,7 @@ public class SortedIntDocSet extends DocSet {
   }
 
   @Override
+  @SuppressWarnings("try")
   public DocSet intersection(DocSet other) {
     check();
     if (!(other instanceof SortedIntDocSet)) {
@@ -743,6 +746,7 @@ public class SortedIntDocSet extends DocSet {
   }
 
   @Override
+  @SuppressWarnings("try")
   public DocSet andNot(DocSet other) {
     check();
     if (other.size() == 0) return this;

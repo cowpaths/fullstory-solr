@@ -68,6 +68,7 @@ public class ReferenceHandler<T> implements Closeable {
       head[i] = new Ref<T>(null, null, null, null, null);
       removeOutstanding[i] = new ReferenceQueue<>();
     }
+    @SuppressWarnings("rawtypes")
     Future<?>[] refQueueHandlers = new Future[execSize];
     int i = 0;
     for (ReferenceQueue<Object> q : removeOutstanding) {
@@ -122,6 +123,7 @@ public class ReferenceHandler<T> implements Closeable {
   }
 
   @Override
+  @SuppressWarnings("try")
   public void close() {
     try (Closeable c = () -> ExecutorUtil.shutdownAndAwaitTermination(exec)) {
       onClose.close();
@@ -211,7 +213,7 @@ public class ReferenceHandler<T> implements Closeable {
     return explicitlyClosed.sum();
   }
 
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings({"unchecked", "rawtypes"})
   private final Ref<T>[] head = new Ref[PARALLEL_HEAD_FACTOR];
 
   private static final Ref<?> RESERVED = new Ref<>(null, null, null, null, null);

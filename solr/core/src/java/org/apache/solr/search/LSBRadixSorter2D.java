@@ -104,6 +104,7 @@ public final class LSBRadixSorter2D implements Closeable {
    * @param numBits how many bits are required to store any of the values in {@code array[0:len]}.
    *     Pass {@code 32} if unknown.
    */
+  @SuppressWarnings("try")
   public void sort(int numBits, final IntBuffer[] array, int len) {
     if (len < INSERTION_SORT_THRESHOLD) {
       insertionSort(array, 0, len);
@@ -136,6 +137,7 @@ public final class LSBRadixSorter2D implements Closeable {
   }
 
   @Override
+  @SuppressWarnings("try")
   public void close() throws IOException {
     try (Closeable c1 = histogram.close[0];
         Closeable c2 = buffer.close[0]) {

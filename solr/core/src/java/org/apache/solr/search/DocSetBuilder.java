@@ -57,6 +57,7 @@ public final class DocSetBuilder {
     }
   }
 
+  @SuppressWarnings("try")
   private void upgradeToBitSet() {
     assert bitSet == null;
     bitSet = new FixedBitSets(maxDoc);
@@ -73,6 +74,7 @@ public final class DocSetBuilder {
     }
   }
 
+  @SuppressWarnings("try")
   private void growBuffer(int minSize) {
     if (minSize < capacity) return;
 

@@ -171,6 +171,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   @Override
+  @SuppressWarnings("try")
   public void close() throws IOException {
     check();
     try (Closeable c = close[0]) {
@@ -183,6 +184,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
     parts[index >> BitDocSet.BIT_SHIFT].set(index & BLOCK_BIT_MASK);
   }
 
+  @Override
   public boolean get(int index) {
     assert closed.notClosed() : "docset already closed";
     return parts[index >> BitDocSet.BIT_SHIFT].get(index & BLOCK_BIT_MASK);
@@ -210,6 +212,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
     parts[lastOuterIdx].set(0, toInner);
   }
 
+  @Override
   public int length() {
     check();
     if (cachedLength == -1) {

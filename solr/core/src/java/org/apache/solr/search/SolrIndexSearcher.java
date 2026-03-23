@@ -1417,6 +1417,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     return getResult(deState, largestPossible);
   }
 
+  @SuppressWarnings("try")
   private DocSet getResult(DocsEnumState deState, int largestPossible) throws IOException {
     int smallSetSize = DocSetUtil.smallSetSize(maxDoc());
     int scratchSize = Math.min(smallSetSize, largestPossible);

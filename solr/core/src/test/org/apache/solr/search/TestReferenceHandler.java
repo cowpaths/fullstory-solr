@@ -70,6 +70,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
             nThreads, new SolrNamedThreadFactory("testHeapCache"));
     try (Closeable c = () -> ExecutorUtil.shutdownAndAwaitTermination(exec)) {
       CountDownLatch cdl = new CountDownLatch(nThreads);
+      @SuppressWarnings("rawtypes")
       Future<?>[] futures = new Future[nThreads];
       for (int i = nThreads - 1; i >= 0; i--) {
         int idx = i;
@@ -115,6 +116,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
     try (Closeable c = () -> ExecutorUtil.shutdownAndAwaitTermination(exec);
         HeapCacheFbsModifier h = new HeapCacheFbsModifier(random().nextBoolean())) {
       AtomicBoolean finished = new AtomicBoolean(false);
+      @SuppressWarnings("rawtypes")
       Future<?>[] futures = new Future[nThreads];
       AtomicInteger errCt = new AtomicInteger();
       int maxSize = (SortedIntDocSet.MAX_ARR_SIZE >> 1) * 16;

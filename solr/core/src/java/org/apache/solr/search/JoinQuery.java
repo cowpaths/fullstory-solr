@@ -247,6 +247,7 @@ class JoinQuery extends Query {
       return result;
     }
 
+    @SuppressWarnings("try")
     public DocSet getDocSetEnumerate() throws IOException {
       FixedBitSets resultBits = null;
 
