@@ -41,7 +41,6 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
-import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.FixedBitSet.ByteBufferStruct;
 import org.apache.lucene.util.RamUsageEstimator;
@@ -526,22 +525,19 @@ public class HeapCacheFbsModifier
       };
     }
     for (int avail = this.top.get(); ; ) {
-      if (avail == 0) {
-        // exhausted; fallback to main heap allocation
+      if (avail <= 0) {
+        // fallback to main heap allocation
+
+        // either exhausted (`avail == 0`), or in the process of being updated with
+        // reclaimed blocks. In the former case, we obviously want fallback allocation;
+        // but we also fallback in the latter case, because we are strictly opportunistic
+        // in the hot/allocation path. We _never_ want to block here (which would potentially
+        // wait for the thread scheduler to arbitrarily wake up the reclaim thread, etc...)
         if (fallback == null) {
           return allocateBytesArr(-1, 0, numBytes, null, withMemorySegment);
         } else {
           return fallback.allocateBytesArr(numBytes, sentinel, withMemorySegment);
         }
-      } else if (avail < 0) {
-        if (closing) {
-          throw new AlreadyClosedException(getClass().getSimpleName() + " is closing");
-        } else if (Thread.currentThread().isInterrupted()) {
-          throw new ThreadInterruptedException(new InterruptedException());
-        }
-        Thread.yield(); // let producer thread complete
-        avail = this.top.get();
-        continue;
       }
       int tryReserve = Math.min(avail, adjustedPartitionCount);
       int witness = this.top.compareAndExchange(avail, avail - tryReserve);
@@ -561,20 +557,7 @@ public class HeapCacheFbsModifier
   private void releaseLoop() throws InterruptedException {
     for (; ; ) {
       ByteBufferStruct[] toRelease = releaseQueue.take();
-      int newTop;
-      for (int top = this.top.get(); ; ) {
-        newTop = top + toRelease.length;
-        int witness = this.top.compareAndExchange(top, ~newTop);
-        if (witness == top) {
-          break;
-        }
-        top = witness;
-      }
-      int idx = newTop;
       for (ByteBufferStruct bb : toRelease) {
-        // pool[destOff++ & POOL_SIZE_MASK] = bb;
-        idx--;
-
         if (offheap) {
           // NOTE: for off-heap we only need to zero out the buffer if bulk-faultin is
           // disabled OR doesn't call MADV_POPULATE_WRITE (which would zero out the buffer
@@ -589,16 +572,30 @@ public class HeapCacheFbsModifier
           // on-heap buffers never get zeroed out at the OS level, so we have to do it ourselves.
           clear(bb);
         }
+      }
+      int newTop;
+      for (int top = this.top.get(); ; ) {
+        newTop = top + toRelease.length;
+        int witness = this.top.compareAndExchange(top, ~newTop);
+        if (witness == top) {
+          break;
+        }
+        top = witness;
+      }
+      int idx = newTop;
+      for (ByteBufferStruct bb : toRelease) {
+        // pool[destOff++ & POOL_SIZE_MASK] = bb;
+        idx--;
         while (!H.compareAndSet(pool, idx, null, bb)) {
           // wait for consumer thread(s) to catch up
           Thread.yield();
         }
       }
-      collected.add(toRelease.length);
       if (!this.top.compareAndSet(~newTop, newTop)) {
         // single-threaded producer, so this should literally never happen.
         throw new IllegalStateException();
       }
+      collected.add(toRelease.length);
       Thread.yield(); // background; try not to monopolize CPU
     }
   }
@@ -802,7 +799,10 @@ public class HeapCacheFbsModifier
   @SuppressWarnings("preview")
   private static boolean madvise(ByteBufferStruct bb, int advice) {
     try {
-      MemorySegment segment = bb.m;
+      MemorySegment segment = (MemorySegment) bb.m;
+      if (segment == null) {
+        return false;
+      }
       // 2. Execute the call directly on the memory segment
       int result = (int) MADVISE_HANDLE.invokeExact(segment, segment.byteSize(), advice);
       if (result == 0) {
