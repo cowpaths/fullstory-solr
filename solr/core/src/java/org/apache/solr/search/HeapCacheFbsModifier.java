@@ -421,15 +421,12 @@ public class HeapCacheFbsModifier
   private static final boolean DUMP_STATS_ON_TEST =
       EnvUtils.getPropertyAsBool(POOL_DUMP_STATS_ON_TEST_PROPNAME, false);
 
-  private boolean closing = false;
-
   @Override
   @SuppressWarnings("try")
   public void close() {
     if (unregister) {
       try {
         if (FixedBitSets.unregisterModifier(this, refHandler)) {
-          closing = true;
           try (Closeable c = SolrMetricProducer.super::close;
               fallback) {
             SolrMetricsContext ctx;
@@ -448,7 +445,6 @@ public class HeapCacheFbsModifier
         throw new UncheckedIOException(e);
       }
     } else {
-      closing = true;
       try (refHandler;
           fallback) {
         SolrMetricProducer.super.close();
@@ -753,15 +749,16 @@ public class HeapCacheFbsModifier
     ByteBufferStruct bbs = new ByteBufferStruct(bb);
     boolean support;
     try {
-      support = FixedBitSet.madvise(bbs, MADV_DONTNEED); // try a standard advice
+      support = FixedBitSet.madvise(bbs.m, MADV_DONTNEED); // try a standard advice
     } catch (Throwable e) {
+      log.warn("disabling madvise", e);
       support = false;
     }
     SUPPORT_MADV = support;
     log.info("support for madvise(): {}", SUPPORT_MADV);
     if (SUPPORT_MADV) {
       try {
-        SUPPORT_MADV_POPULATE_WRITE = FixedBitSet.madvise(bbs, MADV_POPULATE_WRITE);
+        SUPPORT_MADV_POPULATE_WRITE = FixedBitSet.madvise(bbs.m, MADV_POPULATE_WRITE);
       } catch (Throwable e) {
         throw new AssertionError(e);
       }

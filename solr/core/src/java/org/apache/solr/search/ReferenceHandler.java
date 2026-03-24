@@ -108,9 +108,10 @@ public class ReferenceHandler<T> implements Closeable {
               log.warn("exception on close", e);
             }
           }
+          long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
           for (Future<?> f : refQueueHandlers) {
             try {
-              f.get(10, TimeUnit.SECONDS);
+              f.get(Math.max(0, until - System.nanoTime()), TimeUnit.NANOSECONDS);
             } catch (CancellationException e) {
               // swallow; this is how we exit
             } catch (Exception e) {
