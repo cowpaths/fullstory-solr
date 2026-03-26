@@ -119,7 +119,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
       @SuppressWarnings("rawtypes")
       Future<?>[] futures = new Future[nThreads];
       AtomicInteger errCt = new AtomicInteger();
-      int maxSize = (SortedIntDocSet.MAX_ARR_SIZE >> 1) * 16;
+      int maxSize = Math.max(1 << 16, (SortedIntDocSet.MAX_ARR_SIZE >> 1) * 16);
       for (int i = 0; i < nThreads; i++) {
         Random r = new Random(random().nextLong());
         futures[i] =
@@ -135,7 +135,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
                               .map(FixedBitSet.ByteBufferStruct::asLongBufferStruct)
                               .map((lbs) -> lbs.buf)
                               .toArray(LongBuffer[]::new);
-                      try (Closeable c1 = sentinel[0]) {
+                      try (Closeable c1 = r.nextBoolean() ? sentinel[0] : null) {
                         for (int j = 0; j < size; j++) {
                           long v = j; // r.nextLong();
                           compare.put(j, v);

@@ -206,7 +206,7 @@ public class HeapCacheFbsModifier
   private final HeapCacheFbsModifier fallback;
 
   HeapCacheFbsModifier(boolean offheap) {
-    this(false, TPS, offheap, new HeapCacheFbsModifier(false, TPS_OFFHEAP, !offheap, null));
+    this(false, TPS, offheap, TPS_OFFHEAP == 0 ? null : new HeapCacheFbsModifier(false, TPS_OFFHEAP, !offheap, null));
   }
 
   private HeapCacheFbsModifier(
@@ -222,7 +222,8 @@ public class HeapCacheFbsModifier
     }
     if (log.isInfoEnabled()) {
       log.info(
-          "n_blocks={}, pool_size_bytes={}",
+          "offheap={}, n_blocks={}, pool_size_bytes={}",
+          offheap,
           nBlocks,
           RamUsageEstimator.humanReadableUnits((long) nBlocks * BLOCK_SIZE_BYTES));
     }
