@@ -57,8 +57,17 @@ public class ReferenceHandler<T> implements Closeable {
 
   private final boolean allowExplicitClose;
 
+  /** Run after <i>async</i> collection (i.e., background threads only). */
+  public interface PostCollect {
+    void run() throws InterruptedException;
+  }
+
   @SuppressWarnings("unchecked")
-  public ReferenceHandler(boolean allowExplicitClose, Consumer<T> onCollection, Runnable output) {
+  public ReferenceHandler(
+      boolean allowExplicitClose,
+      Consumer<T> onCollection,
+      PostCollect postCollect,
+      Runnable output) {
     int execSize = PARALLEL_HEAD_FACTOR + (output == null ? 0 : 1);
     this.allowExplicitClose = allowExplicitClose;
     this.exec =
@@ -80,6 +89,7 @@ public class ReferenceHandler<T> implements Closeable {
                   Reference<?> collected;
                   while ((collected = q.remove()) != null) {
                     remove((Ref<T>) collected);
+                    postCollect.run();
                   }
                 } finally {
                   activeThreads.decrement();

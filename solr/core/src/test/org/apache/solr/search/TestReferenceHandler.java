@@ -110,6 +110,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
   @SuppressWarnings("try")
   public void testHeapCacheFbs() throws InterruptedException, ExecutionException, IOException {
     int nThreads = 20;
+    LongAdder totalNanos = new LongAdder();
     ExecutorService exec =
         ExecutorUtil.newMDCAwareFixedThreadPool(
             nThreads, new SolrNamedThreadFactory("testHeapCache"));
@@ -130,14 +131,18 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
                       int size = r.nextInt(maxSize);
                       LongBuffer compare = LongBuffer.allocate(size);
                       Closeable[] sentinel = new Closeable[1];
+                      long start = System.nanoTime();
+                      FixedBitSet.ByteBufferStruct[] bbs =
+                          h.allocateBytesArr(size << 3, sentinel, false);
+                      totalNanos.add(System.nanoTime() - start);
                       LongBuffer[] bb =
-                          Arrays.stream(h.allocateBytesArr(size << 3, sentinel, false))
+                          Arrays.stream(bbs)
                               .map(FixedBitSet.ByteBufferStruct::asLongBufferStruct)
                               .map((lbs) -> lbs.buf)
                               .toArray(LongBuffer[]::new);
                       try (Closeable c1 = r.nextBoolean() ? sentinel[0] : null) {
                         for (int j = 0; j < size; j++) {
-                          long v = j; // r.nextLong();
+                          long v = r.nextLong(); // = j; // for debugging
                           compare.put(j, v);
                           bb[j >> BLOCK_SHIFT].put((j & BLOCK_MASK), v);
                         }
@@ -247,8 +252,20 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
         collected += fcollected;
         Thread.sleep(500);
       }
+      long totalNanosComplete = totalNanos.sum();
+      long total = h.allocatedCount() + h.exhaustedCount();
+      System.err.println(
+          "total millis: "
+              + TimeUnit.NANOSECONDS.toMillis(totalNanosComplete)
+              + ", nanos/block="
+              + (totalNanosComplete / total)
+              + ", total="
+              + (total >> 20)
+              + "M");
     }
   }
+
+  private static void doNothing() {}
 
   public void testRefQueueHandling() throws InterruptedException, ExecutionException, IOException {
     int nThreads = 20;
@@ -266,6 +283,7 @@ public class TestReferenceHandler extends SolrTestCaseJ4 {
               collectedRefs.increment();
               totalBytesOut.add(a.ramBytesUsed());
             },
+            TestReferenceHandler::doNothing,
             null);
     AtomicBoolean finished = new AtomicBoolean();
     @SuppressWarnings("rawtypes")

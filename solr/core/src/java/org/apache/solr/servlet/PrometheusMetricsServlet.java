@@ -702,6 +702,15 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
               "current number of docset blocks available",
               value));
     }
+    value = getNumber(parent, "throttleCount");
+    if (!value.equals(INVALID_NUMBER)) {
+      results.add(
+          new PrometheusMetric(
+              type.concat("throttled_count"),
+              PrometheusMetricType.COUNTER,
+              "cumulative number of throttle events on async collection",
+              value));
+    }
   }
 
   enum CoreMetric {

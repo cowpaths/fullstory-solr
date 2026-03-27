@@ -17,12 +17,14 @@
 package org.apache.solr.search;
 
 import com.codahale.metrics.Gauge;
+import com.sun.management.OperatingSystemMXBean;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.lang.management.ManagementFactory;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
@@ -33,7 +35,9 @@ import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.FixedBitSet.ByteBufferStruct;
@@ -91,7 +95,7 @@ public class HeapCacheFbsModifier
 
   private final AtomicInteger top;
   private final BlockingQueue<ByteBufferStruct[]> releaseQueue =
-      new ArrayBlockingQueue<>(1024, false);
+      SINGLE_THREADED_REF_HANDLER ? null : new ArrayBlockingQueue<>(1024, false);
 
   public static final class State {
     // NOTE: could be volatile, but that's not really the failure mode we care about here.
@@ -206,8 +210,15 @@ public class HeapCacheFbsModifier
   private final HeapCacheFbsModifier fallback;
 
   HeapCacheFbsModifier(boolean offheap) {
-    this(false, TPS, offheap, TPS_OFFHEAP == 0 ? null : new HeapCacheFbsModifier(false, TPS_OFFHEAP, !offheap, null));
+    this(
+        false,
+        TPS,
+        offheap,
+        TPS_OFFHEAP == 0 ? null : new HeapCacheFbsModifier(false, TPS_OFFHEAP, !offheap, null));
   }
+
+  private static final boolean SINGLE_THREADED_REF_HANDLER =
+      ReferenceHandler.PARALLEL_HEAD_FACTOR == 1 && !ALLOW_EXPLICIT_CLOSE;
 
   private HeapCacheFbsModifier(
       boolean unregister, long targetPoolSize, boolean offheap, HeapCacheFbsModifier fallback) {
@@ -249,21 +260,75 @@ public class HeapCacheFbsModifier
               try {
                 toRelease.closed.isClosed = true;
                 totalClosedBatches.increment();
-                releaseQueue.put(toRelease.buf);
+                if (SINGLE_THREADED_REF_HANDLER) {
+                  release(toRelease.buf);
+                } else {
+                  releaseQueue.put(toRelease.buf);
+                }
               } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new ThreadInterruptedException(e);
               }
             },
-            () -> {
-              try {
-                releaseLoop();
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new ThreadInterruptedException(e);
-              }
-            });
+            this::postCollect,
+            SINGLE_THREADED_REF_HANDLER
+                ? null
+                : () -> {
+                  try {
+                    releaseLoop();
+                  } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new ThreadInterruptedException(e);
+                  }
+                });
   }
+
+  private static final double THROTTLE_THRESHOLD = 0.90;
+  private static final double THROTTLE_THRESHOLD_DIFF = 1.0 - THROTTLE_THRESHOLD;
+  private static final long MIN_THROTTLE_MILLIS = 500;
+  private static final long MAX_THROTTLE_MILLIS = 2000;
+  private static final long MAX_VARIABLE_THROTTLE = MAX_THROTTLE_MILLIS - MIN_THROTTLE_MILLIS;
+
+  private static final long CHECK_FREQUENCY_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
+  private static final AtomicLong LAST_CHECKED_CPU_LOAD = new AtomicLong();
+  private static volatile double cachedCpuLoad;
+
+  private void postCollect() throws InterruptedException {
+    if (throttleIfNecessary() > 0) {
+      throttleCount.increment();
+    }
+  }
+
+  private static long throttleIfNecessary() throws InterruptedException {
+    long now = System.nanoTime();
+    long lastChecked = LAST_CHECKED_CPU_LOAD.get();
+    double cpuLoad;
+    if (now - lastChecked < CHECK_FREQUENCY_NANOS) {
+      cpuLoad = cachedCpuLoad;
+    } else if (LAST_CHECKED_CPU_LOAD.compareAndSet(lastChecked, now)) {
+      cpuLoad = OS_BEAN.getCpuLoad();
+      if (!Double.isNaN(cpuLoad)) {
+        cachedCpuLoad = cpuLoad;
+      }
+    } else {
+      cpuLoad = cachedCpuLoad; // best-effort; just continue to use cached value
+    }
+    if (cpuLoad > THROTTLE_THRESHOLD) {
+      long sleepMillis =
+          Math.min(
+              MAX_THROTTLE_MILLIS,
+              MIN_THROTTLE_MILLIS
+                  + (long)
+                      (((cpuLoad - THROTTLE_THRESHOLD) / THROTTLE_THRESHOLD_DIFF)
+                          * MAX_VARIABLE_THROTTLE));
+      Thread.sleep(sleepMillis);
+      return sleepMillis;
+    }
+    return 0;
+  }
+
+  private static final OperatingSystemMXBean OS_BEAN =
+      (OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
 
   private static void poolOnheap(
       int nBlocks, int numPartitions, int blockIdx, ByteBufferStruct[] pool) {
@@ -405,6 +470,7 @@ public class HeapCacheFbsModifier
     map.put("explicitBatchCloseCount", explicitBatchCloseCount);
     map.put("totalBatchCloseCount", totalClosedBatches);
     map.put("explicitBatchCloseRatio", (double) explicitBatchCloseCount / totalClosedBatches);
+    map.put("throttleCount", h.throttleCount.sum());
   }
 
   @Override
@@ -484,6 +550,7 @@ public class HeapCacheFbsModifier
   private final LongAdder allocated = new LongAdder();
   private final LongAdder exhausted = new LongAdder();
   private final LongAdder totalClosedBatches = new LongAdder();
+  private final LongAdder throttleCount = new LongAdder();
 
   @Override
   public ByteBufferStruct allocateBytes(int size, boolean withMemorySegment) {
@@ -548,47 +615,53 @@ public class HeapCacheFbsModifier
   private void releaseLoop() throws InterruptedException {
     for (; ; ) {
       ByteBufferStruct[] toRelease = releaseQueue.take();
-      for (ByteBufferStruct bb : toRelease) {
-        if (offheap) {
-          // NOTE: for off-heap we only need to zero out the buffer if bulk-faultin is
-          // disabled OR doesn't call MADV_POPULATE_WRITE (which would zero out the buffer
-          // upon acquire).
-          if (!BULK_FAULT_IN || MADV_BULK_FAULTIN != MADV_POPULATE_WRITE) {
-            clear(bb);
-          } else {
-            bb.buf.clear();
-          }
-          madviseRelease(bb);
-        } else {
-          // on-heap buffers never get zeroed out at the OS level, so we have to do it ourselves.
-          clear(bb);
-        }
-      }
-      int newTop;
-      for (int top = this.top.get(); ; ) {
-        newTop = top + toRelease.length;
-        int witness = this.top.compareAndExchange(top, ~newTop);
-        if (witness == top) {
-          break;
-        }
-        top = witness;
-      }
-      int idx = newTop;
-      for (ByteBufferStruct bb : toRelease) {
-        // pool[destOff++ & POOL_SIZE_MASK] = bb;
-        idx--;
-        while (!H.compareAndSet(pool, idx, null, bb)) {
-          // wait for consumer thread(s) to catch up
-          Thread.yield();
-        }
-      }
-      if (!this.top.compareAndSet(~newTop, newTop)) {
-        // single-threaded producer, so this should literally never happen.
-        throw new IllegalStateException();
-      }
-      collected.add(toRelease.length);
-      Thread.yield(); // background; try not to monopolize CPU
+      release(toRelease);
+      // NOTE: don't increment `throttleCount` here, it would double-count with RefQueue
+      // processing threads, which keeps count consistent.
+      throttleIfNecessary();
     }
+  }
+
+  private void release(ByteBufferStruct[] toRelease) {
+    for (ByteBufferStruct bb : toRelease) {
+      if (offheap) {
+        // NOTE: for off-heap we only need to zero out the buffer if bulk-faultin is
+        // disabled OR doesn't call MADV_POPULATE_WRITE (which would zero out the buffer
+        // upon acquire).
+        if (!BULK_FAULT_IN || MADV_BULK_FAULTIN != MADV_POPULATE_WRITE) {
+          clear(bb);
+        } else {
+          bb.buf.clear();
+        }
+        madviseRelease(bb);
+      } else {
+        // on-heap buffers never get zeroed out at the OS level, so we have to do it ourselves.
+        clear(bb);
+      }
+    }
+    int newTop;
+    for (int top = this.top.get(); ; ) {
+      newTop = top + toRelease.length;
+      int witness = this.top.compareAndExchange(top, ~newTop);
+      if (witness == top) {
+        break;
+      }
+      top = witness;
+    }
+    int idx = newTop;
+    for (ByteBufferStruct bb : toRelease) {
+      // pool[destOff++ & POOL_SIZE_MASK] = bb;
+      idx--;
+      while (!H.compareAndSet(pool, idx, null, bb)) {
+        // wait for consumer thread(s) to catch up
+        Thread.yield();
+      }
+    }
+    if (!this.top.compareAndSet(~newTop, newTop)) {
+      // single-threaded producer, so this should literally never happen.
+      throw new IllegalStateException();
+    }
+    collected.add(toRelease.length);
   }
 
   public static void clear(ByteBufferStruct bb) {
@@ -625,11 +698,11 @@ public class HeapCacheFbsModifier
     int lastIdx = (numBytes - 1) >> BYTE_SHIFT;
     ByteBufferStruct[] ret = new ByteBufferStruct[lastIdx + 1];
     int i = 0;
-    for (int fullPooledLim = Math.min(pooledReserved - 1, lastIdx); i < fullPooledLim; i++) {
-      ret[i] = initBuf(top--, MAX_BYTES);
-    }
     int lastLen = ((numBytes - 1) & BYTE_MASK) + 1;
     if (i < pooledReserved) {
+      for (int fullPooledLim = Math.min(pooledReserved - 1, lastIdx); i < fullPooledLim; i++) {
+        ret[i] = initBuf(top--, MAX_BYTES);
+      }
       ret[i] = initBuf(top, i++ == lastIdx ? lastLen : MAX_BYTES);
       ByteBufferStruct[] pooled;
       if (i == ret.length) {
