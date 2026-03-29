@@ -283,23 +283,62 @@ public class HeapCacheFbsModifier
                 });
   }
 
+  private static final double SOFT_THROTTLE_THRESHOLD = 0.75;
   private static final double THROTTLE_THRESHOLD = 0.90;
   private static final double THROTTLE_THRESHOLD_DIFF = 1.0 - THROTTLE_THRESHOLD;
+  private static final double SOFT_THROTTLE_THRESHOLD_DIFF =
+      THROTTLE_THRESHOLD - SOFT_THROTTLE_THRESHOLD;
+  private static final long SOFT_MIN_THROTTLE_MILLIS = 5;
   private static final long MIN_THROTTLE_MILLIS = 500;
   private static final long MAX_THROTTLE_MILLIS = 2000;
   private static final long MAX_VARIABLE_THROTTLE = MAX_THROTTLE_MILLIS - MIN_THROTTLE_MILLIS;
+  private static final long MAX_VARIABLE_SOFT_THROTTLE =
+      MIN_THROTTLE_MILLIS - SOFT_MIN_THROTTLE_MILLIS;
 
   private static final long CHECK_FREQUENCY_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
   private static final AtomicLong LAST_CHECKED_CPU_LOAD = new AtomicLong();
   private static volatile double cachedCpuLoad;
 
   private void postCollect() throws InterruptedException {
-    if (throttleIfNecessary() > 0) {
+    double cpuLoad = getCpuLoad();
+    if (throttleIfNecessary(cpuLoad) > 0) {
       throttleCount.increment();
+    } else if (SINGLE_THREADED_REF_HANDLER && softThrottleIfNecessary(cpuLoad) > 0) {
+      softThrottleCount.increment();
     }
   }
 
-  private static long throttleIfNecessary() throws InterruptedException {
+  private static long softThrottleIfNecessary(double cpuLoad) throws InterruptedException {
+    if (cpuLoad > SOFT_THROTTLE_THRESHOLD) {
+      long sleepMillis =
+          Math.min(
+              MIN_THROTTLE_MILLIS,
+              SOFT_MIN_THROTTLE_MILLIS
+                  + (long)
+                      (((cpuLoad - SOFT_THROTTLE_THRESHOLD) / SOFT_THROTTLE_THRESHOLD_DIFF)
+                          * MAX_VARIABLE_SOFT_THROTTLE));
+      Thread.sleep(sleepMillis);
+      return sleepMillis;
+    }
+    return 0;
+  }
+
+  private static long throttleIfNecessary(double cpuLoad) throws InterruptedException {
+    if (cpuLoad > THROTTLE_THRESHOLD) {
+      long sleepMillis =
+          Math.min(
+              MAX_THROTTLE_MILLIS,
+              MIN_THROTTLE_MILLIS
+                  + (long)
+                      (((cpuLoad - THROTTLE_THRESHOLD) / THROTTLE_THRESHOLD_DIFF)
+                          * MAX_VARIABLE_THROTTLE));
+      Thread.sleep(sleepMillis);
+      return sleepMillis;
+    }
+    return 0;
+  }
+
+  private static double getCpuLoad() {
     long now = System.nanoTime();
     long lastChecked = LAST_CHECKED_CPU_LOAD.get();
     double cpuLoad;
@@ -313,18 +352,7 @@ public class HeapCacheFbsModifier
     } else {
       cpuLoad = cachedCpuLoad; // best-effort; just continue to use cached value
     }
-    if (cpuLoad > THROTTLE_THRESHOLD) {
-      long sleepMillis =
-          Math.min(
-              MAX_THROTTLE_MILLIS,
-              MIN_THROTTLE_MILLIS
-                  + (long)
-                      (((cpuLoad - THROTTLE_THRESHOLD) / THROTTLE_THRESHOLD_DIFF)
-                          * MAX_VARIABLE_THROTTLE));
-      Thread.sleep(sleepMillis);
-      return sleepMillis;
-    }
-    return 0;
+    return cpuLoad;
   }
 
   private static final OperatingSystemMXBean OS_BEAN =
@@ -471,6 +499,7 @@ public class HeapCacheFbsModifier
     map.put("totalBatchCloseCount", totalClosedBatches);
     map.put("explicitBatchCloseRatio", (double) explicitBatchCloseCount / totalClosedBatches);
     map.put("throttleCount", h.throttleCount.sum());
+    map.put("softThrottleCount", h.softThrottleCount.sum());
   }
 
   @Override
@@ -551,6 +580,7 @@ public class HeapCacheFbsModifier
   private final LongAdder exhausted = new LongAdder();
   private final LongAdder totalClosedBatches = new LongAdder();
   private final LongAdder throttleCount = new LongAdder();
+  private final LongAdder softThrottleCount = new LongAdder();
 
   @Override
   public ByteBufferStruct allocateBytes(int size, boolean withMemorySegment) {
@@ -618,7 +648,10 @@ public class HeapCacheFbsModifier
       release(toRelease);
       // NOTE: don't increment `throttleCount` here, it would double-count with RefQueue
       // processing threads, which keeps count consistent.
-      throttleIfNecessary();
+      double cpuLoad = getCpuLoad();
+      if (throttleIfNecessary(cpuLoad) == 0 && softThrottleIfNecessary(cpuLoad) > 0) {
+        softThrottleCount.increment();
+      }
     }
   }
 

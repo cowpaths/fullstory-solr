@@ -711,6 +711,15 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
               "cumulative number of throttle events on async collection",
               value));
     }
+    value = getNumber(parent, "softThrottleCount");
+    if (!value.equals(INVALID_NUMBER)) {
+      results.add(
+          new PrometheusMetric(
+              type.concat("soft_throttled_count"),
+              PrometheusMetricType.COUNTER,
+              "cumulative number of soft throttle events on async collection",
+              value));
+    }
   }
 
   enum CoreMetric {
