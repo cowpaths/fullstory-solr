@@ -155,46 +155,14 @@ public class HeapCacheFbsModifier
   private static final long TPS;
   private static final long TPS_OFFHEAP;
 
+  private static final boolean STATIC_HUGEPAGES;
+
   public static boolean isEnabled() {
     return TPS > 0 || TPS_OFFHEAP > 0;
   }
 
   private static final Path HUGEPAGES_SYSFS_PATH =
       Path.of("/sys/kernel/mm/hugepages/hugepages-2048kB/");
-
-  static {
-    long maxMemory = Runtime.getRuntime().maxMemory();
-
-    // default to 1/16 of heap
-    long onHeapTarget = getTargetPoolSize(POOL_ONHEAP_TARGET_MB_PROPNAME, maxMemory, 16);
-    if (POOL_BACKING_FILE.isEmpty() || EnvUtils.getProperty("tests.seed") != null) {
-      TPS = onHeapTarget;
-    } else {
-      try {
-        if (!"hugetlbfs"
-            .equals(Files.getFileStore(Path.of(POOL_BACKING_FILE).getParent()).type())) {
-          TPS = onHeapTarget;
-        } else {
-          // if hugetlbfs, then just use all the remaining allocated hugepages
-          Path freePath = HUGEPAGES_SYSFS_PATH.resolve("free_hugepages");
-          Path resvPath = HUGEPAGES_SYSFS_PATH.resolve("resv_hugepages");
-          long free = Long.parseLong(Files.readString(freePath).trim());
-          long resv = Long.parseLong(Files.readString(resvPath).trim());
-          long availableHugePages = free - resv;
-          TPS = availableHugePages << 21; // 2M per hugepage
-        }
-      } catch (IOException e) {
-        throw new UncheckedIOException(e);
-      }
-    }
-
-    // default to 1/4 of heap
-    TPS_OFFHEAP = getTargetPoolSize(POOL_OFFHEAP_TARGET_MB_PROPNAME, maxMemory, 4);
-
-    if (log.isInfoEnabled()) {
-      log.info("block_size={}", RamUsageEstimator.humanReadableUnits(BLOCK_SIZE_BYTES));
-    }
-  }
 
   private static long getTargetPoolSize(String propName, long maxMemory, int divisor) {
     long defaultTargetPoolSize = maxMemory / divisor; // default to 1/<divisor> of heap
@@ -667,6 +635,14 @@ public class HeapCacheFbsModifier
           bb.buf.clear();
         }
         madviseRelease(bb);
+      } else if (STATIC_HUGEPAGES) {
+        bb.buf.clear();
+        if (!madvise(bb, MADV_DONTNEED) || !madvise(bb, MADV_BULK_FAULTIN)) {
+          // if DONTNEED failed, pages still hold dirty data and must be explicitly zeroed;
+          // if POPULATE_WRITE failed (e.g., hugetlb pool temporarily exhausted by external
+          // process), fall back to explicit zeroing to keep fault cost off the user thread
+          clear(bb);
+        }
       } else {
         // on-heap buffers never get zeroed out at the OS level, so we have to do it ourselves.
         clear(bb);
@@ -882,6 +858,44 @@ public class HeapCacheFbsModifier
   private static final int MADV_BULK_FAULTIN =
       (SUPPORT_MADV_POPULATE_WRITE && SYNCHRONOUS_FAULT_IN) ? MADV_POPULATE_WRITE : MADV_WILLNEED;
 
+  static {
+    long maxMemory = Runtime.getRuntime().maxMemory();
+
+    // default to 1/16 of heap
+    long onHeapTarget = getTargetPoolSize(POOL_ONHEAP_TARGET_MB_PROPNAME, maxMemory, 16);
+    if (POOL_BACKING_FILE.isEmpty() || EnvUtils.getProperty("tests.seed") != null) {
+      TPS = onHeapTarget;
+      STATIC_HUGEPAGES = false;
+    } else {
+      try {
+        if (!"hugetlbfs"
+            .equals(Files.getFileStore(Path.of(POOL_BACKING_FILE).getParent()).type())) {
+          TPS = onHeapTarget;
+          STATIC_HUGEPAGES = false;
+        } else {
+          // if hugetlbfs, then just use all the remaining allocated hugepages
+          Path freePath = HUGEPAGES_SYSFS_PATH.resolve("free_hugepages");
+          Path resvPath = HUGEPAGES_SYSFS_PATH.resolve("resv_hugepages");
+          long free = Long.parseLong(Files.readString(freePath).trim());
+          long resv = Long.parseLong(Files.readString(resvPath).trim());
+          long availableHugePages = free - resv;
+          TPS = availableHugePages << 21; // 2M per hugepage
+          STATIC_HUGEPAGES =
+              BLOCK_SIZE_BYTES == ALIGN_SIZE && MADV_BULK_FAULTIN == MADV_POPULATE_WRITE;
+        }
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
+    }
+
+    // default to 1/4 of heap
+    TPS_OFFHEAP = getTargetPoolSize(POOL_OFFHEAP_TARGET_MB_PROPNAME, maxMemory, 4);
+
+    if (log.isInfoEnabled()) {
+      log.info("block_size={}", RamUsageEstimator.humanReadableUnits(BLOCK_SIZE_BYTES));
+    }
+  }
+
   private static final int MADV_NOHUGEPAGE = 15;
   private static final int MADV_HUGEPAGE = 14;
 
@@ -890,17 +904,20 @@ public class HeapCacheFbsModifier
   }
 
   @SuppressWarnings("preview")
-  private static void madvise(ByteBufferStruct bb, int advice) {
+  private static boolean madvise(ByteBufferStruct bb, int advice) {
     if (SUPPORT_MADV && bb.m != null) {
       try {
         // 2. Execute the call directly on the memory segment
         if (!FixedBitSet.madvise(bb.m, advice)) {
           log.warn("madvise {} failed", advice);
+          return false;
         }
       } catch (Throwable t) {
         log.error("exception calling madvise {}", advice, t);
+        return false;
       }
     }
+    return true;
   }
 
   private static void poolOffheap(
