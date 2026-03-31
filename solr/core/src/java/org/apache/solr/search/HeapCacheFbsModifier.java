@@ -131,7 +131,7 @@ public class HeapCacheFbsModifier
   public static final String POOL_FORCE_TRANSPARENT_HUGEPAGE = "solr.fbspool.offheap.thp";
   public static final String POOL_OFFHEAP_TARGET_MB_PROPNAME = "solr.fbspool.offheap.targetMB";
   public static final String POOL_ONHEAP_TARGET_MB_PROPNAME = "solr.fbspool.onheap.targetMB";
-  public static final String POOL_ALWAYS_ONE_UNPOOLED_PROPNAME = "solr.fbspool.alwaysOneUnpooled";
+  public static final String POOL_PERCENT_FOR_POOLED_PROPNAME = "solr.fbspool.percentForPooled";
   public static final String POOL_DUMP_STATS_ON_TEST_PROPNAME = "solr.fbspool.dumpStatsOnTest";
   public static final String POOL_ALLOW_EXPLICIT_CLOSE_PROPNAME = "solr.fbspool.allowExplicitClose";
 
@@ -576,7 +576,17 @@ public class HeapCacheFbsModifier
     if (numBytes == 0) {
       return EMPTY;
     }
-    int adjustedPartitionCount = ((numBytes - 1) >> BYTE_SHIFT) + 1 - ADJUST;
+    int totalPartitionCount = ((numBytes - 1) >> BYTE_SHIFT) + 1;
+    int adjustedPartitionCount;
+    int adjust;
+    int lastLen = ((numBytes - 1) & BYTE_MASK) + 1;
+    if (lastLen < MIN_BYTES_FOR_POOLED) {
+      adjustedPartitionCount = totalPartitionCount - 1;
+      adjust = 1;
+    } else {
+      adjustedPartitionCount = totalPartitionCount;
+      adjust = 0;
+    }
     if (adjustedPartitionCount == 0) {
       return new ByteBufferStruct[] {
         new ByteBufferStruct(
@@ -593,7 +603,7 @@ public class HeapCacheFbsModifier
         // in the hot/allocation path. We _never_ want to block here (which would potentially
         // wait for the thread scheduler to arbitrarily wake up the reclaim thread, etc...)
         if (fallback == null) {
-          return allocateBytesArr(-1, 0, numBytes, null, withMemorySegment);
+          return allocateBytesArr(-1, 0, numBytes, null, withMemorySegment, adjust);
         } else {
           return fallback.allocateBytesArr(numBytes, sentinel, withMemorySegment);
         }
@@ -602,7 +612,8 @@ public class HeapCacheFbsModifier
       int witness = this.top.compareAndExchange(avail, avail - tryReserve);
       if (witness == avail) {
         // we have a batch reservation; now actually allocate
-        return allocateBytesArr(avail - 1, tryReserve, numBytes, sentinel, withMemorySegment);
+        return allocateBytesArr(
+            avail - 1, tryReserve, numBytes, sentinel, withMemorySegment, adjust);
       } else {
         avail = witness;
       }
@@ -697,18 +708,19 @@ public class HeapCacheFbsModifier
   private static final int MAX_BYTES = 1 << BYTE_SHIFT;
   private static final int BYTE_MASK = MAX_BYTES - 1;
 
-  /**
-   * In order to provide some heap pressure, when this field is set to {@code 1}, every non-empty
-   * allocation allocates at least one heap {@link ByteBuffer}. This ensures that there is no wasted
-   * space (every pooled {@link ByteBuffer} that's used will be full), there is nominal heap
-   * pressure to drive GC (and pool entry reclamation), and that there's a consistent dimorphism to
-   * avoid JIT over-fitting.
-   */
-  private static final int ADJUST =
-      EnvUtils.getPropertyAsBool(POOL_ALWAYS_ONE_UNPOOLED_PROPNAME, true) ? 1 : 0;
+  private static final int MIN_BYTES_FOR_POOLED =
+      Math.toIntExact(
+          ((long) BLOCK_SIZE_BYTES
+                  * EnvUtils.getPropertyAsInteger(POOL_PERCENT_FOR_POOLED_PROPNAME, 100))
+              / 100);
 
   private ByteBufferStruct[] allocateBytesArr(
-      int top, int pooledReserved, int numBytes, Object sentinel, boolean withMemorySegment) {
+      int top,
+      int pooledReserved,
+      int numBytes,
+      Object sentinel,
+      boolean withMemorySegment,
+      int adjust) {
     int lastIdx = (numBytes - 1) >> BYTE_SHIFT;
     ByteBufferStruct[] ret = new ByteBufferStruct[lastIdx + 1];
     int i = 0;
@@ -725,7 +737,7 @@ public class HeapCacheFbsModifier
         // if any are pooled, we register the pooled ones for tracking
         pooled = new ByteBufferStruct[pooledReserved];
         System.arraycopy(ret, 0, pooled, 0, pooledReserved);
-        exhausted.add(ret.length - pooledReserved - ADJUST);
+        exhausted.add(ret.length - pooledReserved - adjust);
       }
       State closed;
       if (sentinel instanceof SentinelPacket) {
@@ -741,7 +753,7 @@ public class HeapCacheFbsModifier
       }
       allocated.add(pooledReserved);
     } else {
-      exhausted.add(ret.length - ADJUST);
+      exhausted.add(ret.length - adjust);
     }
     for (; i < lastIdx; i++) {
       // full unpooled
