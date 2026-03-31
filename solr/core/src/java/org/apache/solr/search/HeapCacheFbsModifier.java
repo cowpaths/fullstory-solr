@@ -79,7 +79,7 @@ public class HeapCacheFbsModifier
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
-  private static final int BLOCK_SIZE_BYTES = SortedIntDocSet.MAX_ARR_SIZE << 2;
+  public static final int BLOCK_SIZE_BYTES = SortedIntDocSet.MAX_ARR_SIZE << 2;
   private static final int MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / BLOCK_SIZE_BYTES;
   private final int nBlocks;
   private final boolean offheap;
@@ -251,8 +251,10 @@ public class HeapCacheFbsModifier
                 });
   }
 
-  private static final double SOFT_THROTTLE_THRESHOLD = 0.75;
-  private static final double THROTTLE_THRESHOLD = 0.90;
+  private static final double SOFT_THROTTLE_THRESHOLD =
+      (double) EnvUtils.getPropertyAsInteger("solr.fbspool.softThrottleThreshold", 75) / 100;
+  private static final double THROTTLE_THRESHOLD =
+      (double) EnvUtils.getPropertyAsInteger("solr.fbspool.throttleThreshold", 90) / 100;
   private static final double THROTTLE_THRESHOLD_DIFF = 1.0 - THROTTLE_THRESHOLD;
   private static final double SOFT_THROTTLE_THRESHOLD_DIFF =
       THROTTLE_THRESHOLD - SOFT_THROTTLE_THRESHOLD;
@@ -268,6 +270,7 @@ public class HeapCacheFbsModifier
   private static volatile double cachedCpuLoad;
 
   private void postCollect() throws InterruptedException {
+    if (STATIC_HUGEPAGES) return;
     double cpuLoad = getCpuLoad();
     if (throttleIfNecessary(cpuLoad) > 0) {
       throttleCount.increment();
@@ -614,11 +617,13 @@ public class HeapCacheFbsModifier
     for (; ; ) {
       ByteBufferStruct[] toRelease = releaseQueue.take();
       release(toRelease);
-      // NOTE: don't increment `throttleCount` here, it would double-count with RefQueue
-      // processing threads, which keeps count consistent.
-      double cpuLoad = getCpuLoad();
-      if (throttleIfNecessary(cpuLoad) == 0 && softThrottleIfNecessary(cpuLoad) > 0) {
-        softThrottleCount.increment();
+      if (!STATIC_HUGEPAGES) {
+        // NOTE: don't increment `throttleCount` here, it would double-count with RefQueue
+        // processing threads, which keeps count consistent.
+        double cpuLoad = getCpuLoad();
+        if (throttleIfNecessary(cpuLoad) == 0 && softThrottleIfNecessary(cpuLoad) > 0) {
+          softThrottleCount.increment();
+        }
       }
     }
   }
@@ -637,7 +642,7 @@ public class HeapCacheFbsModifier
         madviseRelease(bb);
       } else if (STATIC_HUGEPAGES) {
         bb.buf.clear();
-        if (!madvise(bb, MADV_DONTNEED) || !madvise(bb, MADV_BULK_FAULTIN)) {
+        if (!madvise(bb, MADV_DONTNEED) || !madvise(bb, MADV_POPULATE_WRITE)) {
           // if DONTNEED failed, pages still hold dirty data and must be explicitly zeroed;
           // if POPULATE_WRITE failed (e.g., hugetlb pool temporarily exhausted by external
           // process), fall back to explicit zeroing to keep fault cost off the user thread
@@ -880,8 +885,8 @@ public class HeapCacheFbsModifier
           long resv = Long.parseLong(Files.readString(resvPath).trim());
           long availableHugePages = free - resv;
           TPS = availableHugePages << 21; // 2M per hugepage
-          STATIC_HUGEPAGES =
-              BLOCK_SIZE_BYTES == ALIGN_SIZE && MADV_BULK_FAULTIN == MADV_POPULATE_WRITE;
+          STATIC_HUGEPAGES = BLOCK_SIZE_BYTES == ALIGN_SIZE && SUPPORT_MADV_POPULATE_WRITE;
+          log.info("STATIC_HUGEPAGES={}", STATIC_HUGEPAGES);
         }
       } catch (IOException e) {
         throw new UncheckedIOException(e);
