@@ -458,10 +458,10 @@ public class HeapCacheFbsModifier
     map.put("offheap", h.offheap);
     map.put("outstandingRefCount", h.refHandler.getOutstandingSize());
     map.put("activeRefProcessingThreads", h.refHandler.activeThreadCount());
-    map.put("allocatedCount", allocated);
-    map.put("exhaustedCount", exhausted);
+    map.put("allocatedBytes", allocated * BLOCK_SIZE_BYTES);
+    map.put("exhaustedBytes", exhausted * BLOCK_SIZE_BYTES);
     map.put("allocatedRatio", (double) allocated / (allocated + exhausted));
-    map.put("availableBlockCount", avail);
+    map.put("availableBytes", avail * BLOCK_SIZE_BYTES);
     map.put("availableBlockRatio", (double) avail / h.nBlocks);
     map.put(
         "totalBlockSize",

@@ -659,10 +659,10 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
       if (primary != null) {
         handleCacheLayer(primary, results, "primary_");
         JsonNode fallback = primary.get("fallback");
-        Number exhausted = getNumber(primary, "exhaustedCount");
+        Number exhausted = getNumber(primary, "exhaustedBytes");
         if (fallback != null) {
           handleCacheLayer(fallback, results, "fallback_");
-          Number fallbackExhausted = getNumber(fallback, "exhaustedCount");
+          Number fallbackExhausted = getNumber(fallback, "exhaustedBytes");
           if (exhausted.equals(INVALID_NUMBER)) {
             exhausted = fallbackExhausted;
           } else if (!fallbackExhausted.equals(INVALID_NUMBER)) {
@@ -672,9 +672,9 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         if (!exhausted.equals(INVALID_NUMBER)) {
           results.add(
               new PrometheusMetric(
-                  "exhausted_count",
+                  "exhausted_bytes",
                   PrometheusMetricType.COUNTER,
-                  "cumulative number of unpooled docset blocks allocated",
+                  "cumulative number of unpooled docset bytes allocated",
                   exhausted));
         }
       }
@@ -684,22 +684,22 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
   private static void handleCacheLayer(JsonNode parent, List<PrometheusMetric> results, String type)
       throws IOException {
     Number value;
-    value = getNumber(parent, "allocatedCount");
+    value = getNumber(parent, "allocatedBytes");
     if (!value.equals(INVALID_NUMBER)) {
       results.add(
           new PrometheusMetric(
-              type.concat("allocated_count"),
+              type.concat("allocated_bytes"),
               PrometheusMetricType.COUNTER,
-              "cumulative number of docset blocks allocated",
+              "cumulative number of pooled docset bytes allocated",
               value));
     }
-    value = getNumber(parent, "availableBlockCount");
+    value = getNumber(parent, "availableBytes");
     if (!value.equals(INVALID_NUMBER)) {
       results.add(
           new PrometheusMetric(
-              type.concat("available_blocks"),
+              type.concat("available_bytes"),
               PrometheusMetricType.GAUGE,
-              "current number of docset blocks available",
+              "current number of docset bytes available",
               value));
     }
     value = getNumber(parent, "throttleCount");
