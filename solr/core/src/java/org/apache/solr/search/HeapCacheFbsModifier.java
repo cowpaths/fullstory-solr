@@ -549,6 +549,7 @@ public class HeapCacheFbsModifier
 
   private final LongAdder allocated = new LongAdder();
   private final LongAdder exhausted = new LongAdder();
+  private final LongAdder waste = new LongAdder();
   private final LongAdder totalClosedBatches = new LongAdder();
   private final LongAdder throttleCount = new LongAdder();
   private final LongAdder softThrottleCount = new LongAdder();
@@ -641,6 +642,10 @@ public class HeapCacheFbsModifier
 
   private void release(ByteBufferStruct[] toRelease) {
     for (ByteBufferStruct bb : toRelease) {
+      int bufSize = bb.buf.remaining();
+      if (bufSize < MAX_BYTES) {
+        waste.add(bufSize - MAX_BYTES);
+      }
       if (offheap) {
         // NOTE: for off-heap we only need to zero out the buffer if bulk-faultin is
         // disabled OR doesn't call MADV_POPULATE_WRITE (which would zero out the buffer
@@ -727,9 +732,14 @@ public class HeapCacheFbsModifier
     int lastLen = ((numBytes - 1) & BYTE_MASK) + 1;
     if (i < pooledReserved) {
       for (int fullPooledLim = Math.min(pooledReserved - 1, lastIdx); i < fullPooledLim; i++) {
-        ret[i] = initBuf(top--, MAX_BYTES);
+        ret[i] = initBuf(top--);
       }
-      ret[i] = initBuf(top, i++ == lastIdx ? lastLen : MAX_BYTES);
+      ByteBufferStruct lastPooled = initBuf(top);
+      ret[i] = lastPooled;
+      if (i++ == lastIdx && lastLen < MAX_BYTES) {
+        lastPooled.buf.limit(lastLen);
+        waste.add(MAX_BYTES - lastLen);
+      }
       ByteBufferStruct[] pooled;
       if (i == ret.length) {
         pooled = ret;
@@ -780,18 +790,12 @@ public class HeapCacheFbsModifier
     }
   }
 
-  private static final int MIN_BLOCK_SIZE_MASK = MIN_BLOCK_SIZE - 1;
-  private static final int MIN_BLOCK_SIZE_ANTIMASK = ~MIN_BLOCK_SIZE_MASK;
-
-  private ByteBufferStruct initBuf(int idx, int size) {
+  private ByteBufferStruct initBuf(int idx) {
     // ByteBuffer ret = pool[head & POOL_SIZE_MASK].clear().limit(size);
     ByteBufferStruct ret = (ByteBufferStruct) H.getAndSetAcquire(pool, idx, null);
-    ret.buf.clear();
     if (BULK_FAULT_IN && offheap) {
-      ret.buf.limit((size + MIN_BLOCK_SIZE_MASK) & MIN_BLOCK_SIZE_ANTIMASK); // 4k-block-aligned
       madvise(ret, MADV_BULK_FAULTIN); // bulk fault in if necessary
     }
-    ret.buf.limit(size);
     return ret;
   }
 
