@@ -965,6 +965,26 @@ public class TestDocSet extends SolrTestCase {
   }
 
   /**
+   * Randomized correctness test for {@link BitDocSet.BitSetsIterator} covering both {@code
+   * nextDoc()} and {@code advance()} across partition boundaries. Uses {@link
+   * BitDocSet#iterator(LeafReaderContext)} with a top-level context (which returns a {@link
+   * BitDocSet.BitSetsIterator}) and compares against a reference {@link BitSetIterator}.
+   */
+  public void testBitSetsIteratorRandomized() throws IOException {
+    final int mbb = BitDocSet.MAX_BLOCK_BITS;
+    for (int i = 0; i < 100 * RANDOM_MULTIPLIER; i++) {
+      // span at least 2 partitions to exercise boundary behaviour
+      int totalBits = mbb * 2 + rand.nextInt(mbb + 1);
+      FixedBitSet ref = getRandomSet(totalBits, rand.nextInt(totalBits + 1));
+      BitDocSet bds = new BitDocSet(partition(ref));
+      // A standalone LeafReader's context has isTopLevel=true, so iterator(ctx) returns a
+      // BitSetsIterator rather than the per-segment anonymous iterator.
+      LeafReaderContext ctx = dummyIndexReader(totalBits).getContext();
+      doTestIteratorEqual(ref, () -> bds.iterator(ctx), () -> new BitSetIterator(ref, 0));
+    }
+  }
+
+  /**
    * End-to-end test showing that the {@link BitDocSet.BitSetsIterator#nextDoc()} wrap-around bug
    * propagates through {@link DocSetUtil#toSmallSet} into a {@link SortedIntDocSet} and ultimately
    * produces a negative segment-local docID when iterated via {@link
