@@ -899,4 +899,127 @@ public class TestDocSet extends SolrTestCase {
     }
     return ret;
   }
+
+  /**
+   * {@link BitDocSet.BitSetsIterator#nextDoc()} had a bug where {@code next & BLOCK_BIT_MASK}
+   * evaluates to {@code 0} when {@code next} is an exact multiple of {@code MAX_BLOCK_BITS} (i.e.,
+   * immediately after the last bit of a partition). This causes {@code nextSetBit(0)} to be called
+   * on the current exhausted partition, returning an already-seen bit out of order.
+   */
+  public void testBitSetsIteratorNextDocPartitionBoundary() {
+    final int mbb = BitDocSet.MAX_BLOCK_BITS;
+
+    // Bit 1 sits near the start of partition 0 and will be re-returned by the wrap-around bug:
+    // after emitting mbb-1 (last bit of p0), next=mbb, next&BLOCK_BIT_MASK=0, so
+    // nextSetBit(0) is called on p0 again and finds bit 1 a second time.
+    FixedBitSet ref = new FixedBitSet(mbb * 2);
+    ref.set(1);
+    ref.set(mbb - 1); // last bit of partition 0 — triggers the boundary
+    ref.set(mbb);
+    ref.set(mbb + 1);
+
+    FixedBitSets fbs = partition(ref);
+    int sz = ref.cardinality();
+    BitDocSet.BitSetsIterator iter = new BitDocSet.BitSetsIterator(fbs.parts, mbb * 2, sz);
+
+    int prev = -1;
+    int count = 0;
+    int doc;
+    while ((doc = iter.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+      assertTrue("nextDoc returned out-of-order docID: prev=" + prev + " doc=" + doc, doc > prev);
+      assertTrue("nextDoc returned bit not in reference set: " + doc, ref.get(doc));
+      prev = doc;
+      count++;
+    }
+    assertEquals("nextDoc returned wrong number of docs (duplicate or missing)", sz, count);
+  }
+
+  /**
+   * {@link BitDocSet.BitSetsIterator#advance(int)} had two bugs: (1) {@code target &
+   * BLOCK_BIT_MASK} was used without first jumping {@code outerIdx} to the correct partition for
+   * {@code target}, so the initial {@code nextSetBit} call lands on the wrong partition; and (2)
+   * {@code pos += partitionBase} is inside the {@code while} body where it is a no-op (immediately
+   * overwritten by the next condition evaluation), but is absent <em>after</em> the {@code while},
+   * so when a bit is found the returned value is the local partition index rather than the global
+   * doc ID.
+   */
+  public void testBitSetsIteratorAdvancePartitionBoundary() throws IOException {
+    final int mbb = BitDocSet.MAX_BLOCK_BITS;
+
+    // advance(mbb+50) should skip past mbb+30 (below target) and return mbb+60.
+    // Bug (1) causes the search to start from local index 0 in partition 1 instead of local 50,
+    // so mbb+30 is found instead of mbb+60.
+    // Bug (2) causes partitionBase to not be added to pos after the while, so the returned value
+    // is the raw local index (30 or 60) rather than the global doc ID.
+    FixedBitSet ref = new FixedBitSet(mbb * 2);
+    ref.set(5); // a bit in partition 0
+    ref.set(mbb + 30); // in partition 1, below the advance target
+    ref.set(mbb + 60); // in partition 1, above the advance target
+
+    FixedBitSets fbs = partition(ref);
+    BitDocSet.BitSetsIterator iter =
+        new BitDocSet.BitSetsIterator(fbs.parts, mbb * 2, ref.cardinality());
+
+    int doc = iter.advance(mbb + 50);
+    assertEquals("advance(mbb+50) should return first set bit >= target", mbb + 60, doc);
+  }
+
+  /**
+   * End-to-end test showing that the {@link BitDocSet.BitSetsIterator#nextDoc()} wrap-around bug
+   * propagates through {@link DocSetUtil#toSmallSet} into a {@link SortedIntDocSet} and ultimately
+   * produces a negative segment-local docID when iterated via {@link
+   * DocSet#iterator(LeafReaderContext)}.
+   *
+   * <p>{@code toSmallSet} calls {@code nextDoc()} exactly {@code sz} times. The wrap-around bug
+   * causes it to re-return global doc 10 instead of advancing to partition 1, so the {@code
+   * SortedIntDocSet} contains {@code [10, mbb-2, mbb-1, 10]} rather than {@code [10, mbb-2, mbb-1,
+   * mbb]}.
+   *
+   * <p>{@code getOrdIdxMap}'s binary search on that unsorted array assigns docs[1..3]={@code
+   * [mbb-2, mbb-1, 10]} to segment 1 (base=20), so the stale entry produces local docID = 10-20 =
+   * -10.
+   *
+   * <p>Why {@code ordIdxMap[0]=1}: {@code lastLimitDoc=docs[0]=10 < max_seg0=20}, so a binary
+   * search fires. In {@code [mbb-2, mbb-1, 10]} all three values are {@code >= 20}, so the search
+   * immediately backs off to limit=1. Seg 1 then gets the remaining docs[1..3].
+   */
+  public void testBitSetsIteratorNextDocStaleDocNegativeSegmentLocal() throws IOException {
+    final int mbb = BitDocSet.MAX_BLOCK_BITS;
+
+    FixedBitSet ref = new FixedBitSet(mbb * 2);
+    ref.set(10);
+    ref.set(mbb - 2);
+    ref.set(mbb - 1); // last bit of partition 0 — triggers wrap-around back to bit 10
+    ref.set(mbb); //     first bit of partition 1 (never reached due to bug)
+
+    DocSet sids = DocSetUtil.toSmallSet(new BitDocSet(partition(ref)));
+
+    // seg 0: base=0,  max=20  (10 < 20, so binary search fires and backs off to limit=1)
+    // seg 1: base=20, max=mbb (gets docs[1..3]; stale=10 gives local 10-20=-10)
+    // seg 2: base=mbb (empty)
+    IndexReader reader =
+        new MultiReader(
+            new IndexReader[] {
+              dummyIndexReader(20), dummyIndexReader(mbb - 20), dummyIndexReader(1),
+            });
+    LeafReaderContext seg1Ctx = reader.getContext().leaves().get(1);
+    assertEquals(20, seg1Ctx.docBase);
+
+    DocIdSetIterator seg1Iter = sids.iterator(seg1Ctx);
+    assertNotNull("segment 1 should have docs assigned to it", seg1Iter);
+    int prev = -1;
+    int doc;
+    while ((doc = seg1Iter.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+      assertTrue(
+          "out-of-order (or negative) segment-local docID: prev="
+              + prev
+              + " doc="
+              + doc
+              + " (base="
+              + seg1Ctx.docBase
+              + ")",
+          doc > prev);
+      prev = doc;
+    }
+  }
 }
