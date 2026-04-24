@@ -568,11 +568,12 @@ public class BitDocSet extends DocSet {
         pos = max;
         return NO_MORE_DOCS;
       } else {
-        while ((pos = bs.nextSetBit(next & BLOCK_BIT_MASK)) == NO_MORE_DOCS) {
+        int nextInner = next - partitionBase;
+        while (nextInner >= MAX_BLOCK_BITS || (pos = bs.nextSetBit(nextInner)) == NO_MORE_DOCS) {
           if (++outerIdx < bss.length) {
             bs = bss[outerIdx];
-            next = outerIdx << BIT_SHIFT;
-            partitionBase = next;
+            partitionBase = outerIdx << BIT_SHIFT;
+            nextInner = 0;
           } else {
             pos = max - partitionBase;
             break;
@@ -589,17 +590,21 @@ public class BitDocSet extends DocSet {
         pos = max;
         return NO_MORE_DOCS;
       } else {
-        while ((pos = bs.nextSetBit(target & BLOCK_BIT_MASK)) == NO_MORE_DOCS) {
+        outerIdx = target >> BIT_SHIFT;
+        bs = bss[outerIdx];
+        partitionBase = outerIdx << BIT_SHIFT;
+        int nextInner = target & BLOCK_BIT_MASK;
+        while (nextInner >= MAX_BLOCK_BITS || (pos = bs.nextSetBit(nextInner)) == NO_MORE_DOCS) {
           if (++outerIdx < bss.length) {
             bs = bss[outerIdx];
-            target = outerIdx << BIT_SHIFT;
-            partitionBase = target;
+            partitionBase = outerIdx << BIT_SHIFT;
+            nextInner = 0;
           } else {
             pos = max - partitionBase;
             break;
           }
-          pos += partitionBase;
         }
+        pos += partitionBase;
         return pos < max ? pos : NO_MORE_DOCS;
       }
     }
