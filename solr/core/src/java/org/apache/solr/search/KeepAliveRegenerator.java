@@ -19,7 +19,9 @@ package org.apache.solr.search;
 import static org.apache.solr.search.DocSetUtil.copyBitRange;
 import static org.apache.solr.search.OrdMapRegenerator.getRegenKeepAliveNanos;
 
+import java.io.Closeable;
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
 import java.nio.IntBuffer;
 import java.util.AbstractMap;
 import java.util.Collections;
@@ -55,10 +57,13 @@ import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.automaton.ByteRunAutomaton;
+import org.apache.solr.common.AlreadyClosedException;
 import org.apache.solr.common.MapWriter;
 import org.apache.solr.core.SolrConfig;
 import org.apache.solr.search.SolrCache.MetaEntry;
 import org.apache.solr.util.IOFunction;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A regenerator capable of lazily warming entries where possible (passing stale entries along
@@ -94,6 +99,8 @@ import org.apache.solr.util.IOFunction;
  */
 public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     extends MetaCacheRegenerator<Query, DocSet, M> {
+
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private static final int DEFAULT_REGEN_KEEPALIVE_MINUTES = 2;
   private static final long DEFAULT_REGEN_KEEPALIVE_NANOS =
@@ -231,6 +238,10 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     private final DoubleAdder partialHitsRatio;
     private final long ramBytesUsed;
     private long accessTimestampNanos;
+    // non-null only for entries created via the template constructor (lazy warming path); holds a
+    // refcount on the stale DocSet to keep it alive for reconstruction, released after
+    // reconstruction completes or when this entry is evicted without ever being accessed.
+    private final AtomicReference<Closeable> staleHold = new AtomicReference<>(UNINITIALIZED);
 
     public KeepAliveSegAwareValue(
         SegmentMap segMap, DocSet val, LongAdder partialHits, DoubleAdder partialHitsRatio) {
@@ -259,7 +270,8 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     }
 
     public KeepAliveSegAwareValue(
-        KeepAliveSegAwareValue template, LongAdder partialHits, DoubleAdder partialHitsRatio) {
+        KeepAliveSegAwareValue template, LongAdder partialHits, DoubleAdder partialHitsRatio)
+        throws AlreadyClosedException {
       AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> entry =
           template.ref.get();
       ref = new AtomicReference<>(template.ref.get());
@@ -269,6 +281,17 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
         ramBytesUsed = template.ramBytesUsed();
       } else {
         ramBytesUsed = BASE_RAM_BYTES_USED + val.ramBytesUsed();
+        // If we already have a DocSet, opportunistically eagerly acquire it here so that
+        // it stays alive until we've used it for reconstruction (or until we're evicted
+        // without being accessed). If we fail to acquire, that's probably because the old
+        // entry was concurrently evicted from its cache. This should be rare, but in such
+        // cases we throw `AlreadyClosedException` to prevent the entry pointlessly consuming
+        // space in entry count and ramBytesAccounting.
+        Closeable release = val.acquire();
+        if (release == null) {
+          throw new AlreadyClosedException("stale docset already closed");
+        }
+        staleHold.set(release);
       }
       this.accessTimestampNanos = template.accessTimestampNanos;
       this.partialHits = partialHits;
@@ -278,6 +301,28 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     @Override
     public KeepAliveSegAwareValue metaClone(DocSet val) {
       throw new UnsupportedOperationException();
+    }
+
+    private static final Closeable UNINITIALIZED = () -> {};
+
+    @Override
+    public void close() throws IOException {
+      log.warn("should instead call close(SegmentMap)");
+      try (Closeable hold = staleHold.getAndSet(null)) {
+        // we can at least close stale, though
+      }
+    }
+
+    @Override
+    public void close(SegmentMap segMap) throws IOException {
+      AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> ref = this.ref.get();
+      try (Closeable hold = staleHold.getAndSet(null);
+          Closeable fresh = segMap == ref.getKey() ? ref.getValue().getNow(null) : null) {
+        // NOTE: there's a race condition here, where a value in the process of computing may not
+        // get closed. This is acceptable. DocSets usage is varied enough that it's impractical to
+        // try to completely control the lifecycle, so we won't ever be able to get away without
+        // ReferenceQueue as backup; so we knowingly let this "leak" for the sake of simplicity.
+      }
     }
 
     @Override
@@ -314,15 +359,23 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
             DocSet stale = CaffeineCache.getV(key, (k) -> null, ref.getValue(), NOOP);
             DocSet computed;
             if (stale == null) {
-              // nothing to reconstruct from; just run the query
+              // nothing to reconstruct from (stale DocSet was null, or could not be acquired at
+              // warming time because it was already closed); just run the query from scratch.
               computed = mappingFunction.apply(key);
               f.complete(computed);
             } else {
-              Query frankenstein = new FrankensteinQuery(key, ref.getKey().segments, stale);
-              computed = mappingFunction.apply(frankenstein);
+              try (Closeable release = acquireLazily(stale)) {
+                if (release == null) {
+                  computed = mappingFunction.apply(key);
+                } else {
+                  computed =
+                      mappingFunction.apply(
+                          new FrankensteinQuery(key, ref.getKey().segments, stale));
+                  partialHits.increment();
+                  partialHitsRatio.add(ref.getKey().getOverlap(segMap.key));
+                }
+              }
               f.complete(computed); // asap
-              partialHits.increment();
-              partialHitsRatio.add(ref.getKey().getOverlap(segMap.key));
             }
             return computed;
           } catch (TimeLimitingCollector.TimeExceededException
@@ -360,6 +413,23 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
                 }
               });
         }
+      }
+    }
+
+    private Closeable acquireLazily(DocSet stale) {
+      Closeable extant = staleHold.get();
+      if (extant == null) {
+        // probably closing, but it doesn't hurt to try to acquire
+        return stale.acquire();
+      } else if (staleHold.compareAndSet(extant, null)) {
+        if (extant == UNINITIALIZED) {
+          return stale.acquire();
+        } else {
+          return extant;
+        }
+      } else {
+        // probably closing, but it doesn't hurt to try to acquire
+        return stale.acquire();
       }
     }
 
@@ -462,10 +532,9 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
           (q) -> {
             AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> ref =
                 metaEntry.ref.get();
-            Query frankenstein;
+            DocSet stale;
             try {
-              frankenstein =
-                  new FrankensteinQuery(query, ref.getKey().segments, ref.getValue().get());
+              stale = ref.getValue().get();
             } catch (InterruptedException e) {
               Thread.currentThread().interrupt();
               throw new RuntimeException(e);
@@ -477,7 +546,16 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
                 throw new RuntimeException(e);
               }
             }
-            DocSet docSet = newSearcher.getDocSetNC(frankenstein, null);
+            DocSet docSet;
+            try (Closeable release = stale.acquire()) {
+              if (release == null) {
+                docSet = newSearcher.getDocSetNC(query, null);
+              } else {
+                docSet =
+                    newSearcher.getDocSetNC(
+                        new FrankensteinQuery(query, ref.getKey().segments, stale), null);
+              }
+            }
             return new KeepAliveSegAwareValue(
                 newSearcher.getSegmentMap(),
                 docSet,
@@ -489,8 +567,12 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     }
 
     // the lazy way. Just pass the stale cache entry along in case it's queried later
-    c.computeIfAbsent(
-        query, (q) -> new KeepAliveSegAwareValue(metaEntry, partialHits, partialHitsRatio));
+    try {
+      c.computeIfAbsent(
+          query, (q) -> new KeepAliveSegAwareValue(metaEntry, partialHits, partialHitsRatio));
+    } catch (AlreadyClosedException ignore) {
+      // ignore
+    }
     return true;
   }
 

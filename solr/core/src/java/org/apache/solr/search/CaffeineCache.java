@@ -209,7 +209,11 @@ public class CaffeineCache<K, V> extends SolrCacheBase
     }
     if (value instanceof Closeable) {
       try {
-        ((Closeable) value).close();
+        if (value instanceof MetaEntry) {
+          ((MetaEntry<?, ?, ?>) value).close(getSegmentMap());
+        } else {
+          ((Closeable) value).close();
+        }
       } catch (IOException e) {
         log.warn("error closing cache object", e);
       }

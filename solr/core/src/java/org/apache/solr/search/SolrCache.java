@@ -16,6 +16,7 @@
  */
 package org.apache.solr.search;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Map;
@@ -240,7 +241,7 @@ public interface SolrCache<K, V> extends SolrInfoBean {
    * Intended for use as a cache value that wraps a raw value of type <code>V</code> in a {@link
    * MetaEntry} for tracking additional per-entry metadata.
    */
-  interface MetaEntry<K, V, E extends MetaEntry<K, V, E>> extends Accountable {
+  interface MetaEntry<K, V, E extends MetaEntry<K, V, E>> extends Accountable, Closeable {
     /**
      * Returns a {@link MetaEntry} instance of the same concrete type, wrapping the specified raw
      * value. The returned value should inherit any relevant metadata from <code>this</code>
@@ -257,6 +258,12 @@ public interface SolrCache<K, V> extends SolrInfoBean {
       } catch (IOException ex) {
         throw new UncheckedIOException(ex);
       }
+    }
+
+    default void close() throws IOException {}
+
+    default void close(SegmentMap segMap) throws IOException {
+      close();
     }
   }
 }
