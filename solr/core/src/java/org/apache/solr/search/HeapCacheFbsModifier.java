@@ -454,7 +454,7 @@ public class HeapCacheFbsModifier
     long allocated = h.allocated.sum();
     long exhausted = h.exhausted.sum();
     int extant = h.top.get();
-    int avail = extant < 0 ? ~extant : extant;
+    long avail = extant < 0 ? ~extant : extant;
     map.put("offheap", h.offheap);
     map.put("outstandingRefCount", h.refHandler.getOutstandingSize());
     map.put("activeRefProcessingThreads", h.refHandler.activeThreadCount());
