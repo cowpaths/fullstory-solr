@@ -226,6 +226,7 @@ public class FixedBitSets implements Bits, Accountable, Closeable {
   }
 
   public int cardinality() {
+    check();
     return Math.toIntExact(Arrays.stream(parts).mapToLong(FixedBitSet::cardinality).sum());
   }
 
