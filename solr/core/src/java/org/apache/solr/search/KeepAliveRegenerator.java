@@ -306,6 +306,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     private static final Closeable UNINITIALIZED = () -> {};
 
     @Override
+    @SuppressWarnings("try")
     public void close() throws IOException {
       log.warn("should instead call close(SegmentMap)");
       try (Closeable hold = staleHold.getAndSet(null)) {
@@ -314,6 +315,7 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
     }
 
     @Override
+    @SuppressWarnings("try")
     public void close(SegmentMap segMap) throws IOException {
       AbstractMap.SimpleImmutableEntry<SegmentMap, CompletableFuture<DocSet>> ref = this.ref.get();
       try (Closeable hold = staleHold.getAndSet(null);
