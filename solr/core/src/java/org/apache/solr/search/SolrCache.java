@@ -260,6 +260,7 @@ public interface SolrCache<K, V> extends SolrInfoBean {
       }
     }
 
+    @Override
     default void close() throws IOException {}
 
     default void close(SegmentMap segMap) throws IOException {
