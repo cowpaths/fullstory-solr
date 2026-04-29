@@ -53,13 +53,13 @@ import org.apache.solr.schema.TrieDateField;
 import org.apache.solr.schema.TrieField;
 import org.apache.solr.search.DocIterator;
 import org.apache.solr.search.DocSet;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.apache.solr.search.DocSetBuilder;
 import org.apache.solr.search.ExtendedQuery;
 import org.apache.solr.search.SyntaxError;
 import org.apache.solr.search.WrappedQuery;
 import org.apache.solr.util.DateMathParser;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 class FacetRangeProcessor extends FacetProcessor<FacetRange> {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
@@ -886,9 +886,9 @@ class FacetRangeProcessor extends FacetProcessor<FacetRange> {
       if (doc >= ctxThreshold) {
         do {
           if (!ctxIt.hasNext()) {
-            if (log.isWarnEnabled()) {
-              log.warn(
-                  "dvRangeStats: doc {} is beyond all segments (indexReader.maxDoc()={} (lastDocBase={}, lastMaxDoc={}),"
+            if (log.isErrorEnabled()) {
+              log.error(
+                  "dvRangeStats NoSuchElementException: doc {} is beyond all segments (indexReader.maxDoc()={} (lastDocBase={}, lastMaxDoc={}),"
                       + " fcontext.base.size()={}, fcontext.base.class={}); skipping remaining docs",
                   doc,
                   maxDoc,

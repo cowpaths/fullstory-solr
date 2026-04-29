@@ -261,10 +261,10 @@ public class KeepAliveRegenerator<M extends MetaEntry<Query, DocSet, M>>
         LongAdder partialHits,
         DoubleAdder partialHitsRatio) {
       if (val.acquire() == null) {
-        // SolrRequestInfo is not null during warming. This ctor should only be invoked during warming,
-        // and because we are placing directly into cache, it's our responsibility to incref/acquire
-        // a ref here on behalf of the cache. The default refcount=1 from the DocSet ctor will be
-        // released by close hook on the SolrRequestInfo.
+        // SolrRequestInfo is not null during warming. This ctor should only be invoked during
+        // warming, and because we are placing directly into cache, it's our responsibility to
+        // incref/acquire a ref here on behalf of the cache. The default refcount=1 from the
+        // DocSet ctor will bereleased by close hook on the SolrRequestInfo.
         // NOTE: we're purposely leaking this ref. It will be closed in the cache's `onRemoval()`
         // method (which invokes `DocSet.close()`).
         throw new IllegalStateException("this should never happen");
