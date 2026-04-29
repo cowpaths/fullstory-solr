@@ -20,6 +20,7 @@ package org.apache.solr.search.facet;
 import static org.apache.solr.search.facet.FacetContext.SKIP_FACET;
 
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.EnumSet;
@@ -52,6 +53,8 @@ import org.apache.solr.schema.TrieDateField;
 import org.apache.solr.schema.TrieField;
 import org.apache.solr.search.DocIterator;
 import org.apache.solr.search.DocSet;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.solr.search.DocSetBuilder;
 import org.apache.solr.search.ExtendedQuery;
 import org.apache.solr.search.SyntaxError;
@@ -59,6 +62,8 @@ import org.apache.solr.search.WrappedQuery;
 import org.apache.solr.util.DateMathParser;
 
 class FacetRangeProcessor extends FacetProcessor<FacetRange> {
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+
   // TODO: the code paths for initial faceting, vs refinement, are very different...
   // TODO: ...it might make sense to have seperate classes w/a common base?
   // TODO: let FacetRange.createFacetProcessor decide which one to instantiate?
@@ -840,7 +845,6 @@ class FacetRangeProcessor extends FacetProcessor<FacetRange> {
     final IndexReader indexReader = fcontext.searcher.getIndexReader();
     final int maxDoc = indexReader.maxDoc();
     final Iterator<LeafReaderContext> ctxIt = indexReader.leaves().iterator();
-    LeafReaderContext ctx = null;
     NumericDocValues longs = null;
     final int numSlots = rangeList.size() + otherList.size();
     DocSetBuilder[] setBuilders = hasSubFacets ? new DocSetBuilder[numSlots] : null;
@@ -873,12 +877,29 @@ class FacetRangeProcessor extends FacetProcessor<FacetRange> {
           }
         };
 
+    LeafReaderContext ctx = ctxIt.hasNext() ? ctxIt.next() : null;
+    forEachGlobalDoc:
     for (DocIterator docsIt = fcontext.base.iterator(); docsIt.hasNext(); ) {
+      assert ctx != null; // otherwise `docsIt.hasNext()` would be false!
       final int doc = docsIt.nextDoc();
-      if (ctx == null || doc >= ctx.docBase + ctx.reader().maxDoc()) {
+      if (doc >= ctx.docBase + ctx.reader().maxDoc()) {
         do {
+          if (!ctxIt.hasNext()) {
+            if (log.isWarnEnabled()) {
+              log.warn(
+                  "dvRangeStats: doc {} is beyond all segments (indexReader.maxDoc()={} (lastDocBase={}, lastMaxDoc={}),"
+                      + " fcontext.base.size()={}, fcontext.base.class={}); skipping remaining docs",
+                  doc,
+                  maxDoc,
+                  ctx.docBase,
+                  ctx.reader().maxDoc(),
+                  fcontext.base.size(),
+                  fcontext.base.getClass().getCanonicalName());
+            }
+            break forEachGlobalDoc;
+          }
           ctx = ctxIt.next();
-        } while (ctx == null || doc >= ctx.docBase + ctx.reader().maxDoc());
+        } while (doc >= ctx.docBase + ctx.reader().maxDoc());
         assert doc >= ctx.docBase;
         setNextReader(ctx);
         switch (numericType) {
