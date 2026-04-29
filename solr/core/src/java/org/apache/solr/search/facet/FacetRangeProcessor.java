@@ -878,11 +878,12 @@ class FacetRangeProcessor extends FacetProcessor<FacetRange> {
         };
 
     LeafReaderContext ctx = ctxIt.hasNext() ? ctxIt.next() : null;
+    int ctxThreshold = ctx == null ? -1 : ctx.docBase + ctx.reader().maxDoc();
     forEachGlobalDoc:
     for (DocIterator docsIt = fcontext.base.iterator(); docsIt.hasNext(); ) {
       assert ctx != null; // otherwise `docsIt.hasNext()` would be false!
       final int doc = docsIt.nextDoc();
-      if (doc >= ctx.docBase + ctx.reader().maxDoc()) {
+      if (doc >= ctxThreshold) {
         do {
           if (!ctxIt.hasNext()) {
             if (log.isWarnEnabled()) {
@@ -899,7 +900,8 @@ class FacetRangeProcessor extends FacetProcessor<FacetRange> {
             break forEachGlobalDoc;
           }
           ctx = ctxIt.next();
-        } while (doc >= ctx.docBase + ctx.reader().maxDoc());
+          ctxThreshold = ctx.docBase + ctx.reader().maxDoc();
+        } while (doc >= ctxThreshold);
         assert doc >= ctx.docBase;
         setNextReader(ctx);
         switch (numericType) {
