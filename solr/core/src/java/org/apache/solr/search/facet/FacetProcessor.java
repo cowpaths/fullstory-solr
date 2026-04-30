@@ -17,6 +17,7 @@
 package org.apache.solr.search.facet;
 
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
@@ -43,9 +44,12 @@ import org.apache.solr.search.QueryUtils;
 import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.search.SyntaxError;
 import org.apache.solr.search.facet.SlotAcc.SlotContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Base abstraction for a class that computes facets. This is fairly internal to the module. */
 public abstract class FacetProcessor<T extends FacetRequest> {
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   protected SimpleOrderedMap<Object> response;
   protected FacetContext fcontext;
   // TODO : I'm not sure this needs to be generic but come back to this later
@@ -378,10 +382,25 @@ public abstract class FacetProcessor<T extends FacetRequest> {
     int segBase = 0;
     int segMax;
     int adjustedMax = 0;
+    forEachGlobalDoc:
     for (DocIterator docsIt = docs.iterator(); docsIt.hasNext(); ) {
       final int doc = docsIt.nextDoc();
       if (doc >= adjustedMax) {
         do {
+          if (!ctxIt.hasNext()) {
+            if (log.isErrorEnabled()) {
+              log.error(
+                  "NoSuchElementException: doc {} is beyond all segments (indexReader.maxDoc()={} (lastDocBase={}, lastMaxDoc={}),"
+                      + " fcontext.base.size()={}, fcontext.base.class={}); skipping remaining docs",
+                  doc,
+                  searcher.getIndexReader().maxDoc(),
+                  ctx == null ? -1 : ctx.docBase,
+                  ctx == null ? -1 : ctx.reader().maxDoc(),
+                  fcontext.base.size(),
+                  fcontext.base.getClass().getCanonicalName());
+            }
+            break forEachGlobalDoc;
+          }
           ctx = ctxIt.next();
           if (ctx == null) {
             // should be impossible
