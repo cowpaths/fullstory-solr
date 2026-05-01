@@ -155,7 +155,7 @@ public class HeapCacheFbsModifier
   private static final long TPS;
   private static final long TPS_OFFHEAP;
 
-  private static final boolean STATIC_HUGEPAGES;
+  private final boolean staticHugePages;
 
   public static boolean isEnabled() {
     return TPS > 0 || TPS_OFFHEAP > 0;
@@ -209,6 +209,7 @@ public class HeapCacheFbsModifier
     int numPartitions = ((nBlocks - 1) / MAX_BLOCKS_PER_PARTITION) + 1;
     pool = new ByteBufferStruct[nBlocks];
     int blockIdx = 0;
+    boolean supportMadvRemove = false;
     if (offheap) {
       poolOffheap(nBlocks, numPartitions, blockIdx, pool);
     } else if (POOL_BACKING_FILE.isEmpty()) {
@@ -219,7 +220,17 @@ public class HeapCacheFbsModifier
       } catch (IOException e) {
         throw new UncheckedIOException(e);
       }
+      // probe MADV_REMOVE on pool[0]: it is the actual MAP_SHARED buffer we'll use in release()
+      supportMadvRemove = madvise(pool[0], MADV_REMOVE);
+      if (supportMadvRemove) {
+        log.info("enabled support for MADV_REMOVE");
+      } else {
+        log.warn("disabling support for MADV_REMOVE");
+      }
     }
+    staticHugePages =
+        BLOCK_SIZE_BYTES == ALIGN_SIZE && SUPPORT_MADV_POPULATE_WRITE && supportMadvRemove;
+    log.info("staticHugePages={}", staticHugePages);
     top = new AtomicInteger(nBlocks);
     refHandler =
         new ReferenceHandler<>(
@@ -270,7 +281,7 @@ public class HeapCacheFbsModifier
   private static volatile double cachedCpuLoad;
 
   private void postCollect() throws InterruptedException {
-    if (STATIC_HUGEPAGES) return;
+    if (staticHugePages) return;
     double cpuLoad = getCpuLoad();
     if (throttleIfNecessary(cpuLoad) > 0) {
       throttleCount.increment();
@@ -629,7 +640,7 @@ public class HeapCacheFbsModifier
     for (; ; ) {
       ByteBufferStruct[] toRelease = releaseQueue.take();
       release(toRelease);
-      if (!STATIC_HUGEPAGES) {
+      if (!staticHugePages) {
         // NOTE: don't increment `throttleCount` here, it would double-count with RefQueue
         // processing threads, which keeps count consistent.
         double cpuLoad = getCpuLoad();
@@ -656,10 +667,10 @@ public class HeapCacheFbsModifier
           bb.buf.clear();
         }
         madviseRelease(bb);
-      } else if (STATIC_HUGEPAGES) {
+      } else if (staticHugePages) {
         bb.buf.clear();
-        if (!madvise(bb, MADV_DONTNEED) || !madvise(bb, MADV_POPULATE_WRITE)) {
-          // if DONTNEED failed, pages still hold dirty data and must be explicitly zeroed;
+        if (!madvise(bb, MADV_REMOVE) || !madvise(bb, MADV_POPULATE_WRITE)) {
+          // if REMOVE failed, pages still hold dirty data and must be explicitly zeroed;
           // if POPULATE_WRITE failed (e.g., hugetlb pool temporarily exhausted by external
           // process), fall back to explicit zeroing to keep fault cost off the user thread
           clear(bb);
@@ -842,6 +853,7 @@ public class HeapCacheFbsModifier
   private static final int MADV_FREE = 8;
   private static final int MADV_DONTNEED = 4;
   private static final int MADV_WILLNEED = 3;
+  private static final int MADV_REMOVE = 9;
   private static final int MADV_POPULATE_WRITE = 23;
 
   private static final boolean SUPPORT_MADV;
@@ -886,13 +898,11 @@ public class HeapCacheFbsModifier
     long onHeapTarget = getTargetPoolSize(POOL_ONHEAP_TARGET_MB_PROPNAME, maxMemory, 16);
     if (POOL_BACKING_FILE.isEmpty() || EnvUtils.getProperty("tests.seed") != null) {
       TPS = onHeapTarget;
-      STATIC_HUGEPAGES = false;
     } else {
       try {
         if (!"hugetlbfs"
             .equals(Files.getFileStore(Path.of(POOL_BACKING_FILE).getParent()).type())) {
           TPS = onHeapTarget;
-          STATIC_HUGEPAGES = false;
         } else {
           // if hugetlbfs, then just use all the remaining allocated hugepages
           Path freePath = HUGEPAGES_SYSFS_PATH.resolve("free_hugepages");
@@ -901,8 +911,6 @@ public class HeapCacheFbsModifier
           long resv = Long.parseLong(Files.readString(resvPath).trim());
           long availableHugePages = free - resv;
           TPS = availableHugePages << 21; // 2M per hugepage
-          STATIC_HUGEPAGES = BLOCK_SIZE_BYTES == ALIGN_SIZE && SUPPORT_MADV_POPULATE_WRITE;
-          log.info("STATIC_HUGEPAGES={}", STATIC_HUGEPAGES);
         }
       } catch (IOException e) {
         throw new UncheckedIOException(e);
