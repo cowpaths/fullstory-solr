@@ -466,6 +466,7 @@ public abstract class FacetProcessor<T extends FacetRequest> {
       } else {
         result = fcontext.searcher.getDocSet(q, fcontext.base);
       }
+      // TODO: result.size() is _not_ free, right?
       count = result.size(); // don't really need this if we are skipping, but it's free.
     } else {
       if (q == null) {
