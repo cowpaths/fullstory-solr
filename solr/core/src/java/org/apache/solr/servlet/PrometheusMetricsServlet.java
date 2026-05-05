@@ -38,10 +38,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import javax.servlet.ServletOutputStream;
 import javax.servlet.UnavailableException;
 import javax.servlet.WriteListener;
@@ -53,6 +55,7 @@ import org.apache.solr.client.solrj.cloud.SolrCloudManager;
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.cloud.ClusterProperties;
 import org.apache.solr.common.params.CommonParams;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.core.CoreContainer;
 import org.apache.solr.storage.CompressingDirectory;
@@ -67,24 +70,13 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
+  private static final String ENABLE_GLOBAL_CACHES_PROPNAME = "solr.fs.enableGlobalCaches";
+  private static final boolean ENABLE_GLOBAL_CACHES =
+      EnvUtils.getPropertyAsBool(ENABLE_GLOBAL_CACHES_PROPNAME, false);
+
   // values less than this threshold are considered invalid; mark the invalid values instead of
   // failing the call.
   private static final Integer INVALID_NUMBER = -1;
-
-  private final List<MetricsApiCaller> callers = getCallers();
-
-  private List<MetricsApiCaller> getCallers() {
-    return List.of(
-        new GarbageCollectorMetricsApiCaller(),
-        new MemoryMetricsApiCaller(),
-        new OsMetricsApiCaller(),
-        new ThreadMetricsApiCaller(),
-        new StatusCodeMetricsApiCaller(),
-        new NodeMetricsApiCaller(),
-        new AggregateMetricsApiCaller(),
-        new CoresMetricsApiCaller(),
-        new CollectionCacheMetricsApiCaller());
-  }
 
   private final Map<String, PrometheusMetricType> cacheMetricTypes =
       Map.of(
@@ -94,6 +86,25 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
           "hits", PrometheusMetricType.COUNTER,
           "puts", PrometheusMetricType.COUNTER,
           "evictions", PrometheusMetricType.COUNTER);
+
+  private final List<MetricsApiCaller> callers = getCallers();
+
+  private List<MetricsApiCaller> getCallers() {
+    return List.of(
+        Stream.of(
+                new GarbageCollectorMetricsApiCaller(),
+                new MemoryMetricsApiCaller(),
+                new OsMetricsApiCaller(),
+                new ThreadMetricsApiCaller(),
+                new StatusCodeMetricsApiCaller(),
+                new NodeMetricsApiCaller(),
+                ENABLE_GLOBAL_CACHES ? new GlobalCacheMetricsApiCaller(cacheMetricTypes) : null,
+                new AggregateMetricsApiCaller(),
+                new CoresMetricsApiCaller(),
+                new CollectionCacheMetricsApiCaller())
+            .filter(Objects::nonNull)
+            .toArray(MetricsApiCaller[]::new));
+  }
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response)
@@ -109,7 +120,9 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
     }
     getCompressingDirectoryPoolMetrics(metrics);
     getCircuitBreakerMetrics(metrics);
-    getSharedCacheMetrics(metrics, getSolrDispatchFilter(request).getCores(), cacheMetricTypes);
+    if (!ENABLE_GLOBAL_CACHES) {
+      getSharedCacheMetrics(metrics, getSolrDispatchFilter(request).getCores(), cacheMetricTypes);
+    }
     metrics.add(
         new PrometheusMetric(
             "metrics_qtime", PrometheusMetricType.GAUGE, "QTime for calling metrics api", qTime));
@@ -628,6 +641,64 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
                 PrometheusMetricType.COUNTER,
                 "cumulative count of requests to shard would have cancelled due to slow node but did not, due to dry-run mode",
                 value));
+      }
+    }
+  }
+
+  static class GlobalCacheMetricsApiCaller extends MetricsByPrefixApiCaller {
+
+    private static final String GLOBAL_CACHE_METRIC_PREFIX = "CACHE.nodeLevelCache/global-";
+
+    private final Map<String, PrometheusMetricType> cacheMetricTypes;
+
+    GlobalCacheMetricsApiCaller(Map<String, PrometheusMetricType> cacheMetricTypes) {
+      super("solr.node", GLOBAL_CACHE_METRIC_PREFIX);
+      this.cacheMetricTypes = cacheMetricTypes;
+    }
+
+    /*
+    "metrics":{
+      "solr.node":{
+      "CACHE.nodeLevelCache/global-filterCache":{
+        "lookups":0,
+        "hits":0,
+        "inserts":0,
+        "evictions":0,
+        "size":0,
+        "ramBytesUsed":576,
+        "maxRamMB":2048,
+         */
+    @Override
+    protected void handle(ResultContext resultContext, JsonNode metrics) throws IOException {
+      List<PrometheusMetric> results = resultContext.resultMetrics;
+      JsonNode parent = metrics.path("solr.node");
+      Iterator<Map.Entry<String, JsonNode>> caches = parent.fields();
+      while (caches.hasNext()) {
+        Map.Entry<String, JsonNode> cacheEntry = caches.next();
+        String cache =
+            cacheEntry
+                .getKey()
+                .substring(GLOBAL_CACHE_METRIC_PREFIX.length())
+                .toLowerCase(Locale.ROOT);
+        Iterator<Map.Entry<String, JsonNode>> fields = cacheEntry.getValue().fields();
+        while (fields.hasNext()) {
+          Map.Entry<String, JsonNode> stat = fields.next();
+          String name = stat.getKey();
+          PrometheusMetricType type = cacheMetricTypes.get(name);
+          if (type != null) {
+            results.add(
+                new PrometheusMetric(
+                    String.format(Locale.ROOT, "cache_%s_%s", cache, name),
+                    type,
+                    String.format(
+                        Locale.ROOT,
+                        "%s %s for global cache %s",
+                        name,
+                        type.getDisplayName(),
+                        cache),
+                    stat.getValue().longValue()));
+          }
+        }
       }
     }
   }
