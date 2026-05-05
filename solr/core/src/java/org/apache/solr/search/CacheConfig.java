@@ -230,6 +230,9 @@ public class CacheConfig implements MapSerializable {
       SolrCache<?, ?> cache = newInstance(core, (Class<? extends SolrCache<?, ?>>) clazz.get());
       persistence[0] = cache.init(args, persistence[0], regenerator);
       SolrCache delegate = cache.toExternal();
+      if (core == null) {
+        return delegate;
+      }
       return new SolrCache() {
         @Override
         @SuppressWarnings("unchecked")
