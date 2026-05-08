@@ -45,6 +45,7 @@ import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.SegmentReader;
 import org.apache.lucene.index.Terms;
+import java.lang.reflect.Method;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.Version;
@@ -173,11 +174,45 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
     SimpleOrderedMap<Object> runningMerges = getMergeInformation(req, infos, mergeCandidates);
     List<LeafReaderContext> leafContexts = searcher.getIndexReader().leaves();
     IndexSchema schema = req.getSchema();
+
+    // Detect TemporalMergePolicy via reflection (it lives in the plugin, not Solr core).
+    // The actual policy may be wrapped in FilterMergePolicy (e.g. SortingMergePolicy), so
+    // we unwrap by walking the "in" field chain.
+    Object temporalPolicy = null;
+    Method getSegmentDateRangeMethod = null;
+    RefCounted<IndexWriter> iwRef2 = core.getSolrCoreState().getIndexWriter(core);
+    try {
+      MergePolicy mp = iwRef2.get().getConfig().getMergePolicy();
+      temporalPolicy = unwrapTemporalMergePolicy(mp);
+      if (temporalPolicy != null) {
+        getSegmentDateRangeMethod =
+            temporalPolicy.getClass().getMethod("getSegmentDateRange", SegmentCommitInfo.class);
+      }
+    } catch (NoSuchMethodException e) {
+      log.debug("TemporalMergePolicy found but getSegmentDateRange method not available", e);
+    } finally {
+      iwRef2.decref();
+    }
+
     for (SegmentCommitInfo segmentCommitInfo : sortable) {
       segmentInfo =
           getSegmentInfo(segmentCommitInfo, withSizeInfo, withFieldInfo, leafContexts, schema);
       if (mergeCandidates.contains(segmentCommitInfo.info.name)) {
         segmentInfo.add("mergeCandidate", true);
+      }
+      if (getSegmentDateRangeMethod != null) {
+        try {
+          Object dateRange = getSegmentDateRangeMethod.invoke(temporalPolicy, segmentCommitInfo);
+          if (dateRange != null) {
+            long minDate = dateRange.getClass().getField("minDate").getLong(dateRange);
+            long maxDate = dateRange.getClass().getField("maxDate").getLong(dateRange);
+            segmentInfo.add("temporalMinDate", new Date(minDate));
+            segmentInfo.add("temporalMaxDate", new Date(maxDate));
+          }
+        } catch (Exception e) {
+          log.debug("Failed to extract temporal date range for segment {}",
+              segmentCommitInfo.info.name, e);
+        }
       }
       segmentInfos.add((String) segmentInfo.get(NAME), segmentInfo);
     }
@@ -456,6 +491,35 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
     } finally {
       refCounted.decref();
     }
+  }
+
+  private static final String TEMPORAL_MERGE_POLICY_CLASS = "mn.fs.solr.index.TemporalMergePolicy";
+
+  /**
+   * Walk the FilterMergePolicy wrapper chain to find a TemporalMergePolicy. Returns null if not
+   * found.
+   */
+  private static Object unwrapTemporalMergePolicy(MergePolicy mp) {
+    MergePolicy current = mp;
+    while (current != null) {
+      if (current.getClass().getName().equals(TEMPORAL_MERGE_POLICY_CLASS)) {
+        return current;
+      }
+      // FilterMergePolicy stores the delegate in a protected field "in"
+      try {
+        java.lang.reflect.Field inField = current.getClass().getSuperclass().getDeclaredField("in");
+        inField.setAccessible(true);
+        Object inner = inField.get(current);
+        if (inner instanceof MergePolicy) {
+          current = (MergePolicy) inner;
+        } else {
+          break;
+        }
+      } catch (NoSuchFieldException | IllegalAccessException e) {
+        break;
+      }
+    }
+    return null;
   }
 
   @Override
