@@ -317,6 +317,7 @@ public class SolrConfig implements MapSerializable {
       queryResultWindowSize = Math.max(1, get("query").get("queryResultWindowSize").intVal(1));
       queryResultMaxDocsCached =
           get("query").get("queryResultMaxDocsCached").intVal(Integer.MAX_VALUE);
+      segmentStats = get("query").get("segmentStats").boolVal(false);
       enableLazyFieldLoading = get("query").get("enableLazyFieldLoading").boolVal(false);
 
       filterCacheConfig =
@@ -702,6 +703,8 @@ public class SolrConfig implements MapSerializable {
   public final boolean useFilterForSortedQuery;
   public final int queryResultWindowSize;
   public final int queryResultMaxDocsCached;
+  /** When true, {@link org.apache.solr.search.SolrIndexSearcher} records per-segment search times. */
+  public final boolean segmentStats;
   public final boolean enableLazyFieldLoading;
 
   // IndexConfig settings
@@ -1041,6 +1044,7 @@ public class SolrConfig implements MapSerializable {
     m.put("useFilterForSortedQuery", useFilterForSortedQuery);
     m.put("queryResultWindowSize", queryResultWindowSize);
     m.put("queryResultMaxDocsCached", queryResultMaxDocsCached);
+    m.put("segmentStats", segmentStats);
     m.put("enableLazyFieldLoading", enableLazyFieldLoading);
     m.put("maxBooleanClauses", booleanQueryMaxClauseCount);
     m.put(MIN_PREFIX_QUERY_TERM_LENGTH, prefixQueryMinPrefixLength);

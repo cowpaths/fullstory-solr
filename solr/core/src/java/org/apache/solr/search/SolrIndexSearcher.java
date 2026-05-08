@@ -94,6 +94,7 @@ import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.util.CollectionUtil;
+import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ObjectReleaseTracker;
 import org.apache.solr.core.DirectoryFactory;
@@ -168,6 +169,9 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   private final LongAdder liveDocsNaiveCacheHitCount = new LongAdder();
   private final LongAdder liveDocsInsertsCount = new LongAdder();
   private final LongAdder liveDocsHitCount = new LongAdder();
+
+  /** Per-segment search timing; non-null only when {@link SolrConfig#segmentStats} is true. */
+  private final ConcurrentHashMap<String, SegmentSearchStats> segmentSearchStats;
 
   // map of generic caches - not synchronized since it's read-only after the constructor.
   private final Map<String, SolrCache<?, ?>> cacheMap;
@@ -378,6 +382,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     this.queryResultWindowSize = solrConfig.queryResultWindowSize;
     this.queryResultMaxDocsCached = solrConfig.queryResultMaxDocsCached;
     this.useFilterForSortedQuery = solrConfig.useFilterForSortedQuery;
+    this.segmentSearchStats =
+        solrConfig.segmentStats ? new ConcurrentHashMap<>() : null;
 
     ordMapCache = buildCache(solrConfig, "ordMapCache", core);
     assert ordMapCache != null;
@@ -484,6 +490,23 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
   public StatsCache getStatsCache() {
     return statsCache;
+  }
+
+  /** Whether {@code <segmentStats>true</segmentStats>} is set under {@code <query>} in solrconfig. */
+  public boolean isSegmentStatsEnabled() {
+    return segmentSearchStats != null;
+  }
+
+  /**
+   * Snapshot of aggregate search time for one segment name, or {@code null} if disabled or no data
+   * yet.
+   */
+  public SegmentSearchStats.Snapshot getSegmentSearchStatsSnapshot(String segmentName) {
+    if (segmentSearchStats == null) {
+      return null;
+    }
+    SegmentSearchStats stats = segmentSearchStats.get(segmentName);
+    return stats == null ? null : stats.snapshot();
   }
 
   public FieldInfos getFieldInfos() {
@@ -782,10 +805,14 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   @Override
   protected void search(List<LeafReaderContext> leaves, Weight weight, Collector collector)
       throws IOException {
+    Collector collectorForSearch =
+        segmentSearchStats != null
+            ? new SegmentTimingCollector(collector, segmentSearchStats)
+            : collector;
     QueryLimits queryLimits = QueryLimits.getCurrentLimits();
     if (useExitableDirectoryReader || !queryLimits.isLimitsEnabled()) {
       // no timeout.  Pass through to super class
-      super.search(leaves, weight, collector);
+      super.search(leaves, weight, collectorForSearch);
     } else {
       // Timeout enabled!  This impl is maybe a hack.  Use Lucene's IndexSearcher timeout.
       // But only some queries have it so don't use on "this" (SolrIndexSearcher), not to mention
@@ -794,7 +821,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       new IndexSearcher(reader) { // cheap, actually!
         void searchWithTimeout() throws IOException {
           setTimeout(queryLimits); // Lucene's method name is less than ideal here...
-          super.search(leaves, weight, collector); // FYI protected access
+          super.search(leaves, weight, collectorForSearch); // FYI protected access
           if (timedOut()) {
             throw new QueryLimitsExceededException(
                 "Limits exceeded! (search): " + queryLimits.limitStatusMessage());
@@ -2859,6 +2886,33 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         "statsCache",
         Category.CACHE.toString(),
         scope);
+    if (segmentSearchStats != null) {
+      parentContext.gauge(
+          new MetricsMap(
+              map -> {
+                for (Map.Entry<String, SegmentSearchStats> e : segmentSearchStats.entrySet()) {
+                  SegmentSearchStats.Snapshot snap = e.getValue().snapshot();
+                  SimpleOrderedMap<Object> seg = new SimpleOrderedMap<>();
+                  seg.add("leafVisits", snap.leafVisits);
+                  seg.add("totalTimeMs", snap.totalTimeMs);
+                  seg.add("avgTimeMs", snap.avgTimeMs);
+                  seg.add("minTimeMs", snap.minTimeMs);
+                  seg.add("maxTimeMs", snap.maxTimeMs);
+                  seg.add("histogramType", SegmentSearchStats.Snapshot.DECAYING_HISTOGRAM_TYPE);
+                  seg.add("histogramSampleSize", snap.histogramSampleSize);
+                  seg.add("histogramUpdateCount", snap.histogramUpdateCount);
+                  seg.add("p50TimeMs", snap.p50TimeMs);
+                  seg.add("p90TimeMs", snap.p90TimeMs);
+                  seg.add("p95TimeMs", snap.p95TimeMs);
+                  seg.add("p99TimeMs", snap.p99TimeMs);
+                  map.put(e.getKey(), seg);
+                }
+              }),
+          true,
+          "segmentSearchStats",
+          Category.SEARCHER.toString(),
+          scope);
+    }
   }
 
   /**

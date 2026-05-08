@@ -77,6 +77,28 @@ limitations under the License.
                                                  <div class="label">data to:</div>
                                                  <div>{{ segment.temporalMaxDate }}</div>
                                              </div>
+                                             <div ng-if="segment.segmentSearchLeafVisits">
+                                                 <div class="label">search visits:</div>
+                                                 <div>{{ segment.segmentSearchLeafVisits | number }}</div>
+                                                 <div class="label">search avg ms:</div>
+                                                 <div>{{ segment.segmentSearchAvgTimeMs | number:4 }}</div>
+                                                 <div class="label">search min ms:</div>
+                                                 <div>{{ segment.segmentSearchMinTimeMs | number:4 }}</div>
+                                                 <div class="label">search max ms:</div>
+                                                 <div>{{ segment.segmentSearchMaxTimeMs | number:4 }}</div>
+                                                 <div class="label">search total ms:</div>
+                                                 <div>{{ segment.segmentSearchTotalTimeMs | number:4 }}</div>
+                                                 <div class="label">hist (decaying) n:</div>
+                                                 <div>{{ segment.segmentSearchHistogramSampleSize | number }}</div>
+                                                 <div class="label">search p50 ms:</div>
+                                                 <div>{{ segment.segmentSearchP50TimeMs | number:4 }}</div>
+                                                 <div class="label">search p90 ms:</div>
+                                                 <div>{{ segment.segmentSearchP90TimeMs | number:4 }}</div>
+                                                 <div class="label">search p95 ms:</div>
+                                                 <div>{{ segment.segmentSearchP95TimeMs | number:4 }}</div>
+                                                 <div class="label">search p99 ms:</div>
+                                                 <div>{{ segment.segmentSearchP99TimeMs | number:4 }}</div>
+                                             </div>
                                          </div>
                                          <div class="deleted" ng-show="segment.deletedDocSize"
                                               style="width: {{ segment.deletedDocSize }}%; margin-left:{{ segment.aliveDocSize}}%;">

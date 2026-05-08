@@ -58,6 +58,7 @@ import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.response.SolrQueryResponse;
 import org.apache.solr.schema.IndexSchema;
 import org.apache.solr.schema.SchemaField;
+import org.apache.solr.search.SegmentSearchStats;
 import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.security.AuthorizationContext;
 import org.apache.solr.update.SolrIndexWriter;
@@ -212,6 +213,25 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
         } catch (Exception e) {
           log.debug("Failed to extract temporal date range for segment {}",
               segmentCommitInfo.info.name, e);
+        }
+      }
+      if (searcher.isSegmentStatsEnabled()) {
+        SegmentSearchStats.Snapshot snap =
+            searcher.getSegmentSearchStatsSnapshot(segmentCommitInfo.info.name);
+        if (snap != null && snap.leafVisits > 0) {
+          segmentInfo.add("segmentSearchLeafVisits", snap.leafVisits);
+          segmentInfo.add("segmentSearchTotalTimeMs", snap.totalTimeMs);
+          segmentInfo.add("segmentSearchAvgTimeMs", snap.avgTimeMs);
+          segmentInfo.add("segmentSearchMinTimeMs", snap.minTimeMs);
+          segmentInfo.add("segmentSearchMaxTimeMs", snap.maxTimeMs);
+          segmentInfo.add(
+              "segmentSearchHistogramType", SegmentSearchStats.Snapshot.DECAYING_HISTOGRAM_TYPE);
+          segmentInfo.add("segmentSearchHistogramSampleSize", snap.histogramSampleSize);
+          segmentInfo.add("segmentSearchHistogramUpdateCount", snap.histogramUpdateCount);
+          segmentInfo.add("segmentSearchP50TimeMs", snap.p50TimeMs);
+          segmentInfo.add("segmentSearchP90TimeMs", snap.p90TimeMs);
+          segmentInfo.add("segmentSearchP95TimeMs", snap.p95TimeMs);
+          segmentInfo.add("segmentSearchP99TimeMs", snap.p99TimeMs);
         }
       }
       segmentInfos.add((String) segmentInfo.get(NAME), segmentInfo);
