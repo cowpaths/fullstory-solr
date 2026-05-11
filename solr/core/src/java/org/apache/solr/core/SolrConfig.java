@@ -317,7 +317,7 @@ public class SolrConfig implements MapSerializable {
       queryResultWindowSize = Math.max(1, get("query").get("queryResultWindowSize").intVal(1));
       queryResultMaxDocsCached =
           get("query").get("queryResultMaxDocsCached").intVal(Integer.MAX_VALUE);
-      segmentStats = get("query").get("segmentStats").boolVal(false);
+      segmentStats = get("query").get("segmentStats").boolVal(true);
       enableLazyFieldLoading = get("query").get("enableLazyFieldLoading").boolVal(false);
 
       filterCacheConfig =
