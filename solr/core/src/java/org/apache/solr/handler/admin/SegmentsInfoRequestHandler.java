@@ -518,16 +518,15 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
       }
 
       if (fieldInfo.getPointDimensionCount() == 0) {
-        log.warn(
-                "Segment "
-                        + si.name
-                        + ": temporal field '"
-                        + temporalField
-                        + "' is not indexed as a point field (found: "
-                        + fieldInfo
-                        + "). "
-                        + "Skipping this segment for date-tiered merging. This may occur with legacy segments "
-                        + "or after schema changes.");
+        if (log.isWarnEnabled()) {
+          log.warn(
+              "Segment {}: temporal field '{}' is not indexed as a point field (found: {}). "
+                  + "Skipping this segment for date-tiered merging. This may occur with legacy segments "
+                  + "or after schema changes.",
+              si.name,
+              temporalField,
+              fieldInfo);
+        }
         return null;
       }
 
