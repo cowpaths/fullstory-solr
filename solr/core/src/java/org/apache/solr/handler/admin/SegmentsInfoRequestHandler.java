@@ -188,10 +188,14 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
         segmentInfo.add("mergeCandidate", true);
       }
 
-      SegmentDateRange segmentDateRange = extractDateRangeFromSegment(segmentCommitInfo);
-      if (segmentDateRange != null) {
-        segmentInfo.add("temporalMinDate", new Date(segmentDateRange.minDate));
-        segmentInfo.add("temporalMaxDate", new Date(segmentDateRange.maxDate));
+      try {
+        SegmentDateRange segmentDateRange = extractDateRangeFromSegment(segmentCommitInfo);
+        if (segmentDateRange != null) {
+          segmentInfo.add("temporalMinDate", new Date(segmentDateRange.minDate));
+          segmentInfo.add("temporalMaxDate", new Date(segmentDateRange.maxDate));
+        }
+      } catch (IOException e) {
+        log.warn("Exception segment range info on segment {}", segmentCommitInfo.info.name,  e);
       }
 
       segmentInfos.add((String) segmentInfo.get(NAME), segmentInfo);
