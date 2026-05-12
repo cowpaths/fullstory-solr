@@ -28,7 +28,6 @@ import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.stream.Collectors;
-
 import org.apache.lucene.codecs.PointsFormat;
 import org.apache.lucene.codecs.PointsReader;
 import org.apache.lucene.document.LongPoint;
@@ -195,7 +194,7 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
           segmentInfo.add("temporalMaxDate", new Date(segmentDateRange.maxDate));
         }
       } catch (IOException e) {
-        log.warn("Exception segment range info on segment {}", segmentCommitInfo.info.name,  e);
+        log.warn("Exception segment range info on segment {}", segmentCommitInfo.info.name, e);
       }
 
       segmentInfos.add((String) segmentInfo.get(NAME), segmentInfo);
@@ -500,19 +499,20 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
    * @throws IOException if there's an error reading the segment
    */
   private static SegmentDateRange extractDateRangeFromSegment(SegmentCommitInfo segmentInfo)
-          throws IOException {
+      throws IOException {
     SegmentInfo si = segmentInfo.info;
 
     // Track compound directory separately to ensure we never close si.dir
     Directory compoundDir = null;
     try {
       Directory readerDir =
-              si.getUseCompoundFile()
-                      ? (compoundDir = si.getCodec().compoundFormat().getCompoundReader(si.dir, si, IOContext.DEFAULT))
-                      : si.dir;
+          si.getUseCompoundFile()
+              ? (compoundDir =
+                  si.getCodec().compoundFormat().getCompoundReader(si.dir, si, IOContext.DEFAULT))
+              : si.dir;
 
       FieldInfos fieldInfos =
-              si.getCodec().fieldInfosFormat().read(readerDir, si, "", IOContext.READONCE);
+          si.getCodec().fieldInfosFormat().read(readerDir, si, "", IOContext.READONCE);
 
       String temporalField = "EventStart";
       // Validate that the temporal field exists and is a point field
@@ -537,8 +537,8 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
       // Read point values using the codec
       PointsFormat pointsFormat = si.getCodec().pointsFormat();
       try (PointsReader pointsReader =
-                   pointsFormat.fieldsReader(
-                           new SegmentReadState(readerDir, si, fieldInfos, IOContext.READONCE))) {
+          pointsFormat.fieldsReader(
+              new SegmentReadState(readerDir, si, fieldInfos, IOContext.READONCE))) {
 
         PointValues pointValues = pointsReader.getValues(temporalField);
         if (pointValues == null) {
