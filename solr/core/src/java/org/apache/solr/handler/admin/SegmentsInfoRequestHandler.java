@@ -28,6 +28,10 @@ import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.stream.Collectors;
+
+import org.apache.lucene.codecs.PointsFormat;
+import org.apache.lucene.codecs.PointsReader;
+import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FieldInfos;
@@ -41,11 +45,15 @@ import org.apache.lucene.index.MergePolicy;
 import org.apache.lucene.index.MergePolicy.MergeSpecification;
 import org.apache.lucene.index.MergePolicy.OneMerge;
 import org.apache.lucene.index.MergeTrigger;
+import org.apache.lucene.index.PointValues;
 import org.apache.lucene.index.SegmentCommitInfo;
+import org.apache.lucene.index.SegmentInfo;
 import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentReader;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.IOContext;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.Version;
 import org.apache.solr.common.luke.FieldFlag;
@@ -179,6 +187,13 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
       if (mergeCandidates.contains(segmentCommitInfo.info.name)) {
         segmentInfo.add("mergeCandidate", true);
       }
+
+      SegmentDateRange segmentDateRange = extractDateRangeFromSegment(segmentCommitInfo);
+      if (segmentDateRange != null) {
+        segmentInfo.add("temporalMinDate", new Date(segmentDateRange.minDate));
+        segmentInfo.add("temporalMaxDate", new Date(segmentDateRange.maxDate));
+      }
+
       segmentInfos.add((String) segmentInfo.get(NAME), segmentInfo);
     }
 
@@ -471,5 +486,116 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
   @Override
   public Name getPermissionName(AuthorizationContext request) {
     return Name.METRICS_READ_PERM;
+  }
+
+  /**
+   * Extract date range (min/max timestamps) from a single segment by reading point values.
+   *
+   * @param segmentInfo the segment to read from
+   * @return the date range, or null if the temporal field is not present or has no values
+   * @throws IOException if there's an error reading the segment
+   */
+  private static SegmentDateRange extractDateRangeFromSegment(SegmentCommitInfo segmentInfo)
+          throws IOException {
+    SegmentInfo si = segmentInfo.info;
+
+    // Track compound directory separately to ensure we never close si.dir
+    Directory compoundDir = null;
+    try {
+      Directory readerDir =
+              si.getUseCompoundFile()
+                      ? (compoundDir = si.getCodec().compoundFormat().getCompoundReader(si.dir, si, IOContext.DEFAULT))
+                      : si.dir;
+
+      FieldInfos fieldInfos =
+              si.getCodec().fieldInfosFormat().read(readerDir, si, "", IOContext.READONCE);
+
+      String temporalField = "EventStart";
+      // Validate that the temporal field exists and is a point field
+      FieldInfo fieldInfo = fieldInfos.fieldInfo(temporalField);
+      if (fieldInfo == null) {
+        return null;
+      }
+
+      if (fieldInfo.getPointDimensionCount() == 0) {
+        log.warn(
+                "Segment "
+                        + si.name
+                        + ": temporal field '"
+                        + temporalField
+                        + "' is not indexed as a point field (found: "
+                        + fieldInfo
+                        + "). "
+                        + "Skipping this segment for date-tiered merging. This may occur with legacy segments "
+                        + "or after schema changes.");
+        return null;
+      }
+
+      // Read point values using the codec
+      PointsFormat pointsFormat = si.getCodec().pointsFormat();
+      try (PointsReader pointsReader =
+                   pointsFormat.fieldsReader(
+                           new SegmentReadState(readerDir, si, fieldInfos, IOContext.READONCE))) {
+
+        PointValues pointValues = pointsReader.getValues(temporalField);
+        if (pointValues == null) {
+          return null;
+        }
+
+        byte[] minPackedValue = pointValues.getMinPackedValue();
+        byte[] maxPackedValue = pointValues.getMaxPackedValue();
+
+        if (minPackedValue == null || maxPackedValue == null) {
+          return null;
+        }
+
+        // Decode the packed values as longs, we have to make an assumption here
+        // since we don't have the schema :/
+        long minDate = LongPoint.decodeDimension(minPackedValue, 0);
+        long maxDate = LongPoint.decodeDimension(maxPackedValue, 0);
+
+        // Convert to milliseconds based on detected unit
+        long divisor = getTemporalFieldDivisor(maxDate);
+        long minDateMillis, maxDateMillis;
+        if (divisor < 0) {
+          long multiplier = -divisor;
+          minDateMillis = minDate * multiplier;
+          maxDateMillis = maxDate * multiplier;
+        } else {
+          minDateMillis = minDate / divisor;
+          maxDateMillis = maxDate / divisor;
+        }
+
+        return new SegmentDateRange(minDateMillis, maxDateMillis);
+      }
+    } finally {
+      // Close compound directory if we opened it (never close si.dir)
+      if (compoundDir != null) {
+        compoundDir.close();
+      }
+    }
+  }
+
+  private static long getTemporalFieldDivisor(long maxValue) {
+    if (maxValue > 100_000_000_000_000L) {
+      // Values > 10^14 are microseconds
+      return 1_000;
+    } else if (maxValue > 100_000_000_000L) {
+      // Values > 10^11 are milliseconds
+      return 1;
+    } else {
+      // Values <= 10^11 are seconds
+      return -1000;
+    }
+  }
+
+  public static class SegmentDateRange {
+    public final long minDate;
+    public final long maxDate;
+
+    public SegmentDateRange(long minDate, long maxDate) {
+      this.minDate = minDate;
+      this.maxDate = maxDate;
+    }
   }
 }
