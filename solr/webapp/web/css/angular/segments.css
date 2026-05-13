@@ -69,19 +69,39 @@ limitations under the License.
     background: #f0f0f0;
     position: absolute;
     z-index: 1000;
-    width:220px;
-    height:120px;
+    /* Wider panel + normal wrapping: parent <dd> uses white-space:nowrap which caused overlap */
+    width: 340px;
+    height:auto;
+    min-height:120px;
     margin-left: 100%;
     opacity: .8;
-    padding: 5px;
+    padding: 8px;
     border: 1px solid;
     border-radius: 5px;
+    white-space: normal;
+    word-break: break-word;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+#content #segments .segments-holder li .tooltip > div:first-child {
+  margin-bottom: 4px;
 }
 
 #content #segments .segments-holder li .tooltip .label {
   float: left;
-  width: 20%;
+  clear: left;
+  width: 152px;
+  max-width: 46%;
+  padding-right: 8px;
+  box-sizing: border-box;
   opacity: 1;
+}
+
+/* Value column sits to the right of floated labels */
+#content #segments .segments-holder li .tooltip .label + div {
+  overflow: hidden;
+  padding-bottom: 2px;
 }
 
 #content #segments .segments-holder li:hover .tooltip {

@@ -20,6 +20,19 @@ var MB_FACTOR = 1024*1024;
 solrAdminApp.controller('SegmentsController', function($scope, $routeParams, $interval, Segments, Constants) {
     $scope.resetMenu("segments", Constants.IS_CORE_PAGE);
 
+    /** Fixed decimals without locale grouping (avoids confusing commas in ms timings). */
+    $scope.formatMs = function(v, fracDigits) {
+        if (v == null || v === '') {
+            return '';
+        }
+        var n = Number(v);
+        if (!isFinite(n)) {
+            return '';
+        }
+        var d = fracDigits != null ? fracDigits : 4;
+        return n.toFixed(d);
+    };
+
     $scope.refresh = function() {
 
         Segments.get({core: $routeParams.core}, function(data) {

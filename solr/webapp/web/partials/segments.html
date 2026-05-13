@@ -71,6 +71,12 @@ limitations under the License.
                                              <div>{{ segment.age }}</div>
                                              <div class="label">source:</div>
                                              <div>{{ segment.source }}</div>
+                                             <div ng-if="segment.temporalMinDate">
+                                                 <div class="label">EventStart from:</div>
+                                                 <div>{{ segment.temporalMinDate }}</div>
+                                                 <div class="label">EventStart to:</div>
+                                                 <div>{{ segment.temporalMaxDate }}</div>
+                                             </div>
                                          </div>
                                          <div class="deleted" ng-show="segment.deletedDocSize"
                                               style="width: {{ segment.deletedDocSize }}%; margin-left:{{ segment.aliveDocSize}}%;">
