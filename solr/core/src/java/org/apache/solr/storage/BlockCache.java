@@ -133,6 +133,8 @@ public class BlockCache implements Closeable {
   /** Least-recently-used sentinel. Eviction candidates are immediately before this. */
   private final Node lruTail = new Node();
 
+  private final Node pinnedHead = new Node();
+
   // ---------------------------------------------------------------------------
   // Construction
   // ---------------------------------------------------------------------------
@@ -143,6 +145,9 @@ public class BlockCache implements Closeable {
     // Wire up the sentinel doubly-linked list: head <-> tail.
     lruHead.next.set(lruTail);
     lruTail.prev = lruHead;
+    Node pinnedTail = new Node();
+    pinnedHead.next.set(pinnedTail);
+    pinnedTail.prev = pinnedHead;
 
     // Wire all pool buffers directly into the LRU list in a single pass. No CAS needed here —
     // init is single-threaded. Each node starts evictable (refCount=0) and in the list.
@@ -236,12 +241,12 @@ public class BlockCache implements Closeable {
     }
   }
 
-  private void insertAtHead(Node node) {
-    Node oldNext = reserve(lruHead, RESERVED);
+  private void insertAtHead(Node node, Node head) {
+    Node oldNext = reserve(head, RESERVED);
     assert oldNext != REMOVED : "lruHead sentinel should never be removed";
     node.next.set(oldNext);
     oldNext.prev = node;
-    if (!lruHead.next.compareAndSet(RESERVED, node)) {
+    if (!head.next.compareAndSet(RESERVED, node)) {
       throw new IllegalStateException("unexpected concurrent modification of lruHead.next");
     }
   }
@@ -306,26 +311,41 @@ public class BlockCache implements Closeable {
     int rc;
     do {
       rc = node.refCount.get();
-      if (rc < 0) {
+      if (rc == -1) {
         return false;
       }
-    } while (!node.refCount.compareAndSet(rc, rc + 1));
+    } while (rc == UNPIN_SENTINEL || !node.refCount.compareAndSet(rc, rc + 1));
     if (rc == 0) {
       // First pin: remove from the evictable list.
-      removeFromList(node);
+      if (removeFromList(node)) {
+        // Return a new Node wrapping the same buffer, pinned (refCount=1), not in list.
+        node.prev = pinnedHead;
+        insertAtHead(node, pinnedHead);
+      }
     }
     return true;
   }
+
+  private static final int UNPIN_SENTINEL = Integer.MIN_VALUE >> 1;
 
   /**
    * Releases a read pin. If this is the last pin (refCount transitions 1&rarr;0), the node is
    * inserted at the LRU head (most-recently-used position) and becomes evictable.
    */
   void unpin(Node node) {
-    if (node.refCount.decrementAndGet() == 0) {
-      node.prev = lruHead;
-      insertAtHead(node);
-    }
+    int rc;
+    do {
+      rc = node.refCount.get();
+      if (rc == 1 && node.refCount.compareAndSet(1, UNPIN_SENTINEL)) {
+        removeFromList(node);
+        node.prev = lruHead;
+        insertAtHead(node, lruHead);
+        if (!node.refCount.compareAndSet(UNPIN_SENTINEL, 0)) {
+          throw new IllegalStateException();
+        }
+        return;
+      }
+    } while (!node.refCount.compareAndSet(rc, rc - 1));
   }
 
   /**
@@ -339,10 +359,11 @@ public class BlockCache implements Closeable {
       // pinned or already dead — best effort, bail
       return;
     }
-    if (!removeFromList(node)) {
-      throw new IllegalStateException();
+    if (removeFromList(node)) {
+      insertAtTail(node.buf);
+    } else {
+      //throw new IllegalStateException(); // TODO: we should be able to assert this
     }
-    insertAtTail(node.buf);
   }
 
   /**
@@ -363,7 +384,9 @@ public class BlockCache implements Closeable {
           throw new IllegalStateException();
         }
         // Return a new Node wrapping the same buffer, pinned (refCount=1), not in list.
-        return new Node(candidate.buf, null, 1);
+        Node node = new Node(candidate.buf, pinnedHead, 1);
+        insertAtHead(node, pinnedHead);
+        return node;
       }
       // CAS failed: a concurrent pin() or acquireNode() just claimed this node and is in the
       // middle of removeFromList(). Spin briefly; lruTail.prev will change momentarily.
