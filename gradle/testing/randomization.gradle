@@ -82,6 +82,8 @@ allprojects {
     ext {
       testOptions += [
           [propName: 'lucene.fixedbitset.maxwordsshift', value: "17", description: "May set lower to exercise FixedBitSet partitioning"],
+          [propName: 'solr.teeDirectory.useBlockCache', value: "true", description: "use cache-based paradigm for access (AccessDirectory2)"],
+          [propName: 'solr.teeDirectory.blockCacheBytes', value: "67108864", description: "size in bytes of blockcache (for access dir)"],
           // seed, repetition and amplification.
           [propName: 'tests.seed', value: { -> rootSeed }, description: "Sets the master randomization seed."],
           [propName: 'tests.iters', value: null, description: "Duplicate (re-run) each test case N times."],

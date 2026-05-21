@@ -76,7 +76,7 @@ public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDi
   public TeeDirectory(Path path, LockFactory lockFactory) throws IOException {
     super(TEE_LOCK_FACTORY);
     TeeDirectoryFactory.NodeLevelTeeDirectoryState ownState =
-        new TeeDirectoryFactory.NodeLevelTeeDirectoryState(64);
+        new TeeDirectoryFactory.NodeLevelTeeDirectoryState(64, null); // null = AccessDirectory mode
     this.ioExec = ownState.ioExec;
     this.persistentLengthVerificationQueue = ownState.persistentLengthVerificationQueue;
     Directory naive = new MMapDirectory(path, lockFactory, MMapDirectory.DEFAULT_MAX_CHUNK_SIZE);

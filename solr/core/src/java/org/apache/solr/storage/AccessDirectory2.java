@@ -345,9 +345,10 @@ public class AccessDirectory2 extends MMapDirectory {
      * freshly decompressed block placed into the cache (cache miss + cache), or an uncached heap
      * buffer (cache exhausted).
      *
-     * <p>Publication ordering: {@link BlockCache#unpin} precedes {@link AtomicReference#set} so
-     * that any node reachable by readers via {@code accessMapped} is already in the LRU and
-     * evictable.
+     * <p>On a cache miss, the node is published to {@code accessMapped} while still holding the
+     * acquire pin (refCount=1). Concurrent readers who find the node via {@code accessMapped} will
+     * call {@link BlockCache#pin}, incrementing the refCount further. The pin is held as {@code
+     * currentNode} until the block changes or this input is closed.
      */
     private void refill(final long pos, final int compressedLen, final int blockIdx)
         throws IOException {
