@@ -28,9 +28,11 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
+import org.apache.solr.common.util.EnvUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -70,7 +72,8 @@ public class BlockCache implements Closeable {
    *       reaches 0 (next==null), the node inserts itself at the LRU head and becomes evictable.
    *   <li>Caller CAS-sets the {@code accessMapped} slot. Unpin must precede this publication so
    *       that any node reachable by readers is already in the LRU.
-   *   <li>Subsequent readers call {@link BlockCache#pin(Node)}, which re-pins and moves the node to the LRU head.
+   *   <li>Subsequent readers call {@link BlockCache#pin(Node)}, which re-pins and moves the node to
+   *       the LRU head.
    *   <li>When evicted, refCount is permanently set to -1; stale slot references self-detect.
    * </ol>
    *
@@ -99,6 +102,8 @@ public class BlockCache implements Closeable {
     /** LRU list link toward the tail (least-recently-used end). */
     private volatile Node prev;
 
+    private volatile long lastTouchNanos = RETOUCH_NANOS == 0 ? 0 : System.nanoTime();
+
     private Node(ByteBuffer buf, Node prev, int initialRefCount) {
       this.buf = buf;
       this.prev = prev;
@@ -110,7 +115,6 @@ public class BlockCache implements Closeable {
       this.buf = null;
       this.refCount = null;
     }
-
   }
 
   // Sentinels for the lock-free linked-list protocol, mirroring ReferenceHandler.
@@ -306,9 +310,18 @@ public class BlockCache implements Closeable {
     if (rc == 0) {
       evictableCount.decrement();
     }
-    touch(node);
+    long now = System.nanoTime();
+    if (RETOUCH_NANOS == 0) {
+      touch(node);
+    } else if (now - node.lastTouchNanos > RETOUCH_NANOS) {
+      node.lastTouchNanos = now;
+      touch(node);
+    }
     return true;
   }
+
+  private static final long RETOUCH_NANOS =
+      TimeUnit.SECONDS.toNanos(EnvUtils.getPropertyAsInteger("solr.blockcache.retouchseconds", 0));
 
   private void touch(Node node) {
     if (removeFromList(node)) {
