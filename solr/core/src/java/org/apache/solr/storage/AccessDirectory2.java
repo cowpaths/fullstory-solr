@@ -84,11 +84,14 @@ public class AccessDirectory2 extends MMapDirectory {
   final BlockCache cache;
 
   /**
-   * Nodes pre-populated by {@link WriteThroughOutput} at write-close time; consumed by {@link
-   * #openInput} to warm the cache for newly written files. Keyed by file name; entries are removed
-   * on first open (or on delete/rename).
+   * Shared {@code accessMapped} arrays pre-populated by {@link WriteThroughOutput} at write-close
+   * time. All root {@link LazyLoadInput} instances opened for the same file share the same array,
+   * so they all see the same cached blocks. Entries are removed (and nodes released) in {@link
+   * #deleteFile} or {@link #rename}.
    */
-  private final HashMap<String, BlockCache.Node[]> pendingNodes = new HashMap<>();
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  private final HashMap<String, AtomicReference<BlockCache.Node>[]> pendingNodes =
+      new HashMap<>();
 
   public AccessDirectory2(
       Path path, LockFactory lockFactory, Path compressedPath, BlockCache cache)
@@ -98,22 +101,23 @@ public class AccessDirectory2 extends MMapDirectory {
     this.cache = cache;
   }
 
-  /** Stores pre-populated cache nodes for {@code name}, to be consumed by the next openInput. */
-  void storeNodes(String name, BlockCache.Node[] nodes) {
+  /** Stores the shared {@code accessMapped} array for {@code name}, pre-populated by the writer. */
+  void storeNodes(String name, AtomicReference<BlockCache.Node>[] sharedAccessMapped) {
     synchronized (pendingNodes) {
-      pendingNodes.put(name, nodes);
+      pendingNodes.put(name, sharedAccessMapped);
     }
   }
 
   @Override
   public void deleteFile(String name) throws IOException {
-    BlockCache.Node[] stale;
+    AtomicReference<BlockCache.Node>[] stale;
     synchronized (pendingNodes) {
       stale = pendingNodes.remove(name);
     }
     if (stale != null) {
-      for (BlockCache.Node node : stale) {
-        if (node != null) cache.unpin(node);
+      for (AtomicReference<BlockCache.Node> slot : stale) {
+        BlockCache.Node node = slot.getAndSet(null);
+        if (node != null) cache.close(node); // best-effort; no-op if pinned by active reader
       }
     }
     // Files are never materialized in the access path; nothing to delete on disk.
@@ -122,7 +126,7 @@ public class AccessDirectory2 extends MMapDirectory {
   @Override
   public void rename(String source, String dest) throws IOException {
     synchronized (pendingNodes) {
-      BlockCache.Node[] nodes = pendingNodes.remove(source);
+      AtomicReference<BlockCache.Node>[] nodes = pendingNodes.remove(source);
       if (nodes != null) pendingNodes.put(dest, nodes);
     }
     // Files are never materialized in the access path; nothing to rename on disk.
@@ -135,11 +139,11 @@ public class AccessDirectory2 extends MMapDirectory {
 
   @Override
   public IndexInput openInput(String name, IOContext context) throws IOException {
-    BlockCache.Node[] prePopulated;
+    AtomicReference<BlockCache.Node>[] sharedAccessMapped;
     synchronized (pendingNodes) {
-      prePopulated = pendingNodes.remove(name);
+      sharedAccessMapped = pendingNodes.get(name); // get, not remove: shared across all root opens
     }
-    return new LazyLoadInput(compressedPath.resolve(name), cache, prePopulated);
+    return new LazyLoadInput(compressedPath.resolve(name), cache, sharedAccessMapped, pendingNodes);
   }
 
   private static ByteBufferGuard.BufferCleaner unmapHack() {
@@ -192,7 +196,11 @@ public class AccessDirectory2 extends MMapDirectory {
     // ---------------------------------------------------------------------------
 
     @SuppressWarnings("unchecked")
-    LazyLoadInput(Path source, BlockCache cache, BlockCache.Node[] prePopulatedNodes)
+    LazyLoadInput(
+        Path source,
+        BlockCache cache,
+        AtomicReference<BlockCache.Node>[] sharedAccessMapped,
+        HashMap<String, AtomicReference<BlockCache.Node>[]> pendingNodes)
         throws IOException {
       super("lazy:" + source);
       this.cache = cache;
@@ -258,20 +266,24 @@ public class AccessDirectory2 extends MMapDirectory {
           }
           blockOffsets[blockCount] = blockDeltaFooterOffset;
 
-          @SuppressWarnings({"unchecked", "rawtypes"})
-          AtomicReference<BlockCache. Node>[] localAccessMapped = new AtomicReference[blockCount];
-          this.accessMapped = localAccessMapped;
-          for (int i = 0; i < blockCount; i++) {
-            BlockCache.Node preNode =
-                prePopulatedNodes != null && i < prePopulatedNodes.length
-                    ? prePopulatedNodes[i]
-                    : null;
-            localAccessMapped[i] = new AtomicReference<>(preNode);
-            if (preNode != null) {
-              // Release the acquire-pin so the node is evictable; readers will re-pin via
-              // accessMapped.
-              cache.unpin(preNode);
+          if (sharedAccessMapped != null) {
+            if (sharedAccessMapped.length != blockCount) {
+              throw new IllegalArgumentException("block count mismatch");
             }
+            // Re-use the shared array from WriteThroughOutput: nodes are already unpinned
+            // (evictable), and all root opens of this file share the same slots.
+            this.accessMapped = sharedAccessMapped;
+          } else {
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            AtomicReference<BlockCache. Node>[] localAccessMapped = new AtomicReference[blockCount];
+            for (int i = 0; i < blockCount; i++) {
+              localAccessMapped[i] = new AtomicReference<>();
+            }
+            AtomicReference<BlockCache. Node>[] existing;
+            synchronized (pendingNodes) {
+              existing = pendingNodes.putIfAbsent(source.getFileName().toString(), localAccessMapped);
+            }
+            this.accessMapped = existing == null ? localAccessMapped : existing;
           }
         }
       }
@@ -1037,21 +1049,14 @@ public class AccessDirectory2 extends MMapDirectory {
       try {
         if (mapped == null) return;
         final ByteBuffer[] bufs = mapped;
-        final AtomicReference<BlockCache.Node>[] slots = accessMapped;
         unsetBuffers();
 
         unpinCurrent();
 
         if (isClone) return;
 
-        // Root close: return all cached nodes to the BlockCache at high eviction priority.
-        for (AtomicReference<BlockCache.Node> slot : slots) {
-          BlockCache.Node node = slot.getAndSet(null);
-          if (node != null) {
-            cache.close(node); // best-effort; no-op if the node is pinned by a live clone
-          }
-        }
-
+        // Slots belong to the shared accessMapped in pendingNodes; leave them intact for other
+        // roots. deleteFile() is responsible for draining them when the file is truly gone.
         compressedGuard.invalidateAndUnmap(bufs);
       } finally {
         unsetBuffers();
@@ -1119,7 +1124,7 @@ public class AccessDirectory2 extends MMapDirectory {
     private final String name;
     private final byte[] blockBuf = new byte[COMPRESSION_BLOCK_SIZE];
     private int blockBufPos = 0;
-    private final ArrayList<BlockCache.Node> nodes = new ArrayList<>();
+    private final ArrayList<AtomicReference<BlockCache.Node>> nodeSlots = new ArrayList<>();
 
     WriteThroughOutput(String name, IndexOutput delegate, AccessDirectory2 dir) {
       super("WriteThroughOutput(" + name + ")", name);
@@ -1161,7 +1166,7 @@ public class AccessDirectory2 extends MMapDirectory {
         node.buf.clear();
         node.buf.put(blockBuf, 0, len);
       }
-      nodes.add(node); // null = cache exhausted; reader will decompress on demand
+      nodeSlots.add(new AtomicReference<>(node)); // null = cache exhausted; cold on first read
       blockBufPos = 0;
     }
 
@@ -1176,12 +1181,20 @@ public class AccessDirectory2 extends MMapDirectory {
     }
 
     @Override
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public void close() throws IOException {
       try (delegate) {
         if (blockBufPos > 0) {
           captureBlock(blockBufPos); // partial last block
         }
-        dir.storeNodes(name, nodes.toArray(new BlockCache.Node[0]));
+        AtomicReference<BlockCache.Node>[] sharedAccessMapped =
+            nodeSlots.toArray(new AtomicReference[0]);
+        // Unpin all nodes so they are evictable (inserted at LRU head) before publishing.
+        for (AtomicReference<BlockCache.Node> slot : sharedAccessMapped) {
+          BlockCache.Node node = slot.get();
+          if (node != null) dir.cache.unpin(node);
+        }
+        dir.storeNodes(name, sharedAccessMapped);
       }
     }
   }
