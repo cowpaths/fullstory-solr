@@ -235,8 +235,8 @@ public class BlockCache implements Closeable {
   private void insertAtHead(Node node) {
     Node oldNext = reserve(lruHead, RESERVED);
     assert oldNext != REMOVED : "lruHead sentinel should never be removed";
-    oldNext.prev = node;
     node.next.set(oldNext);
+    oldNext.prev = node;
     if (!lruHead.next.compareAndSet(RESERVED, node)) {
       throw new IllegalStateException("unexpected concurrent modification of lruHead.next");
     }
@@ -257,8 +257,8 @@ public class BlockCache implements Closeable {
         continue;
       }
       Node node = new Node(buf, pred, 0);
-      lruTail.prev = node;
       node.next.set(lruTail);
+      lruTail.prev = node;
       if (!pred.next.compareAndSet(RESERVED, node)) {
         throw new IllegalStateException("unexpected concurrent modification during tail insertion");
       }
