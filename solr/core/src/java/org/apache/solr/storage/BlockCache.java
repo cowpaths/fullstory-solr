@@ -28,11 +28,8 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.LongAdder;
-import org.apache.solr.common.util.EnvUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,6 +40,18 @@ import org.slf4j.LoggerFactory;
  * <p>If eviction finds all blocks pinned, {@link #acquireNode()} returns {@code null} and the
  * caller is expected to decompress the block into a temporary heap buffer and serve the read
  * uncached.
+ *
+ * <p><b>LRU invariant:</b> a node is in the doubly-linked list if and only if its {@code
+ * refCount} is 0 (evictable). Pinned nodes (refCount &gt; 0) are spliced out of the list.
+ *
+ * <ul>
+ *   <li>{@link #pin}: first pin (CAS 0&rarr;1) removes the node from the list; re-pins (CAS
+ *       N&rarr;N+1, N&gt;0) are pure refcount increments.
+ *   <li>{@link #unpin}: last unpin (result=0) inserts the node at the list head (most-recently
+ *       used); higher unpins are pure refcount decrements.
+ *   <li>{@link #acquireNode}: the tail node is always evictable by invariant — no scanning past
+ *       pinned nodes needed.
+ * </ul>
  */
 public class BlockCache implements Closeable {
 
@@ -51,30 +60,28 @@ public class BlockCache implements Closeable {
   private static final int MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / COMPRESSION_BLOCK_SIZE;
 
   // ---------------------------------------------------------------------------
-  // LRU node (adapted from ReferenceHandler.Ref)
+  // LRU node
   // ---------------------------------------------------------------------------
 
   /**
-   * A cache entry: wraps a decompressed block buffer, carries a reference count for safe concurrent
-   * eviction, and the doubly-linked list pointers used for LRU ordering.
-   *
-   * <p>Each {@code Node} instance is a one-off wrapper for a single acquire/reclaim cycle of its
-   * buffer. Once evicted, {@code refCount} is set to -1 permanently; any reader that subsequently
-   * encounters the node via a stale {@code accessMapped} slot will see the negative count, fail
-   * {@link #pin(Node)}, and fall back to loading.
+   * A cache entry: wraps a decompressed block buffer and carries a reference count for safe
+   * concurrent eviction.
    *
    * <p>Lifecycle:
    *
    * <ol>
-   *   <li>Returned by {@link BlockCache#acquireNode()} pinned (refCount=1), not yet in LRU
-   *       (next==null).
-   *   <li>Caller populates {@link #buf}, calls {@link BlockCache#unpin(Node)}. First time refCount
-   *       reaches 0 (next==null), the node inserts itself at the LRU head and becomes evictable.
-   *   <li>Caller CAS-sets the {@code accessMapped} slot. Unpin must precede this publication so
-   *       that any node reachable by readers is already in the LRU.
-   *   <li>Subsequent readers call {@link BlockCache#pin(Node)}, which re-pins and moves the node to
-   *       the LRU head.
-   *   <li>When evicted, refCount is permanently set to -1; stale slot references self-detect.
+   *   <li>Returned by {@link BlockCache#acquireNode()} pinned (refCount=1), <em>not</em> in the
+   *       LRU list.
+   *   <li>Caller populates {@link #buf} and publishes the node (e.g. via an {@code
+   *       AtomicReference} slot). The node is still pinned.
+   *   <li>Subsequent callers call {@link BlockCache#pin(Node)}, which either re-pins (refCount&gt;0
+   *       → increment only) or first-pins (refCount=0 → remove from list + increment).
+   *   <li>Each caller eventually calls {@link BlockCache#unpin(Node)}. The last unpin
+   *       (refCount→0) inserts the node at the LRU head (most-recently-used, lowest eviction
+   *       priority).
+   *   <li>When evicted by {@link BlockCache#acquireNode()}, refCount is set to -1 permanently.
+   *       Any reader that encounters the node via a stale slot sees the negative count, fails
+   *       {@link BlockCache#pin(Node)}, and falls back to loading.
    * </ol>
    *
    * <p>Head of the list = most recently used; tail = least recently used / eviction candidate.
@@ -88,9 +95,8 @@ public class BlockCache implements Closeable {
      * Reference count.
      *
      * <ul>
-     *   <li>1 — freshly acquired, pinned
-     *   <li>&gt;1 — pinned by multiple readers
-     *   <li>0 — evictable
+     *   <li>&ge;1 — pinned (not in LRU list)
+     *   <li>0 — evictable (in LRU list)
      *   <li>-1 — permanently dead (evicted); node must not be used
      * </ul>
      */
@@ -101,8 +107,6 @@ public class BlockCache implements Closeable {
 
     /** LRU list link toward the tail (least-recently-used end). */
     private volatile Node prev;
-
-    private volatile long lastTouchNanos = RETOUCH_NANOS == 0 ? 0 : System.nanoTime();
 
     private Node(ByteBuffer buf, Node prev, int initialRefCount) {
       this.buf = buf;
@@ -117,7 +121,7 @@ public class BlockCache implements Closeable {
     }
   }
 
-  // Sentinels for the lock-free linked-list protocol, mirroring ReferenceHandler.
+  // Sentinels for the lock-free linked-list protocol.
   // RESERVED: this node's `next` link is currently being modified by exactly one thread.
   // REMOVED:  this node has been spliced out of the list.
   private static final Node RESERVED = new Node();
@@ -128,9 +132,6 @@ public class BlockCache implements Closeable {
 
   /** Least-recently-used sentinel. Eviction candidates are immediately before this. */
   private final Node lruTail = new Node();
-
-  /** Count of nodes with refCount==0 (evictable). Consulted only when eviction fails. */
-  private final LongAdder evictableCount = new LongAdder();
 
   // ---------------------------------------------------------------------------
   // Construction
@@ -144,7 +145,7 @@ public class BlockCache implements Closeable {
     lruTail.prev = lruHead;
 
     // Wire all pool buffers directly into the LRU list in a single pass. No CAS needed here —
-    // init is single-threaded. Each node starts evictable (refCount=0).
+    // init is single-threaded. Each node starts evictable (refCount=0) and in the list.
     ByteBuffer[] pool = initPool(nBlocks, backingFile);
     Node prev = lruHead;
     for (ByteBuffer buf : pool) {
@@ -154,7 +155,6 @@ public class BlockCache implements Closeable {
     }
     prev.next.set(lruTail);
     lruTail.prev = prev;
-    evictableCount.add(nBlocks);
 
     log.info("BlockCache initialized: nBlocks={}, targetBytes={}", nBlocks, targetBytes);
   }
@@ -208,7 +208,7 @@ public class BlockCache implements Closeable {
   }
 
   // ---------------------------------------------------------------------------
-  // LRU list operations (adapted from ReferenceHandler)
+  // LRU list operations
   // ---------------------------------------------------------------------------
 
   /**
@@ -295,9 +295,12 @@ public class BlockCache implements Closeable {
   // ---------------------------------------------------------------------------
 
   /**
-   * Pins {@code node} for the duration of a read, preventing eviction. If the node is already in
-   * the LRU, also moves it to the head (touch). Returns {@code false} if the node is permanently
-   * dead (evicted); the caller must then fall back to loading.
+   * Pins {@code node} for the duration of a read, preventing eviction. Returns {@code false} if
+   * the node is permanently dead (evicted); the caller must then fall back to loading.
+   *
+   * <p>If this is the <em>first</em> pin (refCount transitions 0&rarr;1), the node is removed from
+   * the LRU list (it is no longer evictable). If the node is already pinned (refCount&gt;0), the
+   * refcount is simply incremented with no list operation.
    */
   boolean pin(Node node) {
     int rc;
@@ -308,44 +311,32 @@ public class BlockCache implements Closeable {
       }
     } while (!node.refCount.compareAndSet(rc, rc + 1));
     if (rc == 0) {
-      evictableCount.decrement();
-    }
-    long now = System.nanoTime();
-    if (RETOUCH_NANOS == 0) {
-      touch(node);
-    } else if (now - node.lastTouchNanos > RETOUCH_NANOS) {
-      node.lastTouchNanos = now;
-      touch(node);
+      // First pin: remove from the evictable list.
+      removeFromList(node);
     }
     return true;
   }
 
-  private static final long RETOUCH_NANOS =
-      TimeUnit.SECONDS.toNanos(EnvUtils.getPropertyAsInteger("solr.blockcache.retouchseconds", 0));
-
-  private void touch(Node node) {
-    if (removeFromList(node)) {
+  /**
+   * Releases a read pin. If this is the last pin (refCount transitions 1&rarr;0), the node is
+   * inserted at the LRU head (most-recently-used position) and becomes evictable.
+   */
+  void unpin(Node node) {
+    if (node.refCount.decrementAndGet() == 0) {
       node.prev = lruHead;
       insertAtHead(node);
     }
   }
 
-  /** Releases a read pin. */
-  void unpin(Node node) {
-    if (node.refCount.decrementAndGet() == 0) {
-      evictableCount.increment();
-    }
-  }
-
   /**
    * Explicitly releases a node when its owning {@code IndexInput} is closed. If the node is still
-   * evictable (refCount==0), marks it dead and recycles the buffer back into the pool at the tail,
-   * making it the highest-priority eviction candidate. If the node has already been evicted
-   * concurrently, this is a no-op.
+   * evictable (refCount==0 and in the list), marks it dead and recycles the buffer back into the
+   * pool at the tail, making it the highest-priority eviction candidate. If the node has already
+   * been evicted or is currently pinned, this is a no-op.
    */
   void close(Node node) {
     if (!node.refCount.compareAndSet(0, -1)) {
-      // still referenced somehow? best effort, just bail
+      // pinned or already dead — best effort, bail
       return;
     }
     if (!removeFromList(node)) {
@@ -354,34 +345,30 @@ public class BlockCache implements Closeable {
     insertAtTail(node.buf);
   }
 
-  // ---------------------------------------------------------------------------
-  // Public API
-  // ---------------------------------------------------------------------------
-
   /**
    * Acquires a pinned {@link Node} whose buffer is ready to be populated with decompressed block
    * content. The caller must eventually call {@link #unpin(Node)}.
    *
-   * <p>Returns {@code null} if all blocks are pinned. In that case the caller should decompress
-   * into a temporary heap buffer, serve the read directly, and discard it — the block will not be
-   * cached for this access.
+   * <p>By the LRU invariant all nodes in the list have refCount==0, so the tail node is always
+   * evictable. The returned node is <em>not</em> in the list; it will be re-inserted at the head
+   * on the final {@link #unpin(Node)}.
+   *
+   * <p>Returns {@code null} if the list is empty (all blocks are pinned). In that case the caller
+   * should decompress into a temporary heap buffer, serve the read directly, and discard it.
    */
   public Node acquireNode() {
     for (Node candidate; (candidate = lruTail.prev) != lruHead; ) {
       if (candidate.refCount.compareAndSet(0, -1)) {
-        evictableCount.decrement();
         if (!removeFromList(candidate)) {
           throw new IllegalStateException();
         }
-        Node node = new Node(candidate.buf, lruHead, 1);
-        insertAtHead(node);
-        return node;
+        // Return a new Node wrapping the same buffer, pinned (refCount=1), not in list.
+        return new Node(candidate.buf, null, 1);
       }
-      if (evictableCount.sum() == 0) {
-        return null;
-      }
+      // CAS failed: a concurrent pin() or acquireNode() just claimed this node and is in the
+      // middle of removeFromList(). Spin briefly; lruTail.prev will change momentarily.
     }
-    return null; // all nodes pinned
+    return null; // list empty — all blocks pinned
   }
 
   @Override
