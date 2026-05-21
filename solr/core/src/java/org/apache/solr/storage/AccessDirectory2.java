@@ -140,7 +140,6 @@ public class AccessDirectory2 extends MMapDirectory {
     private final int lastBlockDecompressedLen;
     private ByteBuffer[] mapped;
 
-    @SuppressWarnings("unchecked")
     private final AtomicReference<BlockCache.Node>[] accessMapped;
 
     private final BlockCache cache;
@@ -155,6 +154,8 @@ public class AccessDirectory2 extends MMapDirectory {
     private int currentBlockIdx = -1;
     private BlockCache.Node currentNode;
 
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static final AtomicReference<BlockCache. Node>[] EMPTY_ACCESS_MAPPED = new AtomicReference[0];
     private static final LongBuffer EMPTY_LONGBUFFER = LongBuffer.allocate(0);
     private static final IntBuffer EMPTY_INTBUFFER = IntBuffer.allocate(0);
     private static final FloatBuffer EMPTY_FLOATBUFFER = FloatBuffer.allocate(0);
@@ -193,7 +194,7 @@ public class AccessDirectory2 extends MMapDirectory {
           blockCount = 0;
           lastBlockIdx = -1;
           lastBlockDecompressedLen = 0;
-          accessMapped = new AtomicReference[0];
+          accessMapped = EMPTY_ACCESS_MAPPED;
         } else {
           ByteBuffer initial = mapped[0];
           length = initial.getLong(0);
@@ -232,9 +233,11 @@ public class AccessDirectory2 extends MMapDirectory {
           }
           blockOffsets[blockCount] = blockDeltaFooterOffset;
 
-          accessMapped = new AtomicReference[blockCount];
+          @SuppressWarnings({"unchecked", "rawtypes"})
+          AtomicReference<BlockCache. Node>[] localAccessMapped = new AtomicReference[blockCount];
+          this.accessMapped = localAccessMapped;
           for (int i = 0; i < blockCount; i++) {
-            accessMapped[i] = new AtomicReference<>();
+            localAccessMapped[i] = new AtomicReference<>();
           }
         }
       }
@@ -374,21 +377,18 @@ public class AccessDirectory2 extends MMapDirectory {
       if (node != null) {
         node.buf.clear();
         node.buf.put(heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
-        // Publish before unpin so that any subsequently reachable node is already in the LRU.
-        cache.unpin(node);
+        // Publish while still holding the acquire pin (refCount=1); readers who find the node via
+        // accessMapped will call pin(), which correctly increments from 1.
         accessMapped[blockIdx].set(node);
-        if (cache.pin(node)) {
-          currentNode = node;
-          postBuffer = node.buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-          postBuffer.clear().limit(decompressedLen);
-          postBufferBaseline = 0;
-          currentBlockIdx = blockIdx;
-          longViews = null;
-          intViews = null;
-          floatViews = null;
-          return;
-        }
-        // node was evicted between unpin and our re-pin attempt; fall through to uncached
+        currentNode = node;
+        postBuffer = node.buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+        postBuffer.clear().limit(decompressedLen);
+        postBufferBaseline = 0;
+        currentBlockIdx = blockIdx;
+        longViews = null;
+        intViews = null;
+        floatViews = null;
+        return;
       }
 
       // --- Serve uncached from heap buffer ---
