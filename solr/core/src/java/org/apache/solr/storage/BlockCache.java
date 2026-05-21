@@ -308,13 +308,23 @@ public class BlockCache implements Closeable {
    * refcount is simply incremented with no list operation.
    */
   boolean pin(Node node) {
-    int rc;
-    do {
-      rc = node.refCount.get();
-      if (rc == -1) {
-        return false;
+    int rc = node.refCount.get();
+    for (; ; ) {
+      switch (rc) {
+        case -1:
+          return false;
+        case UNPIN_SENTINEL:
+          rc = node.refCount.get();
+          continue;
       }
-    } while (rc == UNPIN_SENTINEL || !node.refCount.compareAndSet(rc, rc + 1));
+      assert rc >= 0;
+      int witness = node.refCount.compareAndExchange(rc, rc + 1);
+      if (witness == rc) {
+        break;
+      } else {
+        rc = witness;
+      }
+    }
     if (rc == 0) {
       // First pin: remove from the evictable list.
       if (removeFromList(node)) {
@@ -333,19 +343,31 @@ public class BlockCache implements Closeable {
    * inserted at the LRU head (most-recently-used position) and becomes evictable.
    */
   void unpin(Node node) {
-    int rc;
-    do {
-      rc = node.refCount.get();
-      if (rc == 1 && node.refCount.compareAndSet(1, UNPIN_SENTINEL)) {
-        removeFromList(node);
-        node.prev = lruHead;
-        insertAtHead(node, lruHead);
-        if (!node.refCount.compareAndSet(UNPIN_SENTINEL, 0)) {
-          throw new IllegalStateException();
+    int rc = node.refCount.get();
+    for (; ; ) {
+      if (rc == 1) {
+        int witness = node.refCount.compareAndExchange(1, UNPIN_SENTINEL);
+        if (witness == 1) {
+          removeFromList(node);
+          node.prev = lruHead;
+          insertAtHead(node, lruHead);
+          if (!node.refCount.compareAndSet(UNPIN_SENTINEL, 0)) {
+            throw new IllegalStateException();
+          }
+          return;
+        } else {
+          rc = witness;
         }
-        return;
+      } else {
+        assert rc > 1;
+        int witness = node.refCount.compareAndExchange(rc, rc - 1);
+        if (witness == rc) {
+          return;
+        } else {
+          rc = witness;
+        }
       }
-    } while (!node.refCount.compareAndSet(rc, rc - 1));
+    }
   }
 
   /**
@@ -362,7 +384,7 @@ public class BlockCache implements Closeable {
     if (removeFromList(node)) {
       insertAtTail(node.buf);
     } else {
-      //throw new IllegalStateException(); // TODO: we should be able to assert this
+      throw new IllegalStateException();
     }
   }
 
