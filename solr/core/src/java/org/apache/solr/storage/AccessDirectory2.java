@@ -25,7 +25,6 @@ import static org.apache.solr.storage.CompressingDirectory.DirectIOIndexOutput.H
 import static org.apache.solr.storage.CompressingDirectory.readLengthFromHeader;
 
 import java.io.EOFException;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
@@ -36,7 +35,6 @@ import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
@@ -118,7 +116,7 @@ public class AccessDirectory2 extends MMapDirectory {
         if (node != null) cache.unpin(node);
       }
     }
-    super.deleteFile(name);
+    // Files are never materialized in the access path; nothing to delete on disk.
   }
 
   @Override
@@ -127,25 +125,12 @@ public class AccessDirectory2 extends MMapDirectory {
       BlockCache.Node[] nodes = pendingNodes.remove(source);
       if (nodes != null) pendingNodes.put(dest, nodes);
     }
-    try {
-      super.rename(source, dest);
-    } catch (NoSuchFileException e) {
-      // In write-through mode no uncompressed file is materialized in the access path.
-    }
+    // Files are never materialized in the access path; nothing to rename on disk.
   }
 
   @Override
   public long fileLength(String name) throws IOException {
-    try {
-      return super.fileLength(name);
-    } catch (NoSuchFileException | FileNotFoundException ex) {
-      try {
-        return readLengthFromHeader(compressedPath.resolve(name));
-      } catch (Throwable t) {
-        t.addSuppressed(ex);
-        throw t;
-      }
-    }
+    return readLengthFromHeader(compressedPath.resolve(name));
   }
 
   @Override
@@ -154,19 +139,7 @@ public class AccessDirectory2 extends MMapDirectory {
     synchronized (pendingNodes) {
       prePopulated = pendingNodes.remove(name);
     }
-    if (prePopulated != null) {
-      return new LazyLoadInput(compressedPath.resolve(name), cache, prePopulated);
-    }
-    try {
-      return super.openInput(name, context);
-    } catch (NoSuchFileException | FileNotFoundException ex) {
-      try {
-        return new LazyLoadInput(compressedPath.resolve(name), cache, null);
-      } catch (IOException ex1) {
-        ex1.addSuppressed(ex);
-        throw ex1;
-      }
-    }
+    return new LazyLoadInput(compressedPath.resolve(name), cache, prePopulated);
   }
 
   private static ByteBufferGuard.BufferCleaner unmapHack() {
