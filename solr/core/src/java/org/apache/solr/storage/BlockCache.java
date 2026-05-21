@@ -133,8 +133,6 @@ public class BlockCache implements Closeable {
   /** Least-recently-used sentinel. Eviction candidates are immediately before this. */
   private final Node lruTail = new Node();
 
-  private final Node pinnedHead = new Node();
-
   // ---------------------------------------------------------------------------
   // Construction
   // ---------------------------------------------------------------------------
@@ -145,9 +143,6 @@ public class BlockCache implements Closeable {
     // Wire up the sentinel doubly-linked list: head <-> tail.
     lruHead.next.set(lruTail);
     lruTail.prev = lruHead;
-    Node pinnedTail = new Node();
-    pinnedHead.next.set(pinnedTail);
-    pinnedTail.prev = pinnedHead;
 
     // Wire all pool buffers directly into the LRU list in a single pass. No CAS needed here —
     // init is single-threaded. Each node starts evictable (refCount=0) and in the list.
@@ -241,12 +236,12 @@ public class BlockCache implements Closeable {
     }
   }
 
-  private void insertAtHead(Node node, Node head) {
-    Node oldNext = reserve(head, RESERVED);
+  private void insertAtHead(Node node) {
+    Node oldNext = reserve(lruHead, RESERVED);
     assert oldNext != REMOVED : "lruHead sentinel should never be removed";
     node.next.set(oldNext);
     oldNext.prev = node;
-    if (!head.next.compareAndSet(RESERVED, node)) {
+    if (!lruHead.next.compareAndSet(RESERVED, node)) {
       throw new IllegalStateException("unexpected concurrent modification of lruHead.next");
     }
   }
@@ -327,11 +322,7 @@ public class BlockCache implements Closeable {
     }
     if (rc == 0) {
       // First pin: remove from the evictable list.
-      if (removeFromList(node)) {
-        // Return a new Node wrapping the same buffer, pinned (refCount=1), not in list.
-        node.prev = pinnedHead;
-        insertAtHead(node, pinnedHead);
-      }
+      removeFromList(node);
     }
     return true;
   }
@@ -348,9 +339,8 @@ public class BlockCache implements Closeable {
       if (rc == 1) {
         int witness = node.refCount.compareAndExchange(1, UNPIN_SENTINEL);
         if (witness == 1) {
-          removeFromList(node);
           node.prev = lruHead;
-          insertAtHead(node, lruHead);
+          insertAtHead(node);
           if (!node.refCount.compareAndSet(UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
@@ -406,9 +396,7 @@ public class BlockCache implements Closeable {
           throw new IllegalStateException();
         }
         // Return a new Node wrapping the same buffer, pinned (refCount=1), not in list.
-        Node node = new Node(candidate.buf, pinnedHead, 1);
-        insertAtHead(node, pinnedHead);
-        return node;
+        return new Node(candidate.buf, null, 1);
       }
       // CAS failed: a concurrent pin() or acquireNode() just claimed this node and is in the
       // middle of removeFromList(). Spin briefly; lruTail.prev will change momentarily.
