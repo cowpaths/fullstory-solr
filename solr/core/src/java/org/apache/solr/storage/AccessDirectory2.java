@@ -35,11 +35,14 @@ import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -120,7 +123,9 @@ public class AccessDirectory2 extends MMapDirectory {
         if (node != null) cache.close(node); // best-effort; no-op if pinned by active reader
       }
     }
-    // Files are never materialized in the access path; nothing to delete on disk.
+    if (name.endsWith(".tmp")) {
+      super.deleteFile(name);
+    }
   }
 
   @Override
@@ -129,7 +134,21 @@ public class AccessDirectory2 extends MMapDirectory {
       AtomicReference<BlockCache.Node>[] nodes = pendingNodes.remove(source);
       if (nodes != null) pendingNodes.put(dest, nodes);
     }
-    // Files are never materialized in the access path; nothing to rename on disk.
+    if (source.endsWith(".tmp")) {
+      super.rename(source, dest);
+    }
+  }
+
+  @Override
+  public void sync(Collection<String> names) throws IOException {
+    List<String> present = null;
+    for (String name : names) {
+      if (Files.exists(getDirectory().resolve(name))) {
+        if (present == null) present = new ArrayList<>();
+        present.add(name);
+      }
+    }
+    if (present != null) super.sync(present);
   }
 
   @Override
