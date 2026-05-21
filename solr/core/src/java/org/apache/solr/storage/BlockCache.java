@@ -91,7 +91,7 @@ public class BlockCache implements Closeable {
      *   <li>-1 — permanently dead (evicted); node must not be used
      * </ul>
      */
-    private final AtomicInteger refCount = new AtomicInteger(1);
+    private final AtomicInteger refCount;
 
     /** LRU list link toward the head (most-recently-used end). */
     private final AtomicReference<Node> next = new AtomicReference<>();
@@ -99,14 +99,16 @@ public class BlockCache implements Closeable {
     /** LRU list link toward the tail (least-recently-used end). */
     private volatile Node prev;
 
-    private Node(ByteBuffer buf, Node prev) {
+    private Node(ByteBuffer buf, Node prev, int initialRefCount) {
       this.buf = buf;
       this.prev = prev;
+      this.refCount = new AtomicInteger(initialRefCount);
     }
 
     /** Sentinel constructor (head / tail / protocol sentinels). */
     private Node() {
       this.buf = null;
+      this.refCount = null;
     }
 
   }
@@ -142,8 +144,7 @@ public class BlockCache implements Closeable {
     ByteBuffer[] pool = initPool(nBlocks, backingFile);
     Node prev = lruHead;
     for (ByteBuffer buf : pool) {
-      Node node = new Node(buf, prev);
-      node.refCount.set(0);
+      Node node = new Node(buf, prev, 0);
       prev.next.set(node);
       prev = node;
     }
@@ -241,6 +242,30 @@ public class BlockCache implements Closeable {
     }
   }
 
+  private void insertAtTail(ByteBuffer buf) {
+    for (; ; ) {
+      Node pred = lruTail.prev;
+      Node oldNext = reserve(pred, RESERVED);
+      if (oldNext != lruTail) {
+        if (oldNext == REMOVED) {
+          continue; // pred was concurrently removed; retry
+        }
+        // release reservation; pred is no longer tail's predecessor
+        if (!pred.next.compareAndSet(RESERVED, oldNext)) {
+          throw new IllegalStateException();
+        }
+        continue;
+      }
+      Node node = new Node(buf, pred, 0);
+      lruTail.prev = node;
+      node.next.set(lruTail);
+      if (!pred.next.compareAndSet(RESERVED, node)) {
+        throw new IllegalStateException("unexpected concurrent modification during tail insertion");
+      }
+      return;
+    }
+  }
+
   private boolean removeFromList(Node node) {
     Node next = reserve(node, REMOVED);
     if (next == REMOVED) {
@@ -299,6 +324,23 @@ public class BlockCache implements Closeable {
     }
   }
 
+  /**
+   * Explicitly releases a node when its owning {@code IndexInput} is closed. If the node is still
+   * evictable (refCount==0), marks it dead and recycles the buffer back into the pool at the tail,
+   * making it the highest-priority eviction candidate. If the node has already been evicted
+   * concurrently, this is a no-op.
+   */
+  void close(Node node) {
+    if (!node.refCount.compareAndSet(0, -1)) {
+      // still referenced somehow? best effort, just bail
+      return;
+    }
+    if (!removeFromList(node)) {
+      throw new IllegalStateException();
+    }
+    insertAtTail(node.buf);
+  }
+
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
@@ -318,7 +360,7 @@ public class BlockCache implements Closeable {
         if (!removeFromList(candidate)) {
           throw new IllegalStateException();
         }
-        Node node = new Node(candidate.buf, lruHead);
+        Node node = new Node(candidate.buf, lruHead, 1);
         insertAtHead(node);
         return node;
       }
