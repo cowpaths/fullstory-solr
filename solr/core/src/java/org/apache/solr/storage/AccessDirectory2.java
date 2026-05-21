@@ -40,6 +40,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.zip.CRC32;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -158,6 +159,9 @@ public class AccessDirectory2 extends MMapDirectory {
 
   @Override
   public IndexInput openInput(String name, IOContext context) throws IOException {
+    if (name.endsWith(".tmp")) {
+      return super.openInput(name, context);
+    }
     AtomicReference<BlockCache.Node>[] sharedAccessMapped;
     synchronized (pendingNodes) {
       sharedAccessMapped = pendingNodes.get(name); // get, not remove: shared across all root opens
@@ -1144,6 +1148,7 @@ public class AccessDirectory2 extends MMapDirectory {
     private final byte[] blockBuf = new byte[COMPRESSION_BLOCK_SIZE];
     private int blockBufPos = 0;
     private final ArrayList<AtomicReference<BlockCache.Node>> nodeSlots = new ArrayList<>();
+    private final CRC32 crc = new CRC32();
 
     WriteThroughOutput(String name, IndexOutput delegate, AccessDirectory2 dir) {
       super("WriteThroughOutput(" + name + ")", name);
@@ -1158,6 +1163,7 @@ public class AccessDirectory2 extends MMapDirectory {
       if (blockBufPos == COMPRESSION_BLOCK_SIZE) {
         captureBlock(COMPRESSION_BLOCK_SIZE);
       }
+      crc.update(b);
       delegate.writeByte(b);
     }
 
@@ -1176,6 +1182,7 @@ public class AccessDirectory2 extends MMapDirectory {
           captureBlock(COMPRESSION_BLOCK_SIZE);
         }
       }
+      crc.update(src, offset, len);
       delegate.writeBytes(src, offset, len);
     }
 
@@ -1196,7 +1203,7 @@ public class AccessDirectory2 extends MMapDirectory {
 
     @Override
     public long getChecksum() throws IOException {
-      return delegate.getChecksum();
+      return crc.getValue();
     }
 
     @Override
