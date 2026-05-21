@@ -386,6 +386,12 @@ public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDi
     if (persistent == null) {
       return access.createOutput(name, context);
     }
+    // In AccessDirectory2 mode, write only to persistent and capture uncompressed blocks into the
+    // BlockCache as they are written, so that the first openInput call finds a warm cache.
+    if (access instanceof AccessDirectory2) {
+      return new AccessDirectory2.WriteThroughOutput(
+          name, persistent.createOutput(name, context), (AccessDirectory2) access);
+    }
     IndexOutput a = null;
     IndexOutput b = null;
     Throwable th = null;

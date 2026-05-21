@@ -39,7 +39,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -49,6 +51,7 @@ import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
+import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.MappedByteBufferIndexInputProvider;
@@ -80,7 +83,14 @@ public class AccessDirectory2 extends MMapDirectory {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private final Path compressedPath;
-  private final BlockCache cache;
+  final BlockCache cache;
+
+  /**
+   * Nodes pre-populated by {@link WriteThroughOutput} at write-close time; consumed by {@link
+   * #openInput} to warm the cache for newly written files. Keyed by file name; entries are removed
+   * on first open (or on delete/rename).
+   */
+  private final HashMap<String, BlockCache.Node[]> pendingNodes = new HashMap<>();
 
   public AccessDirectory2(
       Path path, LockFactory lockFactory, Path compressedPath, BlockCache cache)
@@ -88,6 +98,40 @@ public class AccessDirectory2 extends MMapDirectory {
     super(path, lockFactory);
     this.compressedPath = compressedPath;
     this.cache = cache;
+  }
+
+  /** Stores pre-populated cache nodes for {@code name}, to be consumed by the next openInput. */
+  void storeNodes(String name, BlockCache.Node[] nodes) {
+    synchronized (pendingNodes) {
+      pendingNodes.put(name, nodes);
+    }
+  }
+
+  @Override
+  public void deleteFile(String name) throws IOException {
+    BlockCache.Node[] stale;
+    synchronized (pendingNodes) {
+      stale = pendingNodes.remove(name);
+    }
+    if (stale != null) {
+      for (BlockCache.Node node : stale) {
+        if (node != null) cache.unpin(node);
+      }
+    }
+    super.deleteFile(name);
+  }
+
+  @Override
+  public void rename(String source, String dest) throws IOException {
+    synchronized (pendingNodes) {
+      BlockCache.Node[] nodes = pendingNodes.remove(source);
+      if (nodes != null) pendingNodes.put(dest, nodes);
+    }
+    try {
+      super.rename(source, dest);
+    } catch (NoSuchFileException e) {
+      // In write-through mode no uncompressed file is materialized in the access path.
+    }
   }
 
   @Override
@@ -106,11 +150,18 @@ public class AccessDirectory2 extends MMapDirectory {
 
   @Override
   public IndexInput openInput(String name, IOContext context) throws IOException {
+    BlockCache.Node[] prePopulated;
+    synchronized (pendingNodes) {
+      prePopulated = pendingNodes.remove(name);
+    }
+    if (prePopulated != null) {
+      return new LazyLoadInput(compressedPath.resolve(name), cache, prePopulated);
+    }
     try {
       return super.openInput(name, context);
     } catch (NoSuchFileException | FileNotFoundException ex) {
       try {
-        return new LazyLoadInput(compressedPath.resolve(name), cache);
+        return new LazyLoadInput(compressedPath.resolve(name), cache, null);
       } catch (IOException ex1) {
         ex1.addSuppressed(ex);
         throw ex1;
@@ -168,7 +219,8 @@ public class AccessDirectory2 extends MMapDirectory {
     // ---------------------------------------------------------------------------
 
     @SuppressWarnings("unchecked")
-    LazyLoadInput(Path source, BlockCache cache) throws IOException {
+    LazyLoadInput(Path source, BlockCache cache, BlockCache.Node[] prePopulatedNodes)
+        throws IOException {
       super("lazy:" + source);
       this.cache = cache;
       this.compressedGuard = new ByteBufferGuard("compressedGuard", unmapHack());
@@ -237,7 +289,16 @@ public class AccessDirectory2 extends MMapDirectory {
           AtomicReference<BlockCache. Node>[] localAccessMapped = new AtomicReference[blockCount];
           this.accessMapped = localAccessMapped;
           for (int i = 0; i < blockCount; i++) {
-            localAccessMapped[i] = new AtomicReference<>();
+            BlockCache.Node preNode =
+                prePopulatedNodes != null && i < prePopulatedNodes.length
+                    ? prePopulatedNodes[i]
+                    : null;
+            localAccessMapped[i] = new AtomicReference<>(preNode);
+            if (preNode != null) {
+              // Release the acquire-pin so the node is evictable; readers will re-pin via
+              // accessMapped.
+              cache.unpin(preNode);
+            }
           }
         }
       }
@@ -1062,6 +1123,93 @@ public class AccessDirectory2 extends MMapDirectory {
     @Override
     public IndexInput slice(String sliceDescription, long offset, long length) throws IOException {
       return new LazyLoadInput(sliceDescription, this, offset, length);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Write-through output: captures uncompressed blocks into the BlockCache at write time.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * An {@link IndexOutput} that forwards all writes to a delegate (the {@link
+   * CompressingDirectory} output) while simultaneously capturing each {@link
+   * CompressingDirectory#COMPRESSION_BLOCK_SIZE}-byte chunk into a {@link BlockCache.Node}. When
+   * closed, the collected nodes are handed to {@link AccessDirectory2#storeNodes} so that the first
+   * {@link #openInput} call on this file finds a warm cache.
+   *
+   * <p>This avoids writing an uncompressed copy to the access-path {@link MMapDirectory}.
+   */
+  static final class WriteThroughOutput extends IndexOutput {
+
+    private final IndexOutput delegate;
+    private final AccessDirectory2 dir;
+    private final String name;
+    private final byte[] blockBuf = new byte[COMPRESSION_BLOCK_SIZE];
+    private int blockBufPos = 0;
+    private final ArrayList<BlockCache.Node> nodes = new ArrayList<>();
+
+    WriteThroughOutput(String name, IndexOutput delegate, AccessDirectory2 dir) {
+      super("WriteThroughOutput(" + name + ")", name);
+      this.delegate = delegate;
+      this.dir = dir;
+      this.name = name;
+    }
+
+    @Override
+    public void writeByte(byte b) throws IOException {
+      blockBuf[blockBufPos++] = b;
+      if (blockBufPos == COMPRESSION_BLOCK_SIZE) {
+        captureBlock(COMPRESSION_BLOCK_SIZE);
+      }
+      delegate.writeByte(b);
+    }
+
+    @Override
+    public void writeBytes(byte[] src, int offset, int len) throws IOException {
+      int remaining = len;
+      int srcOff = offset;
+      while (remaining > 0) {
+        int space = COMPRESSION_BLOCK_SIZE - blockBufPos;
+        int copy = Math.min(space, remaining);
+        System.arraycopy(src, srcOff, blockBuf, blockBufPos, copy);
+        blockBufPos += copy;
+        srcOff += copy;
+        remaining -= copy;
+        if (blockBufPos == COMPRESSION_BLOCK_SIZE) {
+          captureBlock(COMPRESSION_BLOCK_SIZE);
+        }
+      }
+      delegate.writeBytes(src, offset, len);
+    }
+
+    private void captureBlock(int len) {
+      BlockCache.Node node = dir.cache.acquireNode();
+      if (node != null) {
+        node.buf.clear();
+        node.buf.put(blockBuf, 0, len);
+      }
+      nodes.add(node); // null = cache exhausted; reader will decompress on demand
+      blockBufPos = 0;
+    }
+
+    @Override
+    public long getFilePointer() {
+      return delegate.getFilePointer();
+    }
+
+    @Override
+    public long getChecksum() throws IOException {
+      return delegate.getChecksum();
+    }
+
+    @Override
+    public void close() throws IOException {
+      try (delegate) {
+        if (blockBufPos > 0) {
+          captureBlock(blockBufPos); // partial last block
+        }
+        dir.storeNodes(name, nodes.toArray(new BlockCache.Node[0]));
+      }
     }
   }
 }
