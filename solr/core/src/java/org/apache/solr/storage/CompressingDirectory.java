@@ -487,6 +487,11 @@ public class CompressingDirectory extends FSDirectory
   }
 
   enum CompressionBlockType {
+    SIZE_4K(0, 12),
+    SIZE_8K(0, 13),
+    SIZE_16K(0, 14),
+    SIZE_32K(0, 15),
+    SIZE_64K(0, 16),
     SIZE_256K(0, 18);
 
     CompressionBlockType(int id, int blockShift) {
@@ -502,10 +507,22 @@ public class CompressingDirectory extends FSDirectory
     final int blockSize;
     final int blockMaskLow;
     final int blockSizeEstimate;
+
+    static CompressionBlockType forKilobytes(int kb) {
+      for (CompressionBlockType t : values()) {
+        if (t.blockSize == kb * 1024) return t;
+      }
+      throw new IllegalArgumentException(
+          "unsupported solr.compressionBlockKilobytes: "
+              + kb
+              + " (supported: 4, 8, 16, 32, 64, 256)");
+    }
   }
 
   static final CompressionType COMPRESSION_TYPE = CompressionType.LZ4;
-  static final CompressionBlockType COMPRESSION_BLOCK_TYPE = CompressionBlockType.SIZE_256K;
+  static final CompressionBlockType COMPRESSION_BLOCK_TYPE =
+      CompressionBlockType.forKilobytes(
+          Integer.getInteger("solr.compressionBlockKilobytes", 256));
   public static final int COMPRESSION_BLOCK_SHIFT = COMPRESSION_BLOCK_TYPE.blockShift;
   public static final int COMPRESSION_BLOCK_SIZE = COMPRESSION_BLOCK_TYPE.blockSize;
   public static final int COMPRESSION_BLOCK_MASK_LOW = COMPRESSION_BLOCK_TYPE.blockMaskLow;

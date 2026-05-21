@@ -84,6 +84,7 @@ allprojects {
           [propName: 'lucene.fixedbitset.maxwordsshift', value: "17", description: "May set lower to exercise FixedBitSet partitioning"],
           [propName: 'solr.teeDirectory.useBlockCache', value: "true", description: "use cache-based paradigm for access (AccessDirectory2)"],
           [propName: 'solr.teeDirectory.blockCacheBytes', value: "67108864", description: "size in bytes of blockcache (for access dir)"],
+          [propName: 'solr.compressionBlockKilobytes', value: "256", description: "Compression block size in KiB (4, 8, 16, 32, 64, 256)."],
           // seed, repetition and amplification.
           [propName: 'tests.seed', value: { -> rootSeed }, description: "Sets the master randomization seed."],
           [propName: 'tests.iters', value: null, description: "Duplicate (re-run) each test case N times."],
