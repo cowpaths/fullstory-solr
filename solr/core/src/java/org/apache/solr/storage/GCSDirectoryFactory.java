@@ -1,0 +1,207 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.solr.storage;
+
+import com.google.cloud.storage.Storage;
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.lang.ref.WeakReference;
+import java.nio.file.Path;
+import java.util.UUID;
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.LockFactory;
+import org.apache.solr.common.params.SolrParams;
+import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.common.util.NamedList;
+import org.apache.solr.core.CoreContainer;
+import org.apache.solr.core.StandardDirectoryFactory;
+
+/**
+ * A {@link org.apache.solr.core.DirectoryFactory} that stores compressed index data in Google Cloud
+ * Storage and keeps only lightweight offset-manifest files on the local filesystem, via {@link
+ * GCSDirectory}.
+ *
+ * <p>Node-level resources (executor, block cache, buffer pool) are shared across all index
+ * directories on the same node via {@link CoreContainer#getObjectCache()}.
+ *
+ * <p>This factory never uses application-default GCS credentials. Subclasses must override {@link
+ * #initStorage()} to supply a {@link Storage} instance — either a real configured client (with an
+ * explicit service account key) or an in-memory mock (see {@code LocalGCSDirectoryFactory} for
+ * tests).
+ *
+ * <p>Configuration parameters (via {@code solrconfig.xml} or system properties):
+ *
+ * <ul>
+ *   <li>{@code bucket} / {@code solr.gcsDirectory.bucket} — GCS bucket name
+ *   <li>{@code blockCacheKilobytes} / {@code solr.gcsDirectory.blockCacheKilobytes} — decompressed
+ *       block cache size in KiB (default: 1 GiB)
+ *   <li>{@code useAsyncIO} — whether to use double-buffered async GCS writes (default: true)
+ * </ul>
+ */
+public class GCSDirectoryFactory extends StandardDirectoryFactory {
+
+  /** Write buffer size for double-buffered GCS uploads. 256 KB matches GCS chunk alignment. */
+  static final int GCS_WRITE_BUFFER_SIZE = 256 * 1024;
+
+  /** Default block cache size: 1 GiB expressed in KiB. */
+  private static final long DEFAULT_BLOCK_CACHE_KILOBYTES = 1L << 20;
+
+  private NodeLevelGCSDirectoryState nodeLevelState;
+
+  /** Non-null only when this instance owns (and must close) the node-level state. */
+  private NodeLevelGCSDirectoryState ownNodeLevelState;
+
+  private WeakReference<CoreContainer> cc;
+  private String bucket;
+  private boolean useAsyncIO;
+
+  @Override
+  public void initCoreContainer(CoreContainer cc) {
+    super.initCoreContainer(cc);
+    this.cc = new WeakReference<>(cc);
+  }
+
+  /** Node-level resources shared across all {@link GCSDirectory} instances on this node. */
+  public static final class NodeLevelGCSDirectoryState implements Closeable {
+    final java.util.concurrent.ExecutorService ioExec =
+        ExecutorUtil.newMDCAwareCachedThreadPool("gcsIOExec");
+    final BlockCache blockCache;
+    final Storage storage;
+
+    /**
+     * Buffer pool for the double-buffered GCS write path. Buffers are 256 KB, 4-KiB aligned (no
+     * DirectIO requirement, but page-aligned is harmless and avoids any platform surprises).
+     */
+    final DirectBufferPool bufferPool;
+
+    NodeLevelGCSDirectoryState(BlockCache blockCache, Storage storage) {
+      this.blockCache = blockCache;
+      this.storage = storage;
+      this.bufferPool = new DirectBufferPool(GCS_WRITE_BUFFER_SIZE, 4096, 1);
+    }
+
+    @Override
+    @SuppressWarnings("try")
+    public void close() throws IOException {
+      try (Closeable c1 = blockCache;
+          Closeable c2 = () -> ExecutorUtil.shutdownAndAwaitTermination(ioExec)) {
+        // resources closed in declaration order via try-with-resources
+      }
+    }
+  }
+
+  @Override
+  public void init(NamedList<?> args) {
+    SolrParams params = args.toSolrParams();
+    bucket = params.get("bucket", System.getProperty("solr.gcsDirectory.bucket", ""));
+    if (bucket.isEmpty()) {
+      throw new IllegalArgumentException(
+          "GCSDirectoryFactory requires a bucket name via the 'bucket' param "
+              + "or the 'solr.gcsDirectory.bucket' system property.");
+    }
+    useAsyncIO = params.getBool("useAsyncIO", true);
+
+    final long blockCacheBytes =
+        params.getLong(
+                "blockCacheKilobytes",
+                Long.getLong(
+                    "solr.gcsDirectory.blockCacheKilobytes", DEFAULT_BLOCK_CACHE_KILOBYTES))
+            * 1024L;
+
+    final Storage storage = initStorage();
+
+    final Path blockCacheBackingFile =
+        Path.of(System.getProperty("java.io.tmpdir"))
+            .resolve("solr-gcs-block-cache-" + UUID.randomUUID() + ".tmp");
+
+    if (this.cc != null) {
+      CoreContainer cc = this.cc.get();
+      this.cc = null;
+      assert cc != null;
+      nodeLevelState =
+          cc.getObjectCache()
+              .computeIfAbsent(
+                  "nodeLevelGCSDirectoryState",
+                  NodeLevelGCSDirectoryState.class,
+                  k -> {
+                    try {
+                      return new NodeLevelGCSDirectoryState(
+                          new BlockCache(blockCacheBytes, blockCacheBackingFile), storage);
+                    } catch (IOException e) {
+                      throw new UncheckedIOException(e);
+                    }
+                  });
+    } else {
+      try {
+        nodeLevelState =
+            new NodeLevelGCSDirectoryState(
+                new BlockCache(blockCacheBytes, blockCacheBackingFile), storage);
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
+      ownNodeLevelState = nodeLevelState;
+    }
+
+    super.init(args);
+  }
+
+  /**
+   * Creates the {@link Storage} instance used for all GCS operations.
+   *
+   * <p>This implementation throws {@link UnsupportedOperationException} — production deployments
+   * must subclass and override this method to supply a properly credentialed {@link Storage}
+   * instance. This factory intentionally does <em>not</em> call {@code
+   * GoogleCredentials.getApplicationDefault()} or any other ambient-credential mechanism.
+   *
+   * <p>For in-memory testing, use {@code LocalGCSDirectoryFactory} (in the test sources), which
+   * overrides this method with a {@code LocalStorageHelper}-backed singleton.
+   */
+  protected Storage initStorage() {
+    throw new UnsupportedOperationException(
+        "GCSDirectoryFactory does not use application-default GCS credentials. "
+            + "Subclass and override initStorage() to provide a configured Storage instance, "
+            + "or use LocalGCSDirectoryFactory for in-memory testing.");
+  }
+
+  @Override
+  protected Directory create(String path, LockFactory lockFactory, DirContext dirContext)
+      throws IOException {
+    return new GCSDirectory(
+        Path.of(path),
+        bucket,
+        nodeLevelState.storage,
+        nodeLevelState.blockCache,
+        nodeLevelState.ioExec,
+        useAsyncIO,
+        nodeLevelState.bufferPool);
+  }
+
+  @Override
+  public boolean isPersistent() {
+    return true;
+  }
+
+  @Override
+  @SuppressWarnings("try")
+  public void close() throws IOException {
+    try (NodeLevelGCSDirectoryState close = ownNodeLevelState) {
+      super.close();
+    }
+  }
+}
