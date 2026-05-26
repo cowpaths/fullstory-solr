@@ -82,20 +82,19 @@ import org.apache.lucene.util.compress.LZ4;
  *
  * <pre>
  *   [8 bytes]  logical (uncompressed) file length
- *   [4 bytes]  blockDeltaFooterSize
  *   [1 byte]   compressionBlockType id
  *   [1 byte]   compressionType id
  *   [2 bytes]  reserved
  *   [8 bytes]  GCS blob UUID most-significant bits
  *   [8 bytes]  GCS blob UUID least-significant bits
  *   [8 bytes]  total compressed bytes in the GCS object
- *   [blockDeltaFooterSize bytes]  ZInt delta-encoded compressed block sizes
+ *   [remaining bytes]  ZInt delta-encoded compressed block sizes
  * </pre>
  */
 public class GCSDirectory extends BaseDirectory {
 
-  // Offset file header size: 16 (base fields) + 16 (UUID) + 8 (gcsObjectSize) = 40 bytes.
-  static final int OFFSET_FILE_HEADER_SIZE = 40;
+  // Offset file header size: 8 (length) + 4 (blockType/comprType/reserved) + 16 (UUID) + 8 (gcsObjectSize) = 36 bytes.
+  static final int OFFSET_FILE_HEADER_SIZE = 36;
 
   private final Path localPath;
   private final String bucket;
@@ -273,22 +272,16 @@ public class GCSDirectory extends BaseDirectory {
     byte[] header = readOffsetFileHeader(path);
     if (header == null) return null;
     ByteBuffer buf = ByteBuffer.wrap(header);
-    long uuidMsb = buf.getLong(16);
-    long uuidLsb = buf.getLong(24);
+    long uuidMsb = buf.getLong(12);
+    long uuidLsb = buf.getLong(20);
     return new UUID(uuidMsb, uuidLsb).toString();
   }
 
   private static void writeOffsetFile(
-      Path path,
-      long fileLength,
-      int blockDeltaFooterSize,
-      UUID uuid,
-      long gcsObjectSize,
-      byte[] deltaBytes)
+      Path path, long fileLength, UUID uuid, long gcsObjectSize, byte[] deltaBytes)
       throws IOException {
     ByteBuffer header = ByteBuffer.allocate(OFFSET_FILE_HEADER_SIZE);
     header.putLong(fileLength);
-    header.putInt(blockDeltaFooterSize);
     header.put((byte) COMPRESSION_BLOCK_TYPE.id);
     header.put((byte) COMPRESSION_TYPE.id);
     header.putShort((short) 0); // reserved
@@ -299,7 +292,7 @@ public class GCSDirectory extends BaseDirectory {
     try (FileChannel ch =
         FileChannel.open(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE)) {
       while (header.hasRemaining()) ch.write(header);
-      ByteBuffer body = ByteBuffer.wrap(deltaBytes, 0, blockDeltaFooterSize);
+      ByteBuffer body = ByteBuffer.wrap(deltaBytes);
       while (body.hasRemaining()) ch.write(body);
       ch.force(true);
     }
@@ -415,8 +408,7 @@ public class GCSDirectory extends BaseDirectory {
         }
         // Write the local offset file: header + UUID + gcsObjectSize + delta-encoded block sizes.
         byte[] deltaBytes = blockDeltas.toByteArray();
-        writeOffsetFile(
-            offsetFilePath, filePos, deltaBytes.length, uuid, gcsObjectSize, deltaBytes);
+        writeOffsetFile(offsetFilePath, filePos, uuid, gcsObjectSize, deltaBytes);
         // Pre-populate cache-node array for readers of this file.
         if (filePos > 0) {
           int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
@@ -525,22 +517,22 @@ public class GCSDirectory extends BaseDirectory {
 
       ByteBuffer hdr = ByteBuffer.wrap(header);
       length = hdr.getLong(0);
-      int blockDeltaFooterSize = hdr.getInt(8);
-      int cBlockTypeId = hdr.get(12) & 0xff;
+      int cBlockTypeId = hdr.get(8) & 0xff;
       if (cBlockTypeId != COMPRESSION_BLOCK_TYPE.id) {
         throw new IOException("unrecognized compression block type id: " + cBlockTypeId);
       }
-      long uuidMsb = hdr.getLong(16);
-      long uuidLsb = hdr.getLong(24);
+      long uuidMsb = hdr.getLong(12);
+      long uuidLsb = hdr.getLong(20);
       blobName = new UUID(uuidMsb, uuidLsb).toString();
-      long gcsObjectSize = hdr.getLong(32);
+      long gcsObjectSize = hdr.getLong(28);
 
-      // Read the delta footer from the end of the offset file.
+      // Delta bytes occupy everything after the fixed header.
       long offsetFileSize = Files.size(offsetFile);
+      int blockDeltaFooterSize = (int) (offsetFileSize - OFFSET_FILE_HEADER_SIZE);
       byte[] footer = new byte[blockDeltaFooterSize];
       try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
         ByteBuffer footerBuf = ByteBuffer.wrap(footer);
-        ch.read(footerBuf, offsetFileSize - blockDeltaFooterSize);
+        ch.read(footerBuf, OFFSET_FILE_HEADER_SIZE);
       }
       ByteArrayDataInput in = new ByteArrayDataInput(footer);
 
