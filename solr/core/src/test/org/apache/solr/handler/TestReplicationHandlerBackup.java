@@ -206,7 +206,7 @@ public class TestReplicationHandlerBackup extends SolrJettyTestBase {
       final List<String> remainingBackups = new ArrayList<>();
 
       try (DirectoryStream<Path> stream =
-          Files.newDirectoryStream(Paths.get(leader.getDataDir()), "snapshot*")) {
+          Files.newDirectoryStream(Paths.get(leader.getDataDir()), "snapshot.*")) {
         Iterator<Path> iter = stream.iterator();
         while (iter.hasNext()) {
           remainingBackups.add(iter.next().getFileName().toString());
