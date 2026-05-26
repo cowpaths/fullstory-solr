@@ -523,8 +523,7 @@ public class CompressingDirectory extends FSDirectory
 
   static final CompressionType COMPRESSION_TYPE = CompressionType.LZ4;
   static final CompressionBlockType COMPRESSION_BLOCK_TYPE =
-      CompressionBlockType.forKilobytes(
-          Integer.getInteger("solr.compressionBlockKilobytes", 256));
+      CompressionBlockType.forKilobytes(Integer.getInteger("solr.compressionBlockKilobytes", 256));
   public static final int COMPRESSION_BLOCK_SHIFT = COMPRESSION_BLOCK_TYPE.blockShift;
   public static final int COMPRESSION_BLOCK_SIZE = COMPRESSION_BLOCK_TYPE.blockSize;
   public static final int COMPRESSION_BLOCK_MASK_LOW = COMPRESSION_BLOCK_TYPE.blockMaskLow;

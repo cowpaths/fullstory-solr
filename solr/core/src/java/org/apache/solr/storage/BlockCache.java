@@ -41,8 +41,8 @@ import org.slf4j.LoggerFactory;
  * caller is expected to decompress the block into a temporary heap buffer and serve the read
  * uncached.
  *
- * <p><b>LRU invariant:</b> a node is in the doubly-linked list if and only if its {@code
- * refCount} is 0 (evictable). Pinned nodes (refCount &gt; 0) are spliced out of the list.
+ * <p><b>LRU invariant:</b> a node is in the doubly-linked list if and only if its {@code refCount}
+ * is 0 (evictable). Pinned nodes (refCount &gt; 0) are spliced out of the list.
  *
  * <ul>
  *   <li>{@link #pin}: first pin (CAS 0&rarr;1) removes the node from the list; re-pins (CAS
@@ -70,18 +70,17 @@ public class BlockCache implements Closeable {
    * <p>Lifecycle:
    *
    * <ol>
-   *   <li>Returned by {@link BlockCache#acquireNode()} pinned (refCount=1), <em>not</em> in the
-   *       LRU list.
-   *   <li>Caller populates {@link #buf} and publishes the node (e.g. via an {@code
-   *       AtomicReference} slot). The node is still pinned.
+   *   <li>Returned by {@link BlockCache#acquireNode()} pinned (refCount=1), <em>not</em> in the LRU
+   *       list.
+   *   <li>Caller populates {@link #buf} and publishes the node (e.g. via an {@code AtomicReference}
+   *       slot). The node is still pinned.
    *   <li>Subsequent callers call {@link BlockCache#pin(Node)}, which either re-pins (refCount&gt;0
    *       → increment only) or first-pins (refCount=0 → remove from list + increment).
-   *   <li>Each caller eventually calls {@link BlockCache#unpin(Node)}. The last unpin
-   *       (refCount→0) inserts the node at the LRU head (most-recently-used, lowest eviction
-   *       priority).
-   *   <li>When evicted by {@link BlockCache#acquireNode()}, refCount is set to -1 permanently.
-   *       Any reader that encounters the node via a stale slot sees the negative count, fails
-   *       {@link BlockCache#pin(Node)}, and falls back to loading.
+   *   <li>Each caller eventually calls {@link BlockCache#unpin(Node)}. The last unpin (refCount→0)
+   *       inserts the node at the LRU head (most-recently-used, lowest eviction priority).
+   *   <li>When evicted by {@link BlockCache#acquireNode()}, refCount is set to -1 permanently. Any
+   *       reader that encounters the node via a stale slot sees the negative count, fails {@link
+   *       BlockCache#pin(Node)}, and falls back to loading.
    * </ol>
    *
    * <p>Head of the list = most recently used; tail = least recently used / eviction candidate.
@@ -295,8 +294,8 @@ public class BlockCache implements Closeable {
   // ---------------------------------------------------------------------------
 
   /**
-   * Pins {@code node} for the duration of a read, preventing eviction. Returns {@code false} if
-   * the node is permanently dead (evicted); the caller must then fall back to loading.
+   * Pins {@code node} for the duration of a read, preventing eviction. Returns {@code false} if the
+   * node is permanently dead (evicted); the caller must then fall back to loading.
    *
    * <p>If this is the <em>first</em> pin (refCount transitions 0&rarr;1), the node is removed from
    * the LRU list (it is no longer evictable). If the node is already pinned (refCount&gt;0), the
@@ -383,8 +382,8 @@ public class BlockCache implements Closeable {
    * content. The caller must eventually call {@link #unpin(Node)}.
    *
    * <p>By the LRU invariant all nodes in the list have refCount==0, so the tail node is always
-   * evictable. The returned node is <em>not</em> in the list; it will be re-inserted at the head
-   * on the final {@link #unpin(Node)}.
+   * evictable. The returned node is <em>not</em> in the list; it will be re-inserted at the head on
+   * the final {@link #unpin(Node)}.
    *
    * <p>Returns {@code null} if the list is empty (all blocks are pinned). In that case the caller
    * should decompress into a temporary heap buffer, serve the read directly, and discard it.

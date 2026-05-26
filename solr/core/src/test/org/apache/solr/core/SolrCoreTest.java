@@ -347,8 +347,7 @@ public class SolrCoreTest extends SolrTestCaseJ4 {
     CoreContainer coreContainer =
         new CoreContainer(
             SolrXmlConfig.fromString(
-                tmpHome,
-                "<solr><str name=\"configSetBaseDir\">" + configsets + "</str></solr>"));
+                tmpHome, "<solr><str name=\"configSetBaseDir\">" + configsets + "</str></solr>"));
     coreContainer.load();
 
     String coreName = "tmpCore";

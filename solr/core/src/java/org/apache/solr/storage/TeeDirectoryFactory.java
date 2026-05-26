@@ -118,8 +118,8 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
     private SolrMetricsContext solrMetricsContext;
 
     /**
-     * @param blockCache non-null to use {@link AccessDirectory2} (BlockCache mode); {@code null}
-     *     to use {@link AccessDirectory} (lazy-activation mode).
+     * @param blockCache non-null to use {@link AccessDirectory2} (BlockCache mode); {@code null} to
+     *     use {@link AccessDirectory} (lazy-activation mode).
      */
     public NodeLevelTeeDirectoryState(int lengthVerificationQueueSize, BlockCache blockCache) {
       this.blockCache = blockCache;
@@ -170,8 +170,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
                         }
                       } else {
                         if (lazyEntry == null) {
-                          lazyEntry =
-                              activationQueue.poll(idleCount * 200L, TimeUnit.MILLISECONDS);
+                          lazyEntry = activationQueue.poll(idleCount * 200L, TimeUnit.MILLISECONDS);
                         }
                         if (lazyEntry != null) {
                           int blocksLoadedCount = lazyEntry.load();
@@ -387,8 +386,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
   public void init(NamedList<?> args) {
     SolrParams params = args.toSolrParams();
     useBlockCache =
-        params.getBool(
-            "useBlockCache", Boolean.getBoolean("solr.teeDirectory.useBlockCache"));
+        params.getBool("useBlockCache", Boolean.getBoolean("solr.teeDirectory.useBlockCache"));
     final long blockCacheBytes =
         params.getLong(
                 "blockCacheKilobytes",
@@ -416,8 +414,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
                           blockCacheBackingFile != null
                               ? new BlockCache(blockCacheBytes, blockCacheBackingFile)
                               : null;
-                      NodeLevelTeeDirectoryState ret =
-                          new NodeLevelTeeDirectoryState(4096, cache);
+                      NodeLevelTeeDirectoryState ret = new NodeLevelTeeDirectoryState(4096, cache);
                       ret.initializeMetrics(
                           cc.getMetricsHandler().getSolrMetricsContext(), "teeDirectory");
                       return ret;

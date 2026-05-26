@@ -40,7 +40,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.zip.CRC32;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -49,6 +48,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.CRC32;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.IOContext;
@@ -94,11 +94,9 @@ public class AccessDirectory2 extends MMapDirectory {
    * #deleteFile} or {@link #rename}.
    */
   @SuppressWarnings({"unchecked", "rawtypes"})
-  private final HashMap<String, AtomicReference<BlockCache.Node>[]> pendingNodes =
-      new HashMap<>();
+  private final HashMap<String, AtomicReference<BlockCache.Node>[]> pendingNodes = new HashMap<>();
 
-  public AccessDirectory2(
-      Path path, LockFactory lockFactory, Path compressedPath, BlockCache cache)
+  public AccessDirectory2(Path path, LockFactory lockFactory, Path compressedPath, BlockCache cache)
       throws IOException {
     super(path, lockFactory);
     this.compressedPath = compressedPath;
@@ -206,7 +204,9 @@ public class AccessDirectory2 extends MMapDirectory {
     private BlockCache.Node currentNode;
 
     @SuppressWarnings({"unchecked", "rawtypes"})
-    private static final AtomicReference<BlockCache. Node>[] EMPTY_ACCESS_MAPPED = new AtomicReference[0];
+    private static final AtomicReference<BlockCache.Node>[] EMPTY_ACCESS_MAPPED =
+        new AtomicReference[0];
+
     private static final LongBuffer EMPTY_LONGBUFFER = LongBuffer.allocate(0);
     private static final IntBuffer EMPTY_INTBUFFER = IntBuffer.allocate(0);
     private static final FloatBuffer EMPTY_FLOATBUFFER = FloatBuffer.allocate(0);
@@ -232,8 +232,7 @@ public class AccessDirectory2 extends MMapDirectory {
 
       try (FileChannel channel = FileChannel.open(source, StandardOpenOption.READ)) {
         long compressedFileSize = channel.size();
-        mapped =
-            new ByteBuffer[Math.toIntExact(((compressedFileSize - 1) >> MAX_MAP_SHIFT) + 1)];
+        mapped = new ByteBuffer[Math.toIntExact(((compressedFileSize - 1) >> MAX_MAP_SHIFT) + 1)];
         long pos = 0;
         long limit = MAX_MAP_SIZE;
         for (int i = 0, lim = mapped.length; i < lim; i++) {
@@ -298,13 +297,14 @@ public class AccessDirectory2 extends MMapDirectory {
             this.accessMapped = sharedAccessMapped;
           } else {
             @SuppressWarnings({"unchecked", "rawtypes"})
-            AtomicReference<BlockCache. Node>[] localAccessMapped = new AtomicReference[blockCount];
+            AtomicReference<BlockCache.Node>[] localAccessMapped = new AtomicReference[blockCount];
             for (int i = 0; i < blockCount; i++) {
               localAccessMapped[i] = new AtomicReference<>();
             }
-            AtomicReference<BlockCache. Node>[] existing;
+            AtomicReference<BlockCache.Node>[] existing;
             synchronized (pendingNodes) {
-              existing = pendingNodes.putIfAbsent(source.getFileName().toString(), localAccessMapped);
+              existing =
+                  pendingNodes.putIfAbsent(source.getFileName().toString(), localAccessMapped);
             }
             this.accessMapped = existing == null ? localAccessMapped : existing;
           }
@@ -386,8 +386,8 @@ public class AccessDirectory2 extends MMapDirectory {
     }
 
     /**
-     * Reads {@code compressedLen} bytes from the compressed mmap at {@code pos}, decompresses
-     * them, and returns a heap ByteBuffer containing the decompressed block.
+     * Reads {@code compressedLen} bytes from the compressed mmap at {@code pos}, decompresses them,
+     * and returns a heap ByteBuffer containing the decompressed block.
      */
     private ByteBuffer supply(long pos, int compressedLen, int decompressedLen) throws IOException {
       final byte[] preBuffer = new byte[compressedLen];
@@ -1132,8 +1132,8 @@ public class AccessDirectory2 extends MMapDirectory {
   // ---------------------------------------------------------------------------
 
   /**
-   * An {@link IndexOutput} that forwards all writes to a delegate (the {@link
-   * CompressingDirectory} output) while simultaneously capturing each {@link
+   * An {@link IndexOutput} that forwards all writes to a delegate (the {@link CompressingDirectory}
+   * output) while simultaneously capturing each {@link
    * CompressingDirectory#COMPRESSION_BLOCK_SIZE}-byte chunk into a {@link BlockCache.Node}. When
    * closed, the collected nodes are handed to {@link AccessDirectory2#storeNodes} so that the first
    * {@link #openInput} call on this file finds a warm cache.
