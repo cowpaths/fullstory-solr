@@ -76,7 +76,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
   private boolean useAsyncIO;
   private boolean useDirectIO;
 
-  private static final long DEFAULT_BLOCK_CACHE_BYTES = 1L << 30; // 1 GiB
+  private static final long DEFAULT_BLOCK_CACHE_KILOBYTES = 1L << 20; // 1 GiB
 
   @Override
   public void initCoreContainer(CoreContainer cc) {
@@ -391,8 +391,10 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
             "useBlockCache", Boolean.getBoolean("solr.teeDirectory.useBlockCache"));
     final long blockCacheBytes =
         params.getLong(
-            "blockCacheBytes",
-            Long.getLong("solr.teeDirectory.blockCacheBytes", DEFAULT_BLOCK_CACHE_BYTES));
+                "blockCacheKilobytes",
+                Long.getLong(
+                    "solr.teeDirectory.blockCacheKilobytes", DEFAULT_BLOCK_CACHE_KILOBYTES))
+            * 1024L;
     final Path blockCacheBackingFile =
         useBlockCache
             ? Path.of(System.getProperty("java.io.tmpdir"))

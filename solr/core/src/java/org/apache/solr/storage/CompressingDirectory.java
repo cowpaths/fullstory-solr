@@ -487,6 +487,8 @@ public class CompressingDirectory extends FSDirectory
   }
 
   enum CompressionBlockType {
+    SIZE_1K(0, 10),
+    SIZE_2K(0, 11),
     SIZE_4K(0, 12),
     SIZE_8K(0, 13),
     SIZE_16K(0, 14),
@@ -515,7 +517,7 @@ public class CompressingDirectory extends FSDirectory
       throw new IllegalArgumentException(
           "unsupported solr.compressionBlockKilobytes: "
               + kb
-              + " (supported: 4, 8, 16, 32, 64, 256)");
+              + " (supported: 1, 2, 4, 8, 16, 32, 64, 256)");
     }
   }
 
