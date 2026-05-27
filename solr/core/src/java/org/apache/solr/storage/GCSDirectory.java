@@ -45,7 +45,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
 import org.apache.lucene.store.BaseDirectory;
 import org.apache.lucene.store.ByteArrayDataInput;
@@ -106,15 +106,14 @@ public class GCSDirectory extends BaseDirectory {
   private final DirectBufferPool bufferPool;
   private final AtomicLong tempFileCounter = new AtomicLong();
 
-  @SuppressWarnings({"unchecked", "rawtypes"})
-  static final AtomicReference<BlockCache.Node>[] EMPTY_ACCESS_MAPPED = new AtomicReference[0];
+  static final AtomicReferenceArray<BlockCache.Node> EMPTY_ACCESS_MAPPED =
+      new AtomicReferenceArray<>(0);
 
   /**
    * Cache-node arrays shared across all root {@link GCSIndexInput} instances opened for the same
    * file. Populated by the writer at write-close time; entries are removed on delete or rename.
    */
-  @SuppressWarnings({"unchecked", "rawtypes"})
-  private final ConcurrentHashMap<String, AtomicReference<BlockCache.Node>[]> pendingNodes =
+  private final ConcurrentHashMap<String, AtomicReferenceArray<BlockCache.Node>> pendingNodes =
       new ConcurrentHashMap<>();
 
   public GCSDirectory(
@@ -156,11 +155,10 @@ public class GCSDirectory extends BaseDirectory {
   @Override
   public void deleteFile(String name) throws IOException {
     ensureOpen();
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    AtomicReference<BlockCache.Node>[] stale = pendingNodes.remove(name);
+    AtomicReferenceArray<BlockCache.Node> stale = pendingNodes.remove(name);
     if (stale != null) {
-      for (AtomicReference<BlockCache.Node> slot : stale) {
-        BlockCache.Node node = slot.getAndSet(null);
+      for (int i = 0; i < stale.length(); i++) {
+        BlockCache.Node node = stale.getAndSet(i, null);
         if (node != null) cache.close(node);
       }
     }
@@ -231,7 +229,7 @@ public class GCSDirectory extends BaseDirectory {
   @Override
   public void rename(String source, String dest) throws IOException {
     ensureOpen();
-    AtomicReference<BlockCache.Node>[] nodes = pendingNodes.remove(source);
+    AtomicReferenceArray<BlockCache.Node> nodes = pendingNodes.remove(source);
     if (nodes != null) pendingNodes.put(dest, nodes);
     Files.move(localPath.resolve(source), localPath.resolve(dest));
   }
@@ -239,8 +237,7 @@ public class GCSDirectory extends BaseDirectory {
   @Override
   public IndexInput openInput(String name, IOContext context) throws IOException {
     ensureOpen();
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    AtomicReference<BlockCache.Node>[] shared = pendingNodes.get(name);
+    AtomicReferenceArray<BlockCache.Node> shared = pendingNodes.get(name);
     return new GCSIndexInput("gcs:" + name, localPath.resolve(name), shared);
   }
 
@@ -415,10 +412,7 @@ public class GCSDirectory extends BaseDirectory {
         // Pre-populate cache-node array for readers of this file.
         if (filePos > 0) {
           int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-          @SuppressWarnings({"unchecked", "rawtypes"})
-          AtomicReference<BlockCache.Node>[] nodes = new AtomicReference[blockCount];
-          for (int i = 0; i < blockCount; i++) nodes[i] = new AtomicReference<>();
-          pendingNodes.put(getName(), nodes);
+          pendingNodes.put(getName(), new AtomicReferenceArray<>(blockCount));
         }
       }
     }
@@ -482,7 +476,7 @@ public class GCSDirectory extends BaseDirectory {
     private final int lastBlockDecompressedLen;
     private final String blobName;
 
-    private final AtomicReference<BlockCache.Node>[] accessMapped;
+    private final AtomicReferenceArray<BlockCache.Node> accessMapped;
 
     private final long offset;
     private final long sliceLength;
@@ -499,7 +493,7 @@ public class GCSDirectory extends BaseDirectory {
     GCSIndexInput(
         String resourceDescription,
         Path offsetFile,
-        AtomicReference<BlockCache.Node>[] sharedAccessMapped)
+        AtomicReferenceArray<BlockCache.Node> sharedAccessMapped)
         throws IOException {
       super(resourceDescription);
       this.isClone = false;
@@ -558,15 +552,13 @@ public class GCSDirectory extends BaseDirectory {
       blockOffsets[blockCount] = gcsObjectSize;
 
       if (sharedAccessMapped != null) {
-        if (sharedAccessMapped.length != blockCount) {
+        if (sharedAccessMapped.length() != blockCount) {
           throw new IllegalArgumentException("block count mismatch");
         }
         this.accessMapped = sharedAccessMapped;
       } else {
-        @SuppressWarnings({"unchecked", "rawtypes"})
-        AtomicReference<BlockCache.Node>[] local = new AtomicReference[blockCount];
-        for (int i = 0; i < blockCount; i++) local[i] = new AtomicReference<>();
-        AtomicReference<BlockCache.Node>[] existing =
+        AtomicReferenceArray<BlockCache.Node> local = new AtomicReferenceArray<>(blockCount);
+        AtomicReferenceArray<BlockCache.Node> existing =
             pendingNodes.putIfAbsent(offsetFile.getFileName().toString(), local);
         this.accessMapped = existing == null ? local : existing;
       }
@@ -653,7 +645,7 @@ public class GCSDirectory extends BaseDirectory {
       unpinCurrent();
 
       // Cache hit.
-      BlockCache.Node cached = accessMapped[blockIdx].get();
+      BlockCache.Node cached = accessMapped.get(blockIdx);
       if (cached != null && cache.pin(cached)) {
         currentNode = cached;
         postBuffer = cached.buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
@@ -671,7 +663,7 @@ public class GCSDirectory extends BaseDirectory {
       if (node != null) {
         node.buf.clear();
         node.buf.put(heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
-        accessMapped[blockIdx].set(node);
+        accessMapped.set(blockIdx, node);
         currentNode = node;
         postBuffer = node.buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         postBuffer.clear().limit(decompressedLen);
