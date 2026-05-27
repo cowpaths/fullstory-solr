@@ -168,7 +168,7 @@ public class GCSDirectory extends FSDirectory {
     Path offsetFile = directory.resolve(name);
     byte[] header = readOffsetFileHeader(offsetFile);
     if (header == null) throw new NoSuchFileException(name);
-    return ByteBuffer.wrap(header).getLong(0);
+    return new ByteArrayDataInput(header).readLong();
   }
 
   @Override
@@ -209,8 +209,9 @@ public class GCSDirectory extends FSDirectory {
   private static UUID readBlobUUID(Path path) throws IOException {
     byte[] header = readOffsetFileHeader(path);
     if (header == null) return null;
-    ByteBuffer buf = ByteBuffer.wrap(header);
-    return new UUID(buf.getLong(12), buf.getLong(20));
+    ByteArrayDataInput in = new ByteArrayDataInput(header);
+    in.skipBytes(12); // skip fileLength(8) + blockType(1) + compressionType(1) + reserved(2)
+    return new UUID(in.readLong(), in.readLong());
   }
 
   // ---------------------------------------------------------------------------
@@ -440,15 +441,17 @@ public class GCSDirectory extends FSDirectory {
         return;
       }
 
-      ByteBuffer hdr = ByteBuffer.wrap(header);
-      length = hdr.getLong(0);
-      int cBlockTypeId = hdr.get(8) & 0xff;
+      ByteArrayDataInput hdr = new ByteArrayDataInput(header);
+      length = hdr.readLong();
+      int cBlockTypeId = hdr.readByte() & 0xff;
       if (cBlockTypeId != COMPRESSION_BLOCK_TYPE.id) {
         throw new IOException("unrecognized compression block type id: " + cBlockTypeId);
       }
-      UUID blobUUID = new UUID(hdr.getLong(12), hdr.getLong(20));
+      hdr.readByte(); // compressionType (not yet used)
+      hdr.readShort(); // reserved
+      UUID blobUUID = new UUID(hdr.readLong(), hdr.readLong());
       blobName = blobUUID.toString();
-      long gcsObjectSize = hdr.getLong(28);
+      long gcsObjectSize = hdr.readLong();
 
       // Delta bytes occupy everything after the fixed header.
       long offsetFileSize = Files.size(offsetFile);
