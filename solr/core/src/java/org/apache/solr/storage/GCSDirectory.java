@@ -46,7 +46,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
 import org.apache.lucene.store.ByteArrayDataInput;
@@ -105,7 +104,6 @@ public class GCSDirectory extends FSDirectory {
   private final ExecutorService ioExec;
   private final boolean useAsyncIO;
   private final DirectBufferPool bufferPool;
-  private final AtomicLong tempFileCounter = new AtomicLong();
 
   static final AtomicReferenceArray<BlockCache.Node> EMPTY_ACCESS_MAPPED =
       new AtomicReferenceArray<>(0);
@@ -175,26 +173,13 @@ public class GCSDirectory extends FSDirectory {
 
   @Override
   public IndexOutput createOutput(String name, IOContext context) throws IOException {
-    ensureOpen();
-    return new GCSIndexOutput(this, name, directory.resolve(name));
+    return new GCSIndexOutput(this, super.createOutput(name, context));
   }
 
   @Override
   public IndexOutput createTempOutput(String prefix, String suffix, IOContext context)
       throws IOException {
-    ensureOpen();
-    while (true) {
-      String name =
-          prefix + "_" + Long.toString(tempFileCounter.getAndIncrement(), 36) + suffix + ".tmp";
-      Path path = directory.resolve(name);
-      try {
-        Files.createFile(path); // atomically claim the name
-        Files.delete(path); // GCSIndexOutput will create the offset file at close
-        return new GCSIndexOutput(this, name, path);
-      } catch (java.nio.file.FileAlreadyExistsException e) {
-        // retry with next counter value
-      }
-    }
+    return new GCSIndexOutput(this, super.createTempOutput(prefix, suffix, context));
   }
 
   @Override
@@ -228,27 +213,6 @@ public class GCSDirectory extends FSDirectory {
     return new UUID(buf.getLong(12), buf.getLong(20));
   }
 
-  private static void writeOffsetFile(
-      Path path, long fileLength, UUID uuid, long gcsObjectSize, AccessibleBAOS deltaBytes)
-      throws IOException {
-    ByteBuffer header = ByteBuffer.allocate(OFFSET_FILE_HEADER_SIZE);
-    header.putLong(fileLength);
-    header.put((byte) COMPRESSION_BLOCK_TYPE.id);
-    header.put((byte) COMPRESSION_TYPE.id);
-    header.putShort((short) 0); // reserved
-    header.putLong(uuid.getMostSignificantBits());
-    header.putLong(uuid.getLeastSignificantBits());
-    header.putLong(gcsObjectSize);
-    header.flip();
-    try (FileChannel ch =
-        FileChannel.open(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE)) {
-      while (header.hasRemaining()) ch.write(header);
-      ByteBuffer body = ByteBuffer.wrap(deltaBytes.buf(), 0, deltaBytes.count());
-      while (body.hasRemaining()) ch.write(body);
-      ch.force(true);
-    }
-  }
-
   // ---------------------------------------------------------------------------
   // GCSIndexOutput
   // ---------------------------------------------------------------------------
@@ -266,16 +230,16 @@ public class GCSDirectory extends FSDirectory {
     private int prevBlockSize = BLOCK_SIZE_ESTIMATE;
 
     private final UUID uuid;
-    private final Path offsetFilePath;
+    private final IndexOutput localOut;
     private long filePos;
     private long gcsObjectSize;
     private final CRC32 crc = new CRC32();
     private boolean isOpen;
 
-    GCSIndexOutput(GCSDirectory dir, String name, Path offsetFilePath) throws IOException {
-      super("GCSIndexOutput(name=\"" + name + "\")", name);
+    GCSIndexOutput(GCSDirectory dir, IndexOutput localOut) throws IOException {
+      super("GCSIndexOutput(name=\"" + localOut.getName() + "\")", localOut.getName());
       this.dir = dir;
-      this.offsetFilePath = offsetFilePath;
+      this.localOut = localOut;
       this.uuid = UUID.randomUUID();
       String blobName = uuid.toString();
       WriteChannel gcsChannel =
@@ -362,8 +326,17 @@ public class GCSDirectory extends FSDirectory {
         try (writeHelper) {
           flush();
         }
-        // Write the local offset file: header + UUID + gcsObjectSize + delta-encoded block sizes.
-        writeOffsetFile(offsetFilePath, filePos, uuid, gcsObjectSize, blockDeltas.baos);
+        // Write header + delta-encoded block sizes into the local offset file.
+        try (localOut) {
+          localOut.writeLong(filePos);
+          localOut.writeByte((byte) COMPRESSION_BLOCK_TYPE.id);
+          localOut.writeByte((byte) COMPRESSION_TYPE.id);
+          localOut.writeShort((short) 0); // reserved
+          localOut.writeLong(uuid.getMostSignificantBits());
+          localOut.writeLong(uuid.getLeastSignificantBits());
+          localOut.writeLong(gcsObjectSize);
+          localOut.writeBytes(blockDeltas.baos.buf(), 0, blockDeltas.baos.count());
+        }
         // Pre-populate cache-node array for readers of this file.
         if (filePos > 0) {
           int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
