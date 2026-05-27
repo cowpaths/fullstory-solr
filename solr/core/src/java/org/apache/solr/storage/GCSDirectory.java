@@ -42,6 +42,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
@@ -644,28 +645,70 @@ public class GCSDirectory extends BaseDirectory {
           blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
       unpinCurrent();
 
-      // Cache hit.
+      BlockCache.Node node;
       BlockCache.Node cached = accessMapped.get(blockIdx);
       if (cached != null && cache.pin(cached)) {
+        // Cache hit (or in-flight by the winning thread — join() blocks until populated).
+        ByteBuffer buf;
+        try {
+          buf = cached.join();
+        } catch (CompletionException e) {
+          cache.unpin(cached);
+          throw unwrapJoinException(e);
+        }
         currentNode = cached;
-        postBuffer = cached.buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+        postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         postBuffer.clear().limit(decompressedLen);
         postBufferBaseline = 0;
         currentBlockIdx = blockIdx;
         return;
-      }
-
-      // Cache miss: GCS byte-range read + decompress.
-      ByteBuffer heapBuf = supply(pos, compressedLen, decompressedLen);
-
-      // Try to cache the decompressed block.
-      BlockCache.Node node = cache.acquireNode();
-      if (node != null) {
-        node.buf.clear();
-        node.buf.put(heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
-        accessMapped.set(blockIdx, node);
-        currentNode = node;
-        postBuffer = node.buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+      } else if ((node = cache.acquireNode()) != null) {
+        // cache miss
+        BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
+        if (extant == cached) {
+          // We won the race: fetch from GCS and populate the node.
+          ByteBuffer buf;
+          try {
+            ByteBuffer heapBuf = supply(pos, compressedLen, decompressedLen);
+            buf =
+                node.populate(
+                    heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
+          } catch (Throwable t) {
+            node.completeExceptionally(t);
+            accessMapped.compareAndSet(blockIdx, node, null);
+            cache.unpin(node);
+            cache.close(node);
+            if (t instanceof IOException) {
+              throw (IOException) t;
+            } else if (t instanceof RuntimeException) {
+              throw (RuntimeException) t;
+            } else {
+              // must be instanceof Error
+              throw (Error) t;
+            }
+          }
+          currentNode = node;
+          postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+        } else {
+          // Another thread won the race; wait for its result.
+          cache.unpin(node);
+          cache.close(node);
+          if (cache.pin(extant)) {
+            ByteBuffer buf;
+            try {
+              buf = extant.join();
+            } catch (CompletionException e) {
+              cache.unpin(extant);
+              throw unwrapJoinException(e);
+            }
+            currentNode = extant;
+            postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+          } else {
+            // Serve uncached.
+            uncached(pos, compressedLen, blockIdx, decompressedLen);
+            return;
+          }
+        }
         postBuffer.clear().limit(decompressedLen);
         postBufferBaseline = 0;
         currentBlockIdx = blockIdx;
@@ -673,6 +716,20 @@ public class GCSDirectory extends BaseDirectory {
       }
 
       // Serve uncached.
+      uncached(pos, compressedLen, blockIdx, decompressedLen);
+    }
+
+    private static IOException unwrapJoinException(CompletionException e) {
+      Throwable cause = e.getCause();
+      if (cause instanceof IOException ioe) return ioe;
+      if (cause instanceof RuntimeException re) throw re;
+      if (cause instanceof Error err) throw err;
+      return new IOException(cause); // unknown checked exception — shouldn't happen
+    }
+
+    private void uncached(long pos, int compressedLen, int blockIdx, int decompressedLen)
+        throws IOException {
+      ByteBuffer heapBuf = supply(pos, compressedLen, decompressedLen);
       currentNode = null;
       postBuffer = heapBuf;
       postBufferBaseline = heapBuf.position();

@@ -28,6 +28,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
@@ -85,10 +86,10 @@ public class BlockCache implements Closeable {
    *
    * <p>Head of the list = most recently used; tail = least recently used / eviction candidate.
    */
-  public static final class Node {
+  public static final class Node extends CompletableFuture<ByteBuffer> {
 
     /** Decompressed block content. {@code null} for sentinel nodes only. */
-    public final ByteBuffer buf;
+    private final ByteBuffer buf;
 
     /**
      * Reference count.
@@ -117,6 +118,12 @@ public class BlockCache implements Closeable {
     private Node() {
       this.buf = null;
       this.refCount = null;
+    }
+
+    ByteBuffer populate(byte[] arr, int off, int len) {
+      buf.clear().put(arr, off, len);
+      complete(buf);
+      return buf;
     }
   }
 
