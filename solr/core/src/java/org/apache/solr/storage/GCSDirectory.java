@@ -42,9 +42,6 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -52,9 +49,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
-import org.apache.lucene.store.BaseDirectory;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.DataOutput;
+import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.FSLockFactory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
@@ -96,13 +93,12 @@ import org.apache.lucene.util.compress.LZ4;
  *   [remaining bytes]  ZInt delta-encoded compressed block sizes
  * </pre>
  */
-public class GCSDirectory extends BaseDirectory {
+public class GCSDirectory extends FSDirectory {
 
   // Offset file header size: 8 (length) + 4 (blockType/comprType/reserved) + 16 (UUID) + 8
   // (gcsObjectSize) = 36 bytes.
   static final int OFFSET_FILE_HEADER_SIZE = 36;
 
-  private final Path localPath;
   private final String bucket;
   final Storage storage;
   private final BlockCache cache;
@@ -134,32 +130,18 @@ public class GCSDirectory extends BaseDirectory {
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
       throws IOException {
-    super(FSLockFactory.getDefault());
-    this.localPath = localPath;
+    super(localPath, FSLockFactory.getDefault());
     this.bucket = bucket;
     this.storage = storage;
     this.cache = cache;
     this.ioExec = ioExec;
     this.useAsyncIO = useAsyncIO;
     this.bufferPool = bufferPool;
-    Files.createDirectories(localPath);
   }
 
   // ---------------------------------------------------------------------------
   // Directory API
   // ---------------------------------------------------------------------------
-
-  @Override
-  public String[] listAll() throws IOException {
-    ensureOpen();
-    try (var stream = Files.list(localPath)) {
-      return stream
-          .map(p -> p.getFileName().toString())
-          .filter(name -> !name.equals("write.lock"))
-          .sorted()
-          .toArray(String[]::new);
-    }
-  }
 
   @Override
   public void deleteFile(String name) throws IOException {
@@ -171,7 +153,7 @@ public class GCSDirectory extends BaseDirectory {
         if (node != null) cache.close(node);
       }
     }
-    Path offsetFile = localPath.resolve(name);
+    Path offsetFile = directory.resolve(name);
     if (Files.exists(offsetFile)) {
       String blobName = readBlobName(offsetFile);
       if (blobName != null) {
@@ -184,7 +166,7 @@ public class GCSDirectory extends BaseDirectory {
   @Override
   public long fileLength(String name) throws IOException {
     ensureOpen();
-    Path offsetFile = localPath.resolve(name);
+    Path offsetFile = directory.resolve(name);
     byte[] header = readOffsetFileHeader(offsetFile);
     if (header == null) throw new NoSuchFileException(name);
     return ByteBuffer.wrap(header).getLong(0);
@@ -193,7 +175,7 @@ public class GCSDirectory extends BaseDirectory {
   @Override
   public IndexOutput createOutput(String name, IOContext context) throws IOException {
     ensureOpen();
-    return new GCSIndexOutput(name, localPath.resolve(name));
+    return new GCSIndexOutput(name, directory.resolve(name));
   }
 
   @Override
@@ -203,7 +185,7 @@ public class GCSDirectory extends BaseDirectory {
     while (true) {
       String name =
           prefix + "_" + Long.toString(tempFileCounter.getAndIncrement(), 36) + suffix + ".tmp";
-      Path path = localPath.resolve(name);
+      Path path = directory.resolve(name);
       try {
         Files.createFile(path); // atomically claim the name
         Files.delete(path); // GCSIndexOutput will create the offset file at close
@@ -215,51 +197,21 @@ public class GCSDirectory extends BaseDirectory {
   }
 
   @Override
-  public void sync(Collection<String> names) throws IOException {
-    ensureOpen();
-    for (String name : names) {
-      Path p = localPath.resolve(name);
-      if (Files.exists(p)) {
-        try (FileChannel ch = FileChannel.open(p, StandardOpenOption.READ)) {
-          ch.force(true);
-        }
-      }
-    }
-  }
-
-  @Override
-  public void syncMetaData() throws IOException {
-    ensureOpen();
-    try (FileChannel ch = FileChannel.open(localPath, StandardOpenOption.READ)) {
-      ch.force(true);
-    }
-  }
-
-  @Override
   public void rename(String source, String dest) throws IOException {
     ensureOpen();
     AtomicReferenceArray<BlockCache.Node> nodes = pendingNodes.remove(source);
     if (nodes != null) pendingNodes.put(dest, nodes);
-    Files.move(localPath.resolve(source), localPath.resolve(dest));
+    super.rename(source, dest); // atomic move + pendingDeletes housekeeping
   }
 
   @Override
   public IndexInput openInput(String name, IOContext context) throws IOException {
     ensureOpen();
-    Path offsetFile = localPath.resolve(name);
+    ensureCanRead(name);
+    Path offsetFile = directory.resolve(name);
     if (!Files.exists(offsetFile)) throw new NoSuchFileException(name);
     AtomicReferenceArray<BlockCache.Node> shared = pendingNodes.get(name);
     return new GCSIndexInput("gcs:" + name, offsetFile, shared);
-  }
-
-  @Override
-  public Set<String> getPendingDeletions() {
-    return Collections.emptySet();
-  }
-
-  @Override
-  public void close() throws IOException {
-    isOpen = false;
   }
 
   // ---------------------------------------------------------------------------
