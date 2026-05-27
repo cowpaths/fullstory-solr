@@ -43,11 +43,11 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Set;
 import java.util.UUID;
-import java.util.zip.CRC32;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.CRC32;
 import org.apache.lucene.store.BaseDirectory;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.DataOutput;
@@ -94,7 +94,8 @@ import org.apache.lucene.util.compress.LZ4;
  */
 public class GCSDirectory extends BaseDirectory {
 
-  // Offset file header size: 8 (length) + 4 (blockType/comprType/reserved) + 16 (UUID) + 8 (gcsObjectSize) = 36 bytes.
+  // Offset file header size: 8 (length) + 4 (blockType/comprType/reserved) + 16 (UUID) + 8
+  // (gcsObjectSize) = 36 bytes.
   static final int OFFSET_FILE_HEADER_SIZE = 36;
 
   private final Path localPath;

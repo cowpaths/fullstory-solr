@@ -47,10 +47,14 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
     super.setUp();
     storage = LocalStorageHelper.customOptions(false).getService();
     Path tmpDir = createTempDir();
-    cache = new BlockCache(16L * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"));
+    // Cache sized to hold a handful of blocks; intentionally smaller than the largest test files
+    // so that cache-miss GCS reads are exercised.
+    cache = new BlockCache(8L * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"));
     ioExec = ExecutorUtil.newMDCAwareCachedThreadPool("test-gcs-io");
     bufferPool = new DirectBufferPool(GCSDirectoryFactory.GCS_WRITE_BUFFER_SIZE, 4096, 1);
-    dir = new GCSDirectory(tmpDir.resolve("index"), BUCKET, storage, cache, ioExec, false, bufferPool);
+    dir =
+        new GCSDirectory(
+            tmpDir.resolve("index"), BUCKET, storage, cache, ioExec, false, bufferPool);
   }
 
   @Override
@@ -61,61 +65,87 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
     super.tearDown();
   }
 
-  /** Write and read back a file smaller than one compression block. */
-  public void testSmallFileRoundTrip() throws IOException {
-    byte[] data = randomBytes(100);
-    writeFile("small.dat", data);
-    assertArrayEquals(data, readFile("small.dat", data.length));
-    assertEquals(data.length, dir.fileLength("small.dat"));
+  /**
+   * Deterministic sweep of raw-data sizes at 0, ±1 around each compression-block boundary up to
+   * several blocks, and ±1 around the GCS write-buffer boundary. With random (incompressible) data
+   * the compressed size closely tracks the raw size, so this also exercises the region where
+   * compressed data crosses a GCS buffer flush.
+   */
+  public void testRoundTripAtBlockBoundaries() throws IOException {
+    int buf = GCSDirectoryFactory.GCS_WRITE_BUFFER_SIZE;
+    int[] sizes = {
+      0,
+      1,
+      COMPRESSION_BLOCK_SIZE - 1,
+      COMPRESSION_BLOCK_SIZE,
+      COMPRESSION_BLOCK_SIZE + 1,
+      2 * COMPRESSION_BLOCK_SIZE - 1,
+      2 * COMPRESSION_BLOCK_SIZE,
+      2 * COMPRESSION_BLOCK_SIZE + 1,
+      5 * COMPRESSION_BLOCK_SIZE - 1,
+      5 * COMPRESSION_BLOCK_SIZE,
+      5 * COMPRESSION_BLOCK_SIZE + 1,
+      buf - 1,
+      buf,
+      buf + 1,
+    };
+    for (int size : sizes) {
+      byte[] data = randomBytes(size);
+      String name = "b" + size + ".dat";
+      writeFile(name, data);
+      assertArrayEquals("data mismatch at size=" + size, data, readFile(name, size));
+      assertEquals("fileLength mismatch at size=" + size, size, dir.fileLength(name));
+      dir.deleteFile(name);
+    }
   }
 
-  /** Write and read back a file spanning several compression blocks. */
-  public void testMultiBlockRoundTrip() throws IOException {
-    byte[] data = randomBytes(5 * COMPRESSION_BLOCK_SIZE + 300);
-    writeFile("multi.dat", data);
-    assertArrayEquals(data, readFile("multi.dat", data.length));
-    assertEquals(data.length, dir.fileLength("multi.dat"));
-  }
-
-  /** File whose size is an exact multiple of the compression block size. */
-  public void testExactBlockBoundaryRoundTrip() throws IOException {
-    byte[] data = randomBytes(3 * COMPRESSION_BLOCK_SIZE);
-    writeFile("exact.dat", data);
-    assertArrayEquals(data, readFile("exact.dat", data.length));
-    assertEquals(data.length, dir.fileLength("exact.dat"));
+  /**
+   * Randomized file size to exercise variation in where compressed blocks happen to fall relative
+   * to GCS write-buffer boundaries — not controllable deterministically since it depends on the
+   * compressed block sizes produced by LZ4.
+   */
+  public void testRandomSizeRoundTrip() throws IOException {
+    int size =
+        COMPRESSION_BLOCK_SIZE + random().nextInt(2 * GCSDirectoryFactory.GCS_WRITE_BUFFER_SIZE);
+    byte[] data = randomBytes(size);
+    writeFile("rand.dat", data);
+    assertArrayEquals(data, readFile("rand.dat", size));
+    assertEquals(size, dir.fileLength("rand.dat"));
   }
 
   public void testListAll() throws IOException {
-    writeFile("a.dat", randomBytes(50));
-    writeFile("b.dat", randomBytes(50));
+    writeFile("a.dat", randomBytes(random().nextInt(COMPRESSION_BLOCK_SIZE) + 1));
+    writeFile("b.dat", randomBytes(random().nextInt(COMPRESSION_BLOCK_SIZE) + 1));
     String[] names = dir.listAll();
     Arrays.sort(names);
     assertArrayEquals(new String[] {"a.dat", "b.dat"}, names);
   }
 
   public void testDeleteFile() throws IOException {
-    writeFile("todelete.dat", randomBytes(50));
+    writeFile("todelete.dat", randomBytes(random().nextInt(COMPRESSION_BLOCK_SIZE) + 1));
     assertEquals(1, dir.listAll().length);
     dir.deleteFile("todelete.dat");
     assertEquals(0, dir.listAll().length);
   }
 
   public void testRename() throws IOException {
-    byte[] data = randomBytes(200);
+    int size = random().nextInt(3 * COMPRESSION_BLOCK_SIZE) + 1;
+    byte[] data = randomBytes(size);
     writeFile("before.dat", data);
     dir.rename("before.dat", "after.dat");
     assertFalse(Arrays.asList(dir.listAll()).contains("before.dat"));
-    assertArrayEquals(data, readFile("after.dat", data.length));
+    assertArrayEquals(data, readFile("after.dat", size));
   }
 
   /** Spot-check random-access reads at arbitrary byte positions across blocks. */
   public void testRandomAccess() throws IOException {
-    byte[] data = randomBytes(3 * COMPRESSION_BLOCK_SIZE + 500);
+    int size = 2 * COMPRESSION_BLOCK_SIZE + random().nextInt(3 * COMPRESSION_BLOCK_SIZE) + 1;
+    byte[] data = randomBytes(size);
     writeFile("random.dat", data);
     try (IndexInput in = dir.openInput("random.dat", IOContext.DEFAULT)) {
       RandomAccessInput rai = in.randomAccessSlice(0, in.length());
       for (int i = 0; i < 200; i++) {
-        int pos = random().nextInt(data.length);
+        int pos = random().nextInt(size);
         assertEquals("byte mismatch at pos " + pos, data[pos], rai.readByte(pos));
       }
     }
@@ -123,21 +153,22 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
 
   /** Second open of the same file should read identically (exercises shared pendingNodes). */
   public void testReopenFile() throws IOException {
-    byte[] data = randomBytes(2 * COMPRESSION_BLOCK_SIZE + 100);
+    int size = COMPRESSION_BLOCK_SIZE + random().nextInt(2 * COMPRESSION_BLOCK_SIZE) + 1;
+    byte[] data = randomBytes(size);
     writeFile("reopen.dat", data);
-    assertArrayEquals(data, readFile("reopen.dat", data.length));
-    assertArrayEquals(data, readFile("reopen.dat", data.length));
+    assertArrayEquals(data, readFile("reopen.dat", size));
+    assertArrayEquals(data, readFile("reopen.dat", size));
   }
 
   /**
-   * Verifies that getChecksum() tracks the uncompressed bytes correctly by writing a codec header +
-   * data + footer and confirming CodecUtil.checksumEntireFile() passes.
+   * Verifies that getChecksum() tracks uncompressed bytes correctly: write a codec header + data +
+   * footer, then confirm CodecUtil.checksumEntireFile() passes on read-back.
    */
   public void testChecksumRoundTrip() throws IOException {
+    int dataSize = random().nextInt(3 * COMPRESSION_BLOCK_SIZE) + 1;
     try (IndexOutput out = dir.createOutput("checksum.dat", IOContext.DEFAULT)) {
       CodecUtil.writeHeader(out, "TestCodec", 1);
-      out.writeBytes(randomBytes(2 * COMPRESSION_BLOCK_SIZE + 77), 0,
-          2 * COMPRESSION_BLOCK_SIZE + 77);
+      out.writeBytes(randomBytes(dataSize), 0, dataSize);
       CodecUtil.writeFooter(out);
     }
     try (IndexInput in = dir.openInput("checksum.dat", IOContext.DEFAULT)) {
@@ -147,6 +178,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
 
   /** Async write path smoke check. */
   public void testAsyncWriteRoundTrip() throws IOException {
+    int size = COMPRESSION_BLOCK_SIZE + random().nextInt(4 * COMPRESSION_BLOCK_SIZE) + 1;
     GCSDirectory asyncDir =
         new GCSDirectory(
             createTempDir().resolve("async-index"),
@@ -157,11 +189,11 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             true,
             bufferPool);
     try {
-      byte[] data = randomBytes(4 * COMPRESSION_BLOCK_SIZE + 77);
+      byte[] data = randomBytes(size);
       try (IndexOutput out = asyncDir.createOutput("async.dat", IOContext.DEFAULT)) {
         out.writeBytes(data, 0, data.length);
       }
-      assertArrayEquals(data, readFileFrom(asyncDir, "async.dat", data.length));
+      assertArrayEquals(data, readFileFrom(asyncDir, "async.dat", size));
     } finally {
       asyncDir.close();
     }
