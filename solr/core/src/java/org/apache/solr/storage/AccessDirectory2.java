@@ -47,6 +47,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
 import org.apache.lucene.store.ByteArrayDataInput;
@@ -420,52 +421,93 @@ public class AccessDirectory2 extends MMapDirectory {
           blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
       unpinCurrent();
 
-      // --- Cache hit: try to re-pin existing node ---
+      BlockCache.Node node;
       final BlockCache.Node cached = accessMapped.get(blockIdx);
       if (cached != null && cache.pin(cached)) {
+        // Cache hit (or in-flight by the winning thread — join() blocks until populated).
+        ByteBuffer buf;
+        try {
+          buf = cached.join();
+        } catch (CompletionException e) {
+          cache.unpin(cached);
+          throw unwrapJoinException(e);
+        }
         currentNode = cached;
-        postBuffer = cached.join().duplicate().order(ByteOrder.LITTLE_ENDIAN);
-        postBuffer.clear().limit(decompressedLen);
-        postBufferBaseline = 0;
-        currentBlockIdx = blockIdx;
-        longViews = null;
-        intViews = null;
-        floatViews = null;
-        return;
-      }
-
-      // --- Cache miss: decompress ---
-      final ByteBuffer heapBuf = supply(pos, compressedLen, decompressedLen);
-
-      // --- Try to cache the decompressed block ---
-      final BlockCache.Node node = cache.acquireNode();
-      if (node != null) {
-        // Publish while still holding the acquire pin (refCount=1); readers who find the node via
-        // accessMapped will call pin(), which correctly increments from 1.
-        ByteBuffer buf =
-            node.populate(
-                heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
-        accessMapped.set(blockIdx, node);
-        currentNode = node;
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-        postBuffer.clear().limit(decompressedLen);
-        postBufferBaseline = 0;
-        currentBlockIdx = blockIdx;
-        longViews = null;
-        intViews = null;
-        floatViews = null;
+      } else if ((node = cache.acquireNode()) != null) {
+        final BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
+        if (extant == cached) {
+          // We won the race: decompress and populate.
+          ByteBuffer buf;
+          try {
+            final ByteBuffer heapBuf = supply(pos, compressedLen, decompressedLen);
+            buf =
+                node.populate(
+                    heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
+          } catch (Throwable t) {
+            node.completeExceptionally(t);
+            accessMapped.compareAndSet(blockIdx, node, null);
+            cache.unpin(node);
+            cache.close(node);
+            if (t instanceof IOException) throw (IOException) t;
+            if (t instanceof RuntimeException) throw (RuntimeException) t;
+            if (t instanceof Error) throw (Error) t;
+            throw new IOException(t);
+          }
+          currentNode = node;
+          postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+        } else {
+          // Another thread won the race; wait for its result.
+          cache.unpin(node);
+          cache.close(node);
+          if (cache.pin(extant)) {
+            ByteBuffer buf;
+            try {
+              buf = extant.join();
+            } catch (CompletionException e) {
+              cache.unpin(extant);
+              throw unwrapJoinException(e);
+            }
+            currentNode = extant;
+            postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+          } else {
+            // Serve uncached.
+            uncached(pos, compressedLen, blockIdx, decompressedLen);
+            return;
+          }
+        }
+      } else {
+        // Serve uncached.
+        uncached(pos, compressedLen, blockIdx, decompressedLen);
         return;
       }
+      postBuffer.clear().limit(decompressedLen);
+      postBufferBaseline = 0;
+      currentBlockIdx = blockIdx;
+      longViews = null;
+      intViews = null;
+      floatViews = null;
+    }
 
-      // --- Serve uncached from heap buffer ---
+    private void uncached(long pos, int compressedLen, int blockIdx, int decompressedLen)
+        throws IOException {
+      final ByteBuffer heapBuf = supply(pos, compressedLen, decompressedLen);
       currentNode = null;
       postBuffer = heapBuf;
-      postBufferBaseline = heapBuf.position(); // = 0
+      postBufferBaseline = heapBuf.position();
       heapBuf.order(ByteOrder.LITTLE_ENDIAN);
       currentBlockIdx = blockIdx;
       longViews = null;
       intViews = null;
       floatViews = null;
+    }
+
+    private static IOException unwrapJoinException(CompletionException e) {
+      final Throwable cause = e.getCause();
+      if (cause instanceof IOException) return (IOException) cause;
+      if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+      if (cause instanceof Error) throw (Error) cause;
+      return new IOException(cause);
     }
 
     // ---------------------------------------------------------------------------
