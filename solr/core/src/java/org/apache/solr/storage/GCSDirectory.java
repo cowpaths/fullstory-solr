@@ -38,7 +38,6 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Set;
@@ -280,7 +279,7 @@ public class GCSDirectory extends BaseDirectory {
   }
 
   private static void writeOffsetFile(
-      Path path, long fileLength, UUID uuid, long gcsObjectSize, byte[] deltaBytes)
+      Path path, long fileLength, UUID uuid, long gcsObjectSize, AccessibleBAOS deltaBytes)
       throws IOException {
     ByteBuffer header = ByteBuffer.allocate(OFFSET_FILE_HEADER_SIZE);
     header.putLong(fileLength);
@@ -294,7 +293,7 @@ public class GCSDirectory extends BaseDirectory {
     try (FileChannel ch =
         FileChannel.open(path, StandardOpenOption.WRITE, StandardOpenOption.CREATE)) {
       while (header.hasRemaining()) ch.write(header);
-      ByteBuffer body = ByteBuffer.wrap(deltaBytes);
+      ByteBuffer body = ByteBuffer.wrap(deltaBytes.buf(), 0, deltaBytes.count());
       while (body.hasRemaining()) ch.write(body);
       ch.force(true);
     }
@@ -412,8 +411,7 @@ public class GCSDirectory extends BaseDirectory {
           flush();
         }
         // Write the local offset file: header + UUID + gcsObjectSize + delta-encoded block sizes.
-        byte[] deltaBytes = blockDeltas.toByteArray();
-        writeOffsetFile(offsetFilePath, filePos, uuid, gcsObjectSize, deltaBytes);
+        writeOffsetFile(offsetFilePath, filePos, uuid, gcsObjectSize, blockDeltas.baos);
         // Pre-populate cache-node array for readers of this file.
         if (filePos > 0) {
           int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
@@ -826,10 +824,6 @@ public class GCSDirectory extends BaseDirectory {
     private BytesOut(AccessibleBAOS baos) {
       super(baos);
       this.baos = baos;
-    }
-
-    byte[] toByteArray() {
-      return Arrays.copyOf(baos.buf(), baos.count());
     }
   }
 
