@@ -176,7 +176,7 @@ public class GCSDirectory extends FSDirectory {
   @Override
   public IndexOutput createOutput(String name, IOContext context) throws IOException {
     ensureOpen();
-    return new GCSIndexOutput(name, directory.resolve(name));
+    return new GCSIndexOutput(this, name, directory.resolve(name));
   }
 
   @Override
@@ -190,7 +190,7 @@ public class GCSDirectory extends FSDirectory {
       try {
         Files.createFile(path); // atomically claim the name
         Files.delete(path); // GCSIndexOutput will create the offset file at close
-        return new GCSIndexOutput(name, path);
+        return new GCSIndexOutput(this, name, path);
       } catch (java.nio.file.FileAlreadyExistsException e) {
         // retry with next counter value
       }
@@ -203,7 +203,7 @@ public class GCSDirectory extends FSDirectory {
     ensureCanRead(name);
     Path offsetFile = directory.resolve(name);
     if (!Files.exists(offsetFile)) throw new NoSuchFileException(name);
-    return new GCSIndexInput("gcs:" + name, offsetFile);
+    return new GCSIndexInput("gcs:" + name, this, offsetFile);
   }
 
   // ---------------------------------------------------------------------------
@@ -253,9 +253,10 @@ public class GCSDirectory extends FSDirectory {
   // GCSIndexOutput
   // ---------------------------------------------------------------------------
 
-  final class GCSIndexOutput extends IndexOutput
+  static final class GCSIndexOutput extends IndexOutput
       implements CompressingDirectory.SizeReportingIndexOutput {
 
+    private final GCSDirectory dir;
     private final byte[] compressBuffer = new byte[COMPRESSION_BLOCK_SIZE];
     private final LZ4.FastCompressionHashTable ht = new LZ4.FastCompressionHashTable();
     private final ByteBuffer preBuffer;
@@ -271,18 +272,19 @@ public class GCSDirectory extends FSDirectory {
     private final CRC32 crc = new CRC32();
     private boolean isOpen;
 
-    GCSIndexOutput(String name, Path offsetFilePath) throws IOException {
+    GCSIndexOutput(GCSDirectory dir, String name, Path offsetFilePath) throws IOException {
       super("GCSIndexOutput(name=\"" + name + "\")", name);
+      this.dir = dir;
       this.offsetFilePath = offsetFilePath;
       this.uuid = UUID.randomUUID();
       String blobName = uuid.toString();
       WriteChannel gcsChannel =
-          storage.writer(BlobInfo.newBuilder(BlobId.of(bucket, blobName)).build());
-      writeHelper = new AsyncGCSWriteHelper(bufferPool, gcsChannel);
+          dir.storage.writer(BlobInfo.newBuilder(BlobId.of(dir.bucket, blobName)).build());
+      writeHelper = new AsyncGCSWriteHelper(dir.bufferPool, gcsChannel);
       buffer = writeHelper.init();
       preBuffer = ByteBuffer.wrap(compressBuffer);
-      if (useAsyncIO) {
-        writeHelper.start(ioExec);
+      if (dir.useAsyncIO) {
+        writeHelper.start(dir.ioExec);
       } else {
         writeHelper.startSync();
       }
@@ -365,7 +367,7 @@ public class GCSDirectory extends FSDirectory {
         // Pre-populate cache-node array for readers of this file.
         if (filePos > 0) {
           int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-          pendingNodes.put(uuid, new AtomicReferenceArray<>(blockCount));
+          dir.pendingNodes.put(uuid, new AtomicReferenceArray<>(blockCount));
         }
       }
     }
@@ -419,9 +421,9 @@ public class GCSDirectory extends FSDirectory {
   // GCSIndexInput
   // ---------------------------------------------------------------------------
 
-  final class GCSIndexInput extends IndexInput implements RandomAccessInput {
+  static final class GCSIndexInput extends IndexInput implements RandomAccessInput {
 
-    private final boolean isClone;
+    private final GCSDirectory dir;
     private final long length;
     private final long[] blockOffsets; // blockOffsets[i] = byte offset of block i in GCS object
     private final int blockCount;
@@ -446,9 +448,10 @@ public class GCSDirectory extends FSDirectory {
     private FloatBuffer[] floatViews;
 
     // Root constructor: parses the offset file.
-    GCSIndexInput(String resourceDescription, Path offsetFile) throws IOException {
+    GCSIndexInput(String resourceDescription, GCSDirectory dir, Path offsetFile)
+        throws IOException {
       super(resourceDescription);
-      this.isClone = false;
+      this.dir = dir;
 
       byte[] header = readOffsetFileHeader(offsetFile);
       if (header == null || header.length < OFFSET_FILE_HEADER_SIZE) {
@@ -503,7 +506,8 @@ public class GCSDirectory extends FSDirectory {
       blockOffsets[blockCount] = gcsObjectSize;
 
       AtomicReferenceArray<BlockCache.Node> local = new AtomicReferenceArray<>(blockCount);
-      AtomicReferenceArray<BlockCache.Node> existing = pendingNodes.putIfAbsent(blobUUID, local);
+      AtomicReferenceArray<BlockCache.Node> existing =
+          dir.pendingNodes.putIfAbsent(blobUUID, local);
       this.accessMapped = existing == null ? local : existing;
 
       this.offset = 0;
@@ -514,7 +518,7 @@ public class GCSDirectory extends FSDirectory {
     private GCSIndexInput(
         String resourceDescription, GCSIndexInput parent, long offset, long length) {
       super(resourceDescription);
-      this.isClone = true;
+      this.dir = parent.dir;
       this.length = parent.length;
       this.blockOffsets = parent.blockOffsets;
       this.blockCount = parent.blockCount;
@@ -534,7 +538,7 @@ public class GCSDirectory extends FSDirectory {
 
     private void unpinCurrent() {
       if (currentNode != null) {
-        cache.unpin(currentNode);
+        dir.cache.unpin(currentNode);
         currentNode = null;
       }
     }
@@ -546,7 +550,7 @@ public class GCSDirectory extends FSDirectory {
     private ByteBuffer supply(long pos, int compressedLen, int decompressedLen) throws IOException {
       byte[] compressed = new byte[compressedLen];
       ByteBuffer compBuf = ByteBuffer.wrap(compressed);
-      try (ReadChannel reader = storage.reader(BlobId.of(bucket, blobName))) {
+      try (ReadChannel reader = dir.storage.reader(BlobId.of(dir.bucket, blobName))) {
         reader.seek(pos);
         while (compBuf.hasRemaining()) reader.read(compBuf);
       }
@@ -589,13 +593,13 @@ public class GCSDirectory extends FSDirectory {
 
       BlockCache.Node node;
       BlockCache.Node cached = accessMapped.get(blockIdx);
-      if (cached != null && cache.pin(cached)) {
+      if (cached != null && dir.cache.pin(cached)) {
         // Cache hit (or in-flight by the winning thread — join() blocks until populated).
         ByteBuffer buf;
         try {
           buf = cached.join();
         } catch (CompletionException e) {
-          cache.unpin(cached);
+          dir.cache.unpin(cached);
           throw unwrapException(e.getCause());
         }
         currentNode = cached;
@@ -607,7 +611,7 @@ public class GCSDirectory extends FSDirectory {
         intViews = null;
         floatViews = null;
         return;
-      } else if ((node = cache.acquireNode()) != null) {
+      } else if ((node = dir.cache.acquireNode()) != null) {
         // cache miss
         BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
         if (extant == cached) {
@@ -621,22 +625,22 @@ public class GCSDirectory extends FSDirectory {
           } catch (Throwable t) {
             node.completeExceptionally(t);
             accessMapped.compareAndSet(blockIdx, node, null);
-            cache.unpin(node);
-            cache.close(node);
+            dir.cache.unpin(node);
+            dir.cache.close(node);
             throw unwrapException(t);
           }
           currentNode = node;
           postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         } else {
           // Another thread won the race; wait for its result.
-          cache.unpin(node);
-          cache.close(node);
-          if (cache.pin(extant)) {
+          dir.cache.unpin(node);
+          dir.cache.close(node);
+          if (dir.cache.pin(extant)) {
             ByteBuffer buf;
             try {
               buf = extant.join();
             } catch (CompletionException e) {
-              cache.unpin(extant);
+              dir.cache.unpin(extant);
               throw unwrapException(e.getCause());
             }
             currentNode = extant;
