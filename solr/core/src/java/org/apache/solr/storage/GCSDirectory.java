@@ -34,8 +34,12 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
+import java.nio.LongBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Collection;
@@ -110,6 +114,10 @@ public class GCSDirectory extends BaseDirectory {
   static final AtomicReferenceArray<BlockCache.Node> EMPTY_ACCESS_MAPPED =
       new AtomicReferenceArray<>(0);
 
+  static final LongBuffer EMPTY_LONGBUFFER = LongBuffer.allocate(0);
+  static final IntBuffer EMPTY_INTBUFFER = IntBuffer.allocate(0);
+  static final FloatBuffer EMPTY_FLOATBUFFER = FloatBuffer.allocate(0);
+
   /**
    * Cache-node arrays shared across all root {@link GCSIndexInput} instances opened for the same
    * file. Populated by the writer at write-close time; entries are removed on delete or rename.
@@ -178,7 +186,7 @@ public class GCSDirectory extends BaseDirectory {
     ensureOpen();
     Path offsetFile = localPath.resolve(name);
     byte[] header = readOffsetFileHeader(offsetFile);
-    if (header == null) return 0;
+    if (header == null) throw new NoSuchFileException(name);
     return ByteBuffer.wrap(header).getLong(0);
   }
 
@@ -238,8 +246,10 @@ public class GCSDirectory extends BaseDirectory {
   @Override
   public IndexInput openInput(String name, IOContext context) throws IOException {
     ensureOpen();
+    Path offsetFile = localPath.resolve(name);
+    if (!Files.exists(offsetFile)) throw new NoSuchFileException(name);
     AtomicReferenceArray<BlockCache.Node> shared = pendingNodes.get(name);
-    return new GCSIndexInput("gcs:" + name, localPath.resolve(name), shared);
+    return new GCSIndexInput("gcs:" + name, offsetFile, shared);
   }
 
   @Override
@@ -489,6 +499,10 @@ public class GCSDirectory extends BaseDirectory {
     private int currentBlockIdx = -1;
     private BlockCache.Node currentNode;
 
+    private LongBuffer[] longViews;
+    private IntBuffer[] intViews;
+    private FloatBuffer[] floatViews;
+
     // Root constructor: parses the offset file.
     @SuppressWarnings("unchecked")
     GCSIndexInput(
@@ -661,6 +675,9 @@ public class GCSDirectory extends BaseDirectory {
         postBuffer.clear().limit(decompressedLen);
         postBufferBaseline = 0;
         currentBlockIdx = blockIdx;
+        longViews = null;
+        intViews = null;
+        floatViews = null;
         return;
       } else if ((node = cache.acquireNode()) != null) {
         // cache miss
@@ -705,6 +722,9 @@ public class GCSDirectory extends BaseDirectory {
         postBuffer.clear().limit(decompressedLen);
         postBufferBaseline = 0;
         currentBlockIdx = blockIdx;
+        longViews = null;
+        intViews = null;
+        floatViews = null;
         return;
       }
 
@@ -720,6 +740,9 @@ public class GCSDirectory extends BaseDirectory {
       postBufferBaseline = heapBuf.position();
       heapBuf.order(ByteOrder.LITTLE_ENDIAN);
       currentBlockIdx = blockIdx;
+      longViews = null;
+      intViews = null;
+      floatViews = null;
     }
 
     // ---------------------------------------------------------------------------
@@ -799,6 +822,138 @@ public class GCSDirectory extends BaseDirectory {
         left = postBuffer.remaining();
       }
       postBuffer.get(dst, offset, len);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Bulk typed reads with buffer views
+    // ---------------------------------------------------------------------------
+
+    private int _readInt(final int remaining) throws IOException {
+      if (remaining >= Integer.BYTES) {
+        filePointer += Integer.BYTES;
+        return postBuffer.getInt();
+      }
+      // Cross-block: read byte-by-byte (little-endian).
+      int b0 = readByte() & 0xFF;
+      int b1 = readByte() & 0xFF;
+      int b2 = readByte() & 0xFF;
+      int b3 = readByte() & 0xFF;
+      return (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
+    }
+
+    private long _readLong(final int remaining) throws IOException {
+      if (remaining >= Long.BYTES) {
+        filePointer += Long.BYTES;
+        return postBuffer.getLong();
+      }
+      return (_readInt(remaining) & 0xFFFFFFFFL)
+          | (((long) _readInt(postBuffer.remaining())) << 32);
+    }
+
+    @Override
+    public void readLongs(final long[] dst, final int offset, final int length) throws IOException {
+      long pos = seekPos;
+      if (pos != -1) {
+        seekPos = -1;
+        actualSeek(pos);
+      }
+      if (longViews == null) {
+        longViews = initLongViews();
+      }
+      final int remaining = postBuffer.remaining();
+      final long bytesRequested = (long) length << 3;
+      if (remaining < bytesRequested) {
+        dst[offset] = _readLong(remaining);
+        for (int i = 1; i < length; i++) {
+          dst[offset + i] = _readLong(postBuffer.remaining());
+        }
+      } else {
+        final int position = postBuffer.position();
+        longViews[position & 0x07].position(position >>> 3).get(dst, offset, length);
+        filePointer += bytesRequested;
+        postBuffer.position(position + (int) bytesRequested);
+      }
+    }
+
+    @Override
+    public void readInts(final int[] dst, final int offset, final int length) throws IOException {
+      long pos = seekPos;
+      if (pos != -1) {
+        seekPos = -1;
+        actualSeek(pos);
+      }
+      if (intViews == null) {
+        intViews = initIntViews();
+      }
+      final int remaining = postBuffer.remaining();
+      final long bytesRequested = (long) length << 2;
+      if (remaining < bytesRequested) {
+        dst[offset] = _readInt(remaining);
+        for (int i = 1; i < length; i++) {
+          dst[offset + i] = _readInt(postBuffer.remaining());
+        }
+      } else {
+        final int position = postBuffer.position();
+        intViews[position & 0x03].position(position >>> 2).get(dst, offset, length);
+        filePointer += bytesRequested;
+        postBuffer.position(position + (int) bytesRequested);
+      }
+    }
+
+    @Override
+    public void readFloats(final float[] dst, final int offset, final int length)
+        throws IOException {
+      long pos = seekPos;
+      if (pos != -1) {
+        seekPos = -1;
+        actualSeek(pos);
+      }
+      if (floatViews == null) {
+        floatViews = initFloatViews();
+      }
+      final int remaining = postBuffer.remaining();
+      final long bytesRequested = (long) length << 2;
+      if (remaining < bytesRequested) {
+        dst[offset] = Float.intBitsToFloat(_readInt(remaining));
+        for (int i = 1; i < length; i++) {
+          dst[offset + i] = Float.intBitsToFloat(_readInt(postBuffer.remaining()));
+        }
+      } else {
+        final int position = postBuffer.position();
+        floatViews[position & 0x03].position(position >>> 2).get(dst, offset, length);
+        filePointer += bytesRequested;
+        postBuffer.position(position + (int) bytesRequested);
+      }
+    }
+
+    private LongBuffer[] initLongViews() {
+      final LongBuffer[] ret = new LongBuffer[Long.BYTES];
+      final ByteBuffer template = postBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+      final int lim = postBuffer.limit();
+      for (int i = Long.BYTES - 1; i >= 0; i--) {
+        ret[i] = i < lim ? template.position(i).asLongBuffer() : EMPTY_LONGBUFFER;
+      }
+      return ret;
+    }
+
+    private IntBuffer[] initIntViews() {
+      final IntBuffer[] ret = new IntBuffer[Integer.BYTES];
+      final ByteBuffer template = postBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+      final int lim = postBuffer.limit();
+      for (int i = Integer.BYTES - 1; i >= 0; i--) {
+        ret[i] = i < lim ? template.position(i).asIntBuffer() : EMPTY_INTBUFFER;
+      }
+      return ret;
+    }
+
+    private FloatBuffer[] initFloatViews() {
+      final FloatBuffer[] ret = new FloatBuffer[Float.BYTES];
+      final ByteBuffer template = postBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+      final int lim = postBuffer.limit();
+      for (int i = Float.BYTES - 1; i >= 0; i--) {
+        ret[i] = i < lim ? template.position(i).asFloatBuffer() : EMPTY_FLOATBUFFER;
+      }
+      return ret;
     }
 
     // ---------------------------------------------------------------------------
