@@ -505,6 +505,7 @@ public class GCSDirectory extends FSDirectory {
       this.accessMapped = parent.accessMapped;
       this.offset = parent.offset + offset;
       this.seekPos = this.offset;
+      this.filePointer = this.offset;
       this.sliceLength = length;
       this.postBuffer = ByteBuffer.allocate(0);
     }
