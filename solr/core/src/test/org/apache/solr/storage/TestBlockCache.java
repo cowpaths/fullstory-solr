@@ -19,6 +19,8 @@ package org.apache.solr.storage;
 import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZE;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.util.Random;
 import java.util.concurrent.ExecutionException;
@@ -26,7 +28,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.util.ExecutorUtil;
@@ -68,12 +70,15 @@ public class TestBlockCache extends SolrTestCaseJ4 {
    */
   public void testCloseRecyclesToTail() throws IOException {
     Path tmpDir = createTempDir();
+    byte[] dummy = new byte[0];
     try (BlockCache cache =
         new BlockCache(2L * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
       BlockCache.Node n1 = cache.acquireNode();
       BlockCache.Node n2 = cache.acquireNode();
       assertNotNull(n1);
       assertNotNull(n2);
+      n1.populate(dummy, 0, 0);
+      n2.populate(dummy, 0, 0);
 
       // Unpin both; n2 was acquired last so it sits at the LRU head.
       cache.unpin(n1);
@@ -85,7 +90,9 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       // Next acquisition should reclaim n2's buffer from the tail.
       BlockCache.Node n3 = cache.acquireNode();
       assertNotNull(n3);
-      assertSame("close() should recycle the buffer to tail for immediate reuse", n2.buf, n3.buf);
+      n3.populate(dummy, 0, 0);
+      assertSame(
+          "close() should recycle the buffer to tail for immediate reuse", n2.join(), n3.join());
 
       cache.unpin(n3);
     }
@@ -94,16 +101,19 @@ public class TestBlockCache extends SolrTestCaseJ4 {
   /** pin() on an evicted node returns false; the node's buffer may be live under a new Node. */
   public void testPinEvictedNodeReturnsFalse() throws IOException {
     Path tmpDir = createTempDir();
+    byte[] dummy = new byte[0];
     try (BlockCache cache =
         new BlockCache(1L * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
       BlockCache.Node n1 = cache.acquireNode();
       assertNotNull(n1);
+      n1.populate(dummy, 0, 0);
       cache.unpin(n1); // now evictable
 
       // Evict n1 by acquiring the only block.
       BlockCache.Node n2 = cache.acquireNode();
       assertNotNull(n2);
-      assertSame(n1.buf, n2.buf); // same underlying buffer
+      n2.populate(dummy, 0, 0);
+      assertSame(n1.join(), n2.join()); // same underlying buffer
 
       // n1 is dead — pin must fail.
       assertFalse("pin() on evicted node should return false", cache.pin(n1));
@@ -124,7 +134,6 @@ public class TestBlockCache extends SolrTestCaseJ4 {
    * is verified on every successful pin, proving that pinned buffers are never concurrently
    * overwritten.
    */
-  @SuppressWarnings("unchecked")
   public void testStress() throws InterruptedException, ExecutionException, IOException {
     final int nBlocks = 32;
     final int nSlots = 64; // more slots than blocks to force eviction
@@ -134,11 +143,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
     try (BlockCache cache =
         new BlockCache((long) nBlocks * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
 
-      @SuppressWarnings({"unchecked", "rawtypes"})
-      AtomicReference<BlockCache.Node>[] slots = new AtomicReference[nSlots];
-      for (int i = 0; i < nSlots; i++) {
-        slots[i] = new AtomicReference<>();
-      }
+      AtomicReferenceArray<BlockCache.Node> slots = new AtomicReferenceArray<>(nSlots);
 
       ExecutorService exec =
           ExecutorUtil.newMDCAwareFixedThreadPool(
@@ -160,20 +165,20 @@ public class TestBlockCache extends SolrTestCaseJ4 {
             exec.submit(
                 () -> {
                   try {
+                    byte[] sentinelBuf = new byte[Integer.BYTES];
                     while (!finished.get()) {
                       int slotIdx = r.nextInt(nSlots);
-                      AtomicReference<BlockCache.Node> slot = slots[slotIdx];
 
                       // --- Cache hit path: try to pin the existing node ---
-                      BlockCache.Node existing = slot.get();
+                      BlockCache.Node existing = slots.get(slotIdx);
                       if (existing != null && cache.pin(existing)) {
                         hits.increment();
                         // Verify that the sentinel written at acquire time is intact.
-                        assertEquals(slotIdx, existing.buf.getInt(0));
+                        assertEquals(slotIdx, existing.join().getInt(0));
                         if (r.nextInt(8) == 0) {
                           // Explicit close: unpin, vacate slot, close.
                           cache.unpin(existing);
-                          if (slot.compareAndSet(existing, null)) {
+                          if (slots.compareAndSet(slotIdx, existing, null)) {
                             cache.close(existing);
                             closed.increment();
                           }
@@ -191,11 +196,14 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                         continue;
                       }
                       acquired.increment();
-                      // Write sentinel before publishing.
-                      node.buf.putInt(0, slotIdx);
+                      // Write sentinel via populate() before publishing.
+                      ByteBuffer.wrap(sentinelBuf)
+                          .order(ByteOrder.LITTLE_ENDIAN)
+                          .putInt(0, slotIdx);
+                      node.populate(sentinelBuf, 0, Integer.BYTES);
                       cache.unpin(node);
                       // Publish to slot; old occupant (if any) will be evicted via normal LRU.
-                      BlockCache.Node prev = slot.getAndSet(node);
+                      BlockCache.Node prev = slots.getAndSet(slotIdx, node);
                       if (prev != null) {
                         misses.increment();
                       }
