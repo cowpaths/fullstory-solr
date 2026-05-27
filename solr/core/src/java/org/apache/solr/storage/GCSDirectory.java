@@ -32,6 +32,7 @@ import com.google.cloud.storage.Storage;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -896,9 +897,13 @@ public class GCSDirectory extends FSDirectory {
 
     @Override
     public GCSIndexInput clone() {
-      GCSIndexInput clone = (GCSIndexInput) super.clone();
-      clone.unpinCurrent();
-      return new GCSIndexInput(toString(), this, 0, sliceLength);
+      GCSIndexInput clone = new GCSIndexInput(toString(), this, 0, sliceLength);
+      try {
+        clone.seek(getFilePointer());
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
+      return clone;
     }
 
     @Override
