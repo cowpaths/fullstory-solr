@@ -43,6 +43,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Set;
 import java.util.UUID;
+import java.util.zip.CRC32;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
@@ -317,6 +318,7 @@ public class GCSDirectory extends BaseDirectory {
     private final Path offsetFilePath;
     private long filePos;
     private long gcsObjectSize;
+    private final CRC32 crc = new CRC32();
     private boolean isOpen;
 
     GCSIndexOutput(String name, Path offsetFilePath) throws IOException {
@@ -339,12 +341,14 @@ public class GCSDirectory extends BaseDirectory {
 
     @Override
     public void writeByte(byte b) throws IOException {
+      crc.update(b);
       preBuffer.put(b);
       if (!preBuffer.hasRemaining()) dump();
     }
 
     @Override
     public void writeBytes(byte[] src, int offset, int len) throws IOException {
+      crc.update(src, offset, len);
       int toWrite = len;
       while (true) {
         int left = preBuffer.remaining();
@@ -396,7 +400,7 @@ public class GCSDirectory extends BaseDirectory {
 
     @Override
     public long getChecksum() {
-      throw new UnsupportedOperationException();
+      return crc.getValue();
     }
 
     @Override

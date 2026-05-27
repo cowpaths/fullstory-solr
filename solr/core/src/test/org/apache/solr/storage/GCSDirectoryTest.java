@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
+import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
@@ -126,6 +127,22 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
     writeFile("reopen.dat", data);
     assertArrayEquals(data, readFile("reopen.dat", data.length));
     assertArrayEquals(data, readFile("reopen.dat", data.length));
+  }
+
+  /**
+   * Verifies that getChecksum() tracks the uncompressed bytes correctly by writing a codec header +
+   * data + footer and confirming CodecUtil.checksumEntireFile() passes.
+   */
+  public void testChecksumRoundTrip() throws IOException {
+    try (IndexOutput out = dir.createOutput("checksum.dat", IOContext.DEFAULT)) {
+      CodecUtil.writeHeader(out, "TestCodec", 1);
+      out.writeBytes(randomBytes(2 * COMPRESSION_BLOCK_SIZE + 77), 0,
+          2 * COMPRESSION_BLOCK_SIZE + 77);
+      CodecUtil.writeFooter(out);
+    }
+    try (IndexInput in = dir.openInput("checksum.dat", IOContext.DEFAULT)) {
+      CodecUtil.checksumEntireFile(in); // throws CorruptIndexException on mismatch
+    }
   }
 
   /** Async write path smoke check. */
