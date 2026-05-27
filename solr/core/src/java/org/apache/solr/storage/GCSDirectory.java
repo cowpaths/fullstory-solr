@@ -654,7 +654,7 @@ public class GCSDirectory extends BaseDirectory {
           buf = cached.join();
         } catch (CompletionException e) {
           cache.unpin(cached);
-          throw unwrapJoinException(e);
+          throw unwrapException(e.getCause());
         }
         currentNode = cached;
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
@@ -678,14 +678,7 @@ public class GCSDirectory extends BaseDirectory {
             accessMapped.compareAndSet(blockIdx, node, null);
             cache.unpin(node);
             cache.close(node);
-            if (t instanceof IOException) {
-              throw (IOException) t;
-            } else if (t instanceof RuntimeException) {
-              throw (RuntimeException) t;
-            } else {
-              // must be instanceof Error
-              throw (Error) t;
-            }
+            throw unwrapException(t);
           }
           currentNode = node;
           postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
@@ -699,7 +692,7 @@ public class GCSDirectory extends BaseDirectory {
               buf = extant.join();
             } catch (CompletionException e) {
               cache.unpin(extant);
-              throw unwrapJoinException(e);
+              throw unwrapException(e.getCause());
             }
             currentNode = extant;
             postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
@@ -717,14 +710,6 @@ public class GCSDirectory extends BaseDirectory {
 
       // Serve uncached.
       uncached(pos, compressedLen, blockIdx, decompressedLen);
-    }
-
-    private static IOException unwrapJoinException(CompletionException e) {
-      Throwable cause = e.getCause();
-      if (cause instanceof IOException ioe) return ioe;
-      if (cause instanceof RuntimeException re) throw re;
-      if (cause instanceof Error err) throw err;
-      return new IOException(cause); // unknown checked exception — shouldn't happen
     }
 
     private void uncached(long pos, int compressedLen, int blockIdx, int decompressedLen)
@@ -856,6 +841,17 @@ public class GCSDirectory extends BaseDirectory {
     @Override
     public void close() throws IOException {
       unpinCurrent();
+    }
+  }
+
+  private static IOException unwrapException(Throwable t) {
+    if (t instanceof IOException) {
+      return (IOException) t;
+    } else if (t instanceof RuntimeException) {
+      throw (RuntimeException) t;
+    } else {
+      // must be instanceof Error
+      throw (Error) t;
     }
   }
 
