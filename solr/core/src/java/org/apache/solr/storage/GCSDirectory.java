@@ -116,9 +116,10 @@ public class GCSDirectory extends FSDirectory {
 
   /**
    * Cache-node arrays shared across all root {@link GCSIndexInput} instances opened for the same
-   * file. Populated by the writer at write-close time; entries are removed on delete or rename.
+   * GCS blob. Keyed by blob UUID so that rename (which only moves the local offset file) requires
+   * no map update. Populated by the writer at write-close time; entries are removed on delete.
    */
-  private final ConcurrentHashMap<String, AtomicReferenceArray<BlockCache.Node>> pendingNodes =
+  private final ConcurrentHashMap<UUID, AtomicReferenceArray<BlockCache.Node>> pendingNodes =
       new ConcurrentHashMap<>();
 
   public GCSDirectory(
@@ -146,19 +147,19 @@ public class GCSDirectory extends FSDirectory {
   @Override
   public void deleteFile(String name) throws IOException {
     ensureOpen();
-    AtomicReferenceArray<BlockCache.Node> stale = pendingNodes.remove(name);
-    if (stale != null) {
-      for (int i = 0; i < stale.length(); i++) {
-        BlockCache.Node node = stale.getAndSet(i, null);
-        if (node != null) cache.close(node);
-      }
-    }
     Path offsetFile = directory.resolve(name);
-    if (Files.exists(offsetFile)) {
-      String blobName = readBlobName(offsetFile);
-      if (blobName != null) {
-        storage.delete(BlobId.of(bucket, blobName));
+    UUID blobUUID = readBlobUUID(offsetFile);
+    if (blobUUID != null) {
+      AtomicReferenceArray<BlockCache.Node> stale = pendingNodes.remove(blobUUID);
+      if (stale != null) {
+        for (int i = 0; i < stale.length(); i++) {
+          BlockCache.Node node = stale.getAndSet(i, null);
+          if (node != null) cache.close(node);
+        }
       }
+      storage.delete(BlobId.of(bucket, blobUUID.toString()));
+    }
+    if (Files.exists(offsetFile)) {
       Files.delete(offsetFile);
     }
   }
@@ -197,21 +198,12 @@ public class GCSDirectory extends FSDirectory {
   }
 
   @Override
-  public void rename(String source, String dest) throws IOException {
-    ensureOpen();
-    AtomicReferenceArray<BlockCache.Node> nodes = pendingNodes.remove(source);
-    if (nodes != null) pendingNodes.put(dest, nodes);
-    super.rename(source, dest); // atomic move + pendingDeletes housekeeping
-  }
-
-  @Override
   public IndexInput openInput(String name, IOContext context) throws IOException {
     ensureOpen();
     ensureCanRead(name);
     Path offsetFile = directory.resolve(name);
     if (!Files.exists(offsetFile)) throw new NoSuchFileException(name);
-    AtomicReferenceArray<BlockCache.Node> shared = pendingNodes.get(name);
-    return new GCSIndexInput("gcs:" + name, offsetFile, shared);
+    return new GCSIndexInput("gcs:" + name, offsetFile);
   }
 
   // ---------------------------------------------------------------------------
@@ -228,14 +220,12 @@ public class GCSDirectory extends FSDirectory {
     }
   }
 
-  /** Reads the GCS blob UUID string from the offset file, or null if the file is empty/missing. */
-  private static String readBlobName(Path path) throws IOException {
+  /** Reads the GCS blob UUID from the offset file, or null if the file is missing/malformed. */
+  private static UUID readBlobUUID(Path path) throws IOException {
     byte[] header = readOffsetFileHeader(path);
     if (header == null) return null;
     ByteBuffer buf = ByteBuffer.wrap(header);
-    long uuidMsb = buf.getLong(12);
-    long uuidLsb = buf.getLong(20);
-    return new UUID(uuidMsb, uuidLsb).toString();
+    return new UUID(buf.getLong(12), buf.getLong(20));
   }
 
   private static void writeOffsetFile(
@@ -375,7 +365,7 @@ public class GCSDirectory extends FSDirectory {
         // Pre-populate cache-node array for readers of this file.
         if (filePos > 0) {
           int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-          pendingNodes.put(getName(), new AtomicReferenceArray<>(blockCount));
+          pendingNodes.put(uuid, new AtomicReferenceArray<>(blockCount));
         }
       }
     }
@@ -456,12 +446,7 @@ public class GCSDirectory extends FSDirectory {
     private FloatBuffer[] floatViews;
 
     // Root constructor: parses the offset file.
-    @SuppressWarnings("unchecked")
-    GCSIndexInput(
-        String resourceDescription,
-        Path offsetFile,
-        AtomicReferenceArray<BlockCache.Node> sharedAccessMapped)
-        throws IOException {
+    GCSIndexInput(String resourceDescription, Path offsetFile) throws IOException {
       super(resourceDescription);
       this.isClone = false;
 
@@ -485,9 +470,8 @@ public class GCSDirectory extends FSDirectory {
       if (cBlockTypeId != COMPRESSION_BLOCK_TYPE.id) {
         throw new IOException("unrecognized compression block type id: " + cBlockTypeId);
       }
-      long uuidMsb = hdr.getLong(12);
-      long uuidLsb = hdr.getLong(20);
-      blobName = new UUID(uuidMsb, uuidLsb).toString();
+      UUID blobUUID = new UUID(hdr.getLong(12), hdr.getLong(20));
+      blobName = blobUUID.toString();
       long gcsObjectSize = hdr.getLong(28);
 
       // Delta bytes occupy everything after the fixed header.
@@ -518,17 +502,9 @@ public class GCSDirectory extends FSDirectory {
       }
       blockOffsets[blockCount] = gcsObjectSize;
 
-      if (sharedAccessMapped != null) {
-        if (sharedAccessMapped.length() != blockCount) {
-          throw new IllegalArgumentException("block count mismatch");
-        }
-        this.accessMapped = sharedAccessMapped;
-      } else {
-        AtomicReferenceArray<BlockCache.Node> local = new AtomicReferenceArray<>(blockCount);
-        AtomicReferenceArray<BlockCache.Node> existing =
-            pendingNodes.putIfAbsent(offsetFile.getFileName().toString(), local);
-        this.accessMapped = existing == null ? local : existing;
-      }
+      AtomicReferenceArray<BlockCache.Node> local = new AtomicReferenceArray<>(blockCount);
+      AtomicReferenceArray<BlockCache.Node> existing = pendingNodes.putIfAbsent(blobUUID, local);
+      this.accessMapped = existing == null ? local : existing;
 
       this.offset = 0;
       this.sliceLength = length;
