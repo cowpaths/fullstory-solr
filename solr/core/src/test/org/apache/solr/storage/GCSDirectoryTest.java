@@ -68,6 +68,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
   public void tearDown() throws Exception {
     dir.close();
     cache.close();
+    storage.close();
     ExecutorUtil.shutdownAndAwaitTermination(ioExec);
     super.tearDown();
   }
