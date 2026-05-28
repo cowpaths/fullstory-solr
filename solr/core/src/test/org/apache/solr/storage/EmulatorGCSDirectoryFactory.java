@@ -18,17 +18,21 @@
 package org.apache.solr.storage;
 
 import com.google.cloud.NoCredentials;
-import com.google.cloud.storage.GrpcStorageOptions;
 import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageOptions;
 
 /**
  * Test/dev subclass of {@link GCSDirectoryFactory} that routes GCS operations to a local GCS
  * emulator (e.g. {@code gcloud beta emulators storage} or any GCS-compatible emulator).
  *
- * <p>Unlike {@link LocalGCSDirectoryFactory}, this uses a real gRPC transport, so it exercises the
- * full {@link AsyncGCSWriteHelper} write path and byte-range reads over the wire. The emulator host
- * must be an {@code http://} URL; {@link GrpcStorageOptions} automatically configures a plaintext
- * channel when the scheme is {@code http}.
+ * <p>Unlike {@link LocalGCSDirectoryFactory}, this uses a real HTTP transport, so it exercises the
+ * full {@link AsyncGCSWriteHelper} write path and byte-range reads over the wire. gRPC is not used
+ * here because gcsemu (and most GCS emulators) only support the HTTP/JSON API.
+ *
+ * <p><b>Locale sensitivity:</b> the GCS Java client builds {@code Content-Range} headers via {@code
+ * String.format("%d", ...)}, which is locale-sensitive. Under non-Latin locales (e.g. Thai) the
+ * header contains non-ASCII digits that most GCS emulators cannot parse. Always specify a Latin
+ * locale when running tests against this factory, e.g. {@code -Ptests.locale=en} (or {@code root}).
  *
  * <p>Usage:
  *
@@ -48,9 +52,14 @@ public class EmulatorGCSDirectoryFactory extends GCSDirectoryFactory {
 
   @Override
   protected Storage initStorage() {
+    if (!String.format("%d", 0).equals("0")) {
+      throw new IllegalStateException(
+          "EmulatorGCSDirectoryFactory requires a Latin locale: the GCS client builds "
+              + "locale-sensitive Content-Range headers that most emulators cannot parse "
+              + "with non-ASCII digits. Run with -Ptests.locale=en (or root).");
+    }
     String host = System.getProperty("solr.gcsDirectory.emulatorHost", DEFAULT_EMULATOR_HOST);
-    return GrpcStorageOptions.newBuilder()
-        .setAttemptDirectPath(true) // should be irrelevant/noop for emulator; set for consistency
+    return StorageOptions.newBuilder()
         .setHost(host)
         .setProjectId("emulator-project")
         .setCredentials(NoCredentials.getInstance())
