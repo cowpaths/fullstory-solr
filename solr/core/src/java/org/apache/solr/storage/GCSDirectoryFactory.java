@@ -118,6 +118,11 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
 
   @Override
   public void init(NamedList<?> args) {
+    // Reinstall on every init: SLF4JBridgeHandler.install() calls LogManager.reset() which wipes
+    // logger-level configuration (including the filter set in the static block above).
+    java.util.logging.Logger.getLogger(
+            "com.google.api.client.googleapis.services.AbstractGoogleClient")
+        .setFilter(r -> !r.getMessage().startsWith("Application name is not set"));
     SolrParams params = args.toSolrParams();
     bucket = params.get("bucket", System.getProperty("solr.gcsDirectory.bucket", ""));
     if (bucket.isEmpty()) {
