@@ -56,6 +56,15 @@ import org.apache.solr.core.StandardDirectoryFactory;
  */
 public class GCSDirectoryFactory extends StandardDirectoryFactory {
 
+  static {
+    // TODO: replace with StorageOptions.Builder#setApplicationName once the API is available.
+    // The google-api-java-client layer warns when no application name is set; suppress that
+    // specific message while leaving other warnings from this class visible.
+    java.util.logging.Logger.getLogger(
+            "com.google.api.client.googleapis.services.AbstractGoogleClient")
+        .setFilter(r -> !r.getMessage().startsWith("Application name is not set"));
+  }
+
   /** Write buffer size for double-buffered GCS uploads. 256 KB matches GCS chunk alignment. */
   static final int GCS_WRITE_BUFFER_SIZE = 256 * 1024;
 
