@@ -28,6 +28,11 @@ import com.google.cloud.storage.StorageOptions;
  * <p>Unlike {@link LocalGCSDirectoryFactory}, this uses a real HTTP transport, so it exercises the
  * full {@link AsyncGCSWriteHelper} chunked-upload path and byte-range reads over the wire.
  *
+ * <p><b>Locale sensitivity:</b> the GCS Java client builds {@code Content-Range} headers via {@code
+ * String.format("%d", ...)}, which is locale-sensitive. Under non-Latin locales (e.g. Thai) the
+ * header contains non-ASCII digits that most GCS emulators cannot parse. Always specify a Latin
+ * locale when running tests against this factory, e.g. {@code -Ptests.locale=en} (or {@code root}).
+ *
  * <p>Usage:
  *
  * <pre>

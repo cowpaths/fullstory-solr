@@ -30,6 +30,11 @@ import java.util.Collections;
  * Default Credentials</a> (ADC), allowing tests to run against a real (non-production) GCS bucket
  * using local user credentials.
  *
+ * <p><b>Locale sensitivity:</b> the GCS Java client builds {@code Content-Range} headers via {@code
+ * String.format("%d", ...)}, which is locale-sensitive. Under non-Latin locales (e.g. Thai) the
+ * header contains non-ASCII digits that GCS servers cannot parse. Always specify a Latin locale
+ * when running tests with this factory, e.g. {@code -Ptests.locale=en} (or {@code root}).
+ *
  * <p>Before running, authenticate with:
  *
  * <pre>

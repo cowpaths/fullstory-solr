@@ -183,6 +183,14 @@ public class GCSDirectory extends FSDirectory {
     return new GCSIndexOutput(this, super.createTempOutput(prefix, suffix, context));
   }
 
+  /**
+   * Creates the {@link WriteChannel} used to stream compressed data to GCS. Overridable for
+   * testing.
+   */
+  protected WriteChannel openWriteChannel(BlobInfo blobInfo) {
+    return storage.writer(blobInfo);
+  }
+
   @Override
   public IndexInput openInput(String name, IOContext context) throws IOException {
     ensureOpen();
@@ -245,7 +253,7 @@ public class GCSDirectory extends FSDirectory {
       this.uuid = UUID.randomUUID();
       String blobName = uuid.toString();
       WriteChannel gcsChannel =
-          dir.storage.writer(BlobInfo.newBuilder(BlobId.of(dir.bucket, blobName)).build());
+          dir.openWriteChannel(BlobInfo.newBuilder(BlobId.of(dir.bucket, blobName)).build());
       writeHelper = new AsyncGCSWriteHelper(dir.bufferPool, gcsChannel);
       buffer = writeHelper.init();
       preBuffer = ByteBuffer.wrap(compressBuffer);

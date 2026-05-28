@@ -19,6 +19,10 @@ package org.apache.solr.storage;
 
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.contrib.nio.testing.LocalStorageHelper;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
 
 /**
  * Test-only subclass of {@link GCSDirectoryFactory} that uses an in-memory GCS mock backed by
@@ -44,10 +48,34 @@ public class LocalGCSDirectoryFactory extends GCSDirectoryFactory {
     if (storage == null) {
       synchronized (LocalGCSDirectoryFactory.class) {
         if (storage == null) {
-          storage = LocalStorageHelper.customOptions(false).getService();
+          // FakeStorageRpc uses a static SimpleDateFormat initialized at class-load time.
+          // Under non-Latin locales (e.g. Thai), SimpleDateFormat produces non-ASCII digits that
+          // DateTime.parseRfc3339() cannot parse. Force Locale.ROOT so the static formatter is
+          // initialized with ASCII digits.
+          Locale saved = Locale.getDefault();
+          Locale.setDefault(Locale.ROOT);
+          try {
+            storage = LocalStorageHelper.customOptions(false).getService();
+          } finally {
+            Locale.setDefault(saved);
+          }
         }
       }
     }
     return storage;
+  }
+
+  @Override
+  protected GCSDirectory newGCSDirectory(
+      Path localPath,
+      String bucket,
+      Storage gcsStorage,
+      BlockCache cache,
+      ExecutorService ioExec,
+      boolean useAsyncIO,
+      DirectBufferPool bufferPool)
+      throws IOException {
+    return new LocalGCSDirectory(
+        localPath, bucket, gcsStorage, cache, ioExec, useAsyncIO, bufferPool);
   }
 }

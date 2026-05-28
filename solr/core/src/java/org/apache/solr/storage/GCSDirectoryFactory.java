@@ -24,6 +24,7 @@ import java.io.UncheckedIOException;
 import java.lang.ref.WeakReference;
 import java.nio.file.Path;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.LockFactory;
 import org.apache.solr.common.params.SolrParams;
@@ -191,7 +192,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   @Override
   protected Directory create(String path, LockFactory lockFactory, DirContext dirContext)
       throws IOException {
-    return new GCSDirectory(
+    return newGCSDirectory(
         Path.of(path),
         bucket,
         nodeLevelState.storage,
@@ -199,6 +200,18 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         nodeLevelState.ioExec,
         useAsyncIO,
         nodeLevelState.bufferPool);
+  }
+
+  protected GCSDirectory newGCSDirectory(
+      Path localPath,
+      String bucket,
+      Storage storage,
+      BlockCache cache,
+      ExecutorService ioExec,
+      boolean useAsyncIO,
+      DirectBufferPool bufferPool)
+      throws IOException {
+    return new GCSDirectory(localPath, bucket, storage, cache, ioExec, useAsyncIO, bufferPool);
   }
 
   @Override
