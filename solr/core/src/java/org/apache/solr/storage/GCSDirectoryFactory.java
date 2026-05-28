@@ -21,6 +21,7 @@ import com.google.cloud.storage.Storage;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.invoke.MethodHandles;
 import java.lang.ref.WeakReference;
 import java.nio.file.Path;
 import java.util.UUID;
@@ -32,6 +33,8 @@ import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.core.CoreContainer;
 import org.apache.solr.core.StandardDirectoryFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A {@link org.apache.solr.core.DirectoryFactory} that stores compressed index data in Google Cloud
@@ -56,6 +59,8 @@ import org.apache.solr.core.StandardDirectoryFactory;
  * </ul>
  */
 public class GCSDirectoryFactory extends StandardDirectoryFactory {
+
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   static {
     // TODO: replace with StorageOptions.Builder#setApplicationName once the API is available.
@@ -109,9 +114,13 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     @Override
     @SuppressWarnings("try")
     public void close() throws IOException {
-      try (Closeable c1 = blockCache;
-          Closeable c2 = () -> ExecutorUtil.shutdownAndAwaitTermination(ioExec)) {
-        // resources closed in declaration order via try-with-resources
+      try (AutoCloseable c1 = storage;
+          Closeable c2 = blockCache) {
+        ExecutorUtil.shutdownAndAwaitTermination(ioExec);
+      } catch (IOException e) {
+        throw e;
+      } catch (Exception e) {
+        log.error("error closing {}", NodeLevelGCSDirectoryState.class, e);
       }
     }
   }
