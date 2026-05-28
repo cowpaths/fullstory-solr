@@ -19,7 +19,6 @@ package org.apache.solr.storage;
 import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZE;
 
 import com.google.cloud.storage.Storage;
-import com.google.cloud.storage.contrib.nio.testing.LocalStorageHelper;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -30,11 +29,12 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.RandomAccessInput;
 import org.apache.solr.SolrTestCaseJ4;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
 
 public class GCSDirectoryTest extends SolrTestCaseJ4 {
 
-  private static final String BUCKET = "gcs-directory-test";
+  private static final String BUCKET = EnvUtils.getProperty("solr.gcsDirectory.bucket");
 
   private Storage storage;
   private BlockCache cache;
@@ -45,7 +45,14 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
   @Override
   public void setUp() throws Exception {
     super.setUp();
-    storage = LocalStorageHelper.customOptions(false).getService();
+    String factoryClass = EnvUtils.getProperty("solr.directoryFactory");
+    if (factoryClass != null) {
+      GCSDirectoryFactory factory =
+          (GCSDirectoryFactory) Class.forName(factoryClass).getDeclaredConstructor().newInstance();
+      storage = factory.initStorage();
+    } else {
+      storage = new LocalGCSDirectoryFactory().initStorage();
+    }
     Path tmpDir = createTempDir();
     // Cache sized to hold a handful of blocks; intentionally smaller than the largest test files
     // so that cache-miss GCS reads are exercised.
