@@ -39,7 +39,7 @@ import java.util.concurrent.ExecutorService;
  * resumable-upload path entirely: it accumulates compressed bytes in a heap buffer and commits them
  * atomically via {@code storage.create(BlobInfo, byte[])} on close.
  */
-class LocalGCSDirectory extends GCSDirectory {
+public class LocalGCSDirectory extends GCSDirectory {
 
   LocalGCSDirectory(
       Path localPath,
