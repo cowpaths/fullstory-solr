@@ -18,20 +18,17 @@
 package org.apache.solr.storage;
 
 import com.google.cloud.NoCredentials;
+import com.google.cloud.storage.GrpcStorageOptions;
 import com.google.cloud.storage.Storage;
-import com.google.cloud.storage.StorageOptions;
 
 /**
  * Test/dev subclass of {@link GCSDirectoryFactory} that routes GCS operations to a local GCS
  * emulator (e.g. {@code gcloud beta emulators storage} or any GCS-compatible emulator).
  *
- * <p>Unlike {@link LocalGCSDirectoryFactory}, this uses a real HTTP transport, so it exercises the
- * full {@link AsyncGCSWriteHelper} chunked-upload path and byte-range reads over the wire.
- *
- * <p><b>Locale sensitivity:</b> the GCS Java client builds {@code Content-Range} headers via {@code
- * String.format("%d", ...)}, which is locale-sensitive. Under non-Latin locales (e.g. Thai) the
- * header contains non-ASCII digits that most GCS emulators cannot parse. Always specify a Latin
- * locale when running tests against this factory, e.g. {@code -Ptests.locale=en} (or {@code root}).
+ * <p>Unlike {@link LocalGCSDirectoryFactory}, this uses a real gRPC transport, so it exercises the
+ * full {@link AsyncGCSWriteHelper} write path and byte-range reads over the wire. The emulator host
+ * must be an {@code http://} URL; {@link GrpcStorageOptions} automatically configures a plaintext
+ * channel when the scheme is {@code http}.
  *
  * <p>Usage:
  *
@@ -52,7 +49,8 @@ public class EmulatorGCSDirectoryFactory extends GCSDirectoryFactory {
   @Override
   protected Storage initStorage() {
     String host = System.getProperty("solr.gcsDirectory.emulatorHost", DEFAULT_EMULATOR_HOST);
-    return StorageOptions.newBuilder()
+    return GrpcStorageOptions.newBuilder()
+        .setAttemptDirectPath(true) // should be irrelevant/noop for emulator; set for consistency
         .setHost(host)
         .setProjectId("emulator-project")
         .setCredentials(NoCredentials.getInstance())
