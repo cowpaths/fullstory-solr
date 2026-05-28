@@ -533,11 +533,17 @@ public class GCSDirectory extends FSDirectory {
      * Issues a byte-range GET to GCS for the given compressed block and decompresses it. This is
      * called only on a cache miss.
      */
+    // limit() and seek() are deprecated in favor of setByteRangeSpec(ByteRangeSpec), but
+    // ByteRangeSpec is package-private in com.google.cloud.storage, so the deprecated methods
+    // are the only public API for constraining the byte range.
+    @SuppressWarnings("deprecation")
     private ByteBuffer supply(long pos, int compressedLen, int decompressedLen) throws IOException {
       byte[] compressed = new byte[compressedLen];
       ByteBuffer compBuf = ByteBuffer.wrap(compressed);
       try (ReadChannel reader = dir.storage.reader(BlobId.of(dir.bucket, blobName))) {
+        reader.limit(pos + compressedLen);
         reader.seek(pos);
+        reader.setChunkSize(compressedLen);
         while (compBuf.hasRemaining()) reader.read(compBuf);
       }
       byte[] decompressed = new byte[decompressedLen + 7];
