@@ -339,19 +339,21 @@ class Cache<V, N extends Cache.Node<V>> {
 
   /**
    * Explicitly releases a node when its owning resource is closed. If the node is still evictable
-   * (refCount==0 and in the list), marks it dead and recycles its value back into the pool at the
-   * tail, making it the highest-priority eviction candidate. If the node has already been evicted
-   * or is currently pinned, this is a no-op.
+   * (refCount==0 and in the list), marks it dead and recycles its value back to the pool via {@link
+   * #insertAtTail}, making it the highest-priority eviction candidate for reuse. Returns {@code
+   * true} if the node was successfully released, {@code false} if the node was already evicted or
+   * pinned (best-effort; caller need not retry).
    */
-  void close(Node<V> node) {
+  boolean close(Node<V> node) {
     if (!node.refCount.compareAndSet(0, -1)) {
       // pinned or already dead — best effort, bail
-      return;
+      return false;
     }
     if (removeFromList(node)) {
       insertAtTail(node.value);
     } else {
       throw new IllegalStateException();
     }
+    return true;
   }
 }
