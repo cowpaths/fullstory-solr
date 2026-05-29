@@ -18,6 +18,7 @@ package org.apache.solr.storage;
 
 import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZE;
 
+import com.google.cloud.ReadChannel;
 import com.google.cloud.storage.Storage;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -70,7 +71,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             BUCKET,
             storage,
             cache,
-            new ChannelPool(64),
+            new Cache<>(new ReadChannel[64], true),
             ioExec,
             false,
             bufferPool);
@@ -205,7 +206,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             BUCKET,
             storage,
             cache,
-            new ChannelPool(64),
+            new Cache<>(new ReadChannel[64], true),
             ioExec,
             true,
             bufferPool);

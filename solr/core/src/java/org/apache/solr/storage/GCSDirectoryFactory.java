@@ -17,6 +17,7 @@
 
 package org.apache.solr.storage;
 
+import com.google.cloud.ReadChannel;
 import com.google.cloud.storage.Storage;
 import java.io.Closeable;
 import java.io.IOException;
@@ -103,7 +104,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         ExecutorUtil.newMDCAwareCachedThreadPool("gcsIOExec");
     final BlockCache blockCache;
     final Storage storage;
-    final ChannelPool channelPool;
+    final Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool;
 
     /**
      * Buffer pool for the double-buffered GCS write path. Buffers are 256 KB, 4-KiB aligned (no
@@ -114,7 +115,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     NodeLevelGCSDirectoryState(BlockCache blockCache, Storage storage) {
       this.blockCache = blockCache;
       this.storage = storage;
-      this.channelPool = new ChannelPool(DEFAULT_MAX_OPEN_CHANNELS);
+      this.channelPool = new Cache<>(new ReadChannel[DEFAULT_MAX_OPEN_CHANNELS], true);
       this.bufferPool = new DirectBufferPool(GCS_WRITE_BUFFER_SIZE, 4096, 1);
     }
 
@@ -229,7 +230,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       String bucket,
       Storage storage,
       BlockCache cache,
-      ChannelPool channelPool,
+      Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool,
       ExecutorService ioExec,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)

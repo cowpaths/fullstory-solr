@@ -102,7 +102,7 @@ public class GCSDirectory extends FSDirectory {
   private final String bucket;
   final Storage storage;
   private final BlockCache cache;
-  final ChannelPool channelPool;
+  final Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool;
   private final ExecutorService ioExec;
   private final boolean useAsyncIO;
   private final DirectBufferPool bufferPool;
@@ -127,7 +127,7 @@ public class GCSDirectory extends FSDirectory {
       String bucket,
       Storage storage,
       BlockCache cache,
-      ChannelPool channelPool,
+      Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool,
       ExecutorService ioExec,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
@@ -436,7 +436,7 @@ public class GCSDirectory extends FSDirectory {
     private FloatBuffer[] floatViews;
 
     // Pool node for the active channel; null when the pool was exhausted (direct fallback).
-    private ChannelPool.Node channelNode;
+    private Cache.Node<ReadChannel> channelNode;
     // Active ReadChannel, whether pool-backed or opened directly as a one-off fallback.
     // Null between supply() calls in the direct-fallback case (closed at the end of each supply()).
     private ReadChannel channel;
@@ -604,8 +604,8 @@ public class GCSDirectory extends FSDirectory {
      * <p>Handles channel acquisition and positioning (seek or short forward skip) before reading.
      * If the channel was re-pinned from the pool it may have been idle long enough for the
      * transport to time out; in that case one reopen is attempted on the first failing operation.
-     * Note that successful reads do not clear the stale flag: buffered data may be served without
-     * a network call, so a failure can surface at any point during the block read. A brand-new
+     * Note that successful reads do not clear the stale flag: buffered data may be served without a
+     * network call, so a failure can surface at any point during the block read. A brand-new
      * channel opened via {@link #openChannelAt} is never retried.
      */
     private void fillBuffer(long startPos, ByteBuffer dst) throws IOException {
@@ -670,7 +670,9 @@ public class GCSDirectory extends FSDirectory {
       channelPos = startPos + dst.position();
     }
 
-    /** Releases the current channel back to the pool (or closes it directly) and opens a fresh one. */
+    /**
+     * Releases the current channel back to the pool (or closes it directly) and opens a fresh one.
+     */
     private void releaseAndReopenAt(long pos) throws IOException {
       if (channelNode != null) {
         dir.channelPool.unpin(channelNode);
@@ -1061,7 +1063,7 @@ public class GCSDirectory extends FSDirectory {
       unpinCurrent();
       ReadChannel c = channel;
       channel = null;
-      ChannelPool.Node cn = channelNode;
+      Cache.Node<ReadChannel> cn = channelNode;
       channelNode = null;
       if (cn != null) {
         assert c == cn.value;
