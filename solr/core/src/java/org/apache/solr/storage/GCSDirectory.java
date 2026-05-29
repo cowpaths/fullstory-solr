@@ -551,7 +551,6 @@ public class GCSDirectory extends FSDirectory {
     private ByteBuffer supply(long pos, int compressedLen, int decompressedLen) throws IOException {
       byte[] compressed = new byte[compressedLen];
       ByteBuffer compBuf = ByteBuffer.wrap(compressed);
-      ensureChannelAt(pos);
       try {
         fillBuffer(pos, compBuf);
       } finally {
@@ -568,23 +567,6 @@ public class GCSDirectory extends FSDirectory {
       byte[] decompressed = new byte[decompressedLen + 7];
       CompressingDirectory.decompress(compressed, 0, decompressedLen, decompressed, 0);
       return ByteBuffer.wrap(decompressed, 0, decompressedLen);
-    }
-
-    private void ensureChannelAt(long pos) throws IOException {
-      if (channelNode == null || !dir.channelPool.pin(channelNode)) {
-        // No channel yet, or slot was evicted: acquire a fresh slot from the pool.
-        openChannelAt(pos);
-      } else if (pos != channelPos) {
-        long distance = pos - channelPos;
-        if (distance > 0 && distance < REOPEN_THRESHOLD) {
-          // Short forward skip: read and discard rather than paying for a reconnect.
-          fillBuffer(channelPos, ByteBuffer.allocate((int) distance));
-        } else {
-          // Backward seek or long forward jump: seek to target position.
-          channel.seek(pos);
-          channelPos = pos;
-        }
-      }
     }
 
     /**
@@ -617,20 +599,64 @@ public class GCSDirectory extends FSDirectory {
     }
 
     /**
-     * Fills {@code dst} completely from the channel at {@code startPos}, retrying on transient
-     * errors (socket timeout, dropped connection) up to two additional attempts.
+     * Fills {@code dst} completely starting at {@code startPos}.
+     *
+     * <p>Handles channel acquisition and positioning (seek or short forward skip) before reading.
+     * If the channel was re-pinned from the pool it may have been idle long enough for the
+     * transport to time out; in that case one reopen is attempted on the first failing operation.
+     * Note that successful reads do not clear the stale flag: buffered data may be served without
+     * a network call, so a failure can surface at any point during the block read. A brand-new
+     * channel opened via {@link #openChannelAt} is never retried.
      */
     private void fillBuffer(long startPos, ByteBuffer dst) throws IOException {
-      int attempts = 0;
+      final long resumePos = startPos + dst.position();
+
+      // Acquire / re-pin the channel. isStale is true when we re-pinned an existing channel
+      // that may have been idle long enough for the transport layer to time out.
+      boolean isStale;
+      if (channel == null || (channelNode != null && !dir.channelPool.pin(channelNode))) {
+        openChannelAt(resumePos);
+        isStale = false;
+      } else {
+        isStale = true;
+        if (resumePos != channelPos) {
+          long distance = resumePos - channelPos;
+          try {
+            if (distance > 0 && distance < REOPEN_THRESHOLD) {
+              // Short forward skip: read and discard rather than paying for a reconnect.
+              ByteBuffer skip = ByteBuffer.allocate((int) distance);
+              while (skip.hasRemaining()) {
+                if (channel.read(skip) == -1) {
+                  throw new EOFException(
+                      "unexpected EOF in GCS blob " + blobName + " while skipping to " + resumePos);
+                }
+              }
+              channelPos = resumePos;
+            } else {
+              channel.seek(resumePos);
+              channelPos = resumePos;
+              // seek() is lazy (no network call); isStale remains true until first read succeeds.
+            }
+            // (skip path only: isStale cleared below after actual reads confirmed the transport)
+          } catch (IOException e) {
+            // First operation on a potentially-stale channel failed: reopen once.
+            releaseAndReopenAt(resumePos);
+            isStale = false; // fresh channel; no further retries
+          }
+        }
+      }
+
       while (dst.hasRemaining()) {
         int n;
         try {
           n = channel.read(dst);
         } catch (IOException e) {
-          if (++attempts > 2) {
-            throw new IOException("GCS read failed after retries at " + startPos, e);
+          if (!isStale) {
+            throw new IOException("GCS read failed at " + (startPos + dst.position()), e);
           }
-          reopenChannelAt(startPos + dst.position());
+          // First read on a potentially-stale channel: reopen once.
+          releaseAndReopenAt(startPos + dst.position());
+          isStale = false; // fresh channel; no further retries
           continue;
         }
         if (n == -1) {
@@ -644,17 +670,19 @@ public class GCSDirectory extends FSDirectory {
       channelPos = startPos + dst.position();
     }
 
-    private void reopenChannelAt(long pos) throws IOException {
-      // Release the current channel back to the pool (or close it directly if a one-off).
+    /** Releases the current channel back to the pool (or closes it directly) and opens a fresh one. */
+    private void releaseAndReopenAt(long pos) throws IOException {
       if (channelNode != null) {
         dir.channelPool.unpin(channelNode);
         dir.channelPool.close(channelNode);
-      } else {
+        channelNode = null;
+      } else if (channel != null) {
         try {
           channel.close();
         } catch (Exception ignored) {
         }
       }
+      channel = null;
       openChannelAt(pos);
     }
 
