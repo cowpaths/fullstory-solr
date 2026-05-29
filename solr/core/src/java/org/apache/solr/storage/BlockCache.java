@@ -62,8 +62,8 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
    * <ol>
    *   <li>Returned by {@link BlockCache#acquireNode()} pinned (refCount=1), <em>not</em> in the LRU
    *       list.
-   *   <li>Caller populates {@link #buf} and publishes the node (e.g. via an {@code AtomicReference}
-   *       slot). The node is still pinned.
+   *   <li>Caller populates {@link #value} and publishes the node (e.g. via an {@code
+   *       AtomicReference} slot). The node is still pinned.
    *   <li>Subsequent callers call {@link Cache#pin(Cache.Node)}, which either re-pins
    *       (refCount&gt;0 → increment only) or first-pins (refCount=0 → remove from list +
    *       increment).
@@ -77,26 +77,20 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
   public static final class Node extends Cache.Node<ByteBuffer> {
 
     /**
-     * Typed alias for {@link Cache.Node#value}; the same {@link ByteBuffer} object, held here for
-     * convenient typed access without casting.
-     */
-    final ByteBuffer buf;
-
-    /**
-     * Completion signal: fulfilled with {@link #buf} by {@link #populate} on the winning thread;
+     * Completion signal: fulfilled with {@link #value} by {@link #populate} on the winning thread;
      * other threads joining this node wait here until the buffer is ready (or failed).
      */
     private final CompletableFuture<ByteBuffer> future = new CompletableFuture<>();
 
     private Node(ByteBuffer buf, Cache.Node<ByteBuffer> prev, int initialRefCount) {
       super(buf, prev, initialRefCount);
-      this.buf = buf;
     }
 
     ByteBuffer populate(byte[] arr, int off, int len) {
-      buf.clear().put(arr, off, len);
-      future.complete(buf);
-      return buf;
+      assert value != null;
+      value.clear().put(arr, off, len);
+      future.complete(value);
+      return value;
     }
 
     /**
