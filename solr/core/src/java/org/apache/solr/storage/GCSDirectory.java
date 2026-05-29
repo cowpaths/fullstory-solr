@@ -30,6 +30,7 @@ import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.Storage;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -404,6 +405,8 @@ public class GCSDirectory extends FSDirectory {
   // GCSIndexInput
   // ---------------------------------------------------------------------------
 
+  private static final long REOPEN_THRESHOLD = COMPRESSION_BLOCK_SIZE >> 1;
+
   static final class GCSIndexInput extends IndexInput implements RandomAccessInput {
 
     private final GCSDirectory dir;
@@ -429,6 +432,10 @@ public class GCSDirectory extends FSDirectory {
     private LongBuffer[] longViews;
     private IntBuffer[] intViews;
     private FloatBuffer[] floatViews;
+
+    // Persistent read channel: lazily opened on first cache miss, reused across sequential blocks.
+    private ReadChannel openChannel; // null until first cache miss
+    private long channelPos = -1; // current byte offset of openChannel in the GCS object
 
     // Root constructor: parses the offset file.
     GCSIndexInput(String resourceDescription, GCSDirectory dir, Path offsetFile)
@@ -530,25 +537,80 @@ public class GCSDirectory extends FSDirectory {
     }
 
     /**
-     * Issues a byte-range GET to GCS for the given compressed block and decompresses it. This is
-     * called only on a cache miss.
+     * Fetches the given compressed block from GCS and decompresses it. Called only on a cache miss.
+     *
+     * <p>Reuses a persistent {@link ReadChannel} across sequential block fetches to avoid per-block
+     * connection overhead. The channel is seeked (triggering a reconnect) only when the target
+     * position is not reachable by a short forward skip.
      */
-    // limit() and seek() are deprecated in favor of setByteRangeSpec(ByteRangeSpec), but
-    // ByteRangeSpec is package-private in com.google.cloud.storage, so the deprecated methods
-    // are the only public API for constraining the byte range.
-    @SuppressWarnings("deprecation")
     private ByteBuffer supply(long pos, int compressedLen, int decompressedLen) throws IOException {
       byte[] compressed = new byte[compressedLen];
       ByteBuffer compBuf = ByteBuffer.wrap(compressed);
-      try (ReadChannel reader = dir.storage.reader(BlobId.of(dir.bucket, blobName))) {
-        reader.limit(pos + compressedLen);
-        reader.seek(pos);
-        reader.setChunkSize(compressedLen);
-        while (compBuf.hasRemaining()) reader.read(compBuf);
-      }
+      ensureChannelAt(pos);
+      fillBuffer(pos, compBuf);
       byte[] decompressed = new byte[decompressedLen + 7];
       CompressingDirectory.decompress(compressed, 0, decompressedLen, decompressed, 0);
       return ByteBuffer.wrap(decompressed, 0, decompressedLen);
+    }
+
+    private void ensureChannelAt(long pos) throws IOException {
+      if (openChannel == null) {
+        openChannel = dir.storage.reader(BlobId.of(dir.bucket, blobName));
+        openChannel.setChunkSize(COMPRESSION_BLOCK_SIZE);
+        openChannel.seek(pos);
+        channelPos = pos;
+      } else if (pos != channelPos) {
+        long distance = pos - channelPos;
+        if (distance > 0 && distance < REOPEN_THRESHOLD) {
+          // Short forward skip: read and discard rather than paying for a reconnect.
+          fillBuffer(channelPos, ByteBuffer.allocate((int) distance));
+        } else {
+          // Backward seek or long forward jump: reconnect at the target position.
+          openChannel.seek(pos);
+          channelPos = pos;
+        }
+      }
+    }
+
+    /**
+     * Fills {@code dst} completely from the channel at {@code startPos}, retrying on transient
+     * errors (socket timeout, dropped connection) up to two additional attempts.
+     */
+    private void fillBuffer(long startPos, ByteBuffer dst) throws IOException {
+      int attempts = 0;
+      while (dst.hasRemaining()) {
+        int n;
+        try {
+          n = openChannel.read(dst);
+        } catch (IOException e) {
+          if (++attempts > 2) {
+            throw new IOException("GCS read failed after retries at " + startPos, e);
+          }
+          reopenChannelAt(startPos + dst.position());
+          continue;
+        }
+        if (n == -1) {
+          throw new EOFException(
+              "unexpected EOF in GCS blob "
+                  + blobName
+                  + " at position "
+                  + (startPos + dst.position()));
+        }
+      }
+      channelPos = startPos + dst.position();
+    }
+
+    private void reopenChannelAt(long pos) throws IOException {
+      try {
+        openChannel.close();
+      } catch (Exception ignored) {
+        // we're discarding this channel anyway
+        // quite possibly because we already know it has a problem
+      }
+      openChannel = dir.storage.reader(BlobId.of(dir.bucket, blobName));
+      openChannel.setChunkSize(COMPRESSION_BLOCK_SIZE);
+      openChannel.seek(pos);
+      channelPos = pos;
     }
 
     // ---------------------------------------------------------------------------
@@ -923,7 +985,11 @@ public class GCSDirectory extends FSDirectory {
 
     @Override
     public void close() throws IOException {
-      unpinCurrent();
+      Closeable c = openChannel;
+      openChannel = null;
+      try (c) {
+        unpinCurrent();
+      }
     }
   }
 
