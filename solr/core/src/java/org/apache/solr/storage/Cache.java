@@ -115,17 +115,35 @@ class Cache<V, N extends Cache.Node<V>> {
   final Node<V> REMOVED;
 
   /** Most-recently-used sentinel. Real nodes are inserted immediately after this. */
-  final Node<V> lruHead = new Node<>();
+  private final Node<V> lruHead = new Node<>();
 
   /** Least-recently-used sentinel. Eviction candidates are immediately before this. */
-  final Node<V> lruTail = new Node<>();
+  private final Node<V> lruTail = new Node<>();
 
   @SuppressWarnings("unchecked")
-  Cache() {
+  private Cache() {
     RESERVED = (Node<V>) RESERVED_PROTO;
     REMOVED = (Node<V>) REMOVED_PROTO;
     lruHead.next.set(lruTail);
     lruTail.prev = lruHead;
+  }
+
+  /**
+   * Initializing constructor: wires {@code initialValues} into the LRU list in order (first value
+   * at the head, last at the tail) using {@link #createNode}. Equivalent to calling the no-arg
+   * constructor followed by {@link #insertAtTail} for each value, but faster because no CAS is
+   * needed during single-threaded initialization.
+   */
+  Cache(V[] initialValues) {
+    this();
+    Node<V> prev = lruHead;
+    for (V value : initialValues) {
+      N node = createNode(value, prev, 0);
+      prev.next.set(node);
+      prev = node;
+    }
+    prev.next.set(lruTail);
+    lruTail.prev = prev;
   }
 
   // ---------------------------------------------------------------------------

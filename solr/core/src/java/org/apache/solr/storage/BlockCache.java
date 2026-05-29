@@ -119,21 +119,11 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
   // ---------------------------------------------------------------------------
 
   public BlockCache(long targetBytes, Path backingFile) throws IOException {
-    int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
-
-    // Wire all pool buffers directly into the LRU list in a single pass. No CAS needed here —
-    // init is single-threaded. Each node starts evictable (refCount=0) and in the list.
-    ByteBuffer[] pool = initPool(nBlocks, backingFile);
-    Cache.Node<ByteBuffer> prev = lruHead;
-    for (ByteBuffer buf : pool) {
-      Node node = new Node(buf, prev, 0);
-      prev.next.set(node);
-      prev = node;
-    }
-    prev.next.set(lruTail);
-    lruTail.prev = prev;
-
-    log.info("BlockCache initialized: nBlocks={}, targetBytes={}", nBlocks, targetBytes);
+    super(initPool(targetBytes, backingFile));
+    log.info(
+        "BlockCache initialized: nBlocks={}, targetBytes={}",
+        targetBytes / COMPRESSION_BLOCK_SIZE,
+        targetBytes);
   }
 
   /**
@@ -141,7 +131,8 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
    * HeapCacheFbsModifier.poolFileBacked}). The backing file is deleted immediately after mapping so
    * that it does not outlive the JVM.
    */
-  private static ByteBuffer[] initPool(int nBlocks, Path backingFile) throws IOException {
+  private static ByteBuffer[] initPool(long targetBytes, Path backingFile) throws IOException {
+    final int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
     final ByteBuffer[] pool = new ByteBuffer[nBlocks];
     final long blockSizeL = COMPRESSION_BLOCK_SIZE;
     // Round partition size down to a 2 MiB boundary (matches HeapCacheFbsModifier convention).
