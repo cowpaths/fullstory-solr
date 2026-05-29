@@ -30,7 +30,6 @@ import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.Storage;
 import java.io.ByteArrayOutputStream;
-import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -103,6 +102,7 @@ public class GCSDirectory extends FSDirectory {
   private final String bucket;
   final Storage storage;
   private final BlockCache cache;
+  final ChannelPool channelPool;
   private final ExecutorService ioExec;
   private final boolean useAsyncIO;
   private final DirectBufferPool bufferPool;
@@ -127,6 +127,7 @@ public class GCSDirectory extends FSDirectory {
       String bucket,
       Storage storage,
       BlockCache cache,
+      ChannelPool channelPool,
       ExecutorService ioExec,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
@@ -135,6 +136,7 @@ public class GCSDirectory extends FSDirectory {
     this.bucket = bucket;
     this.storage = storage;
     this.cache = cache;
+    this.channelPool = channelPool;
     this.ioExec = ioExec;
     this.useAsyncIO = useAsyncIO;
     this.bufferPool = bufferPool;
@@ -433,9 +435,10 @@ public class GCSDirectory extends FSDirectory {
     private IntBuffer[] intViews;
     private FloatBuffer[] floatViews;
 
-    // Persistent read channel: lazily opened on first cache miss, reused across sequential blocks.
-    private ReadChannel openChannel; // null until first cache miss
-    private long channelPos = -1; // current byte offset of openChannel in the GCS object
+    // Channel pool node: lazily acquired on first cache miss, recycled via close() on IndexInput
+    // close.
+    private ChannelPool.Node channelNode; // null until first cache miss
+    private long channelPos = -1; // current byte offset of the channel in the GCS object
 
     // Root constructor: parses the offset file.
     GCSIndexInput(String resourceDescription, GCSDirectory dir, Path offsetFile)
@@ -547,17 +550,33 @@ public class GCSDirectory extends FSDirectory {
       byte[] compressed = new byte[compressedLen];
       ByteBuffer compBuf = ByteBuffer.wrap(compressed);
       ensureChannelAt(pos);
-      fillBuffer(pos, compBuf);
+      try {
+        fillBuffer(pos, compBuf);
+      } finally {
+        dir.channelPool.unpin(channelNode);
+      }
       byte[] decompressed = new byte[decompressedLen + 7];
       CompressingDirectory.decompress(compressed, 0, decompressedLen, decompressed, 0);
       return ByteBuffer.wrap(decompressed, 0, decompressedLen);
     }
 
     private void ensureChannelAt(long pos) throws IOException {
-      if (openChannel == null) {
-        openChannel = dir.storage.reader(BlobId.of(dir.bucket, blobName));
-        openChannel.setChunkSize(COMPRESSION_BLOCK_SIZE);
-        openChannel.seek(pos);
+      if (channelNode == null || !dir.channelPool.pin(channelNode)) {
+        // No channel yet, or slot was evicted: acquire a fresh slot from the pool.
+        channelNode =
+            dir.channelPool.acquireNode(
+                ch -> {
+                  if (ch != null) {
+                    try {
+                      ch.close();
+                    } catch (Exception ignored) {
+                    }
+                  }
+                  ReadChannel c = dir.storage.reader(BlobId.of(dir.bucket, blobName));
+                  c.setChunkSize(COMPRESSION_BLOCK_SIZE);
+                  return c;
+                });
+        channelNode.value.seek(pos);
         channelPos = pos;
       } else if (pos != channelPos) {
         long distance = pos - channelPos;
@@ -565,8 +584,8 @@ public class GCSDirectory extends FSDirectory {
           // Short forward skip: read and discard rather than paying for a reconnect.
           fillBuffer(channelPos, ByteBuffer.allocate((int) distance));
         } else {
-          // Backward seek or long forward jump: reconnect at the target position.
-          openChannel.seek(pos);
+          // Backward seek or long forward jump: seek to target position.
+          channelNode.value.seek(pos);
           channelPos = pos;
         }
       }
@@ -581,7 +600,7 @@ public class GCSDirectory extends FSDirectory {
       while (dst.hasRemaining()) {
         int n;
         try {
-          n = openChannel.read(dst);
+          n = channelNode.value.read(dst);
         } catch (IOException e) {
           if (++attempts > 2) {
             throw new IOException("GCS read failed after retries at " + startPos, e);
@@ -601,15 +620,23 @@ public class GCSDirectory extends FSDirectory {
     }
 
     private void reopenChannelAt(long pos) throws IOException {
-      try {
-        openChannel.close();
-      } catch (Exception ignored) {
-        // we're discarding this channel anyway
-        // quite possibly because we already know it has a problem
-      }
-      openChannel = dir.storage.reader(BlobId.of(dir.bucket, blobName));
-      openChannel.setChunkSize(COMPRESSION_BLOCK_SIZE);
-      openChannel.seek(pos);
+      // Release our pin on the current slot and recycle it to the pool tail for lazy close.
+      dir.channelPool.unpin(channelNode);
+      dir.channelPool.close(channelNode);
+      channelNode =
+          dir.channelPool.acquireNode(
+              ch -> {
+                if (ch != null) {
+                  try {
+                    ch.close();
+                  } catch (Exception ignored) {
+                  }
+                }
+                ReadChannel c = dir.storage.reader(BlobId.of(dir.bucket, blobName));
+                c.setChunkSize(COMPRESSION_BLOCK_SIZE);
+                return c;
+              });
+      channelNode.value.seek(pos);
       channelPos = pos;
     }
 
@@ -985,10 +1012,11 @@ public class GCSDirectory extends FSDirectory {
 
     @Override
     public void close() throws IOException {
-      Closeable c = openChannel;
-      openChannel = null;
-      try (c) {
-        unpinCurrent();
+      unpinCurrent();
+      ChannelPool.Node cn = channelNode;
+      channelNode = null;
+      if (cn != null) {
+        dir.channelPool.close(cn); // recycle slot to pool tail; channel closed lazily on eviction
       }
     }
   }

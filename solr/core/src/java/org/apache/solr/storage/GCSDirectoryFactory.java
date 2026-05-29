@@ -77,6 +77,11 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   /** Default block cache size: 1 GiB expressed in KiB. */
   private static final long DEFAULT_BLOCK_CACHE_KILOBYTES = 1L << 20;
 
+  /**
+   * Default cap on concurrently open GCS {@link com.google.cloud.ReadChannel}s across all files.
+   */
+  private static final int DEFAULT_MAX_OPEN_CHANNELS = 4096;
+
   private NodeLevelGCSDirectoryState nodeLevelState;
 
   /** Non-null only when this instance owns (and must close) the node-level state. */
@@ -98,6 +103,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         ExecutorUtil.newMDCAwareCachedThreadPool("gcsIOExec");
     final BlockCache blockCache;
     final Storage storage;
+    final ChannelPool channelPool;
 
     /**
      * Buffer pool for the double-buffered GCS write path. Buffers are 256 KB, 4-KiB aligned (no
@@ -108,6 +114,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     NodeLevelGCSDirectoryState(BlockCache blockCache, Storage storage) {
       this.blockCache = blockCache;
       this.storage = storage;
+      this.channelPool = new ChannelPool(DEFAULT_MAX_OPEN_CHANNELS);
       this.bufferPool = new DirectBufferPool(GCS_WRITE_BUFFER_SIZE, 4096, 1);
     }
 
@@ -211,6 +218,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         bucket,
         nodeLevelState.storage,
         nodeLevelState.blockCache,
+        nodeLevelState.channelPool,
         nodeLevelState.ioExec,
         useAsyncIO,
         nodeLevelState.bufferPool);
@@ -221,11 +229,13 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       String bucket,
       Storage storage,
       BlockCache cache,
+      ChannelPool channelPool,
       ExecutorService ioExec,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
       throws IOException {
-    return new GCSDirectory(localPath, bucket, storage, cache, ioExec, useAsyncIO, bufferPool);
+    return new GCSDirectory(
+        localPath, bucket, storage, cache, channelPool, ioExec, useAsyncIO, bufferPool);
   }
 
   @Override

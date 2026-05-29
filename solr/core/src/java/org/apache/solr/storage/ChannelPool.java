@@ -32,20 +32,20 @@ import com.google.cloud.ReadChannel;
  */
 class ChannelPool extends Cache<ReadChannel, ChannelPool.Node> {
 
-  /** A permit node representing one open {@link ReadChannel} slot. */
+  /** A node representing one open {@link ReadChannel} slot. */
   static final class Node extends Cache.Node<ReadChannel> {
-    Node(Cache.Node<ReadChannel> prev, int initialRefCount) {
-      super(null, prev, initialRefCount);
+    Node(ReadChannel value, Cache.Node<ReadChannel> prev, int initialRefCount) {
+      super(value, prev, initialRefCount);
     }
   }
 
   ChannelPool(int maxChannels) {
-    super(new ReadChannel[maxChannels], false);
+    super(new ReadChannel[maxChannels], true);
   }
 
   @Override
   protected Node createNode(ReadChannel value, Cache.Node<ReadChannel> prev, int initialRefCount) {
-    return new Node(prev, initialRefCount);
+    return new Node(value, prev, initialRefCount);
   }
 
   @Override

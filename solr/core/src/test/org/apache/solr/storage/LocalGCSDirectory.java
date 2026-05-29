@@ -46,11 +46,12 @@ public class LocalGCSDirectory extends GCSDirectory {
       String bucket,
       Storage storage,
       BlockCache cache,
+      ChannelPool channelPool,
       ExecutorService ioExec,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
       throws IOException {
-    super(localPath, bucket, storage, cache, ioExec, useAsyncIO, bufferPool);
+    super(localPath, bucket, storage, cache, channelPool, ioExec, useAsyncIO, bufferPool);
   }
 
   @Override

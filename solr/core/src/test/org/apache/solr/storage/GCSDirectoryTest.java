@@ -66,7 +66,14 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
     bufferPool = new DirectBufferPool(GCSDirectoryFactory.GCS_WRITE_BUFFER_SIZE, 4096, 1);
     dir =
         new GCSDirectory(
-            tmpDir.resolve("index"), BUCKET, storage, cache, ioExec, false, bufferPool);
+            tmpDir.resolve("index"),
+            BUCKET,
+            storage,
+            cache,
+            new ChannelPool(64),
+            ioExec,
+            false,
+            bufferPool);
   }
 
   @Override
@@ -198,6 +205,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             BUCKET,
             storage,
             cache,
+            new ChannelPool(64),
             ioExec,
             true,
             bufferPool);
