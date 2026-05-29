@@ -175,8 +175,8 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
 
   /**
    * Creates a {@link BlockCache.Node} carrying the given buffer. Overrides the base factory so that
-   * all nodes inserted into this cache's list (including those recycled via {@link
-   * Cache#insertAtTail}) are of type {@link BlockCache.Node} and can be safely cast on acquisition.
+   * all nodes inserted into this cache's list are of type {@link BlockCache.Node} and can be safely
+   * cast on acquisition.
    */
   @Override
   protected Node createNode(ByteBuffer value, Cache.Node<ByteBuffer> prev, int initialRefCount) {
