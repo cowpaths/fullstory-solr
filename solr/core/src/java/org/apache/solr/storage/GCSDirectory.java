@@ -435,10 +435,12 @@ public class GCSDirectory extends FSDirectory {
     private IntBuffer[] intViews;
     private FloatBuffer[] floatViews;
 
-    // Channel pool node: lazily acquired on first cache miss, recycled via close() on IndexInput
-    // close.
-    private ChannelPool.Node channelNode; // null until first cache miss
-    private long channelPos = -1; // current byte offset of the channel in the GCS object
+    // Pool node for the active channel; null when the pool was exhausted (direct fallback).
+    private ChannelPool.Node channelNode;
+    // Active ReadChannel, whether pool-backed or opened directly as a one-off fallback.
+    // Null between supply() calls in the direct-fallback case (closed at the end of each supply()).
+    private ReadChannel channel;
+    private long channelPos = -1; // current byte offset of channel in the GCS object
 
     // Root constructor: parses the offset file.
     GCSIndexInput(String resourceDescription, GCSDirectory dir, Path offsetFile)
@@ -553,7 +555,15 @@ public class GCSDirectory extends FSDirectory {
       try {
         fillBuffer(pos, compBuf);
       } finally {
-        dir.channelPool.unpin(channelNode);
+        if (channelNode != null) {
+          dir.channelPool.unpin(channelNode);
+        } else if (channel != null) {
+          try {
+            channel.close();
+          } catch (Exception ignored) {
+          }
+          channel = null;
+        }
       }
       byte[] decompressed = new byte[decompressedLen + 7];
       CompressingDirectory.decompress(compressed, 0, decompressedLen, decompressed, 0);
@@ -563,21 +573,7 @@ public class GCSDirectory extends FSDirectory {
     private void ensureChannelAt(long pos) throws IOException {
       if (channelNode == null || !dir.channelPool.pin(channelNode)) {
         // No channel yet, or slot was evicted: acquire a fresh slot from the pool.
-        channelNode =
-            dir.channelPool.acquireNode(
-                ch -> {
-                  if (ch != null) {
-                    try {
-                      ch.close();
-                    } catch (Exception ignored) {
-                    }
-                  }
-                  ReadChannel c = dir.storage.reader(BlobId.of(dir.bucket, blobName));
-                  c.setChunkSize(COMPRESSION_BLOCK_SIZE);
-                  return c;
-                });
-        channelNode.value.seek(pos);
-        channelPos = pos;
+        openChannelAt(pos);
       } else if (pos != channelPos) {
         long distance = pos - channelPos;
         if (distance > 0 && distance < REOPEN_THRESHOLD) {
@@ -585,10 +581,39 @@ public class GCSDirectory extends FSDirectory {
           fillBuffer(channelPos, ByteBuffer.allocate((int) distance));
         } else {
           // Backward seek or long forward jump: seek to target position.
-          channelNode.value.seek(pos);
+          channel.seek(pos);
           channelPos = pos;
         }
       }
+    }
+
+    /**
+     * Acquires a channel (from the pool if available, otherwise a direct one-off) seeked to {@code
+     * pos}, updating {@link #channelNode} and {@link #channel}.
+     */
+    private void openChannelAt(long pos) throws IOException {
+      channelNode =
+          dir.channelPool.acquireNode(
+              ch -> {
+                if (ch != null) {
+                  try {
+                    ch.close();
+                  } catch (Exception ignored) {
+                  }
+                }
+                ReadChannel c = dir.storage.reader(BlobId.of(dir.bucket, blobName));
+                c.setChunkSize(COMPRESSION_BLOCK_SIZE);
+                return c;
+              });
+      if (channelNode != null) {
+        channel = channelNode.value;
+      } else {
+        // Pool exhausted: open a transient channel for this supply() call only.
+        channel = dir.storage.reader(BlobId.of(dir.bucket, blobName));
+        channel.setChunkSize(COMPRESSION_BLOCK_SIZE);
+      }
+      channel.seek(pos);
+      channelPos = pos;
     }
 
     /**
@@ -600,7 +625,7 @@ public class GCSDirectory extends FSDirectory {
       while (dst.hasRemaining()) {
         int n;
         try {
-          n = channelNode.value.read(dst);
+          n = channel.read(dst);
         } catch (IOException e) {
           if (++attempts > 2) {
             throw new IOException("GCS read failed after retries at " + startPos, e);
@@ -620,24 +645,17 @@ public class GCSDirectory extends FSDirectory {
     }
 
     private void reopenChannelAt(long pos) throws IOException {
-      // Release our pin on the current slot and recycle it to the pool tail for lazy close.
-      dir.channelPool.unpin(channelNode);
-      dir.channelPool.close(channelNode);
-      channelNode =
-          dir.channelPool.acquireNode(
-              ch -> {
-                if (ch != null) {
-                  try {
-                    ch.close();
-                  } catch (Exception ignored) {
-                  }
-                }
-                ReadChannel c = dir.storage.reader(BlobId.of(dir.bucket, blobName));
-                c.setChunkSize(COMPRESSION_BLOCK_SIZE);
-                return c;
-              });
-      channelNode.value.seek(pos);
-      channelPos = pos;
+      // Release the current channel back to the pool (or close it directly if a one-off).
+      if (channelNode != null) {
+        dir.channelPool.unpin(channelNode);
+        dir.channelPool.close(channelNode);
+      } else {
+        try {
+          channel.close();
+        } catch (Exception ignored) {
+        }
+      }
+      openChannelAt(pos);
     }
 
     // ---------------------------------------------------------------------------
@@ -1013,6 +1031,7 @@ public class GCSDirectory extends FSDirectory {
     @Override
     public void close() throws IOException {
       unpinCurrent();
+      channel = null;
       ChannelPool.Node cn = channelNode;
       channelNode = null;
       if (cn != null) {
