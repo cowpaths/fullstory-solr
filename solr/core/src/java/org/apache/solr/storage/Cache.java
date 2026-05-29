@@ -23,9 +23,9 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * Generic concurrent LRU cache with pin/unpin support.
  *
- * <p>Subclasses supply the concrete {@link Node} subtype (which carries the payload) and implement
- * resource-specific acquisition and eviction logic. This class manages only the doubly-linked LRU
- * list and the pin/unpin reference-count protocol.
+ * <p>Subclasses supply the concrete {@link Node} subtype (which carries the payload) and override
+ * {@link #createNode} to construct it. This class manages the doubly-linked LRU list, the pin/unpin
+ * reference-count protocol, and the acquire/release/recycle lifecycle.
  *
  * <p><b>LRU invariant:</b> a node is in the doubly-linked list if and only if its {@code refCount}
  * is 0 (evictable). Pinned nodes (refCount &gt; 0) are spliced out of the list.
@@ -35,9 +35,13 @@ import java.util.concurrent.atomic.AtomicReference;
  *       N&rarr;N+1, N&gt;0) are pure refcount increments.
  *   <li>{@link #unpin}: last unpin (result=0) inserts the node at the list head (most-recently
  *       used); higher unpins are pure refcount decrements.
+ *   <li>{@link #acquireNode}: evicts the tail node and returns a fresh pinned node carrying the
+ *       same value (the subclass controls the concrete node type via {@link #createNode}).
  * </ul>
+ *
+ * @param <V> the value type carried by each node
  */
-class Cache {
+class Cache<V, N extends Cache.Node<V>> {
 
   // ---------------------------------------------------------------------------
   // Node
@@ -46,7 +50,9 @@ class Cache {
   /**
    * A linked-list node carrying a reference count for safe concurrent eviction.
    *
-   * <p>Subclasses add the payload field(s) relevant to the concrete cache type.
+   * <p>The {@code value} field holds the payload managed by the cache (e.g. a {@link
+   * java.nio.ByteBuffer} for {@link BlockCache}); it is {@code null} for sentinel nodes. Subclasses
+   * may also add typed convenience fields that alias this value.
    *
    * <ul>
    *   <li>&ge;1 — pinned (not in LRU list)
@@ -56,7 +62,10 @@ class Cache {
    *
    * <p>Head of the list = most recently used; tail = least recently used / eviction candidate.
    */
-  static class Node {
+  static class Node<V> {
+
+    /** The payload managed by this cache entry. {@code null} for sentinel nodes. */
+    final V value;
 
     /**
      * Reference count.
@@ -70,37 +79,66 @@ class Cache {
     final AtomicInteger refCount;
 
     /** LRU list link toward the head (most-recently-used end). */
-    final AtomicReference<Node> next = new AtomicReference<>();
+    final AtomicReference<Node<V>> next = new AtomicReference<>();
 
     /** LRU list link toward the tail (least-recently-used end). */
-    volatile Node prev;
+    volatile Node<V> prev;
 
-    Node(Node prev, int initialRefCount) {
+    Node(V value, Node<V> prev, int initialRefCount) {
+      this.value = value;
       this.prev = prev;
       this.refCount = new AtomicInteger(initialRefCount);
     }
 
     /** Sentinel constructor (head / tail / protocol sentinels). */
     Node() {
+      this.value = null;
       this.refCount = null;
     }
   }
 
-  // Sentinels for the lock-free linked-list protocol.
+  // ---------------------------------------------------------------------------
+  // Sentinels
+  // ---------------------------------------------------------------------------
+
+  // Static prototypes typed as Node<?> to avoid the type-parameter restriction on static fields.
+  // Each Cache<V> instance casts these once to Node<V> final fields (see constructor below);
+  // all subsequent uses are fully typed. The cast is safe because sentinels are only ever
+  // identity-compared (==) and their value/refCount fields are never accessed.
+  private static final Node<?> RESERVED_PROTO = new Node<>();
+  private static final Node<?> REMOVED_PROTO = new Node<>();
+
+  // Per-instance typed views of the sentinels.
   // RESERVED: this node's `next` link is currently being modified by exactly one thread.
   // REMOVED:  this node has been spliced out of the list.
-  static final Node RESERVED = new Node();
-  static final Node REMOVED = new Node();
+  final Node<V> RESERVED;
+  final Node<V> REMOVED;
 
   /** Most-recently-used sentinel. Real nodes are inserted immediately after this. */
-  final Node lruHead = new Node();
+  final Node<V> lruHead = new Node<>();
 
   /** Least-recently-used sentinel. Eviction candidates are immediately before this. */
-  final Node lruTail = new Node();
+  final Node<V> lruTail = new Node<>();
 
+  @SuppressWarnings("unchecked")
   Cache() {
+    RESERVED = (Node<V>) RESERVED_PROTO;
+    REMOVED = (Node<V>) REMOVED_PROTO;
     lruHead.next.set(lruTail);
     lruTail.prev = lruHead;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Node factory
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Creates a new node carrying {@code value}. Subclasses override to return a concrete subtype
+   * (e.g. {@link BlockCache.Node}), ensuring that all nodes in the list are of the expected type.
+   */
+  @SuppressWarnings("unchecked")
+  protected N createNode(V value, Node<V> prev, int initialRefCount) {
+    return (N) new Node<>(value, prev, initialRefCount);
   }
 
   // ---------------------------------------------------------------------------
@@ -112,19 +150,19 @@ class Cache {
    * held by another thread (RESERVED), then CAS-swaps it to {@code reservation} and returns the
    * prior value. Returns REMOVED immediately if the node has already been spliced out.
    */
-  static Node reserve(Node ref, Node reservation) {
-    Node next = ref.next.get();
+  Node<V> reserve(Node<V> ref, Node<V> reservation) {
+    Node<V> next = ref.next.get();
     for (; ; ) {
-      while (next == RESERVED) {
-        if (reservation == REMOVED) {
+      while (next == RESERVED_PROTO) {
+        if (reservation == REMOVED_PROTO) {
           Thread.yield();
         }
         next = ref.next.get();
       }
-      if (next == REMOVED) {
+      if (next == REMOVED_PROTO) {
         return next;
       }
-      Node extant = ref.next.compareAndExchange(next, reservation);
+      Node<V> extant = ref.next.compareAndExchange(next, reservation);
       if (extant == next) {
         return next;
       }
@@ -132,9 +170,9 @@ class Cache {
     }
   }
 
-  void insertAtHead(Node node) {
-    Node oldNext = reserve(lruHead, RESERVED);
-    assert oldNext != REMOVED : "lruHead sentinel should never be removed";
+  void insertAtHead(Node<V> node) {
+    Node<V> oldNext = reserve(lruHead, RESERVED);
+    assert oldNext != REMOVED_PROTO : "lruHead sentinel should never be removed";
     node.next.set(oldNext);
     oldNext.prev = node;
     if (!lruHead.next.compareAndSet(RESERVED, node)) {
@@ -142,12 +180,12 @@ class Cache {
     }
   }
 
-  boolean removeFromList(Node node) {
-    Node next = reserve(node, REMOVED);
-    if (next == REMOVED) {
+  boolean removeFromList(Node<V> node) {
+    Node<V> next = reserve(node, REMOVED);
+    if (next == REMOVED_PROTO) {
       return false;
     }
-    Node prev;
+    Node<V> prev;
     for (; ; ) {
       prev = node.prev;
       if (prev.next.compareAndSet(node, RESERVED)) {
@@ -160,6 +198,30 @@ class Cache {
       throw new IllegalStateException("unexpected concurrent modification during list removal");
     }
     return true;
+  }
+
+  void insertAtTail(V value) {
+    for (; ; ) {
+      Node<V> pred = lruTail.prev;
+      Node<V> oldNext = reserve(pred, RESERVED);
+      if (oldNext != lruTail) {
+        if (oldNext == REMOVED_PROTO) {
+          continue; // pred was concurrently removed; retry
+        }
+        // release reservation; pred is no longer tail's predecessor
+        if (!pred.next.compareAndSet(RESERVED, oldNext)) {
+          throw new IllegalStateException();
+        }
+        continue;
+      }
+      Node<V> node = createNode(value, pred, 0);
+      node.next.set(lruTail);
+      lruTail.prev = node;
+      if (!pred.next.compareAndSet(RESERVED, node)) {
+        throw new IllegalStateException("unexpected concurrent modification during tail insertion");
+      }
+      return;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -176,7 +238,7 @@ class Cache {
    * the LRU list (it is no longer evictable). If the node is already pinned (refCount&gt;0), the
    * refcount is simply incremented with no list operation.
    */
-  boolean pin(Node node) {
+  boolean pin(Node<V> node) {
     int rc = node.refCount.get();
     for (; ; ) {
       switch (rc) {
@@ -205,7 +267,7 @@ class Cache {
    * Releases a read pin. If this is the last pin (refCount transitions 1&rarr;0), the node is
    * inserted at the LRU head (most-recently-used position) and becomes evictable.
    */
-  void unpin(Node node) {
+  void unpin(Node<V> node) {
     int rc = node.refCount.get();
     for (; ; ) {
       if (rc == 1) {
@@ -229,6 +291,49 @@ class Cache {
           rc = witness;
         }
       }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Acquire / release
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Acquires a pinned node whose value is ready to be used. Evicts the least-recently-used
+   * evictable node from the tail of the list, then returns a fresh node (via {@link #createNode})
+   * carrying the same value, pinned (refCount=1) and not yet in the list.
+   *
+   * <p>Returns {@code null} if the list is empty (all nodes are pinned).
+   */
+  N acquireNode() {
+    for (Node<V> candidate; (candidate = lruTail.prev) != lruHead; ) {
+      if (candidate.refCount.compareAndSet(0, -1)) {
+        if (!removeFromList(candidate)) {
+          throw new IllegalStateException();
+        }
+        return createNode(candidate.value, null, 1);
+      }
+      // CAS failed: a concurrent pin() or acquireNode() just claimed this node and is in the
+      // middle of removeFromList(). Spin briefly; lruTail.prev will change momentarily.
+    }
+    return null; // list empty — all nodes pinned
+  }
+
+  /**
+   * Explicitly releases a node when its owning resource is closed. If the node is still evictable
+   * (refCount==0 and in the list), marks it dead and recycles its value back into the pool at the
+   * tail, making it the highest-priority eviction candidate. If the node has already been evicted
+   * or is currently pinned, this is a no-op.
+   */
+  void close(Node<V> node) {
+    if (!node.refCount.compareAndSet(0, -1)) {
+      // pinned or already dead — best effort, bail
+      return;
+    }
+    if (removeFromList(node)) {
+      insertAtTail(node.value);
+    } else {
+      throw new IllegalStateException();
     }
   }
 }

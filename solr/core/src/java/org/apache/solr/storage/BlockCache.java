@@ -43,7 +43,7 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Pin/unpin semantics and the LRU list protocol are inherited from {@link Cache}.
  */
-public class BlockCache extends Cache implements Closeable {
+public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Closeable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -74,9 +74,12 @@ public class BlockCache extends Cache implements Closeable {
    *       Cache#pin(Cache.Node)}, and falls back to loading.
    * </ol>
    */
-  public static final class Node extends Cache.Node {
+  public static final class Node extends Cache.Node<ByteBuffer> {
 
-    /** Decompressed block content. */
+    /**
+     * Typed alias for {@link Cache.Node#value}; the same {@link ByteBuffer} object, held here for
+     * convenient typed access without casting.
+     */
     final ByteBuffer buf;
 
     /**
@@ -85,8 +88,8 @@ public class BlockCache extends Cache implements Closeable {
      */
     private final CompletableFuture<ByteBuffer> future = new CompletableFuture<>();
 
-    private Node(ByteBuffer buf, Cache.Node prev, int initialRefCount) {
-      super(prev, initialRefCount);
+    private Node(ByteBuffer buf, Cache.Node<ByteBuffer> prev, int initialRefCount) {
+      super(buf, prev, initialRefCount);
       this.buf = buf;
     }
 
@@ -121,7 +124,7 @@ public class BlockCache extends Cache implements Closeable {
     // Wire all pool buffers directly into the LRU list in a single pass. No CAS needed here —
     // init is single-threaded. Each node starts evictable (refCount=0) and in the list.
     ByteBuffer[] pool = initPool(nBlocks, backingFile);
-    Cache.Node prev = lruHead;
+    Cache.Node<ByteBuffer> prev = lruHead;
     for (ByteBuffer buf : pool) {
       Node node = new Node(buf, prev, 0);
       prev.next.set(node);
@@ -186,73 +189,13 @@ public class BlockCache extends Cache implements Closeable {
   // ---------------------------------------------------------------------------
 
   /**
-   * Acquires a pinned {@link Node} whose buffer is ready to be populated with decompressed block
-   * content. The caller must eventually call {@link #unpin(Cache.Node)}.
-   *
-   * <p>By the LRU invariant all nodes in the list have refCount==0, so the tail node is always
-   * evictable. The returned node is <em>not</em> in the list; it will be re-inserted at the head on
-   * the final {@link #unpin(Cache.Node)}.
-   *
-   * <p>Returns {@code null} if the list is empty (all blocks are pinned). In that case the caller
-   * should decompress into a temporary heap buffer, serve the read directly, and discard it.
+   * Creates a {@link BlockCache.Node} carrying the given buffer. Overrides the base factory so that
+   * all nodes inserted into this cache's list (including those recycled via {@link
+   * Cache#insertAtTail}) are of type {@link BlockCache.Node} and can be safely cast on acquisition.
    */
-  public Node acquireNode() {
-    for (Cache.Node candidateBase; (candidateBase = lruTail.prev) != lruHead; ) {
-      if (candidateBase.refCount.compareAndSet(0, -1)) {
-        if (!removeFromList(candidateBase)) {
-          throw new IllegalStateException();
-        }
-        // Safe cast: all non-sentinel nodes in this cache's list are BlockCache.Node instances.
-        Node candidate = (Node) candidateBase;
-        // Return a new Node wrapping the same buffer, pinned (refCount=1), not in list.
-        return new Node(candidate.buf, null, 1);
-      }
-      // CAS failed: a concurrent pin() or acquireNode() just claimed this node and is in the
-      // middle of removeFromList(). Spin briefly; lruTail.prev will change momentarily.
-    }
-    return null; // list empty — all blocks pinned
-  }
-
-  /**
-   * Explicitly releases a node when its owning {@code IndexInput} is closed. If the node is still
-   * evictable (refCount==0 and in the list), marks it dead and recycles the buffer back into the
-   * pool at the tail, making it the highest-priority eviction candidate. If the node has already
-   * been evicted or is currently pinned, this is a no-op.
-   */
-  void close(Node node) {
-    if (!node.refCount.compareAndSet(0, -1)) {
-      // pinned or already dead — best effort, bail
-      return;
-    }
-    if (removeFromList(node)) {
-      insertAtTail(node.buf);
-    } else {
-      throw new IllegalStateException();
-    }
-  }
-
-  private void insertAtTail(ByteBuffer buf) {
-    for (; ; ) {
-      Cache.Node pred = lruTail.prev;
-      Cache.Node oldNext = reserve(pred, RESERVED);
-      if (oldNext != lruTail) {
-        if (oldNext == REMOVED) {
-          continue; // pred was concurrently removed; retry
-        }
-        // release reservation; pred is no longer tail's predecessor
-        if (!pred.next.compareAndSet(RESERVED, oldNext)) {
-          throw new IllegalStateException();
-        }
-        continue;
-      }
-      Node node = new Node(buf, pred, 0);
-      node.next.set(lruTail);
-      lruTail.prev = node;
-      if (!pred.next.compareAndSet(RESERVED, node)) {
-        throw new IllegalStateException("unexpected concurrent modification during tail insertion");
-      }
-      return;
-    }
+  @Override
+  protected Node createNode(ByteBuffer value, Cache.Node<ByteBuffer> prev, int initialRefCount) {
+    return new Node(value, prev, initialRefCount);
   }
 
   @Override
