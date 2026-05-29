@@ -113,7 +113,7 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
   // ---------------------------------------------------------------------------
 
   public BlockCache(long targetBytes, Path backingFile) throws IOException {
-    super(initPool(targetBytes, backingFile));
+    super(initPool(targetBytes, backingFile), true);
     log.info(
         "BlockCache initialized: nBlocks={}, targetBytes={}",
         targetBytes / COMPRESSION_BLOCK_SIZE,

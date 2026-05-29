@@ -19,6 +19,7 @@ package org.apache.solr.storage;
 
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 /**
  * Generic concurrent LRU cache with pin/unpin support.
@@ -65,7 +66,7 @@ class Cache<V, N extends Cache.Node<V>> {
   static class Node<V> {
 
     /** The payload managed by this cache entry. {@code null} for sentinel nodes. */
-    final V value;
+    protected final V value;
 
     /**
      * Reference count.
@@ -76,13 +77,13 @@ class Cache<V, N extends Cache.Node<V>> {
      *   <li>-1 — permanently dead (evicted); node must not be used
      * </ul>
      */
-    final AtomicInteger refCount;
+    private final AtomicInteger refCount;
 
     /** LRU list link toward the head (most-recently-used end). */
-    final AtomicReference<Node<V>> next = new AtomicReference<>();
+    private final AtomicReference<Node<V>> next = new AtomicReference<>();
 
     /** LRU list link toward the tail (least-recently-used end). */
-    volatile Node<V> prev;
+    private volatile Node<V> prev;
 
     Node(V value, Node<V> prev, int initialRefCount) {
       this.value = value;
@@ -111,8 +112,8 @@ class Cache<V, N extends Cache.Node<V>> {
   // Per-instance typed views of the sentinels.
   // RESERVED: this node's `next` link is currently being modified by exactly one thread.
   // REMOVED:  this node has been spliced out of the list.
-  final Node<V> RESERVED;
-  final Node<V> REMOVED;
+  private final Node<V> RESERVED;
+  private final Node<V> REMOVED;
 
   /** Most-recently-used sentinel. Real nodes are inserted immediately after this. */
   private final Node<V> lruHead = new Node<>();
@@ -120,12 +121,15 @@ class Cache<V, N extends Cache.Node<V>> {
   /** Least-recently-used sentinel. Eviction candidates are immediately before this. */
   private final Node<V> lruTail = new Node<>();
 
+  private final boolean persistentVals;
+
   @SuppressWarnings("unchecked")
-  private Cache() {
+  private Cache(boolean persistentVals) {
     RESERVED = (Node<V>) RESERVED_PROTO;
     REMOVED = (Node<V>) REMOVED_PROTO;
     lruHead.next.set(lruTail);
     lruTail.prev = lruHead;
+    this.persistentVals = persistentVals;
   }
 
   /**
@@ -134,8 +138,8 @@ class Cache<V, N extends Cache.Node<V>> {
    * constructor followed by {@link #insertAtTail} for each value, but faster because no CAS is
    * needed during single-threaded initialization.
    */
-  Cache(V[] initialValues) {
-    this();
+  Cache(V[] initialValues, boolean persistentVals) {
+    this(persistentVals);
     Node<V> prev = lruHead;
     for (V value : initialValues) {
       N node = createNode(value, prev, 0);
@@ -168,7 +172,7 @@ class Cache<V, N extends Cache.Node<V>> {
    * held by another thread (RESERVED), then CAS-swaps it to {@code reservation} and returns the
    * prior value. Returns REMOVED immediately if the node has already been spliced out.
    */
-  Node<V> reserve(Node<V> ref, Node<V> reservation) {
+  private Node<V> reserve(Node<V> ref, Node<V> reservation) {
     Node<V> next = ref.next.get();
     for (; ; ) {
       while (next == RESERVED_PROTO) {
@@ -188,7 +192,7 @@ class Cache<V, N extends Cache.Node<V>> {
     }
   }
 
-  void insertAtHead(Node<V> node) {
+  private void insertAtHead(Node<V> node) {
     Node<V> oldNext = reserve(lruHead, RESERVED);
     assert oldNext != REMOVED_PROTO : "lruHead sentinel should never be removed";
     node.next.set(oldNext);
@@ -198,7 +202,7 @@ class Cache<V, N extends Cache.Node<V>> {
     }
   }
 
-  boolean removeFromList(Node<V> node) {
+  private boolean removeFromList(Node<V> node) {
     Node<V> next = reserve(node, REMOVED);
     if (next == REMOVED_PROTO) {
       return false;
@@ -218,7 +222,7 @@ class Cache<V, N extends Cache.Node<V>> {
     return true;
   }
 
-  void insertAtTail(V value) {
+  private void insertAtTail(V value) {
     for (; ; ) {
       Node<V> pred = lruTail.prev;
       Node<V> oldNext = reserve(pred, RESERVED);
@@ -246,7 +250,7 @@ class Cache<V, N extends Cache.Node<V>> {
   // Pin / unpin
   // ---------------------------------------------------------------------------
 
-  static final int UNPIN_SENTINEL = Integer.MIN_VALUE >> 1;
+  private static final int UNPIN_SENTINEL = Integer.MIN_VALUE >> 1;
 
   /**
    * Pins {@code node} for the duration of a read, preventing eviction. Returns {@code false} if the
@@ -324,12 +328,17 @@ class Cache<V, N extends Cache.Node<V>> {
    * <p>Returns {@code null} if the list is empty (all nodes are pinned).
    */
   N acquireNode() {
+    return acquireNode(null);
+  }
+
+  N acquireNode(Function<V, V> valFunc) {
     for (Node<V> candidate; (candidate = lruTail.prev) != lruHead; ) {
       if (candidate.refCount.compareAndSet(0, -1)) {
         if (!removeFromList(candidate)) {
           throw new IllegalStateException();
         }
-        return createNode(candidate.value, null, 1);
+        V newVal = valFunc == null ? candidate.value : valFunc.apply(candidate.value);
+        return createNode(newVal, null, 1);
       }
       // CAS failed: a concurrent pin() or acquireNode() just claimed this node and is in the
       // middle of removeFromList(). Spin briefly; lruTail.prev will change momentarily.
@@ -350,7 +359,7 @@ class Cache<V, N extends Cache.Node<V>> {
       return false;
     }
     if (removeFromList(node)) {
-      insertAtTail(node.value);
+      insertAtTail(persistentVals ? node.value : null);
     } else {
       throw new IllegalStateException();
     }
