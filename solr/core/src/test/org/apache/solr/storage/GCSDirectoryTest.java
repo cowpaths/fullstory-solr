@@ -47,8 +47,13 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
     super.setUp();
     String factoryClass = EnvUtils.getProperty("solr.directoryFactory");
     if (factoryClass != null) {
-      GCSDirectoryFactory factory =
-          (GCSDirectoryFactory) Class.forName(factoryClass).getDeclaredConstructor().newInstance();
+      Class<?> clazz = Class.forName(factoryClass);
+      GCSDirectoryFactory factory;
+      if (GCSDirectoryFactory.class.isAssignableFrom(clazz)) {
+        factory = (GCSDirectoryFactory) clazz.getDeclaredConstructor().newInstance();
+      } else {
+        factory = new LocalGCSDirectoryFactory();
+      }
       storage = factory.initStorage();
     } else {
       storage = new LocalGCSDirectoryFactory().initStorage();
