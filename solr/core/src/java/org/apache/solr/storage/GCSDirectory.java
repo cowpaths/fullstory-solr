@@ -1031,11 +1031,18 @@ public class GCSDirectory extends FSDirectory {
     @Override
     public void close() throws IOException {
       unpinCurrent();
+      ReadChannel c = channel;
       channel = null;
       ChannelPool.Node cn = channelNode;
       channelNode = null;
       if (cn != null) {
-        dir.channelPool.close(cn); // recycle slot to pool tail; channel closed lazily on eviction
+        assert c == cn.value;
+        // recycle slot to pool tail; channel closed lazily on eviction
+        if (dir.channelPool.close(cn)) {
+          cn.value.close();
+        }
+      } else if (c != null) {
+        c.close();
       }
     }
   }
