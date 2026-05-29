@@ -100,17 +100,17 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
 
   /** Node-level resources shared across all {@link GCSDirectory} instances on this node. */
   public static final class NodeLevelGCSDirectoryState implements Closeable {
-    final java.util.concurrent.ExecutorService ioExec =
+    private final java.util.concurrent.ExecutorService ioExec =
         ExecutorUtil.newMDCAwareCachedThreadPool("gcsIOExec");
-    final BlockCache blockCache;
-    final Storage storage;
-    final Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool;
+    private final BlockCache blockCache;
+    private final Storage storage;
+    private final Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool;
 
     /**
      * Buffer pool for the double-buffered GCS write path. Buffers are 256 KB, 4-KiB aligned (no
      * DirectIO requirement, but page-aligned is harmless and avoids any platform surprises).
      */
-    final DirectBufferPool bufferPool;
+    private final DirectBufferPool bufferPool;
 
     NodeLevelGCSDirectoryState(BlockCache blockCache, Storage storage) {
       this.blockCache = blockCache;

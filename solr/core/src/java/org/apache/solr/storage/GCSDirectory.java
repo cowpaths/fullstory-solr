@@ -100,9 +100,9 @@ public class GCSDirectory extends FSDirectory {
   static final int OFFSET_FILE_HEADER_SIZE = 36;
 
   private final String bucket;
-  final Storage storage;
+  private final Storage storage;
   private final BlockCache cache;
-  final Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool;
+  private final Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool;
   private final ExecutorService ioExec;
   private final boolean useAsyncIO;
   private final DirectBufferPool bufferPool;
