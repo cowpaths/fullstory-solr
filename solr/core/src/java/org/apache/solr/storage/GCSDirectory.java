@@ -56,11 +56,11 @@ import java.util.zip.CRC32;
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.DataOutput;
-import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.FSLockFactory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.OutputStreamDataOutput;
 import org.apache.lucene.store.RandomAccessInput;
 import org.apache.lucene.util.compress.LZ4;
@@ -102,7 +102,7 @@ import org.slf4j.LoggerFactory;
  *   [remaining bytes]  ZInt delta-encoded compressed block sizes
  * </pre>
  */
-public class GCSDirectory extends FSDirectory {
+public class GCSDirectory extends MMapDirectory {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -163,12 +163,7 @@ public class GCSDirectory extends FSDirectory {
 
     private IndexOutput createOutput(String name, GCSDirectory dir, IOContext context)
         throws IOException {
-      return dir.createOutput(name, segUUID, this, context);
-    }
-
-    private IndexOutput createTempOutput(
-        IndexOutput offsetFileOutput, GCSDirectory dir, IOContext context) throws IOException {
-      return dir.createTempOutput(offsetFileOutput, segUUID, this, context);
+      return dir.createOutput(name, this, context);
     }
   }
 
@@ -191,18 +186,19 @@ public class GCSDirectory extends FSDirectory {
     this.useAsyncIO = useAsyncIO;
     this.bufferPool = bufferPool;
     for (String file : listAll()) {
+      if (!isGcsBacked(file)) continue;
       Path path = directory.resolve(file);
       UUID segUUID = readSegmentUUID(path);
-      batched
-          .computeIfAbsent(segUUID, (k) -> ConcurrentHashMap.newKeySet())
-          .add(readBlobUUID(path));
+      UUID blobUUID = readBlobUUID(path);
+      if (segUUID == null || blobUUID == null) continue; // malformed offset file; skip
+      batched.computeIfAbsent(segUUID, (k) -> ConcurrentHashMap.newKeySet()).add(blobUUID);
       pendingWrites.compute(
           IndexFileNames.parseSegmentName(file),
           (segName, struct) -> {
             if (struct == null) {
               return new SegmentStruct(segUUID);
             } else {
-              if (struct.segUUID.equals(segUUID)) {
+              if (!struct.segUUID.equals(segUUID)) {
                 // this should never happen, but we don't want to fail hard, because all we want
                 // here is a loose guarantee and best-effort batching. In building `segments` here,
                 // we're only need to guarantee a (potentially arbitrary) canonical seg UUID
@@ -224,6 +220,10 @@ public class GCSDirectory extends FSDirectory {
   @Override
   public void deleteFile(String name) throws IOException {
     ensureOpen();
+    if (!isGcsBacked(name)) {
+      super.deleteFile(name);
+      return;
+    }
     Path offsetFile = directory.resolve(name);
     UUID segUUID = readSegmentUUID(offsetFile);
     UUID blobUUID = readBlobUUID(offsetFile);
@@ -287,6 +287,9 @@ public class GCSDirectory extends FSDirectory {
   @Override
   public long fileLength(String name) throws IOException {
     ensureOpen();
+    if (!isGcsBacked(name)) {
+      return super.fileLength(name);
+    }
     Path offsetFile = directory.resolve(name);
     byte[] header = readOffsetFileHeader(offsetFile);
     if (header == null) throw new NoSuchFileException(name);
@@ -295,6 +298,9 @@ public class GCSDirectory extends FSDirectory {
 
   @Override
   public IndexOutput createOutput(String name, IOContext context) throws IOException {
+    if (!isGcsBacked(name)) {
+      return super.createOutput(name, context);
+    }
     return pendingWrites
         .computeIfAbsent(
             IndexFileNames.parseSegmentName(name),
@@ -302,26 +308,24 @@ public class GCSDirectory extends FSDirectory {
         .createOutput(name, this, context);
   }
 
-  private IndexOutput createOutput(
-      String name, UUID segUUID, SegmentStruct registerUUID, IOContext context) throws IOException {
-    return new GCSIndexOutput(this, segUUID, registerUUID, super.createOutput(name, context));
+  private IndexOutput createOutput(String name, SegmentStruct struct, IOContext context)
+      throws IOException {
+    return new GCSIndexOutput(this, struct, super.createOutput(name, context));
   }
 
   @Override
   public IndexOutput createTempOutput(String prefix, String suffix, IOContext context)
       throws IOException {
-    IndexOutput offsetFileOutput = super.createTempOutput(prefix, suffix, context);
-    return pendingWrites
-        .computeIfAbsent(
-            IndexFileNames.parseSegmentName(offsetFileOutput.getName()),
-            (segName) -> new SegmentStruct(UUID.randomUUID()))
-        .createTempOutput(offsetFileOutput, this, context);
+    return super.createTempOutput(prefix, suffix, context);
   }
 
-  private IndexOutput createTempOutput(
-      IndexOutput offsetFileOutput, UUID segUUID, SegmentStruct registerUUID, IOContext context)
-      throws IOException {
-    return new GCSIndexOutput(this, segUUID, registerUUID, offsetFileOutput);
+  @Override
+  public void rename(String source, String dest) throws IOException {
+    if (isGcsBacked(source) != isGcsBacked(dest)) {
+      throw new IOException(
+          "Rename across GCS/non-GCS boundary not supported: " + source + " -> " + dest);
+    }
+    super.rename(source, dest);
   }
 
   @Override
@@ -356,15 +360,28 @@ public class GCSDirectory extends FSDirectory {
   @Override
   public IndexInput openInput(String name, IOContext context) throws IOException {
     ensureOpen();
+    if (!isGcsBacked(name)) {
+      return super.openInput(name, context);
+    }
     ensureCanRead(name);
     Path offsetFile = directory.resolve(name);
-    if (!Files.exists(offsetFile)) throw new NoSuchFileException(name);
+    if (!Files.exists(offsetFile)) {
+      throw new NoSuchFileException(name);
+    }
     return new GCSIndexInput("gcs:" + name, this, offsetFile);
   }
 
   // ---------------------------------------------------------------------------
   // Offset file helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Returns true for files that are backed by a GCS blob with a local offset file. Temp files
+   * (*.tmp) and non-segment files (segments_N, pending_segments_N, etc.) are local-only.
+   */
+  static boolean isGcsBacked(String name) {
+    return name.startsWith("_") && !name.endsWith(".tmp");
+  }
 
   /** Returns the first {@link #OFFSET_FILE_HEADER_SIZE} bytes, or null if file is too small. */
   private static byte[] readOffsetFileHeader(Path path) throws IOException {
@@ -418,7 +435,7 @@ public class GCSDirectory extends FSDirectory {
     private final CRC32 crc = new CRC32();
     private boolean isOpen;
 
-    GCSIndexOutput(GCSDirectory dir, UUID segUUID, SegmentStruct registerUUID, IndexOutput localOut)
+    GCSIndexOutput(GCSDirectory dir, SegmentStruct registerUUID, IndexOutput localOut)
         throws IOException {
       super("GCSIndexOutput(name=\"" + localOut.getName() + "\")", localOut.getName());
       this.dir = dir;
