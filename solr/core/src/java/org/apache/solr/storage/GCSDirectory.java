@@ -96,6 +96,8 @@ import org.slf4j.LoggerFactory;
  *   [2 bytes]  reserved
  *   [8 bytes]  GCS blob UUID most-significant bits
  *   [8 bytes]  GCS blob UUID least-significant bits
+ *   [8 bytes]  segment UUID most-significant bits
+ *   [8 bytes]  segment UUID least-significant bits
  *   [8 bytes]  total compressed bytes in the GCS object
  *   [remaining bytes]  ZInt delta-encoded compressed block sizes
  * </pre>
@@ -104,9 +106,9 @@ public class GCSDirectory extends FSDirectory {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
-  // Offset file header size: 8 (length) + 4 (blockType/comprType/reserved) + 16 (UUID) + 8
-  // (gcsObjectSize) = 36 bytes.
-  static final int OFFSET_FILE_HEADER_SIZE = 36;
+  // Offset file header size: 8 (length) + 4 (blockType/comprType/reserved) + 16 (blobUUID)
+  // + 16 (segUUID) + 8 (gcsObjectSize) = 52 bytes.
+  static final int OFFSET_FILE_HEADER_SIZE = 52;
 
   private final String bucket;
   protected final Storage storage;
@@ -205,7 +207,7 @@ public class GCSDirectory extends FSDirectory {
                 // here is a loose guarantee and best-effort batching. In building `segments` here,
                 // we're only need to guarantee a (potentially arbitrary) canonical seg UUID
                 // for this Directory instance.
-                log.warn("unexpected segUUID: " + struct.segUUID + " != " + segUUID);
+                log.warn("unexpected segUUID: {} != {}", struct.segUUID, segUUID);
               }
               return struct;
             }
@@ -233,28 +235,47 @@ public class GCSDirectory extends FSDirectory {
           if (node != null) cache.close(node);
         }
       }
-      IOException[] ex = new IOException[1];
-      Set<UUID> batchRemaining =
-          batched.compute(
-              segUUID,
+      if (segUUID != null) {
+        String segName = IndexFileNames.parseSegmentName(name);
+        IOException[] ex = new IOException[1];
+        Set<UUID> batchRemaining =
+            batched.compute(
+                segUUID,
+                (k, v) -> {
+                  if (v == null) {
+                    ex[0] = new IOException("seg UUID not found in batched map for " + name);
+                  } else if (!v.remove(blobUUID)) {
+                    ex[0] = new IOException("blob UUID not found in batch for " + name);
+                  } else {
+                    return v.isEmpty() ? null : v;
+                  }
+                  return v;
+                });
+        if (ex[0] != null) {
+          throw ex[0];
+        } else if (batchRemaining == null) {
+          // Last local ref to this segment UUID batch is gone.
+          pendingWrites.compute(
+              segName,
               (k, v) -> {
-                if (v == null) {
-                  ex[0] = new IOException("seg UUID not found");
-                } else if (!v.remove(blobUUID)) {
-                  ex[0] = new IOException("blob UUID not found");
-                } else {
-                  return v.isEmpty() ? null : v;
+                if (v == null || !v.segUUID.equals(segUUID)) {
+                  return v;
                 }
-                return v;
+                ConcurrentHashMap<String, UUID> extant = v.pendingFiles.get();
+                if (extant == null || extant.isEmpty()) {
+                  return null;
+                } else {
+                  log.warn("unexpected entries left in pendingFiles {}", extant);
+                  return v;
+                }
               });
-      if (ex[0] != null) {
-        throw ex[0];
-      } else if (batchRemaining == null) {
-        // last local ref to this batch.
-        // TODO: replace below unconditional single-blob delete with decref on the zk batch.
-        //  if no more refs to the batch in zk (and we own the deletion), then enumerate all
-        //  the blobUUIDs associated with this batch (from zk) and delete them (or queue them
-        //  for deletion?)
+          // TODO: replace below unconditional single-blob delete with decref on the zk batch.
+          //  If no more refs to the batch in zk (and we own the deletion), enumerate all
+          //  blobUUIDs associated with this batch (from zk) and delete them.
+          storage.delete(BlobId.of(bucket, blobUUID.toString()));
+        }
+      } else {
+        // No segment UUID (missing or pre-format offset file): fall back to direct delete.
         storage.delete(BlobId.of(bucket, blobUUID.toString()));
       }
     }
@@ -310,12 +331,16 @@ public class GCSDirectory extends FSDirectory {
     } finally {
       for (SegmentStruct s : pendingWrites.values()) {
         ConcurrentHashMap<String, UUID> addToManifest = s.pendingFiles.getAndSet(null);
+        if (addToManifest == null) continue;
+        // Only move UUIDs for files actually covered by this sync batch.
         addToManifest.keySet().retainAll(names);
-        batched
-            .computeIfAbsent(s.segUUID, (segUUID) -> ConcurrentHashMap.newKeySet())
-            .addAll(addToManifest.values());
-        // TODO: add the UUIDs to the the manifest in zookeeper, and ensure that we
-        //  are registered as holding a ref to this batch.
+        if (!addToManifest.isEmpty()) {
+          batched
+              .computeIfAbsent(s.segUUID, (k) -> ConcurrentHashMap.newKeySet())
+              .addAll(addToManifest.values());
+          // TODO: add the UUIDs to the manifest in zookeeper, and ensure that we
+          //  are registered as holding a ref to this batch.
+        }
       }
     }
   }
@@ -360,9 +385,13 @@ public class GCSDirectory extends FSDirectory {
     return new UUID(in.readLong(), in.readLong());
   }
 
+  /** Reads the segment UUID from the offset file, or null if the file is missing/malformed. */
   private static UUID readSegmentUUID(Path path) throws IOException {
-    // throw new UnsupportedOperationException("TODO: implement after pattern in `readBlobUUID`");
-    return UUID.randomUUID(); // placeholder
+    byte[] header = readOffsetFileHeader(path);
+    if (header == null) return null;
+    ByteArrayDataInput in = new ByteArrayDataInput(header);
+    in.skipBytes(28); // fileLength(8) + blockType(1) + comprType(1) + reserved(2) + blobUUID(16)
+    return new UUID(in.readLong(), in.readLong());
   }
 
   // ---------------------------------------------------------------------------
@@ -480,20 +509,23 @@ public class GCSDirectory extends FSDirectory {
         isOpen = false;
         try (writeHelper) {
           flush();
-        } finally {
-          registerUUID.registerFileUUID(getName(), uuid);
         }
         // Write header + delta-encoded block sizes into the local offset file.
         try (localOut) {
+          UUID segUUID = registerUUID.segUUID;
           localOut.writeLong(filePos);
           localOut.writeByte((byte) COMPRESSION_BLOCK_TYPE.id);
           localOut.writeByte((byte) COMPRESSION_TYPE.id);
           localOut.writeShort((short) 0); // reserved
           localOut.writeLong(uuid.getMostSignificantBits());
           localOut.writeLong(uuid.getLeastSignificantBits());
+          localOut.writeLong(segUUID.getMostSignificantBits());
+          localOut.writeLong(segUUID.getLeastSignificantBits());
           localOut.writeLong(gcsObjectSize);
           localOut.writeBytes(blockDeltas.baos.buf(), 0, blockDeltas.baos.count());
         }
+        // GCS write and offset file are both committed; register for sync/batched accounting.
+        registerUUID.registerFileUUID(getName(), uuid);
         // Pre-populate cache-node array for readers of this file.
         if (filePos > 0) {
           int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
@@ -616,6 +648,7 @@ public class GCSDirectory extends FSDirectory {
       hdr.readShort(); // reserved
       UUID blobUUID = new UUID(hdr.readLong(), hdr.readLong());
       blobName = blobUUID.toString();
+      hdr.skipBytes(16); // segUUID — not needed for reads
       long gcsObjectSize = hdr.readLong();
 
       // Delta bytes occupy everything after the fixed header.
