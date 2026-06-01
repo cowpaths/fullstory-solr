@@ -33,6 +33,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -43,12 +44,16 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Collection;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
+import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.store.FSDirectory;
@@ -59,6 +64,8 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.OutputStreamDataOutput;
 import org.apache.lucene.store.RandomAccessInput;
 import org.apache.lucene.util.compress.LZ4;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A Lucene {@link org.apache.lucene.store.Directory} that stores compressed index data in Google
@@ -95,6 +102,8 @@ import org.apache.lucene.util.compress.LZ4;
  */
 public class GCSDirectory extends FSDirectory {
 
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+
   // Offset file header size: 8 (length) + 4 (blockType/comprType/reserved) + 16 (UUID) + 8
   // (gcsObjectSize) = 36 bytes.
   static final int OFFSET_FILE_HEADER_SIZE = 36;
@@ -122,6 +131,45 @@ public class GCSDirectory extends FSDirectory {
   private final ConcurrentHashMap<UUID, AtomicReferenceArray<BlockCache.Node>> pendingNodes =
       new ConcurrentHashMap<>();
 
+  private final ConcurrentHashMap<String, SegmentStruct> pendingWrites = new ConcurrentHashMap<>();
+
+  private final ConcurrentHashMap<UUID, Set<UUID>> batched = new ConcurrentHashMap<>();
+
+  private static final class SegmentStruct {
+    private final UUID segUUID;
+    private final AtomicReference<ConcurrentHashMap<String, UUID>> pendingFiles =
+        new AtomicReference<>();
+
+    private SegmentStruct(UUID segUUID) {
+      this.segUUID = segUUID;
+    }
+
+    private void registerFileUUID(String name, UUID uuid) throws IOException {
+      ConcurrentHashMap<String, UUID> pendingFiles = this.pendingFiles.get();
+      if (pendingFiles == null) {
+        pendingFiles = new ConcurrentHashMap<>();
+        ConcurrentHashMap<String, UUID> extant =
+            this.pendingFiles.compareAndExchange(null, pendingFiles);
+        if (extant != null) {
+          pendingFiles = extant;
+        }
+      }
+      if (pendingFiles.put(name, uuid) != null) {
+        throw new IOException("double-added UUID " + uuid);
+      }
+    }
+
+    private IndexOutput createOutput(String name, GCSDirectory dir, IOContext context)
+        throws IOException {
+      return dir.createOutput(name, segUUID, this, context);
+    }
+
+    private IndexOutput createTempOutput(
+        IndexOutput offsetFileOutput, GCSDirectory dir, IOContext context) throws IOException {
+      return dir.createTempOutput(offsetFileOutput, segUUID, this, context);
+    }
+  }
+
   public GCSDirectory(
       Path localPath,
       String bucket,
@@ -140,6 +188,31 @@ public class GCSDirectory extends FSDirectory {
     this.ioExec = ioExec;
     this.useAsyncIO = useAsyncIO;
     this.bufferPool = bufferPool;
+    for (String file : listAll()) {
+      Path path = directory.resolve(file);
+      UUID segUUID = readSegmentUUID(path);
+      batched
+          .computeIfAbsent(segUUID, (k) -> ConcurrentHashMap.newKeySet())
+          .add(readBlobUUID(path));
+      pendingWrites.compute(
+          IndexFileNames.parseSegmentName(file),
+          (segName, struct) -> {
+            if (struct == null) {
+              return new SegmentStruct(segUUID);
+            } else {
+              if (struct.segUUID.equals(segUUID)) {
+                // this should never happen, but we don't want to fail hard, because all we want
+                // here is a loose guarantee and best-effort batching. In building `segments` here,
+                // we're only need to guarantee a (potentially arbitrary) canonical seg UUID
+                // for this Directory instance.
+                log.warn("unexpected segUUID: " + struct.segUUID + " != " + segUUID);
+              }
+              return struct;
+            }
+          });
+      // TODO: ensure that the zk manifest for each segment UUID contains all the file UUIDs
+      //  that we found on-disk (iterate over `batched`).
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -150,6 +223,7 @@ public class GCSDirectory extends FSDirectory {
   public void deleteFile(String name) throws IOException {
     ensureOpen();
     Path offsetFile = directory.resolve(name);
+    UUID segUUID = readSegmentUUID(offsetFile);
     UUID blobUUID = readBlobUUID(offsetFile);
     if (blobUUID != null) {
       AtomicReferenceArray<BlockCache.Node> stale = pendingNodes.remove(blobUUID);
@@ -159,7 +233,30 @@ public class GCSDirectory extends FSDirectory {
           if (node != null) cache.close(node);
         }
       }
-      storage.delete(BlobId.of(bucket, blobUUID.toString()));
+      IOException[] ex = new IOException[1];
+      Set<UUID> batchRemaining =
+          batched.compute(
+              segUUID,
+              (k, v) -> {
+                if (v == null) {
+                  ex[0] = new IOException("seg UUID not found");
+                } else if (!v.remove(blobUUID)) {
+                  ex[0] = new IOException("blob UUID not found");
+                } else {
+                  return v.isEmpty() ? null : v;
+                }
+                return v;
+              });
+      if (ex[0] != null) {
+        throw ex[0];
+      } else if (batchRemaining == null) {
+        // last local ref to this batch.
+        // TODO: replace below unconditional single-blob delete with decref on the zk batch.
+        //  if no more refs to the batch in zk (and we own the deletion), then enumerate all
+        //  the blobUUIDs associated with this batch (from zk) and delete them (or queue them
+        //  for deletion?)
+        storage.delete(BlobId.of(bucket, blobUUID.toString()));
+      }
     }
     if (Files.exists(offsetFile)) {
       Files.delete(offsetFile);
@@ -177,13 +274,50 @@ public class GCSDirectory extends FSDirectory {
 
   @Override
   public IndexOutput createOutput(String name, IOContext context) throws IOException {
-    return new GCSIndexOutput(this, super.createOutput(name, context));
+    return pendingWrites
+        .computeIfAbsent(
+            IndexFileNames.parseSegmentName(name),
+            (segName) -> new SegmentStruct(UUID.randomUUID()))
+        .createOutput(name, this, context);
+  }
+
+  private IndexOutput createOutput(
+      String name, UUID segUUID, SegmentStruct registerUUID, IOContext context) throws IOException {
+    return new GCSIndexOutput(this, segUUID, registerUUID, super.createOutput(name, context));
   }
 
   @Override
   public IndexOutput createTempOutput(String prefix, String suffix, IOContext context)
       throws IOException {
-    return new GCSIndexOutput(this, super.createTempOutput(prefix, suffix, context));
+    IndexOutput offsetFileOutput = super.createTempOutput(prefix, suffix, context);
+    return pendingWrites
+        .computeIfAbsent(
+            IndexFileNames.parseSegmentName(offsetFileOutput.getName()),
+            (segName) -> new SegmentStruct(UUID.randomUUID()))
+        .createTempOutput(offsetFileOutput, this, context);
+  }
+
+  private IndexOutput createTempOutput(
+      IndexOutput offsetFileOutput, UUID segUUID, SegmentStruct registerUUID, IOContext context)
+      throws IOException {
+    return new GCSIndexOutput(this, segUUID, registerUUID, offsetFileOutput);
+  }
+
+  @Override
+  public void sync(Collection<String> names) throws IOException {
+    try {
+      super.sync(names);
+    } finally {
+      for (SegmentStruct s : pendingWrites.values()) {
+        ConcurrentHashMap<String, UUID> addToManifest = s.pendingFiles.getAndSet(null);
+        addToManifest.keySet().retainAll(names);
+        batched
+            .computeIfAbsent(s.segUUID, (segUUID) -> ConcurrentHashMap.newKeySet())
+            .addAll(addToManifest.values());
+        // TODO: add the UUIDs to the the manifest in zookeeper, and ensure that we
+        //  are registered as holding a ref to this batch.
+      }
+    }
   }
 
   /**
@@ -226,6 +360,11 @@ public class GCSDirectory extends FSDirectory {
     return new UUID(in.readLong(), in.readLong());
   }
 
+  private static UUID readSegmentUUID(Path path) throws IOException {
+    // throw new UnsupportedOperationException("TODO: implement after pattern in `readBlobUUID`");
+    return UUID.randomUUID(); // placeholder
+  }
+
   // ---------------------------------------------------------------------------
   // GCSIndexOutput
   // ---------------------------------------------------------------------------
@@ -243,16 +382,19 @@ public class GCSDirectory extends FSDirectory {
     private int prevBlockSize = BLOCK_SIZE_ESTIMATE;
 
     private final UUID uuid;
+    private final SegmentStruct registerUUID;
     private final IndexOutput localOut;
     private long filePos;
     private long gcsObjectSize;
     private final CRC32 crc = new CRC32();
     private boolean isOpen;
 
-    GCSIndexOutput(GCSDirectory dir, IndexOutput localOut) throws IOException {
+    GCSIndexOutput(GCSDirectory dir, UUID segUUID, SegmentStruct registerUUID, IndexOutput localOut)
+        throws IOException {
       super("GCSIndexOutput(name=\"" + localOut.getName() + "\")", localOut.getName());
       this.dir = dir;
       this.localOut = localOut;
+      this.registerUUID = registerUUID;
       this.uuid = UUID.randomUUID();
       String blobName = uuid.toString();
       WriteChannel gcsChannel =
@@ -338,6 +480,8 @@ public class GCSDirectory extends FSDirectory {
         isOpen = false;
         try (writeHelper) {
           flush();
+        } finally {
+          registerUUID.registerFileUUID(getName(), uuid);
         }
         // Write header + delta-encoded block sizes into the local offset file.
         try (localOut) {
