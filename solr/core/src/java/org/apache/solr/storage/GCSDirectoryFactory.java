@@ -24,11 +24,14 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.ref.WeakReference;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.LockFactory;
+import org.apache.solr.cloud.ZkController;
+import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.NamedList;
@@ -112,11 +115,33 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
      */
     private final DirectBufferPool bufferPool;
 
-    NodeLevelGCSDirectoryState(BlockCache blockCache, Storage storage) {
+    /**
+     * Non-null when ZooKeeper is available; null in single-node / non-cloud mode. Shared across all
+     * directories on this node; per-directory coordinators are created via {@link
+     * #createBlobCoordinator}.
+     */
+    private final SolrZkClient zkClient;
+
+    NodeLevelGCSDirectoryState(BlockCache blockCache, Storage storage, ZkController zkController) {
       this.blockCache = blockCache;
       this.storage = storage;
       this.channelPool = new Cache<>(new ReadChannel[DEFAULT_MAX_OPEN_CHANNELS], true);
       this.bufferPool = new DirectBufferPool(GCS_WRITE_BUFFER_SIZE, 4096, 1);
+      this.zkClient = zkController != null ? zkController.getZkClient() : null;
+    }
+
+    /**
+     * Returns a {@link GCSDirectory.BlobLifecycleCoordinator} scoped to the given local index
+     * directory, or {@code null} if ZooKeeper is not available. The {@code refId} is a
+     * deterministic UUID derived from the final path element (directory name only), so it is stable
+     * across parent-directory migrations and unique per replica even when co-located.
+     */
+    GCSDirectory.BlobLifecycleCoordinator createBlobCoordinator(Path localPath) throws IOException {
+      if (zkClient == null) return null;
+      UUID refId =
+          UUID.nameUUIDFromBytes(
+              localPath.getFileName().toString().getBytes(StandardCharsets.UTF_8));
+      return new ZkBlobLifecycleCoordinator(zkClient, refId);
     }
 
     @Override
@@ -166,6 +191,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       CoreContainer cc = this.cc.get();
       this.cc = null;
       assert cc != null;
+      final ZkController zkController = cc.getZkController();
       nodeLevelState =
           cc.getObjectCache()
               .computeIfAbsent(
@@ -174,7 +200,9 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
                   k -> {
                     try {
                       return new NodeLevelGCSDirectoryState(
-                          new BlockCache(blockCacheBytes, blockCacheBackingFile), storage);
+                          new BlockCache(blockCacheBytes, blockCacheBackingFile),
+                          storage,
+                          zkController);
                     } catch (IOException e) {
                       throw new UncheckedIOException(e);
                     }
@@ -183,7 +211,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       try {
         nodeLevelState =
             new NodeLevelGCSDirectoryState(
-                new BlockCache(blockCacheBytes, blockCacheBackingFile), storage);
+                new BlockCache(blockCacheBytes, blockCacheBackingFile), storage, null);
       } catch (IOException e) {
         throw new UncheckedIOException(e);
       }
@@ -236,7 +264,15 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       DirectBufferPool bufferPool)
       throws IOException {
     return new GCSDirectory(
-        localPath, bucket, storage, cache, channelPool, ioExec, useAsyncIO, bufferPool, null);
+        localPath,
+        bucket,
+        storage,
+        cache,
+        channelPool,
+        ioExec,
+        useAsyncIO,
+        bufferPool,
+        nodeLevelState.createBlobCoordinator(localPath));
   }
 
   @Override
