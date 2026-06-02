@@ -42,25 +42,20 @@ import org.slf4j.LoggerFactory;
  *
  * <pre>
  *   /gcs-segment-batches/
- *     {segUUID}                       PERSISTENT — data: newline-separated blob UUID strings
- *       {refId}                       PERSISTENT — data: empty; presence = this replica holds a ref
+ *     {segUUID}          PERSISTENT — data: newline-separated blob UUID strings
+ *       refs             PERSISTENT — data: newline-separated refId strings
  * </pre>
  *
- * <p>{@code refId} is a deterministic UUID derived from the replica's local index directory path.
- * This scopes refs to individual replicas, not Solr nodes, so two replicas on the same node each
- * carry independent refs. Using persistent (not ephemeral) nodes means refs survive node restarts:
- * a replica that shuts down for an hour still holds its ref, and its data is not deleted.
+ * <p>{@code refId} is a deterministic UUID derived from the replica's local index directory name,
+ * scoping each ref to an individual replica. Persistent nodes survive node restarts, so a replica
+ * that goes offline for an hour still holds its ref and its data is not deleted.
  *
- * <p>Lifecycle:
+ * <p>Both nodes are updated via compare-and-swap (versioned {@code setData}) to handle concurrent
+ * access. On release, the versioned delete of the {@code refs} node acts as a single-winner claim:
+ * only one replica proceeds to delete the batch and return the blob UUIDs for GCS deletion.
  *
- * <ul>
- *   <li>{@link #registerBatch} creates the batch node (if absent) and adds a persistent ref node
- *       for this replica.
- *   <li>{@link #release} removes this replica's ref. If no ref nodes remain, the batch node is
- *       deleted and all blob UUIDs are returned to the caller for physical GCS deletion.
- *   <li>Orphaned batches (refs left behind by permanently-removed replicas) require a background
- *       sweep for cleanup; that is left for future work.
- * </ul>
+ * <p>Orphaned batches (refs left behind by permanently-removed replicas) require a background sweep
+ * for cleanup; that is left for future work.
  */
 public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoordinator {
 
@@ -71,8 +66,8 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
   private final SolrZkClient zkClient;
 
   /**
-   * Stable identifier for this replica's ref node — a deterministic UUID derived from the local
-   * index directory path. Unique per replica even when multiple replicas share a node.
+   * Stable identifier for this replica's entry in the {@code refs} node — a deterministic UUID
+   * derived from the local index directory name. Unique per replica even when co-located.
    */
   private final String refId;
 
@@ -89,93 +84,120 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
   @Override
   public void registerBatch(UUID segUUID, Collection<UUID> blobUUIDs) throws IOException {
     String batchPath = BASE_PATH + "/" + segUUID;
+    String refsPath = batchPath + "/refs";
     try {
       try {
-        zkClient.create(batchPath, serializeBlobs(blobUUIDs), CreateMode.PERSISTENT, true);
+        zkClient.create(batchPath, serializeItems(blobUUIDs), CreateMode.PERSISTENT, true);
       } catch (KeeperException.NodeExistsException e) {
-        // Node exists — merge our blobs into the existing set.
-        mergeBlobs(batchPath, blobUUIDs);
+        mergeItems(batchPath, blobUUIDs);
       }
-      // Persistent ref node: survives node restarts so data is not deleted while offline.
       try {
-        zkClient.create(batchPath + "/" + refId, null, CreateMode.PERSISTENT, true);
+        zkClient.create(refsPath, serializeItems(List.of(refId)), CreateMode.PERSISTENT, true);
       } catch (KeeperException.NodeExistsException e) {
-        // Re-registering after a restart; ref was already present.
+        mergeItems(refsPath, List.of(refId));
       }
     } catch (KeeperException | InterruptedException e) {
       throw new IOException("Failed to register batch " + segUUID, e);
     }
   }
 
-  private void mergeBlobs(String batchPath, Collection<UUID> newBlobs)
-      throws KeeperException, InterruptedException {
-    while (true) {
-      Stat stat = new Stat();
-      byte[] existing = zkClient.getData(batchPath, null, stat, true);
-      Set<UUID> merged = new LinkedHashSet<>(deserializeBlobs(existing));
-      if (merged.addAll(newBlobs)) {
-        try {
-          zkClient.setData(batchPath, serializeBlobs(merged), stat.getVersion(), true);
-          return;
-        } catch (KeeperException.BadVersionException e) {
-          // Concurrent update; retry.
-        }
-      } else {
-        return; // All blobs already present; nothing to write.
-      }
-    }
-  }
-
   @Override
   public Collection<UUID> release(UUID segUUID) throws IOException {
     String batchPath = BASE_PATH + "/" + segUUID;
+    String refsPath = batchPath + "/refs";
     try {
-      zkClient.delete(batchPath + "/" + refId, -1, true);
+      // CAS-remove our refId from the refs node.
+      while (true) {
+        Stat stat = new Stat();
+        byte[] existing = zkClient.getData(refsPath, null, stat, true);
+        Set<String> refs = new LinkedHashSet<>(deserializeItems(existing));
+        refs.remove(refId);
+        try {
+          zkClient.setData(refsPath, serializeItems(refs), stat.getVersion(), true);
+          break;
+        } catch (KeeperException.BadVersionException e) {
+          // Concurrent update; retry.
+        }
+      }
 
-      List<String> remainingRefs = zkClient.getChildren(batchPath, null, true);
-      if (!remainingRefs.isEmpty()) {
+      // Re-read to check emptiness after our write landed.
+      Stat stat = new Stat();
+      byte[] refsData = zkClient.getData(refsPath, null, stat, true);
+      if (!deserializeItems(refsData).isEmpty()) {
         return Collections.emptyList();
       }
 
-      // We're the last holder. Read the blob list, then clean up the ZK node.
-      byte[] data = zkClient.getData(batchPath, null, null, true);
-      Collection<UUID> blobs = deserializeBlobs(data);
+      // refs is empty — claim deletion via versioned delete.
+      // ZK guarantees at most one caller succeeds at this version.
+      try {
+        zkClient.delete(refsPath, stat.getVersion(), true);
+      } catch (KeeperException.BadVersionException | KeeperException.NoNodeException e) {
+        // Another replica re-registered (BadVersion) or already cleaned up (NoNode).
+        return Collections.emptyList();
+      }
+
+      // We own the cleanup. Read blobs before deleting the parent.
+      byte[] blobData = zkClient.getData(batchPath, null, null, true);
+      Collection<UUID> blobs = deserializeUUIDs(blobData);
       try {
         zkClient.delete(batchPath, -1, true);
       } catch (KeeperException.NoNodeException e) {
-        // Another replica raced us to the deletion; that's fine.
-      } catch (KeeperException.NotEmptyException e) {
-        // A new ref was added between our getChildren and delete — batch is still live.
-        log.debug(
-            "batch {} re-acquired by another replica during release; skipping delete", segUUID);
-        return Collections.emptyList();
+        // Already gone; fine.
       }
       return blobs;
 
     } catch (KeeperException.NoNodeException e) {
-      // Batch was already cleaned up (e.g. by a racing release on another replica).
+      // Batch was already cleaned up by a concurrent release.
       return Collections.emptyList();
     } catch (KeeperException | InterruptedException e) {
       throw new IOException("Failed to release batch " + segUUID, e);
     }
   }
 
-  private static byte[] serializeBlobs(Collection<UUID> blobUUIDs) {
-    return blobUUIDs.stream()
-        .map(UUID::toString)
+  /**
+   * CAS loop to merge {@code newItems} (as strings) into the data at {@code path}. Items are stored
+   * as a newline-separated list; duplicates are suppressed via {@link LinkedHashSet}.
+   */
+  private <T> void mergeItems(String path, Collection<T> newItems)
+      throws KeeperException, InterruptedException {
+    while (true) {
+      Stat stat = new Stat();
+      byte[] existing = zkClient.getData(path, null, stat, true);
+      Set<String> merged = new LinkedHashSet<>(deserializeItems(existing));
+      boolean changed = false;
+      for (T item : newItems) {
+        changed |= merged.add(item.toString());
+      }
+      if (!changed) return;
+      try {
+        zkClient.setData(path, serializeItems(merged), stat.getVersion(), true);
+        return;
+      } catch (KeeperException.BadVersionException e) {
+        // Concurrent update; retry.
+      }
+    }
+  }
+
+  private static <T> byte[] serializeItems(Collection<T> items) {
+    return items.stream()
+        .map(Object::toString)
         .collect(Collectors.joining("\n"))
         .getBytes(StandardCharsets.UTF_8);
   }
 
-  private static Collection<UUID> deserializeBlobs(byte[] data) {
+  private static List<String> deserializeItems(byte[] data) {
     if (data == null || data.length == 0) return Collections.emptyList();
-    String[] parts = new String(data, StandardCharsets.UTF_8).split("\n");
-    List<UUID> result = new java.util.ArrayList<>(parts.length);
-    for (String part : parts) {
-      if (!part.isEmpty()) {
-        result.add(UUID.fromString(part));
-      }
+    List<String> result = new java.util.ArrayList<>();
+    for (String part : new String(data, StandardCharsets.UTF_8).split("\n")) {
+      if (!part.isEmpty()) result.add(part);
     }
+    return result;
+  }
+
+  private static Collection<UUID> deserializeUUIDs(byte[] data) {
+    List<String> items = deserializeItems(data);
+    List<UUID> result = new java.util.ArrayList<>(items.size());
+    for (String s : items) result.add(UUID.fromString(s));
     return result;
   }
 }
