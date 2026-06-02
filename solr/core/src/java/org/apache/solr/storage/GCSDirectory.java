@@ -237,23 +237,33 @@ public class GCSDirectory extends MMapDirectory {
       }
       if (segUUID != null) {
         String segName = IndexFileNames.parseSegmentName(name);
-        IOException[] ex = new IOException[1];
+        // Remove from pendingFiles if present (file was written but not yet sync'd).
+        SegmentStruct struct = pendingWrites.get(segName);
+        if (struct != null && struct.segUUID.equals(segUUID)) {
+          ConcurrentHashMap<String, UUID> pending = struct.pendingFiles.get();
+          UUID extantBlobUUID = null;
+          if (pending != null && blobUUID.equals(extantBlobUUID = pending.remove(name))) {
+            // not yet sync'd, delete the blob immediately
+            storage.delete(BlobId.of(bucket, blobUUID.toString()));
+          } else if (extantBlobUUID != null) {
+            log.warn("found unexpected blobUUID: {} != {}", extantBlobUUID, blobUUID);
+          }
+        }
         Set<UUID> batchRemaining =
             batched.compute(
                 segUUID,
                 (k, v) -> {
                   if (v == null) {
-                    ex[0] = new IOException("seg UUID not found in batched map for " + name);
+                    // Not in batched: file was written but never sync'd. Direct delete below.
+                    return null;
                   } else if (!v.remove(blobUUID)) {
-                    ex[0] = new IOException("blob UUID not found in batch for " + name);
+                    // blob not in batch: file was never sync'd for a partially-sync'd segment.
+                    return v;
                   } else {
                     return v.isEmpty() ? null : v;
                   }
-                  return v;
                 });
-        if (ex[0] != null) {
-          throw ex[0];
-        } else if (batchRemaining == null) {
+        if (batchRemaining == null) {
           // Last local ref to this segment UUID batch is gone.
           pendingWrites.compute(
               segName,
@@ -274,9 +284,6 @@ public class GCSDirectory extends MMapDirectory {
           //  blobUUIDs associated with this batch (from zk) and delete them.
           storage.delete(BlobId.of(bucket, blobUUID.toString()));
         }
-      } else {
-        // No segment UUID (missing or pre-format offset file): fall back to direct delete.
-        storage.delete(BlobId.of(bucket, blobUUID.toString()));
       }
     }
     if (Files.exists(offsetFile)) {
