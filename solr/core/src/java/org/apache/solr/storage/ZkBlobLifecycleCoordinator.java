@@ -86,16 +86,8 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
     String batchPath = BASE_PATH + "/" + segUUID;
     String refsPath = batchPath + "/refs";
     try {
-      try {
-        zkClient.create(batchPath, serializeItems(blobUUIDs), CreateMode.PERSISTENT, true);
-      } catch (KeeperException.NodeExistsException e) {
-        mergeItems(batchPath, blobUUIDs);
-      }
-      try {
-        zkClient.create(refsPath, serializeItems(List.of(refId)), CreateMode.PERSISTENT, true);
-      } catch (KeeperException.NodeExistsException e) {
-        mergeItems(refsPath, List.of(refId));
-      }
+      upsert(batchPath, blobUUIDs);
+      upsert(refsPath, List.of(refId));
     } catch (KeeperException | InterruptedException e) {
       throw new IOException("Failed to register batch " + segUUID, e);
     }
@@ -155,20 +147,34 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
   }
 
   /**
-   * CAS loop to merge {@code newItems} (as strings) into the data at {@code path}. Items are stored
-   * as a newline-separated list; duplicates are suppressed via {@link LinkedHashSet}.
+   * Ensures {@code path} exists and contains at least {@code newItems}. Reads current state first;
+   * if the node is absent, creates it; otherwise CAS-merges. {@link
+   * KeeperException.NodeExistsException} is only possible as a rare concurrent-creation race and is
+   * handled by retrying the read.
    */
-  private <T> void mergeItems(String path, Collection<T> newItems)
+  private <T> void upsert(String path, Collection<T> newItems)
       throws KeeperException, InterruptedException {
     while (true) {
       Stat stat = new Stat();
-      byte[] existing = zkClient.getData(path, null, stat, true);
+      byte[] existing;
+      try {
+        existing = zkClient.getData(path, null, stat, true);
+      } catch (KeeperException.NoNodeException e) {
+        try {
+          zkClient.create(path, serializeItems(newItems), CreateMode.PERSISTENT, true);
+          return;
+        } catch (KeeperException.NodeExistsException ex) {
+          continue; // Created concurrently; loop back to read-then-merge.
+        }
+      }
       Set<String> merged = new LinkedHashSet<>(deserializeItems(existing));
       boolean changed = false;
       for (T item : newItems) {
         changed |= merged.add(item.toString());
       }
-      if (!changed) return;
+      if (!changed) {
+        return;
+      }
       try {
         zkClient.setData(path, serializeItems(merged), stat.getVersion(), true);
         return;
