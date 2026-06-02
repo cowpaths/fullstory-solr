@@ -19,14 +19,12 @@ package org.apache.solr.storage;
 
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
-import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
-import java.util.stream.Collectors;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
@@ -42,8 +40,8 @@ import org.slf4j.LoggerFactory;
  *
  * <pre>
  *   /gcs-segment-batches/
- *     {segUUID}          PERSISTENT — data: newline-separated blob UUID strings
- *       refs             PERSISTENT — data: newline-separated refId strings
+ *     {segUUID}          PERSISTENT — data: sorted binary UUID list (16 bytes each)
+ *       refs             PERSISTENT — data: sorted binary UUID list (16 bytes each)
  * </pre>
  *
  * <p>{@code refId} is a deterministic UUID derived from the replica's local index directory name,
@@ -61,6 +59,8 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
+  private static final int UUID_LENGTH = Long.BYTES << 1;
+
   static final String BASE_PATH = "/gcs-segment-batches";
 
   private final SolrZkClient zkClient;
@@ -69,11 +69,11 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
    * Stable identifier for this replica's entry in the {@code refs} node — a deterministic UUID
    * derived from the local index directory name. Unique per replica even when co-located.
    */
-  private final String refId;
+  private final UUID refId;
 
   public ZkBlobLifecycleCoordinator(SolrZkClient zkClient, UUID refId) throws IOException {
     this.zkClient = zkClient;
-    this.refId = refId.toString();
+    this.refId = refId;
     try {
       zkClient.makePath(BASE_PATH, false, true);
     } catch (KeeperException | InterruptedException e) {
@@ -86,7 +86,7 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
     String batchPath = BASE_PATH + "/" + segUUID;
     String refsPath = batchPath + "/refs";
     try {
-      upsert(batchPath, blobUUIDs);
+      upsert(batchPath, sorted(blobUUIDs));
       upsert(refsPath, List.of(refId));
     } catch (KeeperException | InterruptedException e) {
       throw new IOException("Failed to register batch " + segUUID, e);
@@ -99,30 +99,27 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
     String refsPath = batchPath + "/refs";
     try {
       // CAS-remove our refId from the refs node.
+      byte[] updatedRefs;
+      Stat stat = new Stat();
       while (true) {
-        Stat stat = new Stat();
         byte[] existing = zkClient.getData(refsPath, null, stat, true);
-        Set<String> refs = new LinkedHashSet<>(deserializeItems(existing));
-        refs.remove(refId);
+        updatedRefs = sortedRemove(existing, refId);
         try {
-          zkClient.setData(refsPath, serializeItems(refs), stat.getVersion(), true);
+          zkClient.setData(refsPath, updatedRefs, stat.getVersion(), true);
           break;
         } catch (KeeperException.BadVersionException e) {
           // Concurrent update; retry.
         }
       }
 
-      // Re-read to check emptiness after our write landed.
-      Stat stat = new Stat();
-      byte[] refsData = zkClient.getData(refsPath, null, stat, true);
-      if (!deserializeItems(refsData).isEmpty()) {
+      if (updatedRefs.length != 0) {
         return Collections.emptyList();
       }
 
       // refs is empty — claim deletion via versioned delete.
       // ZK guarantees at most one caller succeeds at this version.
       try {
-        zkClient.delete(refsPath, stat.getVersion(), true);
+        zkClient.delete(refsPath, stat.getVersion() + 1, true);
       } catch (KeeperException.BadVersionException | KeeperException.NoNodeException e) {
         // Another replica re-registered (BadVersion) or already cleaned up (NoNode).
         return Collections.emptyList();
@@ -147,12 +144,12 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
   }
 
   /**
-   * Ensures {@code path} exists and contains at least {@code newItems}. Reads current state first;
-   * if the node is absent, creates it; otherwise CAS-merges. {@link
+   * Ensures {@code path} exists and contains at least {@code newItems} (must be pre-sorted). Reads
+   * current state first; if the node is absent, creates it; otherwise CAS-merges. {@link
    * KeeperException.NodeExistsException} is only possible as a rare concurrent-creation race and is
    * handled by retrying the read.
    */
-  private <T> void upsert(String path, Collection<T> newItems)
+  private void upsert(String path, List<UUID> newItems)
       throws KeeperException, InterruptedException {
     while (true) {
       Stat stat = new Stat();
@@ -161,22 +158,19 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
         existing = zkClient.getData(path, null, stat, true);
       } catch (KeeperException.NoNodeException e) {
         try {
-          zkClient.create(path, serializeItems(newItems), CreateMode.PERSISTENT, true);
+          zkClient.create(path, serializeUUIDs(newItems), CreateMode.PERSISTENT, true);
           return;
         } catch (KeeperException.NodeExistsException ex) {
           continue; // Created concurrently; loop back to read-then-merge.
         }
       }
-      Set<String> merged = new LinkedHashSet<>(deserializeItems(existing));
-      boolean changed = false;
-      for (T item : newItems) {
-        changed |= merged.add(item.toString());
-      }
-      if (!changed) {
-        return;
+      List<UUID> existingList = deserializeUUIDs(existing);
+      List<UUID> merged = sortedMerge(existingList, newItems);
+      if (merged.equals(existingList)) {
+        return; // All items already present; nothing to write.
       }
       try {
-        zkClient.setData(path, serializeItems(merged), stat.getVersion(), true);
+        zkClient.setData(path, serializeUUIDs(merged), stat.getVersion(), true);
         return;
       } catch (KeeperException.BadVersionException e) {
         // Concurrent update; retry.
@@ -184,26 +178,85 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
     }
   }
 
-  private static <T> byte[] serializeItems(Collection<T> items) {
-    return items.stream()
-        .map(Object::toString)
-        .collect(Collectors.joining("\n"))
-        .getBytes(StandardCharsets.UTF_8);
+  private static List<UUID> sorted(Collection<UUID> uuids) {
+    List<UUID> list = new ArrayList<>(uuids);
+    Collections.sort(list);
+    return list;
   }
 
-  private static List<String> deserializeItems(byte[] data) {
-    if (data == null || data.length == 0) return Collections.emptyList();
-    List<String> result = new java.util.ArrayList<>();
-    for (String part : new String(data, StandardCharsets.UTF_8).split("\n")) {
-      if (!part.isEmpty()) result.add(part);
+  /** Standard two-pointer merge of two sorted lists, deduplicating equal elements. */
+  private static List<UUID> sortedMerge(List<UUID> a, List<UUID> b) {
+    List<UUID> result = new ArrayList<>(a.size() + b.size());
+    int i = 0, j = 0;
+    while (i < a.size() && j < b.size()) {
+      int cmp = a.get(i).compareTo(b.get(j));
+      if (cmp < 0) {
+        result.add(a.get(i++));
+      } else if (cmp > 0) {
+        result.add(b.get(j++));
+      } else {
+        result.add(a.get(i++));
+        j++; // deduplicate
+      }
+    }
+    while (i < a.size()) {
+      result.add(a.get(i++));
+    }
+    while (j < b.size()) {
+      result.add(b.get(j++));
     }
     return result;
   }
 
-  private static Collection<UUID> deserializeUUIDs(byte[] data) {
-    List<String> items = deserializeItems(data);
-    List<UUID> result = new java.util.ArrayList<>(items.size());
-    for (String s : items) result.add(UUID.fromString(s));
+  /**
+   * Scans the sorted 16-byte-per-UUID array for {@code item}, copying units speculatively into a
+   * new array. On a match, drains the remaining bytes and returns the new array. If the item is not
+   * found, returns the original array unchanged (no allocation is retained).
+   */
+  private static byte[] sortedRemove(byte[] data, UUID item) {
+    if (data.length < UUID_LENGTH) {
+      return data;
+    }
+    long msbTarget = item.getMostSignificantBits();
+    long lsbTarget = item.getLeastSignificantBits();
+    byte[] result = new byte[data.length - UUID_LENGTH];
+    ByteBuffer src = ByteBuffer.wrap(data);
+    ByteBuffer dst = ByteBuffer.wrap(result);
+    while (dst.remaining() >= UUID_LENGTH) {
+      long msb = src.getLong();
+      long lsb = src.getLong();
+      if (msb == msbTarget && lsb == lsbTarget) {
+        dst.put(src); // drain remaining entries into result
+        return result;
+      }
+      dst.putLong(msb);
+      dst.putLong(lsb);
+    }
+    if (msbTarget == src.getLong() && lsbTarget == src.getLong()) {
+      return result;
+    } else {
+      return data; // not found — discard speculative allocation, return original
+    }
+  }
+
+  private static byte[] serializeUUIDs(List<UUID> uuids) {
+    ByteBuffer buf = ByteBuffer.allocate(uuids.size() * UUID_LENGTH);
+    for (UUID uuid : uuids) {
+      buf.putLong(uuid.getMostSignificantBits());
+      buf.putLong(uuid.getLeastSignificantBits());
+    }
+    return buf.array();
+  }
+
+  private static List<UUID> deserializeUUIDs(byte[] data) {
+    if (data == null || data.length == 0) {
+      return Collections.emptyList();
+    }
+    ByteBuffer buf = ByteBuffer.wrap(data);
+    List<UUID> result = new ArrayList<>(data.length / UUID_LENGTH);
+    while (buf.remaining() >= UUID_LENGTH) {
+      result.add(new UUID(buf.getLong(), buf.getLong()));
+    }
     return result;
   }
 }
