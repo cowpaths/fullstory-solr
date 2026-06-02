@@ -23,6 +23,7 @@ import com.google.cloud.storage.Storage;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.store.IOContext;
@@ -113,7 +114,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
     };
     for (int size : sizes) {
       byte[] data = randomBytes(size);
-      String name = "b" + size + ".dat";
+      String name = "_b" + size + ".dat";
       writeFile(name, data);
       assertArrayEquals("data mismatch at size=" + size, data, readFile(name, size));
       assertEquals("fileLength mismatch at size=" + size, size, dir.fileLength(name));
@@ -130,41 +131,41 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
     int size =
         COMPRESSION_BLOCK_SIZE + random().nextInt(2 * GCSDirectoryFactory.GCS_WRITE_BUFFER_SIZE);
     byte[] data = randomBytes(size);
-    writeFile("rand.dat", data);
-    assertArrayEquals(data, readFile("rand.dat", size));
-    assertEquals(size, dir.fileLength("rand.dat"));
+    writeFile("_rand.dat", data);
+    assertArrayEquals(data, readFile("_rand.dat", size));
+    assertEquals(size, dir.fileLength("_rand.dat"));
   }
 
   public void testListAll() throws IOException {
-    writeFile("a.dat", randomBytes(random().nextInt(COMPRESSION_BLOCK_SIZE) + 1));
-    writeFile("b.dat", randomBytes(random().nextInt(COMPRESSION_BLOCK_SIZE) + 1));
+    writeFile("_a.dat", randomBytes(random().nextInt(COMPRESSION_BLOCK_SIZE) + 1));
+    writeFile("_b.dat", randomBytes(random().nextInt(COMPRESSION_BLOCK_SIZE) + 1));
     String[] names = dir.listAll();
     Arrays.sort(names);
-    assertArrayEquals(new String[] {"a.dat", "b.dat"}, names);
+    assertArrayEquals(new String[] {"_a.dat", "_b.dat"}, names);
   }
 
   public void testDeleteFile() throws IOException {
-    writeFile("todelete.dat", randomBytes(random().nextInt(COMPRESSION_BLOCK_SIZE) + 1));
+    writeFile("_todelete.dat", randomBytes(random().nextInt(COMPRESSION_BLOCK_SIZE) + 1));
     assertEquals(1, dir.listAll().length);
-    dir.deleteFile("todelete.dat");
+    dir.deleteFile("_todelete.dat");
     assertEquals(0, dir.listAll().length);
   }
 
   public void testRename() throws IOException {
     int size = random().nextInt(3 * COMPRESSION_BLOCK_SIZE) + 1;
     byte[] data = randomBytes(size);
-    writeFile("before.dat", data);
-    dir.rename("before.dat", "after.dat");
-    assertFalse(Arrays.asList(dir.listAll()).contains("before.dat"));
-    assertArrayEquals(data, readFile("after.dat", size));
+    writeFile("_before.dat", data);
+    dir.rename("_before.dat", "_after.dat");
+    assertFalse(Arrays.asList(dir.listAll()).contains("_before.dat"));
+    assertArrayEquals(data, readFile("_after.dat", size));
   }
 
   /** Spot-check random-access reads at arbitrary byte positions across blocks. */
   public void testRandomAccess() throws IOException {
     int size = 2 * COMPRESSION_BLOCK_SIZE + random().nextInt(3 * COMPRESSION_BLOCK_SIZE) + 1;
     byte[] data = randomBytes(size);
-    writeFile("random.dat", data);
-    try (IndexInput in = dir.openInput("random.dat", IOContext.DEFAULT)) {
+    writeFile("_random.dat", data);
+    try (IndexInput in = dir.openInput("_random.dat", IOContext.DEFAULT)) {
       RandomAccessInput rai = in.randomAccessSlice(0, in.length());
       for (int i = 0; i < 200; i++) {
         int pos = random().nextInt(size);
@@ -177,9 +178,9 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
   public void testReopenFile() throws IOException {
     int size = COMPRESSION_BLOCK_SIZE + random().nextInt(2 * COMPRESSION_BLOCK_SIZE) + 1;
     byte[] data = randomBytes(size);
-    writeFile("reopen.dat", data);
-    assertArrayEquals(data, readFile("reopen.dat", size));
-    assertArrayEquals(data, readFile("reopen.dat", size));
+    writeFile("_reopen.dat", data);
+    assertArrayEquals(data, readFile("_reopen.dat", size));
+    assertArrayEquals(data, readFile("_reopen.dat", size));
   }
 
   /**
@@ -188,12 +189,12 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
    */
   public void testChecksumRoundTrip() throws IOException {
     int dataSize = random().nextInt(3 * COMPRESSION_BLOCK_SIZE) + 1;
-    try (IndexOutput out = dir.createOutput("checksum.dat", IOContext.DEFAULT)) {
+    try (IndexOutput out = dir.createOutput("_checksum.dat", IOContext.DEFAULT)) {
       CodecUtil.writeHeader(out, "TestCodec", 1);
       out.writeBytes(randomBytes(dataSize), 0, dataSize);
       CodecUtil.writeFooter(out);
     }
-    try (IndexInput in = dir.openInput("checksum.dat", IOContext.DEFAULT)) {
+    try (IndexInput in = dir.openInput("_checksum.dat", IOContext.DEFAULT)) {
       CodecUtil.checksumEntireFile(in); // throws CorruptIndexException on mismatch
     }
   }
@@ -214,10 +215,10 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             null);
     try {
       byte[] data = randomBytes(size);
-      try (IndexOutput out = asyncDir.createOutput("async.dat", IOContext.DEFAULT)) {
+      try (IndexOutput out = asyncDir.createOutput("_async.dat", IOContext.DEFAULT)) {
         out.writeBytes(data, 0, data.length);
       }
-      assertArrayEquals(data, readFileFrom(asyncDir, "async.dat", size));
+      assertArrayEquals(data, readFileFrom(asyncDir, "_async.dat", size));
     } finally {
       asyncDir.close();
     }
@@ -230,6 +231,9 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
   private void writeFile(String name, byte[] data) throws IOException {
     try (IndexOutput out = dir.createOutput(name, IOContext.DEFAULT)) {
       out.writeBytes(data, 0, data.length);
+    }
+    if (random().nextBoolean()) {
+      dir.sync(List.of(name));
     }
   }
 
