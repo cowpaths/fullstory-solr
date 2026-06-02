@@ -116,32 +116,44 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     private final DirectBufferPool bufferPool;
 
     /**
-     * Non-null when ZooKeeper is available; null in single-node / non-cloud mode. Shared across all
-     * directories on this node; per-directory coordinators are created via {@link
-     * #createBlobCoordinator}.
+     * Metadata bucket for {@link GcsBlobLifecycleCoordinator}; derived as {@code bucket + "-meta"}.
+     */
+    private final String metadataBucket;
+
+    /**
+     * Non-null when ZooKeeper is available and {@code solr.gcsDirectory.useZkCoordinator=true};
+     * null otherwise.
      */
     private final SolrZkClient zkClient;
 
-    NodeLevelGCSDirectoryState(BlockCache blockCache, Storage storage, ZkController zkController) {
+    NodeLevelGCSDirectoryState(
+        BlockCache blockCache, Storage storage, String metadataBucket, ZkController zkController) {
       this.blockCache = blockCache;
       this.storage = storage;
       this.channelPool = new Cache<>(new ReadChannel[DEFAULT_MAX_OPEN_CHANNELS], true);
       this.bufferPool = new DirectBufferPool(GCS_WRITE_BUFFER_SIZE, 4096, 1);
+      this.metadataBucket = metadataBucket;
       this.zkClient = zkController != null ? zkController.getZkClient() : null;
     }
 
     /**
      * Returns a {@link GCSDirectory.BlobLifecycleCoordinator} scoped to the given local index
-     * directory, or {@code null} if ZooKeeper is not available. The {@code refId} is a
-     * deterministic UUID derived from the final path element (directory name only), so it is stable
-     * across parent-directory migrations and unique per replica even when co-located.
+     * directory. The {@code refId} is a deterministic UUID derived from the final path element
+     * (directory name only), so it is stable across parent-directory migrations and unique per
+     * replica even when co-located.
+     *
+     * <p>Uses {@link ZkBlobLifecycleCoordinator} when {@code
+     * solr.gcsDirectory.useZkCoordinator=true} and ZooKeeper is available; otherwise uses {@link
+     * GcsBlobLifecycleCoordinator}.
      */
     GCSDirectory.BlobLifecycleCoordinator createBlobCoordinator(Path localPath) throws IOException {
-      if (zkClient == null) return null;
       UUID refId =
           UUID.nameUUIDFromBytes(
               localPath.getFileName().toString().getBytes(StandardCharsets.UTF_8));
-      return new ZkBlobLifecycleCoordinator(zkClient, refId);
+      if (Boolean.getBoolean("solr.gcsDirectory.useZkCoordinator") && zkClient != null) {
+        return new ZkBlobLifecycleCoordinator(zkClient, refId);
+      }
+      return new GcsBlobLifecycleCoordinator(storage, metadataBucket, refId);
     }
 
     @Override
@@ -191,6 +203,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       CoreContainer cc = this.cc.get();
       this.cc = null;
       assert cc != null;
+      final String metadataBucket = bucket + "-meta";
       final ZkController zkController = cc.getZkController();
       nodeLevelState =
           cc.getObjectCache()
@@ -202,6 +215,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
                       return new NodeLevelGCSDirectoryState(
                           new BlockCache(blockCacheBytes, blockCacheBackingFile),
                           storage,
+                          metadataBucket,
                           zkController);
                     } catch (IOException e) {
                       throw new UncheckedIOException(e);
@@ -211,7 +225,10 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       try {
         nodeLevelState =
             new NodeLevelGCSDirectoryState(
-                new BlockCache(blockCacheBytes, blockCacheBackingFile), storage, null);
+                new BlockCache(blockCacheBytes, blockCacheBackingFile),
+                storage,
+                bucket + "-meta",
+                null);
       } catch (IOException e) {
         throw new UncheckedIOException(e);
       }
