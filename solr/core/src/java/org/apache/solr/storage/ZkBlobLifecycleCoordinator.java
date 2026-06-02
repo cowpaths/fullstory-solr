@@ -164,13 +164,12 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
           continue; // Created concurrently; loop back to read-then-merge.
         }
       }
-      List<UUID> existingList = deserializeUUIDs(existing);
-      List<UUID> merged = sortedMerge(existingList, newItems);
-      if (merged.equals(existingList)) {
+      byte[] merged = sortedMergeBytes(existing, newItems);
+      if (merged == existing) {
         return; // All items already present; nothing to write.
       }
       try {
-        zkClient.setData(path, serializeUUIDs(merged), stat.getVersion(), true);
+        zkClient.setData(path, merged, stat.getVersion(), true);
         return;
       } catch (KeeperException.BadVersionException e) {
         // Concurrent update; retry.
@@ -184,27 +183,61 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
     return list;
   }
 
-  /** Standard two-pointer merge of two sorted lists, deduplicating equal elements. */
-  private static List<UUID> sortedMerge(List<UUID> a, List<UUID> b) {
-    List<UUID> result = new ArrayList<>(a.size() + b.size());
-    int i = 0, j = 0;
-    while (i < a.size() && j < b.size()) {
-      int cmp = a.get(i).compareTo(b.get(j));
+  /**
+   * Two-pointer merge of sorted {@code existing} byte array and sorted {@code newItems} list,
+   * deduplicating equal elements. Writes into a heap-allocated ByteBuffer sized for the worst case,
+   * then trims via {@link System#arraycopy}. Returns {@code existing} unchanged (identity) if all
+   * new items were already present.
+   */
+  private static byte[] sortedMergeBytes(byte[] existing, List<UUID> newItems) {
+    int ei = 0;
+    int ni = 0;
+    int existingBytes = existing.length;
+    int newSize = newItems.size();
+    ByteBuffer src = ByteBuffer.wrap(existing);
+    ByteBuffer dst = ByteBuffer.allocate(existingBytes + (newSize * UUID_LENGTH));
+    while (ei < existingBytes && ni < newSize) {
+      long eMsb = src.getLong(ei);
+      long eLsb = src.getLong(ei + Long.BYTES);
+      UUID newUUID = newItems.get(ni);
+      long nMsb = newUUID.getMostSignificantBits();
+      long nLsb = newUUID.getLeastSignificantBits();
+      int cmp = Long.compare(eMsb, nMsb);
+      if (cmp == 0) {
+        cmp = Long.compare(eLsb, nLsb);
+      }
       if (cmp < 0) {
-        result.add(a.get(i++));
+        dst.putLong(eMsb);
+        dst.putLong(eLsb);
+        ei += UUID_LENGTH;
       } else if (cmp > 0) {
-        result.add(b.get(j++));
+        dst.putLong(nMsb);
+        dst.putLong(nLsb);
+        ni++;
       } else {
-        result.add(a.get(i++));
-        j++; // deduplicate
+        dst.putLong(eMsb);
+        dst.putLong(eLsb);
+        ei += UUID_LENGTH;
+        ni++; // deduplicate
       }
     }
-    while (i < a.size()) {
-      result.add(a.get(i++));
+    if (ei < existingBytes) {
+      // Drain remaining existing entries.
+      dst.put(existing, ei, existingBytes - ei);
+    } else {
+      // Drain remaining new items.
+      while (ni < newSize) {
+        UUID newUUID = newItems.get(ni++);
+        dst.putLong(newUUID.getMostSignificantBits());
+        dst.putLong(newUUID.getLeastSignificantBits());
+      }
     }
-    while (j < b.size()) {
-      result.add(b.get(j++));
+    int written = dst.position();
+    if (written == existingBytes) {
+      return existing; // nothing new — identity return
     }
+    byte[] result = new byte[written];
+    System.arraycopy(dst.array(), 0, result, 0, written);
     return result;
   }
 
