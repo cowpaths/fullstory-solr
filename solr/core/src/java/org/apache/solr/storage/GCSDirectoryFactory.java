@@ -33,6 +33,7 @@ import org.apache.lucene.store.LockFactory;
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.params.SolrParams;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.core.CoreContainer;
@@ -150,7 +151,8 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       UUID refId =
           UUID.nameUUIDFromBytes(
               localPath.getFileName().toString().getBytes(StandardCharsets.UTF_8));
-      if (Boolean.getBoolean("solr.gcsDirectory.useZkCoordinator") && zkClient != null) {
+      if (EnvUtils.getPropertyAsBool("solr.gcsDirectory.useZkCoordinator", false)
+          && zkClient != null) {
         return new ZkBlobLifecycleCoordinator(zkClient, refId);
       }
       return new GcsBlobLifecycleCoordinator(storage, metadataBucket, refId);
@@ -178,7 +180,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
             "com.google.api.client.googleapis.services.AbstractGoogleClient")
         .setFilter(r -> !r.getMessage().startsWith("Application name is not set"));
     SolrParams params = args.toSolrParams();
-    bucket = params.get("bucket", System.getProperty("solr.gcsDirectory.bucket", ""));
+    bucket = params.get("bucket", EnvUtils.getProperty("solr.gcsDirectory.bucket", ""));
     if (bucket.isEmpty()) {
       throw new IllegalArgumentException(
           "GCSDirectoryFactory requires a bucket name via the 'bucket' param "
@@ -196,7 +198,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     final Storage storage = initStorage();
 
     final Path blockCacheBackingFile =
-        Path.of(System.getProperty("java.io.tmpdir"))
+        Path.of(EnvUtils.getProperty("java.io.tmpdir"))
             .resolve("solr-gcs-block-cache-" + UUID.randomUUID() + ".tmp");
 
     if (this.cc != null) {
