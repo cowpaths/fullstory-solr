@@ -74,7 +74,8 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             new Cache<>(new ReadChannel[64], true),
             ioExec,
             false,
-            bufferPool);
+            bufferPool,
+            null);
   }
 
   @Override
@@ -209,7 +210,8 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             new Cache<>(new ReadChannel[64], true),
             ioExec,
             true,
-            bufferPool);
+            bufferPool,
+            null);
     try {
       byte[] data = randomBytes(size);
       try (IndexOutput out = asyncDir.createOutput("async.dat", IOContext.DEFAULT)) {

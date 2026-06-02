@@ -236,7 +236,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       DirectBufferPool bufferPool)
       throws IOException {
     return new GCSDirectory(
-        localPath, bucket, storage, cache, channelPool, ioExec, useAsyncIO, bufferPool);
+        localPath, bucket, storage, cache, channelPool, ioExec, useAsyncIO, bufferPool, null);
   }
 
   @Override

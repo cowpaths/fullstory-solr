@@ -45,6 +45,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Collection;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
@@ -106,6 +107,29 @@ public class GCSDirectory extends MMapDirectory {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
+  /**
+   * Seam for ZooKeeper-backed distributed blob lifecycle management.
+   *
+   * <p>When {@code null} (single-node or no-ZK mode), blobs are deleted immediately on the local
+   * node. When non-null, the coordinator is responsible for distributed refcounting: blobs are only
+   * physically deleted once all replicas have released their reference to the segment batch.
+   */
+  public interface BlobLifecycleCoordinator {
+    /**
+     * Registers a new segment batch. Called after {@code sync()} persists the file set for a
+     * segment. The coordinator records the mapping of {@code segUUID → blobUUIDs} in ZK and
+     * increments the refcount for this node.
+     */
+    void registerBatch(UUID segUUID, Collection<UUID> blobUUIDs) throws IOException;
+
+    /**
+     * Releases this node's reference to the given segment batch. Returns the full set of blob UUIDs
+     * for the batch (from ZK), which the caller should delete if the refcount reached zero. Returns
+     * an empty collection if other nodes still hold references (nothing to delete yet).
+     */
+    Collection<UUID> release(UUID segUUID) throws IOException;
+  }
+
   // Offset file header size: 8 (length) + 4 (blockType/comprType/reserved) + 16 (blobUUID)
   // + 16 (segUUID) + 8 (gcsObjectSize) = 52 bytes.
   static final int OFFSET_FILE_HEADER_SIZE = 52;
@@ -136,6 +160,9 @@ public class GCSDirectory extends MMapDirectory {
   private final ConcurrentHashMap<String, SegmentStruct> pendingWrites = new ConcurrentHashMap<>();
 
   private final ConcurrentHashMap<UUID, Set<UUID>> batched = new ConcurrentHashMap<>();
+
+  /** {@code null} in single-node/no-ZK mode; non-null enables distributed refcounting via ZK. */
+  private final BlobLifecycleCoordinator blobCoordinator;
 
   private static final class SegmentStruct {
     private final UUID segUUID;
@@ -175,7 +202,8 @@ public class GCSDirectory extends MMapDirectory {
       Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool,
       ExecutorService ioExec,
       boolean useAsyncIO,
-      DirectBufferPool bufferPool)
+      DirectBufferPool bufferPool,
+      BlobLifecycleCoordinator blobCoordinator)
       throws IOException {
     super(localPath, FSLockFactory.getDefault());
     this.bucket = bucket;
@@ -185,31 +213,35 @@ public class GCSDirectory extends MMapDirectory {
     this.ioExec = ioExec;
     this.useAsyncIO = useAsyncIO;
     this.bufferPool = bufferPool;
-    for (String file : listAll()) {
-      if (!isGcsBacked(file)) continue;
-      Path path = directory.resolve(file);
-      UUID segUUID = readSegmentUUID(path);
-      UUID blobUUID = readBlobUUID(path);
-      if (segUUID == null || blobUUID == null) continue; // malformed offset file; skip
-      batched.computeIfAbsent(segUUID, (k) -> ConcurrentHashMap.newKeySet()).add(blobUUID);
-      pendingWrites.compute(
-          IndexFileNames.parseSegmentName(file),
-          (segName, struct) -> {
-            if (struct == null) {
-              return new SegmentStruct(segUUID);
-            } else {
-              if (!struct.segUUID.equals(segUUID)) {
-                // this should never happen, but we don't want to fail hard, because all we want
-                // here is a loose guarantee and best-effort batching. In building `segments` here,
-                // we're only need to guarantee a (potentially arbitrary) canonical seg UUID
-                // for this Directory instance.
-                log.warn("unexpected segUUID: {} != {}", struct.segUUID, segUUID);
+    this.blobCoordinator = blobCoordinator;
+    if (blobCoordinator != null) {
+      for (String file : listAll()) {
+        if (!isGcsBacked(file)) continue;
+        Path path = directory.resolve(file);
+        UUID segUUID = readSegmentUUID(path);
+        UUID blobUUID = readBlobUUID(path);
+        if (segUUID == null || blobUUID == null) continue; // malformed offset file; skip
+        batched.computeIfAbsent(segUUID, (k) -> ConcurrentHashMap.newKeySet()).add(blobUUID);
+        pendingWrites.compute(
+            IndexFileNames.parseSegmentName(file),
+            (segName, struct) -> {
+              if (struct == null) {
+                return new SegmentStruct(segUUID);
+              } else {
+                if (!struct.segUUID.equals(segUUID)) {
+                  // this should never happen, but we don't want to fail hard, because all we want
+                  // here is a loose guarantee and best-effort batching. In building `segments`
+                  // here, we're only need to guarantee a (potentially arbitrary) canonical seg UUID
+                  // for this Directory instance.
+                  log.warn("unexpected segUUID: {} != {}", struct.segUUID, segUUID);
+                }
+                return struct;
               }
-              return struct;
-            }
-          });
-      // TODO: ensure that the zk manifest for each segment UUID contains all the file UUIDs
-      //  that we found on-disk (iterate over `batched`).
+            });
+      }
+      for (Map.Entry<UUID, Set<UUID>> entry : batched.entrySet()) {
+        blobCoordinator.registerBatch(entry.getKey(), entry.getValue());
+      }
     }
   }
 
@@ -237,52 +269,57 @@ public class GCSDirectory extends MMapDirectory {
       }
       if (segUUID != null) {
         String segName = IndexFileNames.parseSegmentName(name);
-        // Remove from pendingFiles if present (file was written but not yet sync'd).
-        SegmentStruct struct = pendingWrites.get(segName);
-        if (struct != null && struct.segUUID.equals(segUUID)) {
-          ConcurrentHashMap<String, UUID> pending = struct.pendingFiles.get();
-          UUID extantBlobUUID = null;
-          if (pending != null && blobUUID.equals(extantBlobUUID = pending.remove(name))) {
-            // not yet sync'd, delete the blob immediately
-            storage.delete(BlobId.of(bucket, blobUUID.toString()));
-          } else if (extantBlobUUID != null) {
-            log.warn("found unexpected blobUUID: {} != {}", extantBlobUUID, blobUUID);
+        if (blobCoordinator == null) {
+          // No ZK: delete blobs immediately on every deleteFile call.
+          storage.delete(BlobId.of(bucket, blobUUID.toString()));
+        } else {
+          // Remove from pendingFiles if present (file was written but not yet sync'd).
+          SegmentStruct struct = pendingWrites.get(segName);
+          if (struct != null && struct.segUUID.equals(segUUID)) {
+            ConcurrentHashMap<String, UUID> pending = struct.pendingFiles.get();
+            UUID extantBlobUUID = null;
+            if (pending != null && blobUUID.equals(extantBlobUUID = pending.remove(name))) {
+              // not yet sync'd, delete the blob immediately
+              storage.delete(BlobId.of(bucket, blobUUID.toString()));
+            } else if (extantBlobUUID != null) {
+              log.warn("found unexpected blobUUID: {} != {}", extantBlobUUID, blobUUID);
+            }
           }
-        }
-        Set<UUID> batchRemaining =
-            batched.compute(
-                segUUID,
+          Set<UUID> batchRemaining =
+              batched.compute(
+                  segUUID,
+                  (k, v) -> {
+                    if (v == null) {
+                      // Not in batched: file was written but never sync'd. Direct delete above.
+                      return null;
+                    } else if (!v.remove(blobUUID)) {
+                      // blob not in batch: file was never sync'd for a partially-sync'd segment.
+                      return v;
+                    } else {
+                      return v.isEmpty() ? null : v;
+                    }
+                  });
+          if (batchRemaining == null) {
+            // Last local ref to this segment UUID batch is gone.
+            pendingWrites.compute(
+                segName,
                 (k, v) -> {
-                  if (v == null) {
-                    // Not in batched: file was written but never sync'd. Direct delete below.
-                    return null;
-                  } else if (!v.remove(blobUUID)) {
-                    // blob not in batch: file was never sync'd for a partially-sync'd segment.
+                  if (v == null || !v.segUUID.equals(segUUID)) {
                     return v;
+                  }
+                  ConcurrentHashMap<String, UUID> extant = v.pendingFiles.get();
+                  if (extant == null || extant.isEmpty()) {
+                    return null;
                   } else {
-                    return v.isEmpty() ? null : v;
+                    log.warn("unexpected entries left in pendingFiles {}", extant);
+                    return v;
                   }
                 });
-        if (batchRemaining == null) {
-          // Last local ref to this segment UUID batch is gone.
-          pendingWrites.compute(
-              segName,
-              (k, v) -> {
-                if (v == null || !v.segUUID.equals(segUUID)) {
-                  return v;
-                }
-                ConcurrentHashMap<String, UUID> extant = v.pendingFiles.get();
-                if (extant == null || extant.isEmpty()) {
-                  return null;
-                } else {
-                  log.warn("unexpected entries left in pendingFiles {}", extant);
-                  return v;
-                }
-              });
-          // TODO: replace below unconditional single-blob delete with decref on the zk batch.
-          //  If no more refs to the batch in zk (and we own the deletion), enumerate all
-          //  blobUUIDs associated with this batch (from zk) and delete them.
-          storage.delete(BlobId.of(bucket, blobUUID.toString()));
+            Collection<UUID> toDelete = blobCoordinator.release(segUUID);
+            for (UUID id : toDelete) {
+              storage.delete(BlobId.of(bucket, id.toString()));
+            }
+          }
         }
       }
     }
@@ -340,17 +377,18 @@ public class GCSDirectory extends MMapDirectory {
     try {
       super.sync(names);
     } finally {
-      for (SegmentStruct s : pendingWrites.values()) {
-        ConcurrentHashMap<String, UUID> addToManifest = s.pendingFiles.getAndSet(null);
-        if (addToManifest == null) continue;
-        // Only move UUIDs for files actually covered by this sync batch.
-        addToManifest.keySet().retainAll(names);
-        if (!addToManifest.isEmpty()) {
-          batched
-              .computeIfAbsent(s.segUUID, (k) -> ConcurrentHashMap.newKeySet())
-              .addAll(addToManifest.values());
-          // TODO: add the UUIDs to the manifest in zookeeper, and ensure that we
-          //  are registered as holding a ref to this batch.
+      if (blobCoordinator != null) {
+        for (SegmentStruct s : pendingWrites.values()) {
+          ConcurrentHashMap<String, UUID> addToManifest = s.pendingFiles.getAndSet(null);
+          if (addToManifest == null) continue;
+          // Only move UUIDs for files actually covered by this sync batch.
+          addToManifest.keySet().retainAll(names);
+          if (!addToManifest.isEmpty()) {
+            batched
+                .computeIfAbsent(s.segUUID, (k) -> ConcurrentHashMap.newKeySet())
+                .addAll(addToManifest.values());
+            blobCoordinator.registerBatch(s.segUUID, addToManifest.values());
+          }
         }
       }
     }
