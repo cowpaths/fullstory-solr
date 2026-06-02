@@ -38,6 +38,7 @@ final class BlobMetadataCodec {
   private static final int UUID_BYTES = Long.BYTES << 1; // 16
   private static final int HEADER_BYTES = Integer.BYTES; // 4
   private static final int NEW_MANIFEST_OFFSET = HEADER_BYTES + UUID_BYTES;
+  private static final int TWO_UUIDS_BYTES = UUID_BYTES << 1;
 
   private BlobMetadataCodec() {}
 
@@ -61,28 +62,25 @@ final class BlobMetadataCodec {
    */
   static byte[] mergeInto(byte[] existing, UUID refId, List<UUID> manifest) {
     int n = ByteBuffer.wrap(existing).getInt(0);
-    byte[] newRefs = sortedMergeSlice(existing, HEADER_BYTES, n, List.of(refId));
-    byte[] newManifest = sortedMergeSlice(existing, n, existing.length, manifest);
-    if (newRefs == null && newManifest == null) {
+    ByteBuffer dst =
+        ByteBuffer.allocate(existing.length + UUID_BYTES + (manifest.size() * UUID_BYTES));
+    dst.putInt(n); // optimistically assume we already have a ref
+    boolean modified = sortedMergeSlice(existing, HEADER_BYTES, n, List.of(refId), dst);
+    if (modified) {
+      dst.putInt(0, dst.position()); // overwrite header
+    }
+    modified |= sortedMergeSlice(existing, n, existing.length, manifest, dst);
+    if (!modified) {
       return existing;
-    }
-    int refsLen = newRefs != null ? newRefs.length : n - HEADER_BYTES;
-    int manifestLen = newManifest != null ? newManifest.length : existing.length - n;
-    int newN = HEADER_BYTES + refsLen;
-    byte[] result = new byte[newN + manifestLen];
-    ByteBuffer buf = ByteBuffer.wrap(result);
-    buf.putInt(newN);
-    if (newRefs != null) {
-      buf.put(newRefs);
     } else {
-      buf.put(existing, HEADER_BYTES, refsLen);
+      if (dst.hasRemaining()) {
+        byte[] ret = new byte[dst.position()];
+        dst.flip().get(ret);
+        return ret;
+      } else {
+        return dst.array();
+      }
     }
-    if (newManifest != null) {
-      buf.put(newManifest);
-    } else {
-      buf.put(existing, n, manifestLen);
-    }
-    return result;
   }
 
   /**
@@ -91,18 +89,13 @@ final class BlobMetadataCodec {
    */
   static byte[] removeRef(byte[] existing, UUID refId) {
     int n = ByteBuffer.wrap(existing).getInt(0);
-    byte[] newRefs = sortedRemoveSlice(existing, HEADER_BYTES, n, refId);
-    if (newRefs == null) {
+    ByteBuffer dst = ByteBuffer.allocate(existing.length - UUID_BYTES);
+    dst.putInt(n - UUID_BYTES); // prospective
+    if (!sortedRemoveSlice(existing, HEADER_BYTES, n, refId, dst)) {
       return existing;
     }
-    int newN = HEADER_BYTES + newRefs.length;
-    int manifestLen = existing.length - n;
-    byte[] result = new byte[newN + manifestLen];
-    ByteBuffer buf = ByteBuffer.wrap(result);
-    buf.putInt(newN);
-    buf.put(newRefs);
-    buf.put(existing, n, manifestLen);
-    return result;
+    dst.put(existing, n, existing.length - n);
+    return dst.array();
   }
 
   /** Returns {@code true} if the refs section contains no UUIDs. */
@@ -132,13 +125,14 @@ final class BlobMetadataCodec {
    * newItems}, deduplicating equal elements. Returns a trimmed new array containing the merged
    * section, or {@code null} if all new items were already present (no change).
    */
-  private static byte[] sortedMergeSlice(byte[] existing, int from, int to, List<UUID> newItems) {
+  private static boolean sortedMergeSlice(
+      byte[] existing, int from, int to, List<UUID> newItems, ByteBuffer dst) {
     int ei = from;
     int ni = 0;
     int existingBytes = to - from;
     int newSize = newItems.size();
+    int dstFrom = dst.position();
     ByteBuffer src = ByteBuffer.wrap(existing);
-    ByteBuffer dst = ByteBuffer.allocate(existingBytes + (newSize * UUID_BYTES));
     while (ei < to && ni < newSize) {
       long eMsb = src.getLong(ei);
       long eLsb = src.getLong(ei + Long.BYTES);
@@ -175,43 +169,34 @@ final class BlobMetadataCodec {
         dst.putLong(newUUID.getLeastSignificantBits());
       }
     }
-    int written = dst.position();
-    if (written == existingBytes) {
-      return null; // nothing new
-    }
-    byte[] result = new byte[written];
-    System.arraycopy(dst.array(), 0, result, 0, written);
-    return result;
+    int written = dst.position() - dstFrom;
+    return written != existingBytes;
   }
 
   /**
    * Scans the sorted UUID section {@code data[from..to)} for {@code item}. Returns a new array with
    * it removed, or {@code null} if not found.
    */
-  private static byte[] sortedRemoveSlice(byte[] data, int from, int to, UUID item) {
+  private static boolean sortedRemoveSlice(
+      byte[] data, int from, int to, UUID item, ByteBuffer dst) {
     int sectionLen = to - from;
     if (sectionLen < UUID_BYTES) {
-      return null;
+      return false;
     }
     long msbTarget = item.getMostSignificantBits();
     long lsbTarget = item.getLeastSignificantBits();
-    byte[] result = new byte[sectionLen - UUID_BYTES];
     ByteBuffer src = ByteBuffer.wrap(data, from, sectionLen);
-    ByteBuffer dst = ByteBuffer.wrap(result);
-    while (dst.remaining() >= UUID_BYTES) {
+    while (src.remaining() >= TWO_UUIDS_BYTES) {
       long msb = src.getLong();
       long lsb = src.getLong();
       if (msb == msbTarget && lsb == lsbTarget) {
         dst.put(src); // drain remaining entries into result
-        return result;
+        return true;
       }
       dst.putLong(msb);
       dst.putLong(lsb);
     }
-    if (msbTarget == src.getLong() && lsbTarget == src.getLong()) {
-      return result;
-    }
-    return null; // not found
+    return msbTarget == src.getLong() && lsbTarget == src.getLong();
   }
 
   private static List<UUID> deserializeUUIDs(byte[] data, int from, int to) {
