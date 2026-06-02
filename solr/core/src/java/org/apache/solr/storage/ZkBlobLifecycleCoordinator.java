@@ -22,12 +22,15 @@ import java.lang.invoke.MethodHandles;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -86,12 +89,12 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
   @Override
   public void registerBatch(UUID segUUID, Collection<UUID> blobUUIDs) throws IOException {
     String batchPath = BASE_PATH + "/" + segUUID;
-    byte[] data = serializeBlobs(blobUUIDs);
     try {
       try {
-        zkClient.create(batchPath, data, CreateMode.PERSISTENT, true);
+        zkClient.create(batchPath, serializeBlobs(blobUUIDs), CreateMode.PERSISTENT, true);
       } catch (KeeperException.NodeExistsException e) {
-        // Another replica already registered this batch; our blob set should be identical.
+        // Node exists — merge our blobs into the existing set.
+        mergeBlobs(batchPath, blobUUIDs);
       }
       // Persistent ref node: survives node restarts so data is not deleted while offline.
       try {
@@ -101,6 +104,25 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
       }
     } catch (KeeperException | InterruptedException e) {
       throw new IOException("Failed to register batch " + segUUID, e);
+    }
+  }
+
+  private void mergeBlobs(String batchPath, Collection<UUID> newBlobs)
+      throws KeeperException, InterruptedException {
+    while (true) {
+      Stat stat = new Stat();
+      byte[] existing = zkClient.getData(batchPath, null, stat, true);
+      Set<UUID> merged = new LinkedHashSet<>(deserializeBlobs(existing));
+      if (merged.addAll(newBlobs)) {
+        try {
+          zkClient.setData(batchPath, serializeBlobs(merged), stat.getVersion(), true);
+          return;
+        } catch (KeeperException.BadVersionException e) {
+          // Concurrent update; retry.
+        }
+      } else {
+        return; // All blobs already present; nothing to write.
+      }
     }
   }
 
