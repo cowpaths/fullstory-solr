@@ -446,6 +446,17 @@ public class GCSDirectory extends MMapDirectory {
     if (!isGcsBacked(name)) {
       return super.createOutput(name, context);
     }
+    // TODO: consider gating on IOContext.FLUSH to keep flush segments local (disk-only) and
+    // only upload to GCS on merge. Flush segments are short-lived and frequently replaced, so
+    // paying per-object GCS operation costs for them is wasteful. Implementation sketch:
+    //   - On FLUSH: write a magic "local-only" header to the offset file and return a direct
+    //     local output (no GCS upload, no metadata blob).
+    //   - isGcsBacked() would need to detect the magic header to serve the file from local disk
+    //     and skip registerBatch/release coordination for such files.
+    //   - On merge, Lucene reads the flush segment via openInput() (which detects the local
+    //     header) and writes the merged result via createOutput() with a MERGE context, which
+    //     would take the normal GCS upload path.
+    // This could significantly reduce GCS operation churn and metadata blob cost.
     return pendingWrites
         .computeIfAbsent(
             IndexFileNames.parseSegmentName(name),
