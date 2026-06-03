@@ -483,7 +483,16 @@ public class GCSDirectory extends MMapDirectory {
   @Override
   public void copyFrom(Directory from, String src, String dest, IOContext context)
       throws IOException {
-    rawDirectoryView(this).copyFrom(rawDirectoryView(from), src, dest, context);
+    Directory rawFrom = rawDirectoryView(from);
+    if (rawFrom == from) {
+      // Source is not a GCSDirectory (should not happen in practice); fall back to a regular copy
+      // which reads content and uploads it to GCS as a new blob.
+      super.copyFrom(from, src, dest, context);
+      return;
+    }
+    // Both directories are GCS-backed: copy the raw offset file so the destination reuses
+    // the same GCS blob without re-uploading.
+    rawDirectoryView(this).copyFrom(rawFrom, src, dest, context);
   }
 
   @Override
