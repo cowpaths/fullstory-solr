@@ -25,9 +25,9 @@ import com.google.cloud.storage.StorageOptions;
  * Test/dev subclass of {@link GCSDirectoryFactory} that routes GCS operations to a local GCS
  * emulator (e.g. {@code gcloud beta emulators storage} or any GCS-compatible emulator).
  *
- * <p>Unlike {@link LocalGCSDirectoryFactory}, this uses a real HTTP transport, so it exercises the
- * full {@link AsyncGCSWriteHelper} write path and byte-range reads over the wire. gRPC is not used
- * here because gcsemu (and most GCS emulators) only support the HTTP/JSON API.
+ * <p>Unlike test {@code LocalGCSDirectoryFactory}, this uses a real HTTP transport, so it exercises
+ * the full {@link AsyncGCSWriteHelper} write path and byte-range reads over the wire. gRPC is not
+ * used here because gcsemu (and most GCS emulators) only support the HTTP/JSON API.
  *
  * <p><b>Locale sensitivity:</b> the GCS Java client builds {@code Content-Range} headers via {@code
  * String.format("%d", ...)}, which is locale-sensitive. Under non-Latin locales (e.g. Thai) the

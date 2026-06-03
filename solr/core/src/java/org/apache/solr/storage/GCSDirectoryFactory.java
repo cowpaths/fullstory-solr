@@ -324,6 +324,8 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
    *
    * <p>For in-memory testing, use {@code LocalGCSDirectoryFactory} (in the test sources), which
    * overrides this method with a {@code LocalStorageHelper}-backed singleton.
+   *
+   * <p>TODO: {@code initStorage()} should take {@code NamedList<?> args}.
    */
   protected Storage initStorage() {
     throw new UnsupportedOperationException(
