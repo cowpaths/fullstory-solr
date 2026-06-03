@@ -580,13 +580,12 @@ public class GCSDirectory extends MMapDirectory {
     private final ConcurrentHashMap<String, SegmentStruct> registerUUIDs;
     private final IndexOutput localOut;
 
-    // TODO: lazily parse the below out of the header (first bytes written)
-    private long length;
-    private SegmentStruct segStruct; // initialized via `initSegStruct(segUUID)`
+    // Offset-file header fields, populated lazily once OFFSET_FILE_HEADER_SIZE bytes have
+    // been written (see parseHeader()).
+    private final byte[] headerBuf = new byte[OFFSET_FILE_HEADER_SIZE];
+    private int headerBytesRead = 0;
+    private SegmentStruct segStruct;
     private UUID uuid;
-
-    // TODO: read offset vints as written to determine running block count
-    private long blockCount;
 
     private long bytesWritten = 0;
 
@@ -608,23 +607,31 @@ public class GCSDirectory extends MMapDirectory {
       }
     }
 
+    /** Parses segUUID and blobUUID out of the buffered offset-file header. */
+    private void parseHeader() {
+      ByteArrayDataInput hdr = new ByteArrayDataInput(headerBuf);
+      hdr.skipBytes(8); // [0–7]  logical file length
+      hdr.readByte(); // [8]    compressionBlockType
+      hdr.readByte(); // [9]    compressionType
+      hdr.readShort(); // [10–11] reserved
+      uuid = new UUID(hdr.readLong(), hdr.readLong()); // [12–27] blobUUID
+      UUID segUUID = new UUID(hdr.readLong(), hdr.readLong()); // [28–43] segUUID
+      // [44–51] gcsObjectSize — not needed here
+      segStruct = initSegStruct(segUUID);
+    }
+
     @Override
     public void close() throws IOException {
       try {
         localOut.close();
       } finally {
-        // TODO: remove null check once the lazy-parse path (see TODO above) is implemented and
-        // segStruct/uuid are always populated before close(). Until then, discover() + sync() on
-        // the destination directory handles registration after move.
-        if (segStruct != null && uuid != null) {
-          segStruct.registerFileUUID(getName(), uuid);
-        }
+        segStruct.registerFileUUID(getName(), uuid);
       }
     }
 
     @Override
     public long getFilePointer() {
-      return blockCount * COMPRESSION_BLOCK_SIZE; // reconstruct logical size
+      throw new UnsupportedOperationException();
     }
 
     @Override
@@ -635,12 +642,26 @@ public class GCSDirectory extends MMapDirectory {
     @Override
     public void writeByte(byte b) throws IOException {
       bytesWritten++;
+      if (headerBytesRead < OFFSET_FILE_HEADER_SIZE) {
+        headerBuf[headerBytesRead++] = b;
+        if (headerBytesRead == OFFSET_FILE_HEADER_SIZE) {
+          parseHeader();
+        }
+      }
       localOut.writeByte(b);
     }
 
     @Override
     public void writeBytes(byte[] b, int offset, int length) throws IOException {
       bytesWritten += length;
+      if (headerBytesRead < OFFSET_FILE_HEADER_SIZE) {
+        int toCopy = Math.min(OFFSET_FILE_HEADER_SIZE - headerBytesRead, length);
+        System.arraycopy(b, offset, headerBuf, headerBytesRead, toCopy);
+        headerBytesRead += toCopy;
+        if (headerBytesRead == OFFSET_FILE_HEADER_SIZE) {
+          parseHeader();
+        }
+      }
       localOut.writeBytes(b, offset, length);
     }
 
