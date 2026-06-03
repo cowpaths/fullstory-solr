@@ -17,6 +17,7 @@
 
 package org.apache.solr.storage;
 
+import com.google.cloud.WriteChannel;
 import com.google.cloud.storage.Blob;
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.BlobInfo;
@@ -24,6 +25,7 @@ import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageException;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.nio.ByteBuffer;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -72,29 +74,32 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
   public void registerBatch(UUID segUUID, Collection<UUID> blobUUIDs) throws IOException {
     String name = segUUID.toString();
     List<UUID> sortedBlobs = BlobMetadataCodec.sorted(blobUUIDs);
-    byte[] newData = BlobMetadataCodec.encodeNew(refId, sortedBlobs);
     BlobInfo blobInfo = BlobInfo.newBuilder(BlobId.of(metadataBucket, name)).build();
     while (true) {
-      try {
-        storage.create(blobInfo, newData, Storage.BlobTargetOption.generationMatch(0L));
-        return;
-      } catch (StorageException e) {
-        if (e.getCode() != HTTP_PRECONDITION_FAILED) {
-          throw new IOException("Failed to register batch " + segUUID, e);
-        }
-        // Object already exists; fall through to CAS merge.
-      }
       Blob blob = storage.get(BlobId.of(metadataBucket, name));
       if (blob == null) {
-        continue; // Deleted between precondition failure and read; retry create.
+        // Object doesn't exist; use generationMatch(0) to guard against a concurrent creation
+        // between our get() and this write. If the precondition fails, another replica created
+        // the object first — retry and merge our ref into the now-existing object.
+        byte[] newData = BlobMetadataCodec.encodeNew(refId, sortedBlobs);
+        try {
+          writeViaChannel(blobInfo, newData, Storage.BlobWriteOption.generationMatch(0L));
+          return;
+        } catch (StorageException e) {
+          if (e.getCode() != HTTP_PRECONDITION_FAILED) {
+            throw new IOException("Failed to register batch " + segUUID, e);
+          }
+          // Precondition failed; retry and merge our ref into the now-existing object.
+        }
       }
-      byte[] merged = BlobMetadataCodec.mergeInto(blob.getContent(), refId, sortedBlobs);
-      if (merged == blob.getContent()) {
+      byte[] existing = blob.getContent();
+      byte[] merged = BlobMetadataCodec.mergeInto(existing, refId, sortedBlobs);
+      if (merged == existing) {
         return; // Already registered; nothing to do.
       }
       try {
-        storage.create(
-            blobInfo, merged, Storage.BlobTargetOption.generationMatch(blob.getGeneration()));
+        writeViaChannel(
+            blobInfo, merged, Storage.BlobWriteOption.generationMatch(blob.getGeneration()));
         return;
       } catch (StorageException e) {
         if (e.getCode() != HTTP_PRECONDITION_FAILED) {
@@ -122,8 +127,8 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
       if (!BlobMetadataCodec.refsEmpty(updated)) {
         // Other refs remain; write back with our ref removed.
         try {
-          storage.create(
-              blobInfo, updated, Storage.BlobTargetOption.generationMatch(blob.getGeneration()));
+          writeViaChannel(
+              blobInfo, updated, Storage.BlobWriteOption.generationMatch(blob.getGeneration()));
           return Collections.emptyList();
         } catch (StorageException e) {
           if (e.getCode() != HTTP_PRECONDITION_FAILED) {
@@ -139,6 +144,25 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
         return manifest;
       }
       // Lost the race (concurrent re-registration or release); retry.
+    }
+  }
+
+  // TODO: metadata blobs are tiny (< 1 KB). Resumable upload (WriteChannel) requires two HTTP
+  // round-trips vs. one for multipart upload (storage.create(BlobInfo, byte[], ...)), so it
+  // carries slightly higher per-write latency. We use resumable here because the fullstorydev GCS
+  // emulator used in integration tests does not support the multipart upload format. On real GCS
+  // the difference is negligible given how rarely registerBatch/release fire (once per segment
+  // batch). If metadata write latency ever shows up in profiling, options include: fixing the
+  // emulator to support multipart, switching to ZkBlobLifecycleCoordinator in prod (where ZK is
+  // available), or making the upload method configurable.
+  private void writeViaChannel(BlobInfo blobInfo, byte[] data, Storage.BlobWriteOption... options)
+      throws StorageException {
+    try (WriteChannel writer = storage.writer(blobInfo, options)) {
+      writer.write(ByteBuffer.wrap(data));
+    } catch (StorageException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new StorageException(0, "Failed to write via channel", e);
     }
   }
 }

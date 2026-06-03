@@ -613,7 +613,12 @@ public class GCSDirectory extends MMapDirectory {
       try {
         localOut.close();
       } finally {
-        segStruct.registerFileUUID(getName(), uuid);
+        // TODO: remove null check once the lazy-parse path (see TODO above) is implemented and
+        // segStruct/uuid are always populated before close(). Until then, discover() + sync() on
+        // the destination directory handles registration after move.
+        if (segStruct != null && uuid != null) {
+          segStruct.registerFileUUID(getName(), uuid);
+        }
       }
     }
 
