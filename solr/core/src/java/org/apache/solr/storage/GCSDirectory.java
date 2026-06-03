@@ -219,6 +219,18 @@ public class GCSDirectory extends MMapDirectory {
   // + 16 (segUUID) + 8 (gcsObjectSize) = 52 bytes.
   static final int OFFSET_FILE_HEADER_SIZE = 52;
 
+  /**
+   * Sentinel written as the first 8 bytes of a local-only file (created with {@link
+   * IOContext.Context#FLUSH} context). Derived from a UUID so it cannot collide with a valid
+   * logical file length. Files beginning with this value bypass GCS upload entirely and are served
+   * directly from the local MMap file at byte offset 8.
+   */
+  static final long LOCAL_ONLY_SENTINEL =
+      UUID.nameUUIDFromBytes(
+              "org.apache.solr.storage.GCSDirectory#LOCAL_ONLY_SENTINEL"
+                  .getBytes(java.nio.charset.StandardCharsets.UTF_8))
+          .getMostSignificantBits();
+
   private final String bucket;
   protected final Storage storage;
   private final BlockCache cache;
@@ -301,11 +313,18 @@ public class GCSDirectory extends MMapDirectory {
     this.blobCoordinator = blobCoordinator;
     if (blobCoordinator != null) {
       for (String file : listAll()) {
-        if (!isGcsBacked(file)) continue;
+        if (!isGcsBacked(file)) {
+          continue;
+        }
         Path path = directory.resolve(file);
+        if (isLocalOnly(path)) {
+          continue; // local-only flush segment; no GCS blob to register
+        }
         UUID segUUID = readSegmentUUID(path);
         UUID blobUUID = readBlobUUID(path);
-        if (segUUID == null || blobUUID == null) continue; // malformed offset file; skip
+        if (segUUID == null || blobUUID == null) {
+          continue; // malformed offset file; skip
+        }
         batched.computeIfAbsent(segUUID, (k) -> ConcurrentHashMap.newKeySet()).add(blobUUID);
         pendingWrites.compute(
             IndexFileNames.parseSegmentName(file),
@@ -331,8 +350,13 @@ public class GCSDirectory extends MMapDirectory {
   }
 
   public void discover(String file) throws IOException {
-    if (!isGcsBacked(file)) return;
+    if (!isGcsBacked(file)) {
+      return;
+    }
     Path path = directory.resolve(file);
+    if (isLocalOnly(path)) {
+      return; // local-only flush segment; no GCS blob to register
+    }
     UUID segUUID = readSegmentUUID(path);
     UUID blobUUID = readBlobUUID(path);
     if (segUUID == null || blobUUID == null) return; // malformed offset file; skip
@@ -358,6 +382,10 @@ public class GCSDirectory extends MMapDirectory {
       return;
     }
     Path offsetFile = directory.resolve(name);
+    if (isLocalOnly(offsetFile)) {
+      super.deleteFile(name);
+      return;
+    }
     UUID segUUID = readSegmentUUID(offsetFile);
     UUID blobUUID = readBlobUUID(offsetFile);
     if (blobUUID != null) {
@@ -436,8 +464,17 @@ public class GCSDirectory extends MMapDirectory {
       return super.fileLength(name);
     }
     Path offsetFile = directory.resolve(name);
+    if (isLocalOnly(offsetFile)) {
+      long size = Files.size(offsetFile);
+      if (size < 8) {
+        throw new NoSuchFileException(name);
+      }
+      return size - 8;
+    }
     byte[] header = readOffsetFileHeader(offsetFile);
-    if (header == null) throw new NoSuchFileException(name);
+    if (header == null) {
+      throw new NoSuchFileException(name);
+    }
     return new ByteArrayDataInput(header).readLong();
   }
 
@@ -446,17 +483,13 @@ public class GCSDirectory extends MMapDirectory {
     if (!isGcsBacked(name)) {
       return super.createOutput(name, context);
     }
-    // TODO: consider gating on IOContext.FLUSH to keep flush segments local (disk-only) and
-    // only upload to GCS on merge. Flush segments are short-lived and frequently replaced, so
-    // paying per-object GCS operation costs for them is wasteful. Implementation sketch:
-    //   - On FLUSH: write a magic "local-only" header to the offset file and return a direct
-    //     local output (no GCS upload, no metadata blob).
-    //   - isGcsBacked() would need to detect the magic header to serve the file from local disk
-    //     and skip registerBatch/release coordination for such files.
-    //   - On merge, Lucene reads the flush segment via openInput() (which detects the local
-    //     header) and writes the merged result via createOutput() with a MERGE context, which
-    //     would take the normal GCS upload path.
-    // This could significantly reduce GCS operation churn and metadata blob cost.
+    // Flush segments are short-lived and frequently replaced, so skip GCS upload for them.
+    // A local-only sentinel is prepended so openInput/fileLength/deleteFile can detect them.
+    // On merge, Lucene reads these files via openInput() (which strips the sentinel) and writes
+    // the merged result via createOutput() with a MERGE context, taking the normal GCS path.
+    if (context.context == IOContext.Context.FLUSH) {
+      return new LocalOnlyIndexOutput(name, super.createOutput(name, context));
+    }
     return pendingWrites
         .computeIfAbsent(
             IndexFileNames.parseSegmentName(name),
@@ -547,6 +580,11 @@ public class GCSDirectory extends MMapDirectory {
     if (!Files.exists(offsetFile)) {
       throw new NoSuchFileException(name);
     }
+    if (isLocalOnly(offsetFile)) {
+      long fileSize = Files.size(offsetFile);
+      IndexInput raw = super.openInput(name, context);
+      return raw.slice("local-only:" + name, 8, fileSize - 8);
+    }
     return new GCSIndexInput("gcs:" + name, this, offsetFile);
   }
 
@@ -584,10 +622,79 @@ public class GCSDirectory extends MMapDirectory {
   /** Reads the segment UUID from the offset file, or null if the file is missing/malformed. */
   private static UUID readSegmentUUID(Path path) throws IOException {
     byte[] header = readOffsetFileHeader(path);
-    if (header == null) return null;
+    if (header == null) {
+      return null;
+    }
     ByteArrayDataInput in = new ByteArrayDataInput(header);
     in.skipBytes(28); // fileLength(8) + blockType(1) + comprType(1) + reserved(2) + blobUUID(16)
     return new UUID(in.readLong(), in.readLong());
+  }
+
+  /**
+   * Returns true if {@code path} is a local-only flush segment (first 8 bytes equal {@link
+   * #LOCAL_ONLY_SENTINEL}).
+   */
+  private static boolean isLocalOnly(Path path) throws IOException {
+    if (!Files.exists(path) || Files.size(path) < 8) {
+      return false;
+    }
+    try (FileChannel ch = FileChannel.open(path, StandardOpenOption.READ)) {
+      ByteBuffer buf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
+      while (buf.hasRemaining()) {
+        ch.read(buf);
+      }
+      return buf.getLong(0) == LOCAL_ONLY_SENTINEL;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // LocalOnlyIndexOutput
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Wraps a local {@link IndexOutput} (from {@link MMapDirectory}) to produce a local-only file
+   * that bypasses GCS upload. Prepends {@link #LOCAL_ONLY_SENTINEL} as the first 8 bytes so that
+   * {@link #openInput}, {@link #fileLength}, {@link #deleteFile}, and {@link #discover} can detect
+   * these files. The CRC32 and {@link #getFilePointer()} exclude the sentinel so callers see the
+   * logical file position and checksum.
+   */
+  private static final class LocalOnlyIndexOutput extends IndexOutput {
+
+    private final IndexOutput delegate;
+    private final CRC32 crc = new CRC32();
+
+    LocalOnlyIndexOutput(String name, IndexOutput delegate) throws IOException {
+      super("LocalOnly(name=\"" + name + "\")", name);
+      this.delegate = delegate;
+      delegate.writeLong(LOCAL_ONLY_SENTINEL);
+    }
+
+    @Override
+    public void writeByte(byte b) throws IOException {
+      crc.update(b);
+      delegate.writeByte(b);
+    }
+
+    @Override
+    public void writeBytes(byte[] b, int offset, int length) throws IOException {
+      crc.update(b, offset, length);
+      delegate.writeBytes(b, offset, length);
+    }
+
+    @Override
+    public long getFilePointer() {
+      return delegate.getFilePointer() - 8;
+    }
+
+    @Override
+    public long getChecksum() {
+      return crc.getValue();
+    }
+
+    @Override
+    public void close() throws IOException {
+      delegate.close();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -630,7 +737,11 @@ public class GCSDirectory extends MMapDirectory {
     /** Parses segUUID and blobUUID out of the buffered offset-file header. */
     private void parseHeader() {
       ByteArrayDataInput hdr = new ByteArrayDataInput(headerBuf);
-      hdr.skipBytes(8); // [0–7]  logical file length
+      long firstLong = hdr.readLong(); // [0–7] logical file length (or LOCAL_ONLY_SENTINEL)
+      if (firstLong == LOCAL_ONLY_SENTINEL) {
+        // Local-only flush segment received via replication; no GCS blob to register.
+        return;
+      }
       hdr.readByte(); // [8]    compressionBlockType
       hdr.readByte(); // [9]    compressionType
       hdr.readShort(); // [10–11] reserved
@@ -645,7 +756,11 @@ public class GCSDirectory extends MMapDirectory {
       try {
         localOut.close();
       } finally {
-        segStruct.registerFileUUID(getName(), uuid);
+        // segStruct/uuid are null for local-only files (sentinel detected in parseHeader) and for
+        // files that never accumulated a full 52-byte header (e.g. empty files in tests).
+        if (segStruct != null) {
+          segStruct.registerFileUUID(getName(), uuid);
+        }
       }
     }
 
