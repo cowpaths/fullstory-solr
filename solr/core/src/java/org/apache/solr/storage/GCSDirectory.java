@@ -316,15 +316,12 @@ public class GCSDirectory extends MMapDirectory {
         if (!isGcsBacked(file)) {
           continue;
         }
-        Path path = directory.resolve(file);
-        if (isLocalOnly(path)) {
-          continue; // local-only flush segment; no GCS blob to register
+        byte[] header = readOffsetFileHeader(directory.resolve(file));
+        if (header == null || isLocalOnlyHeader(header)) {
+          continue; // missing, malformed, or local-only flush segment
         }
-        UUID segUUID = readSegmentUUID(path);
-        UUID blobUUID = readBlobUUID(path);
-        if (segUUID == null || blobUUID == null) {
-          continue; // malformed offset file; skip
-        }
+        UUID segUUID = readSegmentUUID(header);
+        UUID blobUUID = readBlobUUID(header);
         batched.computeIfAbsent(segUUID, (k) -> ConcurrentHashMap.newKeySet()).add(blobUUID);
         pendingWrites.compute(
             IndexFileNames.parseSegmentName(file),
@@ -353,13 +350,12 @@ public class GCSDirectory extends MMapDirectory {
     if (!isGcsBacked(file)) {
       return;
     }
-    Path path = directory.resolve(file);
-    if (isLocalOnly(path)) {
-      return; // local-only flush segment; no GCS blob to register
+    byte[] header = readOffsetFileHeader(directory.resolve(file));
+    if (header == null || isLocalOnlyHeader(header)) {
+      return; // missing, malformed, or local-only flush segment
     }
-    UUID segUUID = readSegmentUUID(path);
-    UUID blobUUID = readBlobUUID(path);
-    if (segUUID == null || blobUUID == null) return; // malformed offset file; skip
+    UUID segUUID = readSegmentUUID(header);
+    UUID blobUUID = readBlobUUID(header);
     SegmentStruct segStruct =
         pendingWrites.computeIfAbsent(
             IndexFileNames.parseSegmentName(file), (segName) -> new SegmentStruct(segUUID));
@@ -382,12 +378,13 @@ public class GCSDirectory extends MMapDirectory {
       return;
     }
     Path offsetFile = directory.resolve(name);
-    if (isLocalOnly(offsetFile)) {
+    byte[] header = readOffsetFileHeader(offsetFile);
+    if (header != null && isLocalOnlyHeader(header)) {
       super.deleteFile(name);
       return;
     }
-    UUID segUUID = readSegmentUUID(offsetFile);
-    UUID blobUUID = readBlobUUID(offsetFile);
+    UUID segUUID = header != null ? readSegmentUUID(header) : null;
+    UUID blobUUID = header != null ? readBlobUUID(header) : null;
     if (blobUUID != null) {
       AtomicReferenceArray<BlockCache.Node> stale = pendingNodes.remove(blobUUID);
       if (stale != null) {
@@ -464,16 +461,12 @@ public class GCSDirectory extends MMapDirectory {
       return super.fileLength(name);
     }
     Path offsetFile = directory.resolve(name);
-    if (isLocalOnly(offsetFile)) {
-      long size = Files.size(offsetFile);
-      if (size < 8) {
-        throw new NoSuchFileException(name);
-      }
-      return size - 8;
-    }
     byte[] header = readOffsetFileHeader(offsetFile);
     if (header == null) {
       throw new NoSuchFileException(name);
+    }
+    if (isLocalOnlyHeader(header)) {
+      return Files.size(offsetFile) - 8;
     }
     return new ByteArrayDataInput(header).readLong();
   }
@@ -577,15 +570,16 @@ public class GCSDirectory extends MMapDirectory {
     }
     ensureCanRead(name);
     Path offsetFile = directory.resolve(name);
-    if (!Files.exists(offsetFile)) {
+    byte[] header = readOffsetFileHeader(offsetFile);
+    if (header == null) {
       throw new NoSuchFileException(name);
     }
-    if (isLocalOnly(offsetFile)) {
+    if (isLocalOnlyHeader(header)) {
       long fileSize = Files.size(offsetFile);
       IndexInput raw = super.openInput(name, context);
       return raw.slice("local-only:" + name, 8, fileSize - 8);
     }
-    return new GCSIndexInput("gcs:" + name, this, offsetFile);
+    return new GCSIndexInput("gcs:" + name, this, offsetFile, header);
   }
 
   // ---------------------------------------------------------------------------
@@ -600,51 +594,61 @@ public class GCSDirectory extends MMapDirectory {
     return name.startsWith("_") && !name.endsWith(".tmp");
   }
 
-  /** Returns the first {@link #OFFSET_FILE_HEADER_SIZE} bytes, or null if file is too small. */
+  /**
+   * Reads the offset-file header from {@code path} in a single file open. Returns:
+   *
+   * <ul>
+   *   <li>{@code null} — file missing, unreadable, or shorter than 8 bytes
+   *   <li>array of exactly 8 bytes starting with {@link #LOCAL_ONLY_SENTINEL} — local-only flush
+   *       segment
+   *   <li>array of exactly {@link #OFFSET_FILE_HEADER_SIZE} bytes — normal GCS-backed offset file
+   * </ul>
+   *
+   * Use {@link #isLocalOnlyHeader} to distinguish the two non-null cases.
+   */
   private static byte[] readOffsetFileHeader(Path path) throws IOException {
-    if (!Files.exists(path) || Files.size(path) < OFFSET_FILE_HEADER_SIZE) return null;
+    if (!Files.exists(path)) {
+      return null;
+    }
     try (FileChannel ch = FileChannel.open(path, StandardOpenOption.READ)) {
+      ByteBuffer sentinelBuf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
+      while (sentinelBuf.hasRemaining()) {
+        if (ch.read(sentinelBuf) == -1) {
+          return null; // file shorter than 8 bytes
+        }
+      }
+      if (sentinelBuf.getLong(0) == LOCAL_ONLY_SENTINEL) {
+        return sentinelBuf.array(); // 8 bytes — local-only
+      }
+      // GCS-backed: read remaining 44 bytes to complete the fixed header.
       ByteBuffer buf = ByteBuffer.allocate(OFFSET_FILE_HEADER_SIZE);
-      while (buf.hasRemaining()) ch.read(buf);
+      buf.put(sentinelBuf.array());
+      while (buf.hasRemaining()) {
+        if (ch.read(buf) == -1) {
+          return null; // malformed
+        }
+      }
       return buf.array();
     }
   }
 
-  /** Reads the GCS blob UUID from the offset file, or null if the file is missing/malformed. */
-  private static UUID readBlobUUID(Path path) throws IOException {
-    byte[] header = readOffsetFileHeader(path);
-    if (header == null) return null;
+  /** Returns true if {@code header} was read from a local-only flush segment. */
+  private static boolean isLocalOnlyHeader(byte[] header) {
+    return header.length < OFFSET_FILE_HEADER_SIZE;
+  }
+
+  /** Extracts the GCS blob UUID from an already-read offset-file header. */
+  private static UUID readBlobUUID(byte[] header) {
     ByteArrayDataInput in = new ByteArrayDataInput(header);
-    in.skipBytes(12); // skip fileLength(8) + blockType(1) + compressionType(1) + reserved(2)
+    in.skipBytes(12); // fileLength(8) + blockType(1) + compressionType(1) + reserved(2)
     return new UUID(in.readLong(), in.readLong());
   }
 
-  /** Reads the segment UUID from the offset file, or null if the file is missing/malformed. */
-  private static UUID readSegmentUUID(Path path) throws IOException {
-    byte[] header = readOffsetFileHeader(path);
-    if (header == null) {
-      return null;
-    }
+  /** Extracts the segment UUID from an already-read offset-file header. */
+  private static UUID readSegmentUUID(byte[] header) {
     ByteArrayDataInput in = new ByteArrayDataInput(header);
     in.skipBytes(28); // fileLength(8) + blockType(1) + comprType(1) + reserved(2) + blobUUID(16)
     return new UUID(in.readLong(), in.readLong());
-  }
-
-  /**
-   * Returns true if {@code path} is a local-only flush segment (first 8 bytes equal {@link
-   * #LOCAL_ONLY_SENTINEL}).
-   */
-  private static boolean isLocalOnly(Path path) throws IOException {
-    if (!Files.exists(path) || Files.size(path) < 8) {
-      return false;
-    }
-    try (FileChannel ch = FileChannel.open(path, StandardOpenOption.READ)) {
-      ByteBuffer buf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
-      while (buf.hasRemaining()) {
-        ch.read(buf);
-      }
-      return buf.getLong(0) == LOCAL_ONLY_SENTINEL;
-    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1026,25 +1030,12 @@ public class GCSDirectory extends MMapDirectory {
     private ReadChannel channel;
     private long channelPos = -1; // current byte offset of channel in the GCS object
 
-    // Root constructor: parses the offset file.
-    GCSIndexInput(String resourceDescription, GCSDirectory dir, Path offsetFile)
+    // Root constructor: parses the offset file using a pre-read header (from openInput) to avoid
+    // re-reading the fixed header bytes. Only the delta footer is read from disk here.
+    GCSIndexInput(String resourceDescription, GCSDirectory dir, Path offsetFile, byte[] header)
         throws IOException {
       super(resourceDescription);
       this.dir = dir;
-
-      byte[] header = readOffsetFileHeader(offsetFile);
-      if (header == null || header.length < OFFSET_FILE_HEADER_SIZE) {
-        length = 0;
-        blockOffsets = null;
-        blockCount = 0;
-        lastBlockIdx = -1;
-        lastBlockDecompressedLen = 0;
-        blobName = null;
-        accessMapped = EMPTY_ACCESS_MAPPED;
-        offset = 0;
-        sliceLength = 0;
-        return;
-      }
 
       ByteArrayDataInput hdr = new ByteArrayDataInput(header);
       length = hdr.readLong();
