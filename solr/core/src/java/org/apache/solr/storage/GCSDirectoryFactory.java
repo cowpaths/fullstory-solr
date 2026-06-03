@@ -29,6 +29,7 @@ import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.LockFactory;
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.cloud.SolrZkClient;
@@ -100,6 +101,15 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   public void initCoreContainer(CoreContainer cc) {
     super.initCoreContainer(cc);
     this.cc = new WeakReference<>(cc);
+  }
+
+  @Override
+  public void move(Directory fromDir, Directory toDir, String fileName, IOContext ioContext)
+      throws IOException {
+    super.move(fromDir, toDir, fileName, ioContext);
+    if (toDir instanceof GCSDirectory) {
+      ((GCSDirectory) toDir).discover(fileName);
+    }
   }
 
   /** Node-level resources shared across all {@link GCSDirectory} instances on this node. */

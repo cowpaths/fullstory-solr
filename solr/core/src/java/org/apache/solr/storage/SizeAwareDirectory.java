@@ -19,6 +19,7 @@ package org.apache.solr.storage;
 
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.util.Collection;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -28,7 +29,9 @@ import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.IOContext;
+import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.store.Lock;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.core.DirectoryFactory;
@@ -63,6 +66,71 @@ public class SizeAwareDirectory extends FilterDirectory
 
   @SuppressWarnings({"unchecked", "rawtypes"})
   private final Future<Sizes>[] computingSize = new Future[1];
+
+  public Directory rewrapRaw(Directory raw) {
+    return new Directory() {
+      @Override
+      public String[] listAll() throws IOException {
+        return SizeAwareDirectory.this.listAll();
+      }
+
+      @Override
+      public void deleteFile(String name) throws IOException {
+        SizeAwareDirectory.this.deleteFile(name);
+      }
+
+      @Override
+      public long fileLength(String name) throws IOException {
+        return SizeAwareDirectory.this.onDiskFileLength(name);
+      }
+
+      @Override
+      public IndexOutput createOutput(String name, IOContext context) throws IOException {
+        return SizeAwareDirectory.this.wrap(name, raw.createOutput(name, context));
+      }
+
+      @Override
+      public IndexOutput createTempOutput(String prefix, String suffix, IOContext context)
+          throws IOException {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public void sync(Collection<String> names) throws IOException {
+        SizeAwareDirectory.this.sync(names);
+      }
+
+      @Override
+      public void syncMetaData() throws IOException {
+        SizeAwareDirectory.this.syncMetaData();
+      }
+
+      @Override
+      public void rename(String source, String dest) throws IOException {
+        SizeAwareDirectory.this.rename(source, dest);
+      }
+
+      @Override
+      public IndexInput openInput(String name, IOContext context) throws IOException {
+        return raw.openInput(name, context);
+      }
+
+      @Override
+      public Lock obtainLock(String name) throws IOException {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public void close() throws IOException {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public Set<String> getPendingDeletions() throws IOException {
+        return SizeAwareDirectory.this.getPendingDeletions();
+      }
+    };
+  }
 
   private interface SizeWriter {
     void apply(long size, long onDiskSize, String name);
@@ -319,9 +387,12 @@ public class SizeAwareDirectory extends FilterDirectory
 
   @Override
   public IndexOutput createOutput(String name, IOContext context) throws IOException {
+    return wrap(name, in.createOutput(name, context));
+  }
+
+  private IndexOutput wrap(String name, IndexOutput delegate) {
     SizeAccountingIndexOutput ret =
-        new SizeAccountingIndexOutput(
-            name, in.createOutput(name, context), fileSizeMap, liveOutputs, sizeWriter, in);
+        new SizeAccountingIndexOutput(name, delegate, fileSizeMap, liveOutputs, sizeWriter, in);
     liveOutputs.put(name, ret);
     return ret;
   }

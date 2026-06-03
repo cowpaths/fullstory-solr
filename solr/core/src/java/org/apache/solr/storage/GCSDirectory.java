@@ -57,10 +57,13 @@ import java.util.zip.CRC32;
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.DataOutput;
+import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSLockFactory;
+import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.store.Lock;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.OutputStreamDataOutput;
 import org.apache.lucene.store.RandomAccessInput;
@@ -106,6 +109,88 @@ import org.slf4j.LoggerFactory;
 public class GCSDirectory extends MMapDirectory {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+
+  public static Directory rawDirectoryView(Directory dir) {
+    Directory unwrap = dir;
+    SizeAwareDirectory sad = null;
+    while (unwrap instanceof FilterDirectory) {
+      if (unwrap instanceof SizeAwareDirectory) {
+        sad = (SizeAwareDirectory) unwrap;
+      }
+      unwrap = ((FilterDirectory) unwrap).getDelegate();
+    }
+    if (unwrap instanceof GCSDirectory) {
+      Directory raw = ((GCSDirectory) unwrap).rawDirectoryView();
+      return sad == null ? raw : sad.rewrapRaw(raw);
+    } else {
+      return dir;
+    }
+  }
+
+  private Directory rawDirectoryView() {
+    return new Directory() {
+      @Override
+      public long fileLength(String name) throws IOException {
+        return GCSDirectory.super.fileLength(name);
+      }
+
+      @Override
+      public IndexInput openInput(String name, IOContext context) throws IOException {
+        return GCSDirectory.super.openInput(name, context);
+      }
+
+      @Override
+      public void close() throws IOException {
+        // no-op
+      }
+
+      @Override
+      public String[] listAll() throws IOException {
+        return GCSDirectory.this.listAll();
+      }
+
+      @Override
+      public void deleteFile(String name) throws IOException {
+        GCSDirectory.this.deleteFile(name);
+      }
+
+      @Override
+      public IndexOutput createOutput(String name, IOContext context) throws IOException {
+        return GCSDirectory.this.createOutputDirect(name, context);
+      }
+
+      @Override
+      public IndexOutput createTempOutput(String prefix, String suffix, IOContext context)
+          throws IOException {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public void sync(Collection<String> names) throws IOException {
+        GCSDirectory.this.sync(names);
+      }
+
+      @Override
+      public void syncMetaData() throws IOException {
+        GCSDirectory.this.syncMetaData();
+      }
+
+      @Override
+      public void rename(String source, String dest) throws IOException {
+        GCSDirectory.this.rename(source, dest);
+      }
+
+      @Override
+      public Lock obtainLock(String name) throws IOException {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public Set<String> getPendingDeletions() throws IOException {
+        throw new UnsupportedOperationException();
+      }
+    };
+  }
 
   /**
    * Seam for ZooKeeper-backed distributed blob lifecycle management.
@@ -245,6 +330,22 @@ public class GCSDirectory extends MMapDirectory {
     }
   }
 
+  public void discover(String file) throws IOException {
+    if (!isGcsBacked(file)) return;
+    Path path = directory.resolve(file);
+    UUID segUUID = readSegmentUUID(path);
+    UUID blobUUID = readBlobUUID(path);
+    if (segUUID == null || blobUUID == null) return; // malformed offset file; skip
+    SegmentStruct segStruct =
+        pendingWrites.computeIfAbsent(
+            IndexFileNames.parseSegmentName(file), (segName) -> new SegmentStruct(segUUID));
+    if (!segUUID.equals(segStruct.segUUID)) {
+      segStruct =
+          pendingWrites.computeIfAbsent(segUUID.toString(), (k) -> new SegmentStruct(segUUID));
+    }
+    segStruct.registerFileUUID(file, blobUUID);
+  }
+
   // ---------------------------------------------------------------------------
   // Directory API
   // ---------------------------------------------------------------------------
@@ -352,6 +453,13 @@ public class GCSDirectory extends MMapDirectory {
         .createOutput(name, this, context);
   }
 
+  private IndexOutput createOutputDirect(String name, IOContext context) throws IOException {
+    if (!isGcsBacked(name)) {
+      return super.createOutput(name, context);
+    }
+    return new GCSIndexOutputDirect(pendingWrites, super.createOutput(name, context));
+  }
+
   private IndexOutput createOutput(String name, SegmentStruct struct, IOContext context)
       throws IOException {
     return new GCSIndexOutput(this, struct, super.createOutput(name, context));
@@ -370,6 +478,12 @@ public class GCSDirectory extends MMapDirectory {
           "Rename across GCS/non-GCS boundary not supported: " + source + " -> " + dest);
     }
     super.rename(source, dest);
+  }
+
+  @Override
+  public void copyFrom(Directory from, String src, String dest, IOContext context)
+      throws IOException {
+    rawDirectoryView(this).copyFrom(rawDirectoryView(from), src, dest, context);
   }
 
   @Override
@@ -459,6 +573,77 @@ public class GCSDirectory extends MMapDirectory {
   // ---------------------------------------------------------------------------
   // GCSIndexOutput
   // ---------------------------------------------------------------------------
+
+  static final class GCSIndexOutputDirect extends IndexOutput
+      implements CompressingDirectory.SizeReportingIndexOutput {
+
+    private final ConcurrentHashMap<String, SegmentStruct> registerUUIDs;
+    private final IndexOutput localOut;
+
+    // TODO: lazily parse the below out of the header (first bytes written)
+    private long length;
+    private SegmentStruct segStruct; // initialized via `initSegStruct(segUUID)`
+    private UUID uuid;
+
+    // TODO: read offset vints as written to determine running block count
+    private long blockCount;
+
+    private long bytesWritten = 0;
+
+    GCSIndexOutputDirect(
+        ConcurrentHashMap<String, SegmentStruct> registerUUIDs, IndexOutput localOut) {
+      super("GCSIndexOutputDirect(name=\"" + localOut.getName() + "\")", localOut.getName());
+      this.registerUUIDs = registerUUIDs;
+      this.localOut = localOut;
+    }
+
+    private SegmentStruct initSegStruct(UUID segUUID) {
+      SegmentStruct candidate =
+          registerUUIDs.computeIfAbsent(
+              IndexFileNames.parseSegmentName(getName()), (segName) -> new SegmentStruct(segUUID));
+      if (segUUID.equals(candidate.segUUID)) {
+        return candidate;
+      } else {
+        return registerUUIDs.computeIfAbsent(segUUID.toString(), (k) -> new SegmentStruct(segUUID));
+      }
+    }
+
+    @Override
+    public void close() throws IOException {
+      try {
+        localOut.close();
+      } finally {
+        segStruct.registerFileUUID(getName(), uuid);
+      }
+    }
+
+    @Override
+    public long getFilePointer() {
+      return blockCount * COMPRESSION_BLOCK_SIZE; // reconstruct logical size
+    }
+
+    @Override
+    public long getChecksum() throws IOException {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void writeByte(byte b) throws IOException {
+      bytesWritten++;
+      localOut.writeByte(b);
+    }
+
+    @Override
+    public void writeBytes(byte[] b, int offset, int length) throws IOException {
+      bytesWritten += length;
+      localOut.writeBytes(b, offset, length);
+    }
+
+    @Override
+    public long getBytesWritten() {
+      return bytesWritten; // _compressed_ bytes ... so, like, the actual size on disk.
+    }
+  }
 
   static final class GCSIndexOutput extends IndexOutput
       implements CompressingDirectory.SizeReportingIndexOutput {
