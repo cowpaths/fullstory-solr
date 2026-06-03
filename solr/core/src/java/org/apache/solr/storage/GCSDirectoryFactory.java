@@ -21,11 +21,14 @@ import com.google.cloud.ReadChannel;
 import com.google.cloud.storage.Storage;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import org.apache.lucene.store.Directory;
@@ -137,35 +140,93 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
      */
     private final SolrZkClient zkClient;
 
+    /**
+     * The Solr core root directory (from {@link CoreContainer#getCoreRootDirectory()}); used to
+     * bound the upward search for {@code core.properties} in {@link
+     * #refIdFromCoreProperties(Path)}. Null when no {@link CoreContainer} is available (e.g. in
+     * standalone tests), in which case the search falls back to a depth limit.
+     */
+    private final Path coreRootDirectory;
+
     NodeLevelGCSDirectoryState(
-        BlockCache blockCache, Storage storage, String metadataBucket, ZkController zkController) {
+        BlockCache blockCache,
+        Storage storage,
+        String metadataBucket,
+        ZkController zkController,
+        Path coreRootDirectory) {
       this.blockCache = blockCache;
       this.storage = storage;
       this.channelPool = new Cache<>(new ReadChannel[DEFAULT_MAX_OPEN_CHANNELS], true);
       this.bufferPool = new DirectBufferPool(GCS_WRITE_BUFFER_SIZE, 4096, 1);
       this.metadataBucket = metadataBucket;
       this.zkClient = zkController != null ? zkController.getZkClient() : null;
+      this.coreRootDirectory = coreRootDirectory;
     }
 
     /**
      * Returns a {@link GCSDirectory.BlobLifecycleCoordinator} scoped to the given local index
-     * directory. The {@code refId} is a deterministic UUID derived from the final path element
-     * (directory name only), so it is stable across parent-directory migrations and unique per
-     * replica even when co-located.
+     * directory.
+     *
+     * <p>The {@code refId} is a deterministic UUID that uniquely identifies this replica's instance
+     * of {@code localPath}. It is derived preferentially from the {@code name} and {@code
+     * coreNodeName} properties in the nearest {@code core.properties} file found by walking up from
+     * {@code localPath}, combined with the path relative to that file's directory. This makes the
+     * refId stable across moves of the Solr data root. Falls back to the full absolute path if no
+     * {@code core.properties} is found (e.g. in tests or standalone deployments without a standard
+     * directory layout).
+     *
+     * <p><b>Warning (fallback path only):</b> if the absolute-path fallback is in use and the Solr
+     * data directory is relocated, refIds will change. Blobs whose old refIds are never released
+     * will be orphaned and never garbage-collected, requiring a manual migration.
      *
      * <p>Uses {@link ZkBlobLifecycleCoordinator} when {@code
      * solr.gcsDirectory.useZkCoordinator=true} and ZooKeeper is available; otherwise uses {@link
      * GcsBlobLifecycleCoordinator}.
      */
     GCSDirectory.BlobLifecycleCoordinator createBlobCoordinator(Path localPath) throws IOException {
-      UUID refId =
-          UUID.nameUUIDFromBytes(
-              localPath.getFileName().toString().getBytes(StandardCharsets.UTF_8));
+      UUID refId = refIdFromCoreProperties(localPath);
+      if (refId == null) {
+        refId =
+            UUID.nameUUIDFromBytes(
+                localPath.toAbsolutePath().normalize().toString().getBytes(StandardCharsets.UTF_8));
+      }
       if (EnvUtils.getPropertyAsBool("solr.gcsDirectory.useZkCoordinator", false)
           && zkClient != null) {
         return new ZkBlobLifecycleCoordinator(zkClient, refId);
       }
       return new GcsBlobLifecycleCoordinator(storage, metadataBucket, refId);
+    }
+
+    /**
+     * Derives a stable, replica-unique refId from the nearest {@code core.properties} file found by
+     * walking up from {@code localPath}. Returns {@code null} if no {@code core.properties} is
+     * found or if it contains neither a {@code name} nor a {@code coreNodeName} property.
+     */
+    private UUID refIdFromCoreProperties(Path localPath) throws IOException {
+      if (coreRootDirectory == null) return null;
+      Path root = coreRootDirectory.toAbsolutePath().normalize();
+      Path normalized = localPath.toAbsolutePath().normalize();
+      if (!normalized.startsWith(root)) return null;
+      // Walk up from localPath, stopping before coreRootDirectory itself (core.properties lives
+      // in a direct subdirectory of it, not in coreRootDirectory itself).
+      for (Path dir = normalized; !dir.equals(root); dir = dir.getParent()) {
+        Path corePropsPath = dir.resolve("core.properties");
+        if (Files.isRegularFile(corePropsPath)) {
+          Properties props = new Properties();
+          try (InputStream in = Files.newInputStream(corePropsPath)) {
+            props.load(in);
+          }
+          String name = props.getProperty("name", "");
+          String coreNodeName = props.getProperty("coreNodeName", "");
+          if (name.isEmpty() && coreNodeName.isEmpty()) {
+            return null;
+          }
+          String relPath = dir.relativize(normalized).toString();
+          String key = name + "\n" + coreNodeName + "\n" + relPath;
+          return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
+        }
+      }
+      return null;
     }
 
     @Override
@@ -217,6 +278,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       assert cc != null;
       final String metadataBucket = bucket + "-meta";
       final ZkController zkController = cc.getZkController();
+      final Path coreRootDirectory = cc.getCoreRootDirectory();
       nodeLevelState =
           cc.getObjectCache()
               .computeIfAbsent(
@@ -228,7 +290,8 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
                           new BlockCache(blockCacheBytes, blockCacheBackingFile),
                           storage,
                           metadataBucket,
-                          zkController);
+                          zkController,
+                          coreRootDirectory);
                     } catch (IOException e) {
                       throw new UncheckedIOException(e);
                     }
@@ -240,6 +303,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
                 new BlockCache(blockCacheBytes, blockCacheBackingFile),
                 storage,
                 bucket + "-meta",
+                null,
                 null);
       } catch (IOException e) {
         throw new UncheckedIOException(e);
