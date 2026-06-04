@@ -221,6 +221,12 @@ public class GCSDirectory extends MMapDirectory {
   static final int OFFSET_FILE_HEADER_SIZE = 52;
 
   /**
+   * GCS resumable-upload chunk size. 8 MiB amortizes HTTP round-trip overhead effectively;
+   * throughput gains plateau well below the client default of 15 MiB.
+   */
+  private static final int GCS_WRITE_CHUNK_SIZE = 8 * 1024 * 1024;
+
+  /**
    * Sentinel written as the first 8 bytes of a local-only file (created with {@link
    * IOContext.Context#FLUSH} context). Derived from a UUID so it cannot collide with a valid
    * logical file length. Files beginning with this value bypass GCS upload entirely and are served
@@ -860,6 +866,7 @@ public class GCSDirectory extends MMapDirectory {
       String blobName = uuid.toString();
       WriteChannel gcsChannel =
           dir.openWriteChannel(BlobInfo.newBuilder(BlobId.of(dir.bucket, blobName)).build());
+      gcsChannel.setChunkSize(GCS_WRITE_CHUNK_SIZE);
       writeHelper = new AsyncGCSWriteHelper(dir.bufferPool, gcsChannel);
       buffer = writeHelper.init();
       preBuffer = ByteBuffer.wrap(compressBuffer);
