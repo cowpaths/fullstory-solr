@@ -412,21 +412,24 @@ public class GCSDirectory extends MMapDirectory {
               log.warn("found unexpected blobUUID: {} != {}", extantBlobUUID, blobUUID);
             }
           }
-          Set<UUID> batchRemaining =
-              batched.compute(
-                  segUUID,
-                  (k, v) -> {
-                    if (v == null) {
-                      // Not in batched: file was written but never sync'd. Direct delete above.
-                      return null;
-                    } else if (!v.remove(blobUUID)) {
-                      // blob not in batch: file was never sync'd for a partially-sync'd segment.
-                      return v;
-                    } else {
-                      return v.isEmpty() ? null : v;
-                    }
-                  });
-          if (batchRemaining == null) {
+          boolean[] removedFromBatched = new boolean[1];
+          batched.compute(
+              segUUID,
+              (k, v) -> {
+                if (v == null) {
+                  // Not in batched: file was written but never sync'd. Direct delete above.
+                  return null;
+                } else if (!v.remove(blobUUID)) {
+                  // blob not in batch: file was never sync'd for a partially-sync'd segment.
+                  return v;
+                } else if (v.isEmpty()) {
+                  removedFromBatched[0] = true;
+                  return null;
+                } else {
+                  return v;
+                }
+              });
+          if (removedFromBatched[0]) {
             // Last local ref to this segment UUID batch is gone.
             pendingWrites.compute(
                 segName,
