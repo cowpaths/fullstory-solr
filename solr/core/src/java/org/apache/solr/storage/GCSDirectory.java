@@ -541,8 +541,10 @@ public class GCSDirectory extends MMapDirectory {
         for (SegmentStruct s : pendingWrites.values()) {
           ConcurrentHashMap<String, UUID> addToManifest = s.pendingFiles.getAndSet(null);
           if (addToManifest == null) continue;
-          // Only move UUIDs for files actually covered by this sync batch.
-          addToManifest.keySet().retainAll(names);
+          // NOTE: we cannot do `addToManifest.keySet().retainAll(names)`, because at the point
+          // we have acquired `addToManifest`, we hold the only record of these blobs' existence
+          // (`s.pendingFiles.getAndSet(null)`). Therefore it's our responsibility to register
+          // all of them with `batched` and `blobCoordinator`.
           if (!addToManifest.isEmpty()) {
             batched
                 .computeIfAbsent(s.segUUID, (k) -> ConcurrentHashMap.newKeySet())
