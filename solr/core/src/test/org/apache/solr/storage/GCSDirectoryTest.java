@@ -31,6 +31,7 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.RandomAccessInput;
 import org.apache.solr.SolrTestCaseJ4;
+import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
 
@@ -56,9 +57,9 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
       } else {
         factory = new LocalGCSDirectoryFactory();
       }
-      storage = factory.initStorage();
+      storage = factory.initStorage(new ModifiableSolrParams());
     } else {
-      storage = new LocalGCSDirectoryFactory().initStorage();
+      storage = new LocalGCSDirectoryFactory().initStorage(new ModifiableSolrParams());
     }
     Path tmpDir = createTempDir();
     // Cache sized to hold a handful of blocks; intentionally smaller than the largest test files

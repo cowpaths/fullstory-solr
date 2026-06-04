@@ -82,7 +82,7 @@ public class ServiceAccountGCSDirectoryFactory extends GCSDirectoryFactory {
   }
 
   @Override
-  protected Storage initStorage() {
+  protected Storage initStorage(SolrParams params) {
     try (InputStream is = Files.newInputStream(Path.of(keyFilePath))) {
       GoogleCredentials credentials =
           ServiceAccountCredentials.fromStream(is)

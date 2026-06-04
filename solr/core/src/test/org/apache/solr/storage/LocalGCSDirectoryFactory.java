@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
+import org.apache.solr.common.params.SolrParams;
 
 /**
  * Test-only subclass of {@link GCSDirectoryFactory} that uses an in-memory GCS mock backed by
@@ -45,7 +46,7 @@ public class LocalGCSDirectoryFactory extends GCSDirectoryFactory {
   private static volatile Storage storage;
 
   @Override
-  protected Storage initStorage() {
+  protected Storage initStorage(SolrParams params) {
     if (storage == null) {
       synchronized (LocalGCSDirectoryFactory.class) {
         if (storage == null) {

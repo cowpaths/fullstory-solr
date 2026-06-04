@@ -23,6 +23,7 @@ import com.google.cloud.storage.Storage;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Collections;
+import org.apache.solr.common.params.SolrParams;
 
 /**
  * Test/dev subclass of {@link GCSDirectoryFactory} that authenticates via <a
@@ -40,18 +41,23 @@ import java.util.Collections;
  *
  * <pre>
  *   -Psolr.directoryFactory=org.apache.solr.storage.ADCGCSDirectoryFactory
- *   -Psolr.gcsDirectory.bucket=my-dev-bucket
- *   -Psolr.gcsDirectory.project=my-gcp-project
+ *   -Psolr.gcsDirectory.bucket=fs-playpen-my-dev-bucket
  * </pre>
  */
 public class ADCGCSDirectoryFactory extends GCSDirectoryFactory {
 
+  private static final String PROJECT = "fs-playpen";
+  private static final String BUCKET_PREFIX = "fs-playpen-";
+
   @Override
-  protected Storage initStorage() {
-    String project = System.getProperty("solr.gcsDirectory.project");
-    if (project == null || project.isEmpty()) {
+  protected Storage initStorage(SolrParams params) {
+    if (!BUCKET.startsWith(BUCKET_PREFIX)) {
       throw new IllegalArgumentException(
-          "ADCGCSDirectoryFactory requires a GCP project ID via 'solr.gcsDirectory.project'.");
+          "ADCGCSDirectoryFactory requires a bucket name starting with \""
+              + BUCKET_PREFIX
+              + "\", got: \""
+              + BUCKET
+              + "\"");
     }
     try {
       GoogleCredentials credentials =
@@ -61,7 +67,7 @@ public class ADCGCSDirectoryFactory extends GCSDirectoryFactory {
       return GrpcStorageOptions.newBuilder()
           .setAttemptDirectPath(true)
           .setCredentials(credentials)
-          .setProjectId(project)
+          .setProjectId(PROJECT)
           .build()
           .getService();
     } catch (IOException e) {

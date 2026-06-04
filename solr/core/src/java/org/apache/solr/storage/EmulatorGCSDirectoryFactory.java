@@ -20,6 +20,8 @@ package org.apache.solr.storage;
 import com.google.cloud.NoCredentials;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
+import org.apache.solr.common.params.SolrParams;
+import org.apache.solr.common.util.EnvUtils;
 
 /**
  * Test/dev subclass of {@link GCSDirectoryFactory} that routes GCS operations to a local GCS
@@ -51,14 +53,14 @@ public class EmulatorGCSDirectoryFactory extends GCSDirectoryFactory {
   private static final String DEFAULT_EMULATOR_HOST = "http://localhost:4443";
 
   @Override
-  protected Storage initStorage() {
+  protected Storage initStorage(SolrParams params) {
     if (!String.format("%d", 0).equals("0")) {
       throw new IllegalStateException(
           "EmulatorGCSDirectoryFactory requires a Latin locale: the GCS client builds "
               + "locale-sensitive Content-Range headers that most emulators cannot parse "
               + "with non-ASCII digits. Run with -Ptests.locale=en (or root).");
     }
-    String host = System.getProperty("solr.gcsDirectory.emulatorHost", DEFAULT_EMULATOR_HOST);
+    String host = EnvUtils.getProperty("solr.gcsDirectory.emulatorHost", DEFAULT_EMULATOR_HOST);
     return StorageOptions.newBuilder()
         .setHost(host)
         .setProjectId("emulator-project")

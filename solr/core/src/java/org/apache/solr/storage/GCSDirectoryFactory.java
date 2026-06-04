@@ -54,14 +54,14 @@ import org.slf4j.LoggerFactory;
  * directories on the same node via {@link CoreContainer#getObjectCache()}.
  *
  * <p>This factory never uses application-default GCS credentials. Subclasses must override {@link
- * #initStorage()} to supply a {@link Storage} instance — either a real configured client (with an
- * explicit service account key) or an in-memory mock (see {@code LocalGCSDirectoryFactory} for
- * tests).
+ * #initStorage(SolrParams)} to supply a {@link Storage} instance — either a real configured client
+ * (with an explicit service account key) or an in-memory mock (see {@code LocalGCSDirectoryFactory}
+ * for tests).
  *
  * <p>Configuration parameters (via {@code solrconfig.xml} or system properties):
  *
  * <ul>
- *   <li>{@code bucket} / {@code solr.gcsDirectory.bucket} — GCS bucket name
+ *   <li>{@code solr.gcsDirectory.bucket} — GCS bucket name (system property)
  *   <li>{@code blockCacheKilobytes} / {@code solr.gcsDirectory.blockCacheKilobytes} — decompressed
  *       block cache size in KiB (default: 1 GiB)
  *   <li>{@code useAsyncIO} — whether to use double-buffered async GCS writes (default: true)
@@ -83,13 +83,18 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   /** Write buffer size for double-buffered GCS uploads. 256 KB matches GCS chunk alignment. */
   static final int GCS_WRITE_BUFFER_SIZE = 256 * 1024;
 
-  /** Default block cache size: 1 GiB expressed in KiB. */
-  private static final long DEFAULT_BLOCK_CACHE_KILOBYTES = 1L << 20;
+  /** Block cache size in KiB; node-level, must be set via sysprop before JVM startup. */
+  private static final long BLOCK_CACHE_KILOBYTES =
+      Long.getLong("solr.gcsDirectory.blockCacheKilobytes", 1L << 20);
 
   /**
    * Default cap on concurrently open GCS {@link com.google.cloud.ReadChannel}s across all files.
    */
-  private static final int DEFAULT_MAX_OPEN_CHANNELS = 256;
+  private static final int DEFAULT_MAX_OPEN_CHANNELS =
+      Integer.getInteger("solr.gcsDirectory.maxOpenChannels", 256);
+
+  /** GCS bucket name; node-level, must be set via sysprop before JVM startup. */
+  protected static final String BUCKET = EnvUtils.getProperty("solr.gcsDirectory.bucket", "");
 
   private NodeLevelGCSDirectoryState nodeLevelState;
 
@@ -97,7 +102,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   private NodeLevelGCSDirectoryState ownNodeLevelState;
 
   private WeakReference<CoreContainer> cc;
-  private String bucket;
   private boolean useAsyncIO;
 
   @Override
@@ -251,22 +255,14 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
             "com.google.api.client.googleapis.services.AbstractGoogleClient")
         .setFilter(r -> !r.getMessage().startsWith("Application name is not set"));
     SolrParams params = args.toSolrParams();
-    bucket = params.get("bucket", EnvUtils.getProperty("solr.gcsDirectory.bucket", ""));
-    if (bucket.isEmpty()) {
+    if (BUCKET.isEmpty()) {
       throw new IllegalArgumentException(
-          "GCSDirectoryFactory requires a bucket name via the 'bucket' param "
-              + "or the 'solr.gcsDirectory.bucket' system property.");
+          "GCSDirectoryFactory requires a bucket name via the 'solr.gcsDirectory.bucket' "
+              + "system property.");
     }
     useAsyncIO = params.getBool("useAsyncIO", true);
 
-    final long blockCacheBytes =
-        params.getLong(
-                "blockCacheKilobytes",
-                Long.getLong(
-                    "solr.gcsDirectory.blockCacheKilobytes", DEFAULT_BLOCK_CACHE_KILOBYTES))
-            * 1024L;
-
-    final Storage storage = initStorage();
+    final long blockCacheBytes = BLOCK_CACHE_KILOBYTES * 1024L;
 
     final Path blockCacheBackingFile =
         Path.of(EnvUtils.getProperty("java.io.tmpdir"))
@@ -276,7 +272,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       CoreContainer cc = this.cc.get();
       this.cc = null;
       assert cc != null;
-      final String metadataBucket = bucket + "-meta";
+      final String metadataBucket = BUCKET + "-meta";
       final ZkController zkController = cc.getZkController();
       final Path coreRootDirectory = cc.getCoreRootDirectory();
       nodeLevelState =
@@ -285,6 +281,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
                   "nodeLevelGCSDirectoryState",
                   NodeLevelGCSDirectoryState.class,
                   k -> {
+                    final Storage storage = initStorage(params); // TODO: race here.
                     try {
                       return new NodeLevelGCSDirectoryState(
                           new BlockCache(blockCacheBytes, blockCacheBackingFile),
@@ -301,8 +298,8 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         nodeLevelState =
             new NodeLevelGCSDirectoryState(
                 new BlockCache(blockCacheBytes, blockCacheBackingFile),
-                storage,
-                bucket + "-meta",
+                initStorage(params),
+                BUCKET + "-meta",
                 null,
                 null);
       } catch (IOException e) {
@@ -324,10 +321,8 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
    *
    * <p>For in-memory testing, use {@code LocalGCSDirectoryFactory} (in the test sources), which
    * overrides this method with a {@code LocalStorageHelper}-backed singleton.
-   *
-   * <p>TODO: {@code initStorage()} should take {@code NamedList<?> args}.
    */
-  protected Storage initStorage() {
+  protected Storage initStorage(SolrParams params) {
     throw new UnsupportedOperationException(
         "GCSDirectoryFactory does not use application-default GCS credentials. "
             + "Subclass and override initStorage() to provide a configured Storage instance, "
@@ -339,7 +334,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       throws IOException {
     return newGCSDirectory(
         Path.of(path),
-        bucket,
+        BUCKET,
         nodeLevelState.storage,
         nodeLevelState.blockCache,
         nodeLevelState.channelPool,
