@@ -89,7 +89,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   /**
    * Default cap on concurrently open GCS {@link com.google.cloud.ReadChannel}s across all files.
    */
-  private static final int DEFAULT_MAX_OPEN_CHANNELS = 4096;
+  private static final int DEFAULT_MAX_OPEN_CHANNELS = 256;
 
   private NodeLevelGCSDirectoryState nodeLevelState;
 
