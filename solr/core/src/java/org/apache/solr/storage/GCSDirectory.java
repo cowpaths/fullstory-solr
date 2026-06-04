@@ -29,6 +29,7 @@ import com.google.cloud.WriteChannel;
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageException;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
@@ -397,7 +398,7 @@ public class GCSDirectory extends MMapDirectory {
         String segName = IndexFileNames.parseSegmentName(name);
         if (blobCoordinator == null) {
           // No ZK: delete blobs immediately on every deleteFile call.
-          storage.delete(BlobId.of(bucket, blobUUID.toString()));
+          deleteBlob(blobUUID);
         } else {
           // Remove from pendingFiles if present (file was written but not yet sync'd).
           SegmentStruct struct = pendingWrites.get(segName);
@@ -406,7 +407,7 @@ public class GCSDirectory extends MMapDirectory {
             UUID extantBlobUUID = null;
             if (pending != null && blobUUID.equals(extantBlobUUID = pending.remove(name))) {
               // not yet sync'd, delete the blob immediately
-              storage.delete(BlobId.of(bucket, blobUUID.toString()));
+              deleteBlob(blobUUID);
             } else if (extantBlobUUID != null) {
               log.warn("found unexpected blobUUID: {} != {}", extantBlobUUID, blobUUID);
             }
@@ -443,7 +444,7 @@ public class GCSDirectory extends MMapDirectory {
                 });
             Collection<UUID> toDelete = blobCoordinator.release(segUUID);
             for (UUID id : toDelete) {
-              storage.delete(BlobId.of(bucket, id.toString()));
+              deleteBlob(id);
             }
           }
         }
@@ -562,6 +563,20 @@ public class GCSDirectory extends MMapDirectory {
    */
   protected WriteChannel openWriteChannel(BlobInfo blobInfo) {
     return storage.writer(blobInfo);
+  }
+
+  /**
+   * Deletes a GCS blob, logging a warning on failure rather than propagating. A failed delete
+   * leaves the blob orphaned (a space leak) but does not affect index correctness. This can happen
+   * transiently under load (e.g. emulator connection resets) and may warrant investigation if it
+   * persists in production.
+   */
+  private void deleteBlob(UUID blobUUID) {
+    try {
+      storage.delete(BlobId.of(bucket, blobUUID.toString()));
+    } catch (StorageException e) {
+      log.warn("Failed to delete GCS blob {} — it may be orphaned", blobUUID, e);
+    }
   }
 
   @Override
