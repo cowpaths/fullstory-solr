@@ -105,6 +105,19 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
       return future.join();
     }
 
+    /**
+     * Completes this node with an externally-owned buffer (e.g. an mmap slice) without copying.
+     * Unlike {@link #populate}, the node's {@link #getValue()} is not used; {@code buf} is stored
+     * directly as the future's result. Intended for synthetic always-pinned nodes (such as the
+     * local tail block) that are not backed by a pool slot.
+     *
+     * <p>TODO: revisit — there may be a cleaner way to model this without a separate method.
+     */
+    ByteBuffer populateDirect(ByteBuffer buf) {
+      future.complete(buf);
+      return buf;
+    }
+
     /** Marks this node as failed, unblocking any threads waiting in {@link #join()}. */
     public boolean completeExceptionally(Throwable t) {
       return future.completeExceptionally(t);

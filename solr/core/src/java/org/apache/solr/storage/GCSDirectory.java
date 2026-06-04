@@ -57,6 +57,7 @@ import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.store.ByteArrayDataInput;
+import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSLockFactory;
@@ -66,6 +67,7 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.Lock;
 import org.apache.lucene.store.MMapDirectory;
+import org.apache.lucene.store.MappedByteBufferIndexInputProvider;
 import org.apache.lucene.store.OutputStreamDataOutput;
 import org.apache.lucene.store.RandomAccessInput;
 import org.apache.lucene.util.compress.LZ4;
@@ -92,20 +94,26 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Delete: the local offset file and the GCS object are both removed.
  *
- * <p>Offset file format (all fields big-endian):
+ * <p>Local file format: for GCS-backed files the local file contains three sections, in order:
  *
  * <pre>
- *   [8 bytes]  logical (uncompressed) file length
- *   [1 byte]   compressionBlockType id
- *   [1 byte]   compressionType id
- *   [2 bytes]  reserved
- *   [8 bytes]  GCS blob UUID most-significant bits
- *   [8 bytes]  GCS blob UUID least-significant bits
- *   [8 bytes]  segment UUID most-significant bits
- *   [8 bytes]  segment UUID least-significant bits
- *   [8 bytes]  total compressed bytes in the GCS object
- *   [remaining bytes]  ZInt delta-encoded compressed block sizes
+ *   [tailLen bytes]     uncompressed tail block (last partial block; absent when length is an exact
+ *                       multiple of COMPRESSION_BLOCK_SIZE); tailLen = length % COMPRESSION_BLOCK_SIZE
+ *   [variable bytes]    ZInt delta-encoded compressed block sizes for the GCS portion (blocks 0..N-2)
+ *   [52 bytes trailer]  fixed metadata, fields little-endian:
+ *     [1 byte]   compressionBlockType id
+ *     [1 byte]   compressionType id
+ *     [2 bytes]  reserved
+ *     [16 bytes] GCS blob UUID (MSB then LSB)
+ *     [16 bytes] segment UUID (MSB then LSB)
+ *     [8 bytes]  logical (uncompressed) file length
+ *     [8 bytes]  total compressed bytes in the GCS object (blocks 0..N-2 only)
  * </pre>
+ *
+ * <p>Local-only files (flush segments or any file whose uncompressed length is less than one block)
+ * contain the raw uncompressed data followed by {@link #LOCAL_ONLY_SENTINEL} (8 bytes) as the very
+ * last bytes. Detection reads the last 8 bytes first; if they equal the sentinel the file is
+ * local-only, otherwise the full 52-byte trailer is parsed.
  */
 public class GCSDirectory extends MMapDirectory {
 
@@ -227,16 +235,25 @@ public class GCSDirectory extends MMapDirectory {
   private static final int GCS_WRITE_CHUNK_SIZE = 8 * 1024 * 1024;
 
   /**
-   * Sentinel written as the first 8 bytes of a local-only file (created with {@link
-   * IOContext.Context#FLUSH} context). Derived from a UUID so it cannot collide with a valid
-   * logical file length. Files beginning with this value bypass GCS upload entirely and are served
-   * directly from the local MMap file at byte offset 8.
+   * Sentinel written as the last 8 bytes of a local-only file. Derived from a UUID so it is
+   * astronomically unlikely to collide with a valid {@code gcsObjectSize} field that closes a
+   * GCS-backed trailer. Files ending with this value bypass GCS entirely and are served directly
+   * from the local MMap file (all bytes except the final 8).
    */
   static final long LOCAL_ONLY_SENTINEL =
       UUID.nameUUIDFromBytes(
               "org.apache.solr.storage.GCSDirectory#LOCAL_ONLY_SENTINEL"
                   .getBytes(java.nio.charset.StandardCharsets.UTF_8))
           .getMostSignificantBits();
+
+  /** Obtains Lucene's unmap hack for explicit {@link java.nio.MappedByteBuffer} cleanup. */
+  static ByteBufferGuard.BufferCleaner unmapHack() {
+    Object hack = MappedByteBufferIndexInputProvider.unmapHackImpl();
+    if (hack instanceof ByteBufferGuard.BufferCleaner) {
+      return (ByteBufferGuard.BufferCleaner) hack;
+    }
+    throw new UnsupportedOperationException("MappedByteBuffer unmap not available on this JVM");
+  }
 
   private final String bucket;
   protected final Storage storage;
@@ -486,7 +503,10 @@ public class GCSDirectory extends MMapDirectory {
     if (isLocalOnlyHeader(header)) {
       return Files.size(offsetFile) - 8;
     }
-    return new ByteArrayDataInput(header).readLong();
+    // length is at trailer offset 36: blockType+comprType+reserved(4) + blobUUID(16) + segUUID(16)
+    ByteArrayDataInput in = new ByteArrayDataInput(header);
+    in.skipBytes(36);
+    return in.readLong();
   }
 
   @Override
@@ -611,7 +631,7 @@ public class GCSDirectory extends MMapDirectory {
     if (isLocalOnlyHeader(header)) {
       long fileSize = Files.size(offsetFile);
       IndexInput raw = super.openInput(name, context);
-      return raw.slice("local-only:" + name, 8, fileSize - 8);
+      return raw.slice("local-only:" + name, 0, fileSize - 8);
     }
     return new GCSIndexInput("gcs:" + name, this, offsetFile, header);
   }
@@ -647,13 +667,13 @@ public class GCSDirectory extends MMapDirectory {
   }
 
   /**
-   * Reads the offset-file header from {@code path} in a single file open. Returns:
+   * Reads the local-file trailer from {@code path} in a single file open. Returns:
    *
    * <ul>
    *   <li>{@code null} — file missing, unreadable, or shorter than 8 bytes
-   *   <li>array of exactly 8 bytes starting with {@link #LOCAL_ONLY_SENTINEL} — local-only flush
-   *       segment
-   *   <li>array of exactly {@link #OFFSET_FILE_HEADER_SIZE} bytes — normal GCS-backed offset file
+   *   <li>array of exactly 8 bytes whose {@code long} value equals {@link #LOCAL_ONLY_SENTINEL} —
+   *       local-only file
+   *   <li>array of exactly {@link #OFFSET_FILE_HEADER_SIZE} bytes — GCS-backed file trailer
    * </ul>
    *
    * Use {@link #isLocalOnlyHeader} to distinguish the two non-null cases.
@@ -663,43 +683,38 @@ public class GCSDirectory extends MMapDirectory {
       return null;
     }
     try (FileChannel ch = FileChannel.open(path, StandardOpenOption.READ)) {
+      long fileSize = ch.size();
+      if (fileSize < 8) return null;
+      // Read last 8 bytes to check for the local-only sentinel.
       ByteBuffer sentinelBuf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
-      while (sentinelBuf.hasRemaining()) {
-        if (ch.read(sentinelBuf) == -1) {
-          return null; // file shorter than 8 bytes
-        }
-      }
+      ch.read(sentinelBuf, fileSize - 8);
       if (sentinelBuf.getLong(0) == LOCAL_ONLY_SENTINEL) {
         return sentinelBuf.array(); // 8 bytes — local-only
       }
-      // GCS-backed: read remaining 44 bytes to complete the fixed header.
-      ByteBuffer buf = ByteBuffer.allocate(OFFSET_FILE_HEADER_SIZE);
-      buf.put(sentinelBuf.array());
-      while (buf.hasRemaining()) {
-        if (ch.read(buf) == -1) {
-          return null; // malformed
-        }
-      }
+      if (fileSize < OFFSET_FILE_HEADER_SIZE) return null;
+      // GCS-backed: read the full 52-byte trailer from the end.
+      ByteBuffer buf = ByteBuffer.allocate(OFFSET_FILE_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN);
+      ch.read(buf, fileSize - OFFSET_FILE_HEADER_SIZE);
       return buf.array();
     }
   }
 
-  /** Returns true if {@code header} was read from a local-only flush segment. */
+  /** Returns true if {@code header} was read from a local-only file. */
   private static boolean isLocalOnlyHeader(byte[] header) {
     return header.length < OFFSET_FILE_HEADER_SIZE;
   }
 
-  /** Extracts the GCS blob UUID from an already-read offset-file header. */
+  /** Extracts the GCS blob UUID from an already-read GCS-backed trailer. */
   private static UUID readBlobUUID(byte[] header) {
     ByteArrayDataInput in = new ByteArrayDataInput(header);
-    in.skipBytes(12); // fileLength(8) + blockType(1) + compressionType(1) + reserved(2)
+    in.skipBytes(4); // blockType(1) + comprType(1) + reserved(2)
     return new UUID(in.readLong(), in.readLong());
   }
 
-  /** Extracts the segment UUID from an already-read offset-file header. */
+  /** Extracts the segment UUID from an already-read GCS-backed trailer. */
   private static UUID readSegmentUUID(byte[] header) {
     ByteArrayDataInput in = new ByteArrayDataInput(header);
-    in.skipBytes(28); // fileLength(8) + blockType(1) + comprType(1) + reserved(2) + blobUUID(16)
+    in.skipBytes(20); // blockType+comprType+reserved(4) + blobUUID(16)
     return new UUID(in.readLong(), in.readLong());
   }
 
@@ -709,10 +724,9 @@ public class GCSDirectory extends MMapDirectory {
 
   /**
    * Wraps a local {@link IndexOutput} (from {@link MMapDirectory}) to produce a local-only file
-   * that bypasses GCS upload. Prepends {@link #LOCAL_ONLY_SENTINEL} as the first 8 bytes so that
-   * {@link #openInput}, {@link #fileLength}, {@link #deleteFile}, and {@link #discover} can detect
-   * these files. The CRC32 and {@link #getFilePointer()} exclude the sentinel so callers see the
-   * logical file position and checksum.
+   * that bypasses GCS upload. Appends {@link #LOCAL_ONLY_SENTINEL} as the last 8 bytes on {@link
+   * #close()} so that {@link #openInput}, {@link #fileLength}, and {@link #deleteFile} can detect
+   * these files by reading the file's final 8 bytes.
    */
   private static final class LocalOnlyIndexOutput extends IndexOutput {
 
@@ -722,7 +736,6 @@ public class GCSDirectory extends MMapDirectory {
     LocalOnlyIndexOutput(String name, IndexOutput delegate) throws IOException {
       super("LocalOnly(name=\"" + name + "\")", name);
       this.delegate = delegate;
-      delegate.writeLong(LOCAL_ONLY_SENTINEL);
     }
 
     @Override
@@ -739,7 +752,7 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public long getFilePointer() {
-      return delegate.getFilePointer() - 8;
+      return delegate.getFilePointer();
     }
 
     @Override
@@ -749,6 +762,7 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public void close() throws IOException {
+      delegate.writeLong(LOCAL_ONLY_SENTINEL);
       delegate.close();
     }
   }
@@ -763,10 +777,11 @@ public class GCSDirectory extends MMapDirectory {
     private final ConcurrentHashMap<String, SegmentStruct> registerUUIDs;
     private final IndexOutput localOut;
 
-    // Offset-file header fields, populated lazily once OFFSET_FILE_HEADER_SIZE bytes have
-    // been written (see parseHeader()).
-    private final byte[] headerBuf = new byte[OFFSET_FILE_HEADER_SIZE];
-    private int headerBytesRead = 0;
+    // Sliding window of the last OFFSET_FILE_HEADER_SIZE bytes written.
+    // trailerBuf[0..trailerBytesBuffered-1] holds them in order (oldest first).
+    private final byte[] trailerBuf = new byte[OFFSET_FILE_HEADER_SIZE];
+    private int trailerBytesBuffered = 0;
+    // Populated in close() after parseTrailer().
     private SegmentStruct segStruct;
     private UUID uuid;
 
@@ -790,20 +805,49 @@ public class GCSDirectory extends MMapDirectory {
       }
     }
 
-    /** Parses segUUID and blobUUID out of the buffered offset-file header. */
-    private void parseHeader() {
-      ByteArrayDataInput hdr = new ByteArrayDataInput(headerBuf);
-      long firstLong = hdr.readLong(); // [0–7] logical file length (or LOCAL_ONLY_SENTINEL)
-      if (firstLong == LOCAL_ONLY_SENTINEL) {
-        // Local-only flush segment received via replication; no GCS blob to register.
-        return;
+    /** Slides {@code b[offset..offset+length-1]} through the trailer window. */
+    private void offerBytes(byte[] b, int offset, int length) {
+      if (length == 0) return;
+      if (length >= OFFSET_FILE_HEADER_SIZE) {
+        System.arraycopy(
+            b, offset + length - OFFSET_FILE_HEADER_SIZE, trailerBuf, 0, OFFSET_FILE_HEADER_SIZE);
+        trailerBytesBuffered = OFFSET_FILE_HEADER_SIZE;
+      } else {
+        int newTotal = trailerBytesBuffered + length;
+        if (newTotal <= OFFSET_FILE_HEADER_SIZE) {
+          System.arraycopy(b, offset, trailerBuf, trailerBytesBuffered, length);
+          trailerBytesBuffered = newTotal;
+        } else {
+          int shift = newTotal - OFFSET_FILE_HEADER_SIZE;
+          System.arraycopy(trailerBuf, shift, trailerBuf, 0, OFFSET_FILE_HEADER_SIZE - length);
+          System.arraycopy(b, offset, trailerBuf, OFFSET_FILE_HEADER_SIZE - length, length);
+          trailerBytesBuffered = OFFSET_FILE_HEADER_SIZE;
+        }
       }
-      hdr.readByte(); // [8]    compressionBlockType
-      hdr.readByte(); // [9]    compressionType
-      hdr.readShort(); // [10–11] reserved
-      uuid = new UUID(hdr.readLong(), hdr.readLong()); // [12–27] blobUUID
-      UUID segUUID = new UUID(hdr.readLong(), hdr.readLong()); // [28–43] segUUID
-      // [44–51] gcsObjectSize — not needed here
+    }
+
+    /**
+     * Parses segUUID and blobUUID from the trailing 52 bytes (the new trailer format). The last 8
+     * bytes are checked for {@link #LOCAL_ONLY_SENTINEL}; if matched, no registration.
+     */
+    private void parseTrailer() {
+      if (trailerBytesBuffered < 8) return; // too short for even a sentinel
+      // Check last 8 bytes for LOCAL_ONLY_SENTINEL.
+      ByteBuffer last8 =
+          ByteBuffer.wrap(trailerBuf, trailerBytesBuffered - 8, 8).order(ByteOrder.LITTLE_ENDIAN);
+      if (last8.getLong(0) == LOCAL_ONLY_SENTINEL) {
+        return; // local-only file received via replication; no GCS blob to register
+      }
+      if (trailerBytesBuffered < OFFSET_FILE_HEADER_SIZE) return; // partial/unknown format
+      // Parse 52-byte trailer:
+      // blockType(1)+comprType(1)+reserved(2)+blobUUID(16)+segUUID(16)+length(8)+gcsObjectSize(8)
+      ByteArrayDataInput hdr = new ByteArrayDataInput(trailerBuf);
+      hdr.readByte(); // blockType
+      hdr.readByte(); // comprType
+      hdr.readShort(); // reserved
+      uuid = new UUID(hdr.readLong(), hdr.readLong()); // blobUUID [4–19]
+      UUID segUUID = new UUID(hdr.readLong(), hdr.readLong()); // segUUID [20–35]
+      // length [36–43] and gcsObjectSize [44–51] not needed here
       segStruct = initSegStruct(segUUID);
     }
 
@@ -812,8 +856,9 @@ public class GCSDirectory extends MMapDirectory {
       try {
         localOut.close();
       } finally {
-        // segStruct/uuid are null for local-only files (sentinel detected in parseHeader) and for
-        // files that never accumulated a full 52-byte header (e.g. empty files in tests).
+        parseTrailer();
+        // segStruct/uuid are null for local-only files and for files too short to contain a
+        // trailer.
         if (segStruct != null) {
           segStruct.registerFileUUID(getName(), uuid);
         }
@@ -833,11 +878,11 @@ public class GCSDirectory extends MMapDirectory {
     @Override
     public void writeByte(byte b) throws IOException {
       bytesWritten++;
-      if (headerBytesRead < OFFSET_FILE_HEADER_SIZE) {
-        headerBuf[headerBytesRead++] = b;
-        if (headerBytesRead == OFFSET_FILE_HEADER_SIZE) {
-          parseHeader();
-        }
+      if (trailerBytesBuffered < OFFSET_FILE_HEADER_SIZE) {
+        trailerBuf[trailerBytesBuffered++] = b;
+      } else {
+        System.arraycopy(trailerBuf, 1, trailerBuf, 0, OFFSET_FILE_HEADER_SIZE - 1);
+        trailerBuf[OFFSET_FILE_HEADER_SIZE - 1] = b;
       }
       localOut.writeByte(b);
     }
@@ -845,14 +890,7 @@ public class GCSDirectory extends MMapDirectory {
     @Override
     public void writeBytes(byte[] b, int offset, int length) throws IOException {
       bytesWritten += length;
-      if (headerBytesRead < OFFSET_FILE_HEADER_SIZE) {
-        int toCopy = Math.min(OFFSET_FILE_HEADER_SIZE - headerBytesRead, length);
-        System.arraycopy(b, offset, headerBuf, headerBytesRead, toCopy);
-        headerBytesRead += toCopy;
-        if (headerBytesRead == OFFSET_FILE_HEADER_SIZE) {
-          parseHeader();
-        }
-      }
+      offerBytes(b, offset, length);
       localOut.writeBytes(b, offset, length);
     }
 
@@ -869,18 +907,22 @@ public class GCSDirectory extends MMapDirectory {
     private final byte[] compressBuffer = new byte[COMPRESSION_BLOCK_SIZE];
     private final LZ4.FastCompressionHashTable ht = new LZ4.FastCompressionHashTable();
     private final ByteBuffer preBuffer;
-    private final AsyncGCSWriteHelper writeHelper;
+    // GCS write state: all null until the first full block is dumped (lazy start).
+    private AsyncGCSWriteHelper writeHelper;
     private ByteBuffer buffer;
+    private UUID uuid;
     private final BytesOut blockDeltas = new BytesOut();
     private int prevBlockSize = BLOCK_SIZE_ESTIMATE;
 
-    private final UUID uuid;
     private final SegmentStruct registerUUID;
     private final IndexOutput localOut;
     private long filePos;
     private long gcsObjectSize;
     private final CRC32 crc = new CRC32();
     private boolean isOpen;
+    // Uncompressed bytes of the last (partial) block, captured in flush().
+    private byte[] tailBytes;
+    private int tailLen;
 
     GCSIndexOutput(GCSDirectory dir, SegmentStruct registerUUID, IndexOutput localOut)
         throws IOException {
@@ -888,20 +930,24 @@ public class GCSDirectory extends MMapDirectory {
       this.dir = dir;
       this.localOut = localOut;
       this.registerUUID = registerUUID;
-      this.uuid = UUID.randomUUID();
-      String blobName = uuid.toString();
+      preBuffer = ByteBuffer.wrap(compressBuffer);
+      isOpen = true;
+    }
+
+    /** Opens the GCS write channel and starts the write helper on the first full-block dump. */
+    private void ensureGCSStarted() throws IOException {
+      if (writeHelper != null) return;
+      uuid = UUID.randomUUID();
       WriteChannel gcsChannel =
-          dir.openWriteChannel(BlobInfo.newBuilder(BlobId.of(dir.bucket, blobName)).build());
+          dir.openWriteChannel(BlobInfo.newBuilder(BlobId.of(dir.bucket, uuid.toString())).build());
       gcsChannel.setChunkSize(GCS_WRITE_CHUNK_SIZE);
       writeHelper = new AsyncGCSWriteHelper(dir.bufferPool, gcsChannel);
       buffer = writeHelper.init();
-      preBuffer = ByteBuffer.wrap(compressBuffer);
       if (dir.useAsyncIO) {
         writeHelper.start(dir.ioExec);
       } else {
         writeHelper.startSync();
       }
-      isOpen = true;
     }
 
     @Override
@@ -931,6 +977,7 @@ public class GCSDirectory extends MMapDirectory {
 
     private void dump() throws IOException {
       assert preBuffer.position() == COMPRESSION_BLOCK_SIZE;
+      ensureGCSStarted();
       preBuffer.rewind();
       LZ4.compressWithDictionary(compressBuffer, 0, 0, COMPRESSION_BLOCK_SIZE, out, ht);
       int nextBlockSize = out.resetSize();
@@ -943,14 +990,18 @@ public class GCSDirectory extends MMapDirectory {
 
     private void flush() throws IOException {
       preBuffer.flip();
-      int preBufferRemaining = preBuffer.remaining();
-      if (preBufferRemaining > 0) {
-        filePos += preBufferRemaining;
-        LZ4.compressWithDictionary(compressBuffer, 0, 0, preBufferRemaining, out, ht);
-        gcsObjectSize += out.resetSize();
+      int rem = preBuffer.remaining();
+      if (rem > 0) {
+        // Capture the partial last block uncompressed — it stays local, not in GCS.
+        filePos += rem;
+        tailBytes = new byte[rem];
+        preBuffer.get(tailBytes);
+        tailLen = rem;
       }
-      // Flush compressed data to GCS (this does NOT include block deltas).
-      writeHelper.flush(buffer, true);
+      if (writeHelper != null) {
+        // Flush the GCS portion (full blocks only; tail was not written to buffer).
+        writeHelper.flush(buffer, true);
+      }
     }
 
     @Override
@@ -972,29 +1023,48 @@ public class GCSDirectory extends MMapDirectory {
     public void close() throws IOException {
       if (isOpen) {
         isOpen = false;
-        try (writeHelper) {
+        AsyncGCSWriteHelper wh = this.writeHelper;
+        if (wh != null) {
+          try (wh) {
+            flush();
+          }
+        } else {
           flush();
         }
-        // Write header + delta-encoded block sizes into the local offset file.
         try (localOut) {
-          UUID segUUID = registerUUID.segUUID;
-          localOut.writeLong(filePos);
-          localOut.writeByte((byte) COMPRESSION_BLOCK_TYPE.id);
-          localOut.writeByte((byte) COMPRESSION_TYPE.id);
-          localOut.writeShort((short) 0); // reserved
-          localOut.writeLong(uuid.getMostSignificantBits());
-          localOut.writeLong(uuid.getLeastSignificantBits());
-          localOut.writeLong(segUUID.getMostSignificantBits());
-          localOut.writeLong(segUUID.getLeastSignificantBits());
-          localOut.writeLong(gcsObjectSize);
-          localOut.writeBytes(blockDeltas.baos.buf(), 0, blockDeltas.baos.count());
-        }
-        // GCS write and offset file are both committed; register for sync/batched accounting.
-        registerUUID.registerFileUUID(getName(), uuid);
-        // Pre-populate cache-node array for readers of this file.
-        if (filePos > 0) {
-          int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-          dir.pendingNodes.put(uuid, new AtomicReferenceArray<>(blockCount));
+          if (wh == null) {
+            // No full blocks were written: entire file fits in less than one block.
+            // Store as local-only: raw data + sentinel.
+            if (tailLen > 0) {
+              localOut.writeBytes(tailBytes, 0, tailLen);
+            }
+            localOut.writeLong(LOCAL_ONLY_SENTINEL);
+          } else {
+            // GCS-backed: [tail bytes][block deltas][52-byte trailer]
+            if (tailLen > 0) {
+              localOut.writeBytes(tailBytes, 0, tailLen);
+            }
+            localOut.writeBytes(blockDeltas.baos.buf(), 0, blockDeltas.baos.count());
+            // 52-byte trailer:
+            // blockType(1)+comprType(1)+reserved(2)+blobUUID(16)+segUUID(16)+length(8)+gcsObjectSize(8)
+            UUID segUUID = registerUUID.segUUID;
+            localOut.writeByte((byte) COMPRESSION_BLOCK_TYPE.id);
+            localOut.writeByte((byte) COMPRESSION_TYPE.id);
+            localOut.writeShort((short) 0); // reserved
+            localOut.writeLong(uuid.getMostSignificantBits());
+            localOut.writeLong(uuid.getLeastSignificantBits());
+            localOut.writeLong(segUUID.getMostSignificantBits());
+            localOut.writeLong(segUUID.getLeastSignificantBits());
+            localOut.writeLong(filePos); // logical (uncompressed) file length
+            localOut.writeLong(gcsObjectSize); // compressed bytes in GCS (full blocks only)
+            // GCS write and local file are both committed; register for sync/batched accounting.
+            registerUUID.registerFileUUID(getName(), uuid);
+            // Pre-populate cache-node array for readers of this file.
+            if (filePos > 0) {
+              int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
+              dir.pendingNodes.put(uuid, new AtomicReferenceArray<>(blockCount));
+            }
+          }
         }
       }
     }
@@ -1054,11 +1124,17 @@ public class GCSDirectory extends MMapDirectory {
 
     private final GCSDirectory dir;
     private final long length;
-    private final long[] blockOffsets; // blockOffsets[i] = byte offset of block i in GCS object
-    private final int blockCount;
+    // blockOffsets[i] = GCS byte offset of block i; [gcsBlockCount] = gcsObjectSize sentinel;
+    // [blockCount] = 0 (dummy, never used — tail block always hits accessMapped cache).
+    private final long[] blockOffsets;
+    private final int blockCount; // total logical blocks (GCS blocks + optional tail)
     private final int lastBlockIdx;
     private final int lastBlockDecompressedLen;
     private final String blobName;
+    // Full mmap of the local file; non-null only in the root (not in slices).
+    private final java.nio.MappedByteBuffer localFileMapped;
+    // Guard for explicit unmap of localFileMapped on close; non-null only in root.
+    private final ByteBufferGuard localFileGuard;
 
     private final AtomicReferenceArray<BlockCache.Node> accessMapped;
 
@@ -1083,15 +1159,17 @@ public class GCSDirectory extends MMapDirectory {
     private ReadChannel channel;
     private long channelPos = -1; // current byte offset of channel in the GCS object
 
-    // Root constructor: parses the offset file using a pre-read header (from openInput) to avoid
-    // re-reading the fixed header bytes. Only the delta footer is read from disk here.
-    GCSIndexInput(String resourceDescription, GCSDirectory dir, Path offsetFile, byte[] header)
+    // Root constructor: mmaps the full local file, parses the 52-byte trailer from the end,
+    // pre-pins the uncompressed tail block (if any) into accessMapped, and decodes GCS block
+    // offsets.
+    GCSIndexInput(String resourceDescription, GCSDirectory dir, Path offsetFile, byte[] trailer)
         throws IOException {
       super(resourceDescription);
       this.dir = dir;
 
-      ByteArrayDataInput hdr = new ByteArrayDataInput(header);
-      length = hdr.readLong();
+      // Parse the 52-byte trailer:
+      // blockType(1)+comprType(1)+reserved(2)+blobUUID(16)+segUUID(16)+length(8)+gcsObjectSize(8)
+      ByteArrayDataInput hdr = new ByteArrayDataInput(trailer);
       int cBlockTypeId = hdr.readByte() & 0xff;
       if (cBlockTypeId != COMPRESSION_BLOCK_TYPE.id) {
         throw new IOException("unrecognized compression block type id: " + cBlockTypeId);
@@ -1101,46 +1179,77 @@ public class GCSDirectory extends MMapDirectory {
       UUID blobUUID = new UUID(hdr.readLong(), hdr.readLong());
       blobName = blobUUID.toString();
       hdr.skipBytes(16); // segUUID — not needed for reads
+      length = hdr.readLong();
       long gcsObjectSize = hdr.readLong();
 
-      // Delta bytes occupy everything after the fixed header.
-      long offsetFileSize = Files.size(offsetFile);
-      int blockDeltaFooterSize = (int) (offsetFileSize - OFFSET_FILE_HEADER_SIZE);
-      byte[] footer = new byte[blockDeltaFooterSize];
-      try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
-        ByteBuffer footerBuf = ByteBuffer.wrap(footer);
-        ch.read(footerBuf, OFFSET_FILE_HEADER_SIZE);
-      }
-      ByteArrayDataInput in = new ByteArrayDataInput(footer);
+      // Tail: last partial block, stored uncompressed at offset 0 in the local file.
+      int tailLen =
+          (int) (length & COMPRESSION_BLOCK_MASK_LOW); // = length % COMPRESSION_BLOCK_SIZE
+      boolean hasTail = tailLen > 0;
 
       blockCount = (int) (((length - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-      blockOffsets = new long[blockCount + 1];
       lastBlockIdx = blockCount - 1;
-      lastBlockDecompressedLen = (int) (((length - 1) & COMPRESSION_BLOCK_MASK_LOW) + 1);
+      lastBlockDecompressedLen = hasTail ? tailLen : COMPRESSION_BLOCK_SIZE;
 
-      // Decode block offsets: blockOffsets[0] = 0 (GCS objects have no header prefix).
+      // gcsBlockCount = full blocks in GCS (all but the tail when hasTail).
+      int gcsBlockCount = hasTail ? blockCount - 1 : blockCount;
+      // blockOffsets[0..gcsBlockCount] = GCS start offsets; [gcsBlockCount] = gcsObjectSize
+      // sentinel.
+      // [blockCount] is the dummy entry for the tail (default 0, never used — tail always
+      // cache-hits).
+      blockOffsets = new long[blockCount + 1];
+
+      // Mmap the full local file once.
+      long offsetFileSize;
+      try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
+        offsetFileSize = ch.size();
+        localFileMapped = ch.map(FileChannel.MapMode.READ_ONLY, 0, offsetFileSize);
+      }
+      localFileMapped.order(ByteOrder.LITTLE_ENDIAN);
+      localFileGuard = new ByteBufferGuard("gcsLocalFile", GCSDirectory.unmapHack());
+
+      // Delta bytes sit between the tail region and the 52-byte trailer.
+      int deltaStart = tailLen;
+      int deltaEnd = (int) (offsetFileSize - OFFSET_FILE_HEADER_SIZE);
+      byte[] deltaBytes = new byte[Math.max(0, deltaEnd - deltaStart)];
+      if (deltaBytes.length > 0) {
+        localFileMapped.position(deltaStart);
+        localFileMapped.get(deltaBytes);
+      }
+      ByteArrayDataInput in = new ByteArrayDataInput(deltaBytes);
+
+      // Decode GCS block offsets (gcsBlockCount - 1 deltas; blockOffsets[0] = 0 is implicit).
       long blockOffset = 0;
       int lastBlockSize = BLOCK_SIZE_ESTIMATE;
       blockOffsets[0] = 0;
-      for (int i = 1; i < blockCount; i++) {
+      for (int i = 1; i < gcsBlockCount; i++) {
         int delta = in.readZInt();
         int nextBlockSize = lastBlockSize + delta;
         blockOffset += nextBlockSize;
         blockOffsets[i] = blockOffset;
         lastBlockSize = nextBlockSize;
       }
-      blockOffsets[blockCount] = gcsObjectSize;
+      blockOffsets[gcsBlockCount] = gcsObjectSize;
 
       AtomicReferenceArray<BlockCache.Node> local = new AtomicReferenceArray<>(blockCount);
       AtomicReferenceArray<BlockCache.Node> existing =
           dir.pendingNodes.putIfAbsent(blobUUID, local);
       this.accessMapped = existing == null ? local : existing;
 
+      // Pre-pin the tail block into accessMapped[lastBlockIdx] as a synthetic always-pinned node
+      // backed directly by the mmap slice — no GCS fetch or decompression ever needed for it.
+      if (hasTail) {
+        ByteBuffer tailBuf = localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
+        BlockCache.Node tailNode = dir.cache.createNode(null, null, Integer.MAX_VALUE / 2);
+        tailNode.populateDirect(tailBuf);
+        accessMapped.set(lastBlockIdx, tailNode);
+      }
+
       this.offset = 0;
       this.sliceLength = length;
     }
 
-    // Clone / slice constructor.
+    // Clone / slice constructor: shares immutable state from parent; does not own the mmap.
     private GCSIndexInput(
         String resourceDescription, GCSIndexInput parent, long offset, long length) {
       super(resourceDescription);
@@ -1151,6 +1260,8 @@ public class GCSDirectory extends MMapDirectory {
       this.lastBlockIdx = parent.lastBlockIdx;
       this.lastBlockDecompressedLen = parent.lastBlockDecompressedLen;
       this.blobName = parent.blobName;
+      this.localFileMapped = null; // slice does not own the mapping
+      this.localFileGuard = null; // slice does not unmap
       this.accessMapped = parent.accessMapped;
       this.offset = parent.offset + offset;
       this.seekPos = this.offset;
@@ -1704,6 +1815,10 @@ public class GCSDirectory extends MMapDirectory {
         }
       } else if (c != null) {
         c.close();
+      }
+      // Only the root (not slices) owns the local file mapping.
+      if (localFileGuard != null) {
+        localFileGuard.invalidateAndUnmap(localFileMapped);
       }
     }
   }
