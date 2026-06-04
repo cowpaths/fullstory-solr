@@ -414,6 +414,14 @@ public class GCSDirectory extends MMapDirectory {
             if (pending != null && blobUUID.equals(extantBlobUUID = pending.remove(name))) {
               // not yet sync'd, delete the blob immediately
               deleteBlob(blobUUID);
+              // If this segment was never batched and all pending files are now gone,
+              // clean up the SegmentStruct so it doesn't linger in pendingWrites.
+              // NOTE: a new segUUID will be assigned if we see this seg prefix again,
+              // but that's fine because we're essentially "starting from scratch".
+              if (pending.isEmpty() && !batched.containsKey(segUUID)) {
+                // TODO (immediately): there's a race condition here.
+                pendingWrites.remove(segName, struct);
+              }
             } else if (extantBlobUUID != null) {
               log.warn("found unexpected blobUUID: {} != {}", extantBlobUUID, blobUUID);
             }
@@ -1664,6 +1672,7 @@ public class GCSDirectory extends MMapDirectory {
     @Override
     public void close() throws IOException {
       unpinCurrent();
+      // TODO (optimization): can we explicitly close() accessMapped here?
       ReadChannel c = channel;
       channel = null;
       Cache.Node<ReadChannel> cn = channelNode;
