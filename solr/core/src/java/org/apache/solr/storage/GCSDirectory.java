@@ -620,12 +620,30 @@ public class GCSDirectory extends MMapDirectory {
   // Offset file helpers
   // ---------------------------------------------------------------------------
 
+  private static final String[] NON_GCS_EXTENSIONS =
+      new String[] {
+        "tmp", // transient, local-only
+        "si", // tiny
+        "cfe" // tiny
+      };
+
   /**
    * Returns true for files that are backed by a GCS blob with a local offset file. Temp files
    * (*.tmp) and non-segment files (segments_N, pending_segments_N, etc.) are local-only.
    */
   static boolean isGcsBacked(String name) {
-    return name.startsWith("_") && !name.endsWith(".tmp");
+    int extIdx;
+    if (name.charAt(0) != '_') {
+      return false;
+    } else if ((extIdx = name.lastIndexOf('.')) != -1) {
+      int from = extIdx + 1;
+      for (String s : NON_GCS_EXTENSIONS) {
+        if (name.startsWith(s, from) && from + s.length() == name.length()) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   /**
