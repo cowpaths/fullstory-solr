@@ -77,7 +77,7 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
   public static final class Node extends Cache.Node<ByteBuffer> {
 
     /**
-     * Completion signal: fulfilled with {@link #value} by {@link #populate} on the winning thread;
+     * Completion signal: fulfilled with {@code value} by {@link #populate} on the winning thread;
      * other threads joining this node wait here until the buffer is ready (or failed).
      */
     private final CompletableFuture<ByteBuffer> future = new CompletableFuture<>();
@@ -87,6 +87,7 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
     }
 
     ByteBuffer populate(byte[] arr, int off, int len) {
+      ByteBuffer value = getValue();
       assert value != null;
       value.clear().put(arr, off, len);
       future.complete(value);

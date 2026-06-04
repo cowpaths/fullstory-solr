@@ -65,8 +65,11 @@ class Cache<V, N extends Cache.Node<V>> {
    */
   static class Node<V> {
 
-    /** The payload managed by this cache entry. {@code null} for sentinel nodes. */
-    protected final V value;
+    /**
+     * The payload managed by this cache entry. {@code null} for sentinel nodes. Non-final only in
+     * order to enable nulling out (for GC eligibility) upon node reclaim.
+     */
+    private V value;
 
     /**
      * Reference count.
@@ -86,7 +89,7 @@ class Cache<V, N extends Cache.Node<V>> {
     private volatile Node<V> prev;
 
     Node(V value, Node<V> prev, int initialRefCount) {
-      this.value = value;
+      this.value = value; // visibility guaranteed by callers incref'ing refCount before access
       this.prev = prev;
       this.refCount = new AtomicInteger(initialRefCount);
     }
@@ -95,6 +98,11 @@ class Cache<V, N extends Cache.Node<V>> {
     Node() {
       this.value = null;
       this.refCount = null;
+    }
+
+    /** Return the associated value. Must only be called on a pinned node! */
+    protected final V getValue() {
+      return value;
     }
   }
 
@@ -338,6 +346,9 @@ class Cache<V, N extends Cache.Node<V>> {
           throw new IllegalStateException();
         }
         V newVal = valFunc == null ? candidate.value : valFunc.apply(candidate.value);
+        if (newVal != candidate.value) {
+          candidate.value = null; // ensure eligible for GC
+        }
         return createNode(newVal, null, 1);
       }
       // CAS failed: a concurrent pin() or acquireNode() just claimed this node and is in the
@@ -359,7 +370,12 @@ class Cache<V, N extends Cache.Node<V>> {
       return false;
     }
     if (removeFromList(node)) {
-      insertAtTail(persistentVals ? node.value : null);
+      if (persistentVals) {
+        insertAtTail(node.value);
+      } else {
+        node.value = null; // ensure eligible for GC
+        insertAtTail(null);
+      }
     } else {
       throw new IllegalStateException();
     }

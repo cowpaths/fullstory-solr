@@ -1199,7 +1199,7 @@ public class GCSDirectory extends MMapDirectory {
                 return c;
               });
       if (channelNode != null) {
-        channel = channelNode.value;
+        channel = channelNode.getValue();
       } else {
         // Pool exhausted: open a transient channel for this supply() call only.
         channel = dir.storage.reader(BlobId.of(dir.bucket, blobName));
@@ -1678,10 +1678,11 @@ public class GCSDirectory extends MMapDirectory {
       Cache.Node<ReadChannel> cn = channelNode;
       channelNode = null;
       if (cn != null) {
-        assert c == cn.value;
+        ReadChannel closeReadChannel = cn.getValue();
         // recycle slot to pool tail; channel closed lazily on eviction
         if (dir.channelPool.close(cn)) {
-          cn.value.close();
+          assert c == closeReadChannel;
+          closeReadChannel.close();
         }
       } else if (c != null) {
         c.close();
