@@ -28,6 +28,8 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.EnumSet;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import org.slf4j.Logger;
@@ -62,7 +64,7 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
    * <ol>
    *   <li>Returned by {@link BlockCache#acquireNode()} pinned (refCount=1), <em>not</em> in the LRU
    *       list.
-   *   <li>Caller populates {@link #value} and publishes the node (e.g. via an {@code
+   *   <li>Caller populates {@link #getValue()} and publishes the node (e.g. via an {@code
    *       AtomicReference} slot). The node is still pinned.
    *   <li>Subsequent callers call {@link Cache#pin(Cache.Node)}, which either re-pins
    *       (refCount&gt;0 → increment only) or first-pins (refCount=0 → remove from list +
@@ -113,8 +115,12 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
   // Construction
   // ---------------------------------------------------------------------------
 
+  /**
+   * Creates a new block cache backed by a freshly-created temp file. The file is deleted
+   * immediately after mapping so it does not outlive the JVM.
+   */
   public BlockCache(long targetBytes, Path backingFile) throws IOException {
-    super(initPool(targetBytes, backingFile), true);
+    super(initPool(targetBytes, backingFile, true), true);
     log.info(
         "BlockCache initialized: nBlocks={}, targetBytes={}",
         targetBytes / COMPRESSION_BLOCK_SIZE,
@@ -122,11 +128,33 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
   }
 
   /**
-   * Allocates the pool as slices of a file-backed memory-mapped region (adapted from {@code
-   * HeapCacheFbsModifier.poolFileBacked}). The backing file is deleted immediately after mapping so
-   * that it does not outlive the JVM.
+   * Creates a block cache backed by an existing file. The file is mmapped as-is; its size (rounded
+   * down to a block boundary) determines the cache capacity. The file is not deleted.
    */
-  private static ByteBuffer[] initPool(long targetBytes, Path backingFile) throws IOException {
+  public BlockCache(Path existingBackingFile) throws IOException {
+    this(
+        existingBackingFile,
+        Files.size(existingBackingFile) / COMPRESSION_BLOCK_SIZE * COMPRESSION_BLOCK_SIZE);
+  }
+
+  private BlockCache(Path existingBackingFile, long targetBytes) throws IOException {
+    super(initPool(targetBytes, existingBackingFile, false), true);
+    log.info(
+        "BlockCache initialized from existing file {}: nBlocks={}, targetBytes={}",
+        existingBackingFile,
+        targetBytes / COMPRESSION_BLOCK_SIZE,
+        targetBytes);
+  }
+
+  /**
+   * Allocates the pool as slices of a file-backed memory-mapped region (adapted from {@code
+   * HeapCacheFbsModifier.poolFileBacked}). If {@code createAndDelete} is true, the file is created
+   * fresh, sized to {@code targetBytes}, and deleted immediately after mapping so that it does not
+   * outlive the JVM. If false, the file must already exist and is mmapped without truncation or
+   * deletion.
+   */
+  private static ByteBuffer[] initPool(long targetBytes, Path backingFile, boolean createAndDelete)
+      throws IOException {
     final int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
     final ByteBuffer[] pool = new ByteBuffer[nBlocks];
     final long blockSizeL = COMPRESSION_BLOCK_SIZE;
@@ -135,13 +163,15 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
     final int effectiveMaxBlocksPerPartition = Math.toIntExact(partitionMaxBytes / blockSizeL);
     final int numPartitions = ((nBlocks - 1) / effectiveMaxBlocksPerPartition) + 1;
 
-    try (FileChannel fc =
-        FileChannel.open(
-            backingFile,
-            StandardOpenOption.READ,
-            StandardOpenOption.WRITE,
-            StandardOpenOption.CREATE_NEW)) {
-      fc.truncate(nBlocks * blockSizeL);
+    Set<StandardOpenOption> openOpts =
+        EnumSet.of(StandardOpenOption.READ, StandardOpenOption.WRITE);
+    if (createAndDelete) {
+      openOpts.add(StandardOpenOption.CREATE_NEW);
+    }
+    try (FileChannel fc = FileChannel.open(backingFile, openOpts)) {
+      if (createAndDelete) {
+        fc.truncate(nBlocks * blockSizeL);
+      }
 
       int blockIdx = 0;
       // Iterate partitions from high to low so that the remainder partition (which may be
@@ -165,7 +195,9 @@ public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Cl
         partitionNumBlocks = effectiveMaxBlocksPerPartition;
       }
     } finally {
-      Files.delete(backingFile);
+      if (createAndDelete) {
+        Files.delete(backingFile);
+      }
     }
     return pool;
   }

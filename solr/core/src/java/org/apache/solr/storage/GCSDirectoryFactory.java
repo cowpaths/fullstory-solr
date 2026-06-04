@@ -88,6 +88,14 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       Long.getLong("solr.gcsDirectory.blockCacheKilobytes", 1L << 20);
 
   /**
+   * Path to an existing file to use as the block cache backing store. Mutually exclusive with
+   * {@code solr.gcsDirectory.blockCacheKilobytes}; the file's current size determines cache
+   * capacity.
+   */
+  private static final String BLOCK_CACHE_PATH =
+      EnvUtils.getProperty("solr.gcsDirectory.blockCachePath", "");
+
+  /**
    * Default cap on concurrently open GCS {@link com.google.cloud.ReadChannel}s across all files.
    */
   private static final int DEFAULT_MAX_OPEN_CHANNELS =
@@ -262,11 +270,13 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     }
     useAsyncIO = params.getBool("useAsyncIO", true);
 
-    final long blockCacheBytes = BLOCK_CACHE_KILOBYTES * 1024L;
-
-    final Path blockCacheBackingFile =
-        Path.of(EnvUtils.getProperty("java.io.tmpdir"))
-            .resolve("solr-gcs-block-cache-" + UUID.randomUUID() + ".tmp");
+    boolean hasPath = !BLOCK_CACHE_PATH.isEmpty();
+    boolean hasSizeExplicit = System.getProperty("solr.gcsDirectory.blockCacheKilobytes") != null;
+    if (hasPath && hasSizeExplicit) {
+      throw new IllegalArgumentException(
+          "solr.gcsDirectory.blockCachePath and solr.gcsDirectory.blockCacheKilobytes "
+              + "are mutually exclusive.");
+    }
 
     if (this.cc != null) {
       CoreContainer cc = this.cc.get();
@@ -284,7 +294,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
                     final Storage storage = initStorage(params); // TODO: race here.
                     try {
                       return new NodeLevelGCSDirectoryState(
-                          new BlockCache(blockCacheBytes, blockCacheBackingFile),
+                          buildBlockCache(),
                           storage,
                           metadataBucket,
                           zkController,
@@ -297,11 +307,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       try {
         nodeLevelState =
             new NodeLevelGCSDirectoryState(
-                new BlockCache(blockCacheBytes, blockCacheBackingFile),
-                initStorage(params),
-                BUCKET + "-meta",
-                null,
-                null);
+                buildBlockCache(), initStorage(params), BUCKET + "-meta", null, null);
       } catch (IOException e) {
         throw new UncheckedIOException(e);
       }
@@ -309,6 +315,17 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     }
 
     super.init(args);
+  }
+
+  private static BlockCache buildBlockCache() throws IOException {
+    if (!BLOCK_CACHE_PATH.isEmpty()) {
+      return new BlockCache(Path.of(BLOCK_CACHE_PATH));
+    } else {
+      Path backingFile =
+          Path.of(EnvUtils.getProperty("java.io.tmpdir"))
+              .resolve("solr-gcs-block-cache-" + UUID.randomUUID() + ".tmp");
+      return new BlockCache(BLOCK_CACHE_KILOBYTES * 1024L, backingFile);
+    }
   }
 
   /**
