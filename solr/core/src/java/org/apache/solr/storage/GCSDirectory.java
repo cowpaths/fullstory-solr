@@ -45,6 +45,7 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -1000,6 +1001,9 @@ public class GCSDirectory extends MMapDirectory {
     // Uncompressed bytes of the last (partial) block, captured in flush().
     private byte[] tailBytes;
     private int tailLen;
+    // Cache nodes pre-populated during dump(), one per GCS block (null if pool was exhausted).
+    // Published into pendingNodes on close() so readers get cache hits instead of GCS fetches.
+    private final ArrayList<BlockCache.Node> cachedNodes = new ArrayList<>();
 
     GCSIndexOutput(GCSDirectory dir, SegmentStruct registerUUID, IndexOutput localOut)
         throws IOException {
@@ -1056,6 +1060,17 @@ public class GCSDirectory extends MMapDirectory {
       assert preBuffer.position() == COMPRESSION_BLOCK_SIZE;
       ensureGCSStarted();
       preBuffer.rewind();
+      // Pre-warm the block cache with the uncompressed block while it's already in memory,
+      // so readers get a cache hit instead of a GCS round-trip.
+      BlockCache.Node cacheNode = dir.cache.acquireNode();
+      if (cacheNode != null) {
+        try {
+          cacheNode.populate(compressBuffer, 0, COMPRESSION_BLOCK_SIZE);
+        } finally {
+          dir.cache.unpin(cacheNode); // release writer's pin; node enters LRU, ready for readers
+        }
+      }
+      cachedNodes.add(cacheNode); // null if pool exhausted; slot index == block number
       LZ4.compressWithDictionary(compressBuffer, 0, 0, COMPRESSION_BLOCK_SIZE, out, ht);
       int nextBlockSize = out.resetSize();
       gcsObjectSize += nextBlockSize;
@@ -1136,10 +1151,16 @@ public class GCSDirectory extends MMapDirectory {
             localOut.writeLong(gcsObjectSize); // compressed bytes in GCS (full blocks only)
             // GCS write and local file are both committed; register for sync/batched accounting.
             registerUUID.registerFileUUID(getName(), uuid);
-            // Pre-populate cache-node array for readers of this file.
+            // Publish pre-warmed cache nodes so readers get cache hits instead of GCS fetches.
             if (filePos > 0) {
               int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-              dir.pendingNodes.put(uuid, new AtomicReferenceArray<>(blockCount));
+              int gcsBlockCount = tailLen > 0 ? blockCount - 1 : blockCount;
+              AtomicReferenceArray<BlockCache.Node> accessMapped =
+                  new AtomicReferenceArray<>(blockCount);
+              for (int i = 0; i < gcsBlockCount; i++) {
+                accessMapped.set(i, cachedNodes.get(i));
+              }
+              dir.pendingNodes.put(uuid, accessMapped);
             }
           }
         }

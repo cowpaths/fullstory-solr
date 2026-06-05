@@ -99,7 +99,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
    * Default cap on concurrently open GCS {@link com.google.cloud.ReadChannel}s across all files.
    */
   private static final int DEFAULT_MAX_OPEN_CHANNELS =
-      Integer.getInteger("solr.gcsDirectory.maxOpenChannels", 256);
+      EnvUtils.getPropertyAsInteger("solr.gcsDirectory.maxOpenChannels", 256);
 
   /** GCS bucket name; node-level, must be set via sysprop before JVM startup. */
   protected static final String BUCKET = EnvUtils.getProperty("solr.gcsDirectory.bucket", "");
