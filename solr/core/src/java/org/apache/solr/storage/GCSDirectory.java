@@ -46,9 +46,12 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -285,6 +288,21 @@ public class GCSDirectory extends MMapDirectory {
   /** {@code null} in single-node/no-ZK mode; non-null enables distributed refcounting via ZK. */
   private final BlobLifecycleCoordinator blobCoordinator;
 
+  /**
+   * Bounded queue of pending {@link BlobLifecycleCoordinator#registerBatch} calls. Non-null only
+   * when {@code blobCoordinator != null}. {@code sync()} enqueues tasks here instead of calling
+   * {@code registerBatch} directly, so the {@code SolrIndexWriter} monitor is not held across a
+   * blocking GCS write. If the queue fills up (GCS severely degraded), {@code sync()} blocks on
+   * {@code put()} — still preferable to blocking on the GCS round-trip itself.
+   */
+  private final BlockingQueue<Runnable> registerQueue;
+
+  /** Poison pill that signals {@link #registerThread} to exit after draining pending tasks. */
+  private static final Runnable REGISTER_POISON = () -> {};
+
+  /** Single background thread that drains {@link #registerQueue}. */
+  private final Thread registerThread;
+
   private static final class SegmentStruct {
     private final UUID segUUID;
     private final AtomicReference<ConcurrentHashMap<String, UUID>> pendingFiles =
@@ -336,6 +354,30 @@ public class GCSDirectory extends MMapDirectory {
     this.bufferPool = bufferPool;
     this.blobCoordinator = blobCoordinator;
     if (blobCoordinator != null) {
+      this.registerQueue = new ArrayBlockingQueue<>(512);
+      Thread t =
+          new Thread(
+              () -> {
+                while (true) {
+                  Runnable task;
+                  try {
+                    task = registerQueue.take();
+                  } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                  }
+                  if (task == REGISTER_POISON) break;
+                  try {
+                    task.run();
+                  } catch (Throwable th) {
+                    log.warn("exception registering", th);
+                  }
+                }
+              },
+              "gcs-register-" + localPath.getFileName());
+      t.setDaemon(true);
+      t.start();
+      this.registerThread = t;
       for (String file : listAll()) {
         if (!isGcsBacked(file)) {
           continue;
@@ -367,6 +409,9 @@ public class GCSDirectory extends MMapDirectory {
       for (Map.Entry<UUID, Set<UUID>> entry : batched.entrySet()) {
         blobCoordinator.registerBatch(entry.getKey(), entry.getValue());
       }
+    } else {
+      this.registerQueue = null;
+      this.registerThread = null;
     }
   }
 
@@ -587,11 +632,43 @@ public class GCSDirectory extends MMapDirectory {
             batched
                 .computeIfAbsent(s.segUUID, (k) -> ConcurrentHashMap.newKeySet())
                 .addAll(addToManifest.values());
-            blobCoordinator.registerBatch(s.segUUID, addToManifest.values());
+            UUID segUUID = s.segUUID;
+            List<UUID> blobs = List.copyOf(addToManifest.values());
+            try {
+              registerQueue.put(
+                  () -> {
+                    try {
+                      blobCoordinator.registerBatch(segUUID, blobs);
+                    } catch (IOException e) {
+                      log.error(
+                          "async registerBatch failed for segUUID {}; {} blobs may be orphaned",
+                          segUUID,
+                          blobs.size(),
+                          e);
+                    }
+                  });
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+              throw new IOException("interrupted while enqueuing registerBatch for " + segUUID, e);
+            }
           }
         }
       }
     }
+  }
+
+  @Override
+  public void close() throws IOException {
+    if (registerThread != null) {
+      try {
+        registerQueue.put(REGISTER_POISON);
+        registerThread.join(30_000);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        registerThread.interrupt(); // ensure thread exits if join was cut short
+      }
+    }
+    super.close();
   }
 
   /**
