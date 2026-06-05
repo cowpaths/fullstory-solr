@@ -56,6 +56,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
@@ -263,6 +264,7 @@ public class GCSDirectory extends MMapDirectory {
   protected final Storage storage;
   private final BlockCache cache;
   private final Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool;
+  private final Semaphore channelSemaphore;
   private final ExecutorService ioExec;
   private final boolean useAsyncIO;
   private final DirectBufferPool bufferPool;
@@ -340,6 +342,7 @@ public class GCSDirectory extends MMapDirectory {
       Storage storage,
       BlockCache cache,
       Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool,
+      Semaphore channelSemaphore,
       ExecutorService ioExec,
       boolean useAsyncIO,
       DirectBufferPool bufferPool,
@@ -350,6 +353,7 @@ public class GCSDirectory extends MMapDirectory {
     this.storage = storage;
     this.cache = cache;
     this.channelPool = channelPool;
+    this.channelSemaphore = channelSemaphore;
     this.ioExec = ioExec;
     this.useAsyncIO = useAsyncIO;
     this.bufferPool = bufferPool;
@@ -1254,6 +1258,8 @@ public class GCSDirectory extends MMapDirectory {
     private Cache.Node<ReadChannel> channelNode;
     // Active ReadChannel, whether pool-backed or opened directly as a one-off fallback.
     // Null between supply() calls in the direct-fallback case (closed at the end of each supply()).
+    // Invariant: channelNode==null && channel!=null iff a one-off channel is open and
+    // channelSemaphore has been acquired for it.
     private ReadChannel channel;
     private long channelPos = -1; // current byte offset of channel in the GCS object
 
@@ -1395,11 +1401,13 @@ public class GCSDirectory extends MMapDirectory {
         if (channelNode != null) {
           dir.channelPool.unpin(channelNode);
         } else if (channel != null) {
+          // one-off channel: close it and release the semaphore permit
           try {
             channel.close();
           } catch (Exception ignored) {
           }
           channel = null;
+          dir.channelSemaphore.release();
         }
       }
       byte[] decompressed = new byte[decompressedLen + 7];
@@ -1412,28 +1420,45 @@ public class GCSDirectory extends MMapDirectory {
      * pos}, updating {@link #channelNode} and {@link #channel}.
      */
     private void openChannelAt(long pos) throws IOException {
-      channelNode =
-          dir.channelPool.acquireNode(
-              ch -> {
-                if (ch != null) {
-                  try {
-                    ch.close();
-                  } catch (Exception ignored) {
-                  }
-                }
-                ReadChannel c = dir.storage.reader(BlobId.of(dir.bucket, blobName));
-                c.setChunkSize(COMPRESSION_BLOCK_SIZE);
-                return c;
-              });
-      if (channelNode != null) {
-        channel = channelNode.getValue();
+      channelNode = acquireManagedChannel();
+      if (channelNode == null) {
+        // Pool exhausted: wait for a one-off permit, then retry the pool once more.
+        try {
+          dir.channelSemaphore.acquire();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          throw new IOException("interrupted waiting for GCS channel slot", e);
+        }
+        channelNode = acquireManagedChannel();
+        if (channelNode != null) {
+          // A slot freed up while we waited; use it and release the permit immediately.
+          dir.channelSemaphore.release();
+          channel = channelNode.getValue();
+        } else {
+          // Still no pool slot; open a one-off. Permit held until supply() closes the channel.
+          channel = dir.storage.reader(BlobId.of(dir.bucket, blobName));
+          channel.setChunkSize(COMPRESSION_BLOCK_SIZE);
+        }
       } else {
-        // Pool exhausted: open a transient channel for this supply() call only.
-        channel = dir.storage.reader(BlobId.of(dir.bucket, blobName));
-        channel.setChunkSize(COMPRESSION_BLOCK_SIZE);
+        channel = channelNode.getValue();
       }
       channel.seek(pos);
       channelPos = pos;
+    }
+
+    private Cache.Node<ReadChannel> acquireManagedChannel() {
+      return dir.channelPool.acquireNode(
+          ch -> {
+            if (ch != null) {
+              try {
+                ch.close();
+              } catch (Exception ignored) {
+              }
+            }
+            ReadChannel c = dir.storage.reader(BlobId.of(dir.bucket, blobName));
+            c.setChunkSize(COMPRESSION_BLOCK_SIZE);
+            return c;
+          });
     }
 
     /**
@@ -1521,6 +1546,9 @@ public class GCSDirectory extends MMapDirectory {
           channel.close();
         } catch (Exception ignored) {
         }
+        // Release the one-off permit so openChannelAt() starts fresh; it will re-acquire
+        // one if the replacement also turns out to be a one-off.
+        dir.channelSemaphore.release();
       }
       channel = null;
       openChannelAt(pos);

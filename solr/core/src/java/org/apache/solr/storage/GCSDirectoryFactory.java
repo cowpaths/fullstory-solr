@@ -31,6 +31,7 @@ import java.nio.file.Path;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Semaphore;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.LockFactory;
@@ -134,6 +135,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     private final BlockCache blockCache;
     private final Storage storage;
     private final Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool;
+    final Semaphore oneOffChannelSemaphore = new Semaphore(DEFAULT_MAX_OPEN_CHANNELS >> 1);
 
     /**
      * Buffer pool for the double-buffered GCS write path. Buffers are 256 KB, 4-KiB aligned (no
@@ -376,6 +378,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         storage,
         cache,
         channelPool,
+        nodeLevelState.oneOffChannelSemaphore,
         ioExec,
         useAsyncIO,
         bufferPool,

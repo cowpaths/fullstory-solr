@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Semaphore;
 
 /**
  * Test-only subclass of {@link GCSDirectory} that replaces the resumable-upload write path with a
@@ -52,7 +53,17 @@ public class LocalGCSDirectory extends GCSDirectory {
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
       throws IOException {
-    super(localPath, bucket, storage, cache, channelPool, ioExec, useAsyncIO, bufferPool, null);
+    super(
+        localPath,
+        bucket,
+        storage,
+        cache,
+        channelPool,
+        new Semaphore(Integer.MAX_VALUE),
+        ioExec,
+        useAsyncIO,
+        bufferPool,
+        null);
   }
 
   @Override
