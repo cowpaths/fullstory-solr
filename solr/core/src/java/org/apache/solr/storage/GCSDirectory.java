@@ -526,9 +526,29 @@ public class GCSDirectory extends MMapDirectory {
                     return v;
                   }
                 });
-            Collection<UUID> toDelete = blobCoordinator.release(segUUID);
-            for (UUID id : toDelete) {
-              deleteBlob(id);
+            final UUID releaseSegUUID = segUUID;
+            try {
+              registerQueue.put(
+                  () -> {
+                    Collection<UUID> toDelete;
+                    try {
+                      toDelete = blobCoordinator.release(releaseSegUUID);
+                    } catch (IOException e) {
+                      log.error(
+                          "async release failed for segUUID {}; blobs may be orphaned",
+                          releaseSegUUID,
+                          e);
+                      return;
+                    }
+                    for (UUID id : toDelete) {
+                      deleteBlob(id);
+                    }
+                  });
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+              log.error(
+                  "interrupted while enqueuing release for {}; blobs may be orphaned",
+                  releaseSegUUID);
             }
           }
         }
