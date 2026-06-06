@@ -17,7 +17,6 @@
 
 package org.apache.solr.storage;
 
-import com.google.cloud.ReadChannel;
 import com.google.cloud.storage.Storage;
 import java.io.Closeable;
 import java.io.IOException;
@@ -134,8 +133,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         ExecutorUtil.newMDCAwareCachedThreadPool("gcsIOExec");
     private final BlockCache blockCache;
     private final Storage storage;
-    private final Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool;
-    final Semaphore oneOffChannelSemaphore = new Semaphore(DEFAULT_MAX_OPEN_CHANNELS >> 1);
+    final Semaphore channelSemaphore = new Semaphore(DEFAULT_MAX_OPEN_CHANNELS);
 
     /**
      * Buffer pool for the double-buffered GCS write path. Buffers are 256 KB, 4-KiB aligned (no
@@ -170,7 +168,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         Path coreRootDirectory) {
       this.blockCache = blockCache;
       this.storage = storage;
-      this.channelPool = new Cache<>(new ReadChannel[DEFAULT_MAX_OPEN_CHANNELS], true);
       this.bufferPool = new DirectBufferPool(GCS_WRITE_BUFFER_SIZE, 4096, 1);
       this.metadataBucket = metadataBucket;
       this.zkClient = zkController != null ? zkController.getZkClient() : null;
@@ -356,7 +353,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         BUCKET,
         nodeLevelState.storage,
         nodeLevelState.blockCache,
-        nodeLevelState.channelPool,
         nodeLevelState.ioExec,
         useAsyncIO,
         nodeLevelState.bufferPool);
@@ -367,7 +363,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       String bucket,
       Storage storage,
       BlockCache cache,
-      Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool,
       ExecutorService ioExec,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
@@ -377,8 +372,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         bucket,
         storage,
         cache,
-        channelPool,
-        nodeLevelState.oneOffChannelSemaphore,
+        nodeLevelState.channelSemaphore,
         ioExec,
         useAsyncIO,
         bufferPool,

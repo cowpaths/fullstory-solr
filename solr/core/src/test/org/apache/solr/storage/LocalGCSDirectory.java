@@ -17,7 +17,6 @@
 
 package org.apache.solr.storage;
 
-import com.google.cloud.ReadChannel;
 import com.google.cloud.RestorableState;
 import com.google.cloud.WriteChannel;
 import com.google.cloud.storage.BlobInfo;
@@ -48,7 +47,6 @@ public class LocalGCSDirectory extends GCSDirectory {
       String bucket,
       Storage storage,
       BlockCache cache,
-      Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool,
       ExecutorService ioExec,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
@@ -58,7 +56,6 @@ public class LocalGCSDirectory extends GCSDirectory {
         bucket,
         storage,
         cache,
-        channelPool,
         new Semaphore(Integer.MAX_VALUE),
         ioExec,
         useAsyncIO,

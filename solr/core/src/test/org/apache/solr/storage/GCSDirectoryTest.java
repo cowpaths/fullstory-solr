@@ -18,7 +18,6 @@ package org.apache.solr.storage;
 
 import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZE;
 
-import com.google.cloud.ReadChannel;
 import com.google.cloud.storage.Storage;
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -80,7 +79,6 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             BUCKET,
             storage,
             cache,
-            new Cache<>(new ReadChannel[64], true),
             new java.util.concurrent.Semaphore(Integer.MAX_VALUE),
             ioExec,
             false,
@@ -217,7 +215,6 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             BUCKET,
             storage,
             cache,
-            new Cache<>(new ReadChannel[64], true),
             new java.util.concurrent.Semaphore(Integer.MAX_VALUE),
             ioExec,
             true,

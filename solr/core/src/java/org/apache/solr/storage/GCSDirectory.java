@@ -263,7 +263,6 @@ public class GCSDirectory extends MMapDirectory {
   private final String bucket;
   protected final Storage storage;
   private final BlockCache cache;
-  private final Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool;
   private final Semaphore channelSemaphore;
   private final ExecutorService ioExec;
   private final boolean useAsyncIO;
@@ -341,7 +340,6 @@ public class GCSDirectory extends MMapDirectory {
       String bucket,
       Storage storage,
       BlockCache cache,
-      Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool,
       Semaphore channelSemaphore,
       ExecutorService ioExec,
       boolean useAsyncIO,
@@ -352,7 +350,6 @@ public class GCSDirectory extends MMapDirectory {
     this.bucket = bucket;
     this.storage = storage;
     this.cache = cache;
-    this.channelPool = channelPool;
     this.channelSemaphore = channelSemaphore;
     this.ioExec = ioExec;
     this.useAsyncIO = useAsyncIO;
@@ -1240,8 +1237,6 @@ public class GCSDirectory extends MMapDirectory {
   // GCSIndexInput
   // ---------------------------------------------------------------------------
 
-  private static final long REOPEN_THRESHOLD = COMPRESSION_BLOCK_SIZE >> 1;
-
   static final class GCSIndexInput extends IndexInput implements RandomAccessInput {
 
     private final GCSDirectory dir;
@@ -1273,15 +1268,6 @@ public class GCSDirectory extends MMapDirectory {
     private LongBuffer[] longViews;
     private IntBuffer[] intViews;
     private FloatBuffer[] floatViews;
-
-    // Pool node for the active channel; null when the pool was exhausted (direct fallback).
-    private Cache.Node<ReadChannel> channelNode;
-    // Active ReadChannel, whether pool-backed or opened directly as a one-off fallback.
-    // Null between supply() calls in the direct-fallback case (closed at the end of each supply()).
-    // Invariant: channelNode==null && channel!=null iff a one-off channel is open and
-    // channelSemaphore has been acquired for it.
-    private ReadChannel channel;
-    private long channelPos = -1; // current byte offset of channel in the GCS object
 
     // Root constructor: mmaps the full local file, parses the 52-byte trailer from the end,
     // pre-pins the uncompressed tail block (if any) into accessMapped, and decodes GCS block
@@ -1333,11 +1319,10 @@ public class GCSDirectory extends MMapDirectory {
       localFileGuard = new ByteBufferGuard("gcsLocalFile", GCSDirectory.unmapHack());
 
       // Delta bytes sit between the tail region and the 52-byte trailer.
-      int deltaStart = tailLen;
       int deltaEnd = (int) (offsetFileSize - OFFSET_FILE_HEADER_SIZE);
-      byte[] deltaBytes = new byte[Math.max(0, deltaEnd - deltaStart)];
+      byte[] deltaBytes = new byte[Math.max(0, deltaEnd - tailLen)];
       if (deltaBytes.length > 0) {
-        localFileMapped.position(deltaStart);
+        localFileMapped.position(tailLen);
         localFileMapped.get(deltaBytes);
       }
       ByteArrayDataInput in = new ByteArrayDataInput(deltaBytes);
@@ -1408,170 +1393,39 @@ public class GCSDirectory extends MMapDirectory {
     /**
      * Fetches the given compressed block from GCS and decompresses it. Called only on a cache miss.
      *
-     * <p>Reuses a persistent {@link ReadChannel} across sequential block fetches to avoid per-block
-     * connection overhead. The channel is seeked (triggering a reconnect) only when the target
-     * position is not reachable by a short forward skip.
+     * <p>Opens a fresh {@link ReadChannel} for each block, limited to exactly {@code compressedLen}
+     * bytes via {@link ReadChannel#limit}, so the gRPC stream ends naturally after the block is
+     * consumed. This prevents unbounded pre-parsing of surplus {@code ReadObjectResponse} messages
+     * into the zero-copy lifecycle manager's unclosed-streams map.
      */
     private ByteBuffer supply(long pos, int compressedLen, int decompressedLen) throws IOException {
       byte[] compressed = new byte[compressedLen];
       ByteBuffer compBuf = ByteBuffer.wrap(compressed);
       try {
-        fillBuffer(pos, compBuf);
-      } finally {
-        if (channelNode != null) {
-          dir.channelPool.unpin(channelNode);
-        } else if (channel != null) {
-          // one-off channel: close it and release the semaphore permit
-          try {
-            channel.close();
-          } catch (Exception ignored) {
+        dir.channelSemaphore.acquire();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IOException("interrupted waiting for GCS channel slot", e);
+      }
+      try (ReadChannel ch = dir.storage.reader(BlobId.of(dir.bucket, blobName))) {
+        ch.seek(pos);
+        ch.limit(pos + compressedLen);
+        while (compBuf.hasRemaining()) {
+          int n = ch.read(compBuf);
+          if (n == -1) {
+            throw new EOFException(
+                "unexpected EOF in GCS blob "
+                    + blobName
+                    + " at position "
+                    + (pos + compBuf.position()));
           }
-          channel = null;
-          dir.channelSemaphore.release();
         }
+      } finally {
+        dir.channelSemaphore.release();
       }
       byte[] decompressed = new byte[decompressedLen + 7];
       CompressingDirectory.decompress(compressed, 0, decompressedLen, decompressed, 0);
       return ByteBuffer.wrap(decompressed, 0, decompressedLen);
-    }
-
-    /**
-     * Acquires a channel (from the pool if available, otherwise a direct one-off) seeked to {@code
-     * pos}, updating {@link #channelNode} and {@link #channel}.
-     */
-    private void openChannelAt(long pos) throws IOException {
-      channelNode = acquireManagedChannel();
-      if (channelNode == null) {
-        // Pool exhausted: wait for a one-off permit, then retry the pool once more.
-        try {
-          dir.channelSemaphore.acquire();
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          throw new IOException("interrupted waiting for GCS channel slot", e);
-        }
-        channelNode = acquireManagedChannel();
-        if (channelNode != null) {
-          // A slot freed up while we waited; use it and release the permit immediately.
-          dir.channelSemaphore.release();
-          channel = channelNode.getValue();
-        } else {
-          // Still no pool slot; open a one-off. Permit held until supply() closes the channel.
-          channel = dir.storage.reader(BlobId.of(dir.bucket, blobName));
-          channel.setChunkSize(COMPRESSION_BLOCK_SIZE);
-        }
-      } else {
-        channel = channelNode.getValue();
-      }
-      channel.seek(pos);
-      channelPos = pos;
-    }
-
-    private Cache.Node<ReadChannel> acquireManagedChannel() {
-      return dir.channelPool.acquireNode(
-          ch -> {
-            if (ch != null) {
-              try {
-                ch.close();
-              } catch (Exception ignored) {
-              }
-            }
-            ReadChannel c = dir.storage.reader(BlobId.of(dir.bucket, blobName));
-            c.setChunkSize(COMPRESSION_BLOCK_SIZE);
-            return c;
-          });
-    }
-
-    /**
-     * Fills {@code dst} completely starting at {@code startPos}.
-     *
-     * <p>Handles channel acquisition and positioning (seek or short forward skip) before reading.
-     * If the channel was re-pinned from the pool it may have been idle long enough for the
-     * transport to time out; in that case one reopen is attempted on the first failing operation.
-     * Note that successful reads do not clear the stale flag: buffered data may be served without a
-     * network call, so a failure can surface at any point during the block read. A brand-new
-     * channel opened via {@link #openChannelAt} is never retried.
-     */
-    private void fillBuffer(long startPos, ByteBuffer dst) throws IOException {
-      final long resumePos = startPos + dst.position();
-
-      // Acquire / re-pin the channel. isStale is true when we re-pinned an existing channel
-      // that may have been idle long enough for the transport layer to time out.
-      boolean isStale;
-      if (channel == null || (channelNode != null && !dir.channelPool.pin(channelNode))) {
-        openChannelAt(resumePos);
-        isStale = false;
-      } else {
-        isStale = true;
-        if (resumePos != channelPos) {
-          long distance = resumePos - channelPos;
-          try {
-            if (distance > 0 && distance < REOPEN_THRESHOLD) {
-              // Short forward skip: read and discard rather than paying for a reconnect.
-              ByteBuffer skip = ByteBuffer.allocate((int) distance);
-              while (skip.hasRemaining()) {
-                if (channel.read(skip) == -1) {
-                  throw new EOFException(
-                      "unexpected EOF in GCS blob " + blobName + " while skipping to " + resumePos);
-                }
-              }
-              channelPos = resumePos;
-            } else {
-              channel.seek(resumePos);
-              channelPos = resumePos;
-              // seek() is lazy (no network call); isStale remains true until first read succeeds.
-            }
-            // (skip path only: isStale cleared below after actual reads confirmed the transport)
-          } catch (IOException e) {
-            // First operation on a potentially-stale channel failed: reopen once.
-            releaseAndReopenAt(resumePos);
-            isStale = false; // fresh channel; no further retries
-          }
-        }
-      }
-
-      while (dst.hasRemaining()) {
-        int n;
-        try {
-          n = channel.read(dst);
-        } catch (IOException e) {
-          if (!isStale) {
-            throw new IOException("GCS read failed at " + (startPos + dst.position()), e);
-          }
-          // First read on a potentially-stale channel: reopen once.
-          releaseAndReopenAt(startPos + dst.position());
-          isStale = false; // fresh channel; no further retries
-          continue;
-        }
-        if (n == -1) {
-          throw new EOFException(
-              "unexpected EOF in GCS blob "
-                  + blobName
-                  + " at position "
-                  + (startPos + dst.position()));
-        }
-      }
-      channelPos = startPos + dst.position();
-    }
-
-    /**
-     * Releases the current channel back to the pool (or closes it directly) and opens a fresh one.
-     */
-    private void releaseAndReopenAt(long pos) throws IOException {
-      if (channelNode != null) {
-        dir.channelPool.unpin(channelNode);
-        dir.channelPool.close(channelNode);
-        channelNode = null;
-      } else if (channel != null) {
-        try {
-          channel.close();
-        } catch (Exception ignored) {
-        }
-        // Release the one-off permit so openChannelAt() starts fresh; it will re-acquire
-        // one if the replacement also turns out to be a one-off.
-        dir.channelSemaphore.release();
-      }
-      channel = null;
-      openChannelAt(pos);
     }
 
     // ---------------------------------------------------------------------------
@@ -1947,21 +1801,6 @@ public class GCSDirectory extends MMapDirectory {
     @Override
     public void close() throws IOException {
       unpinCurrent();
-      // TODO (optimization): can we explicitly close() accessMapped here?
-      ReadChannel c = channel;
-      channel = null;
-      Cache.Node<ReadChannel> cn = channelNode;
-      channelNode = null;
-      if (cn != null) {
-        ReadChannel closeReadChannel = cn.getValue();
-        // recycle slot to pool tail; channel closed lazily on eviction
-        if (dir.channelPool.close(cn)) {
-          assert c == closeReadChannel;
-          closeReadChannel.close();
-        }
-      } else if (c != null) {
-        c.close();
-      }
       // Only the root (not slices) owns the local file mapping.
       if (localFileGuard != null) {
         localFileGuard.invalidateAndUnmap(localFileMapped);

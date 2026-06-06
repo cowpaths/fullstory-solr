@@ -17,7 +17,6 @@
 
 package org.apache.solr.storage;
 
-import com.google.cloud.ReadChannel;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.contrib.nio.testing.LocalStorageHelper;
 import java.io.IOException;
@@ -73,12 +72,11 @@ public class LocalGCSDirectoryFactory extends GCSDirectoryFactory {
       String bucket,
       Storage gcsStorage,
       BlockCache cache,
-      Cache<ReadChannel, Cache.Node<ReadChannel>> channelPool,
       ExecutorService ioExec,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
       throws IOException {
     return new LocalGCSDirectory(
-        localPath, bucket, gcsStorage, cache, channelPool, ioExec, useAsyncIO, bufferPool);
+        localPath, bucket, gcsStorage, cache, ioExec, useAsyncIO, bufferPool);
   }
 }
