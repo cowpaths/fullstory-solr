@@ -21,10 +21,17 @@ import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZ
 import com.google.cloud.ReadChannel;
 import com.google.cloud.storage.Storage;
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
@@ -224,6 +231,260 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
       assertArrayEquals(data, readFileFrom(asyncDir, "_async.dat", size));
     } finally {
       asyncDir.close();
+    }
+  }
+
+  /**
+   * Directly tests the unclosedStreams accumulation hypothesis by bypassing GCSDirectory entirely
+   * and probing GrpcStorageImpl internals.
+   *
+   * <p>The hypothesis: gRPC's blocking server-streaming iterator calls {@code request(MAX_VALUE)}
+   * upfront, so GCS streams the entire object. On the first {@code iter.next()} call,
+   * waitAndDrain() processes ALL already-queued tasks, parsing every received ReadObjectResponse
+   * (adding each to unclosedStreams). After consuming only the first response, seeking away cancels
+   * the stream — leaving all pre-parsed extras stuck.
+   *
+   * <p>The test directly opens a ReadChannel, reads a tiny amount, checks unclosedStreams before
+   * and after close to distinguish two cases:
+   *
+   * <ul>
+   *   <li>If entries appear after read but before close → pre-parsing is happening; they are stuck
+   *       until the Storage is closed (confirming the accumulation mechanism).
+   *   <li>If entries appear then disappear on channel close → close() drains them (original
+   *       supply()-close fix would have been sufficient).
+   *   <li>If entries never appear → parse() is fully lazy (no accumulation regardless of seeks).
+   * </ul>
+   *
+   * <p>Run with -Psolr.directoryFactory=org.apache.solr.storage.ADCGCSDirectoryFactory and a bucket
+   * containing at least one object larger than 2 MB (a few gRPC response chunks). Skipped
+   * automatically when zero-copy is not active.
+   */
+  public void testUnclosedStreamsDirectProbe() throws Exception {
+    // ---- resolve unclosedStreams via reflection ----
+    Field rclmField;
+    try {
+      rclmField = storage.getClass().getDeclaredField("responseContentLifecycleManager");
+    } catch (NoSuchFieldException e) {
+      System.out.println("SKIP: " + storage.getClass().getName() + " has no rclm field");
+      return;
+    }
+    rclmField.setAccessible(true);
+    Object rclm = rclmField.get(storage);
+    System.out.println("rclm class: " + rclm.getClass().getName());
+
+    Field unclosedStreamsField;
+    try {
+      unclosedStreamsField = rclm.getClass().getDeclaredField("unclosedStreams");
+    } catch (NoSuchFieldException e) {
+      System.out.println(
+          "SKIP: rclm " + rclm.getClass().getName() + " has no unclosedStreams (noop path)");
+      return;
+    }
+    unclosedStreamsField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    Map<Object, Object> unclosedStreams = (Map<Object, Object>) unclosedStreamsField.get(rclm);
+
+    // ---- write a large file: enough blocks that compressed data > several gRPC chunks (2 MB ea)
+    // ----
+    // ~200 * 256 KB = ~50 MB compressed (incompressible random data, so ~50 MB on wire).
+    // GCS returns 50 MB / 2 MB = ~25 ReadObjectResponse messages for a no-limit request.
+    int blockCount = 200;
+    byte[] data = randomBytes(blockCount * COMPRESSION_BLOCK_SIZE);
+    writeFile("_probe.dat", data);
+
+    System.out.println("zeroCopyReady class: " + rclm.getClass().getSimpleName());
+    System.out.println("baseline unclosedStreams.size() = " + unclosedStreams.size());
+
+    // ---- read block 0 (forces a GCS fetch since cache is cold) ----
+    // We use sequential IndexInput.readByte() rather than randomAccessSlice so we can
+    // observe the state right after the first GCS supply() call, before any seek.
+    try (IndexInput in = dir.openInput("_probe.dat", IOContext.DEFAULT)) {
+      // Read one byte at position 0; this triggers supply() for block 0 and opens a gRPC stream
+      // for the entire object (no readLimit). waitAndDrain() will process ALL queued tasks.
+      in.readByte();
+      System.out.println(
+          "After readByte(0) [block 0 fetched from GCS]: unclosedStreams.size() = "
+              + unclosedStreams.size());
+
+      // Force a second block fetch to trigger a seek (stream cancel + reopen).
+      // Seek past the end of block 0.
+      in.seek(2L * COMPRESSION_BLOCK_SIZE);
+      in.readByte();
+      System.out.println(
+          "After seek+readByte(block 2) [stream cancelled+reopened]: unclosedStreams.size() = "
+              + unclosedStreams.size());
+    }
+    System.out.println(
+        "After IndexInput.close(): unclosedStreams.size() = " + unclosedStreams.size());
+
+    // ---- also test ReadChannel directly (no GCSDirectory layer) ----
+    // Write a raw blob that we can read with a plain ReadChannel.
+    String testBlob = "unclosed-streams-probe-" + System.currentTimeMillis();
+    byte[] blobData = randomBytes(10 * 1024 * 1024); // 10 MB; expect ~5 ReadObjectResponse chunks
+    storage.create(
+        com.google.cloud.storage.BlobInfo.newBuilder(BUCKET, testBlob).build(), blobData);
+    try {
+      System.out.println("-- direct ReadChannel probe (10 MB blob) --");
+      int before = unclosedStreams.size();
+
+      com.google.cloud.ReadChannel ch =
+          storage.reader(com.google.cloud.storage.BlobId.of(BUCKET, testBlob));
+      ch.setChunkSize(3098);
+      ch.seek(0);
+      java.nio.ByteBuffer tiny = java.nio.ByteBuffer.allocate(1024);
+      ch.read(tiny);
+      System.out.println(
+          "After 1 KB read (no seek yet): unclosedStreams.size() = "
+              + unclosedStreams.size()
+              + "  (delta="
+              + (unclosedStreams.size() - before)
+              + ")");
+
+      ch.seek(9 * 1024 * 1024); // seek near end — cancels old stream
+      ch.read(tiny.clear());
+      System.out.println(
+          "After seek+read (stream cancelled): unclosedStreams.size() = "
+              + unclosedStreams.size()
+              + "  (delta="
+              + (unclosedStreams.size() - before)
+              + ")");
+
+      ch.close();
+      System.out.println(
+          "After ch.close(): unclosedStreams.size() = "
+              + unclosedStreams.size()
+              + "  (delta="
+              + (unclosedStreams.size() - before)
+              + ")");
+    } finally {
+      storage.delete(com.google.cloud.storage.BlobId.of(BUCKET, testBlob));
+    }
+  }
+
+  /**
+   * Stress reproduction for unclosedStreams accumulation.
+   *
+   * <p>Pattern per thread: seek → read small amount (opens gRPC stream, window opens) → sleep (gRPC
+   * I/O thread pre-parses more responses into unclosedStreams) → seek again (cancels stream,
+   * leaving pre-parsed entries permanently stuck). Repeat with many concurrent threads.
+   *
+   * <p>Run with -Psolr.directoryFactory=org.apache.solr.storage.ADCGCSDirectoryFactory and a real
+   * bucket. Skipped automatically when not using gRPC storage.
+   */
+  public void testUnclosedStreamsStress() throws Exception {
+    Field rclmField;
+    try {
+      rclmField = storage.getClass().getDeclaredField("responseContentLifecycleManager");
+    } catch (NoSuchFieldException e) {
+      System.out.println("SKIP: " + storage.getClass().getName() + " has no rclm field");
+      return;
+    }
+    rclmField.setAccessible(true);
+    Object rclm = rclmField.get(storage);
+    Field unclosedStreamsField;
+    try {
+      unclosedStreamsField = rclm.getClass().getDeclaredField("unclosedStreams");
+    } catch (NoSuchFieldException e) {
+      System.out.println("SKIP: noop rclm (zero-copy not active)");
+      return;
+    }
+    unclosedStreamsField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    Map<Object, Object> unclosedStreams = (Map<Object, Object>) unclosedStreamsField.get(rclm);
+
+    // 50 MB: ~25 gRPC response messages at 2 MB each — enough to pre-parse several per sleep window
+    int blobBytes = 50 * 1024 * 1024;
+    String blobName = "unclosed-streams-stress-" + System.currentTimeMillis();
+    storage.create(
+        com.google.cloud.storage.BlobInfo.newBuilder(BUCKET, blobName).build(),
+        randomBytes(blobBytes));
+
+    try {
+      int numThreads = 16;
+      long runMillis = 2 * 60 * 1000L;
+      long deadline = System.currentTimeMillis() + runMillis;
+      AtomicInteger maxUnclosed = new AtomicInteger(0);
+      CountDownLatch done = new CountDownLatch(numThreads);
+      ExecutorService exec = Executors.newFixedThreadPool(numThreads);
+
+      for (int t = 0; t < numThreads; t++) {
+        exec.submit(
+            () -> {
+              ThreadLocalRandom rng = ThreadLocalRandom.current();
+              com.google.cloud.ReadChannel ch =
+                  storage.reader(com.google.cloud.storage.BlobId.of(BUCKET, blobName));
+              try {
+                ByteBuffer buf = ByteBuffer.allocate(4096);
+                while (System.currentTimeMillis() < deadline) {
+                  // Stay well away from EOF so the stream has many remaining messages
+                  long pos = rng.nextLong(blobBytes / 2);
+                  ch.seek(pos);
+                  buf.clear();
+                  ch.read(buf); // opens gRPC stream, consumes first response, opens flow window
+
+                  // Let gRPC I/O thread pre-parse more responses while we sleep
+                  Thread.sleep(rng.nextInt(50, 150));
+
+                  int cur = unclosedStreams.size();
+                  int prev = maxUnclosed.getAndUpdate(m -> Math.max(m, cur));
+                  if (cur > prev) {
+                    System.out.printf(
+                        "[%5.1fs] new peak unclosedStreams.size() = %d%n",
+                        (System.currentTimeMillis() - (deadline - runMillis)) / 1000.0, cur);
+                  }
+                  // Next seek will cancel this stream, leaving pre-parsed entries stuck
+                }
+              } catch (Exception e) {
+                System.err.println("stress thread error: " + e);
+              } finally {
+                try {
+                  ch.close();
+                } catch (Exception ignored) {
+                }
+                done.countDown();
+              }
+            });
+      }
+
+      // Reporter thread: print current size every 5 s
+      Thread reporter =
+          new Thread(
+              () -> {
+                try {
+                  while (!Thread.currentThread().isInterrupted()
+                      && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(5000);
+                    System.out.printf(
+                        "[%5.1fs] unclosedStreams.size() = %d  (peak=%d)%n",
+                        (System.currentTimeMillis() - (deadline - runMillis)) / 1000.0,
+                        unclosedStreams.size(),
+                        maxUnclosed.get());
+                  }
+                } catch (InterruptedException ignored) {
+                }
+              });
+      reporter.setDaemon(true);
+      reporter.start();
+
+      done.await();
+      reporter.interrupt();
+      ExecutorUtil.shutdownAndAwaitTermination(exec);
+      System.out.println("Peak unclosedStreams.size()   = " + maxUnclosed.get());
+      System.out.println("Final unclosedStreams.size()  = " + unclosedStreams.size());
+
+      Thread.sleep(5000);
+      System.out.println("Final2 unclosedStreams.size() = " + unclosedStreams.size());
+
+      storage.delete(com.google.cloud.storage.BlobId.of(BUCKET, blobName));
+      storage.close();
+      Thread.sleep(5000);
+      System.out.println("After storage.close()         = " + unclosedStreams.size());
+    } finally {
+      // best-effort cleanup in case the block above threw before delete
+      try {
+        storage.delete(com.google.cloud.storage.BlobId.of(BUCKET, blobName));
+      } catch (Exception ignored) {
+      }
     }
   }
 
