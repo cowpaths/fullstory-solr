@@ -1250,8 +1250,10 @@ public class GCSDirectory extends MMapDirectory {
     private final String blobName;
     // Full mmap of the local file; non-null only in the root (not in slices).
     private final java.nio.MappedByteBuffer localFileMapped;
-    // Guard for explicit unmap of localFileMapped on close; non-null only in root.
-    private final ByteBufferGuard localFileGuard;
+    // Guard for explicit unmap of localFileMapped on close. Created in root, shared with all slices
+    // so that after root.close() any in-flight slice read through the guard throws instead of
+    // producing a SIGSEGV on unmapped native memory (specifically the mmap-backed tail block).
+    private final ByteBufferGuard guard;
 
     private final AtomicReferenceArray<BlockCache.Node> accessMapped;
 
@@ -1316,7 +1318,7 @@ public class GCSDirectory extends MMapDirectory {
         localFileMapped = ch.map(FileChannel.MapMode.READ_ONLY, 0, offsetFileSize);
       }
       localFileMapped.order(ByteOrder.LITTLE_ENDIAN);
-      localFileGuard = new ByteBufferGuard("gcsLocalFile", GCSDirectory.unmapHack());
+      guard = new ByteBufferGuard("gcsLocalFile", GCSDirectory.unmapHack());
 
       // Delta bytes sit between the tail region and the 52-byte trailer.
       int deltaEnd = (int) (offsetFileSize - OFFSET_FILE_HEADER_SIZE);
@@ -1370,7 +1372,7 @@ public class GCSDirectory extends MMapDirectory {
       this.lastBlockDecompressedLen = parent.lastBlockDecompressedLen;
       this.blobName = parent.blobName;
       this.localFileMapped = null; // slice does not own the mapping
-      this.localFileGuard = null; // slice does not unmap
+      this.guard = parent.guard; // shared: root.close() invalidates all slices
       this.accessMapped = parent.accessMapped;
       this.offset = parent.offset + offset;
       this.seekPos = this.offset;
@@ -1555,7 +1557,8 @@ public class GCSDirectory extends MMapDirectory {
       long absolutePos = pos + offset;
       int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
       if (blockIdx != currentBlockIdx) initBlock(blockIdx);
-      return postBuffer.get(postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW));
+      return guard.getByte(
+          postBuffer, postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW));
     }
 
     @Override
@@ -1567,7 +1570,7 @@ public class GCSDirectory extends MMapDirectory {
       if (postBuffer.limit() - localPos < Short.BYTES) {
         return (short) (((readByte(pos + 1) & 0xFF) << 8) | (readByte(pos) & 0xFF));
       }
-      return postBuffer.getShort(localPos);
+      return guard.getShort(postBuffer, localPos);
     }
 
     @Override
@@ -1582,7 +1585,7 @@ public class GCSDirectory extends MMapDirectory {
             | ((readByte(pos + 1) & 0xFF) << 8)
             | (readByte(pos) & 0xFF);
       }
-      return postBuffer.getInt(localPos);
+      return guard.getInt(postBuffer, localPos);
     }
 
     @Override
@@ -1603,7 +1606,7 @@ public class GCSDirectory extends MMapDirectory {
       }
       if (!postBuffer.hasRemaining()) refill();
       filePointer++;
-      return postBuffer.get();
+      return guard.getByte(postBuffer);
     }
 
     @Override
@@ -1616,13 +1619,13 @@ public class GCSDirectory extends MMapDirectory {
       filePointer += len;
       int left = postBuffer.remaining();
       while (left < len) {
-        postBuffer.get(dst, offset, left);
+        guard.getBytes(postBuffer, dst, offset, left);
         len -= left;
         offset += left;
         refill();
         left = postBuffer.remaining();
       }
-      postBuffer.get(dst, offset, len);
+      guard.getBytes(postBuffer, dst, offset, len);
     }
 
     // ---------------------------------------------------------------------------
@@ -1632,7 +1635,7 @@ public class GCSDirectory extends MMapDirectory {
     private int _readInt(final int remaining) throws IOException {
       if (remaining >= Integer.BYTES) {
         filePointer += Integer.BYTES;
-        return postBuffer.getInt();
+        return guard.getInt(postBuffer);
       }
       // Cross-block: read byte-by-byte (little-endian).
       int b0 = readByte() & 0xFF;
@@ -1645,7 +1648,7 @@ public class GCSDirectory extends MMapDirectory {
     private long _readLong(final int remaining) throws IOException {
       if (remaining >= Long.BYTES) {
         filePointer += Long.BYTES;
-        return postBuffer.getLong();
+        return guard.getLong(postBuffer);
       }
       return (_readInt(remaining) & 0xFFFFFFFFL)
           | (((long) _readInt(postBuffer.remaining())) << 32);
@@ -1670,7 +1673,7 @@ public class GCSDirectory extends MMapDirectory {
         }
       } else {
         final int position = postBuffer.position();
-        longViews[position & 0x07].position(position >>> 3).get(dst, offset, length);
+        guard.getLongs(longViews[position & 0x07].position(position >>> 3), dst, offset, length);
         filePointer += bytesRequested;
         postBuffer.position(position + (int) bytesRequested);
       }
@@ -1695,7 +1698,7 @@ public class GCSDirectory extends MMapDirectory {
         }
       } else {
         final int position = postBuffer.position();
-        intViews[position & 0x03].position(position >>> 2).get(dst, offset, length);
+        guard.getInts(intViews[position & 0x03].position(position >>> 2), dst, offset, length);
         filePointer += bytesRequested;
         postBuffer.position(position + (int) bytesRequested);
       }
@@ -1721,7 +1724,7 @@ public class GCSDirectory extends MMapDirectory {
         }
       } else {
         final int position = postBuffer.position();
-        floatViews[position & 0x03].position(position >>> 2).get(dst, offset, length);
+        guard.getFloats(floatViews[position & 0x03].position(position >>> 2), dst, offset, length);
         filePointer += bytesRequested;
         postBuffer.position(position + (int) bytesRequested);
       }
@@ -1800,10 +1803,14 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public void close() throws IOException {
-      unpinCurrent();
-      // Only the root (not slices) owns the local file mapping.
-      if (localFileGuard != null) {
-        localFileGuard.invalidateAndUnmap(localFileMapped);
+      if (localFileMapped == null) {
+        unpinCurrent();
+      } else {
+        // null out the tail node; probably local mmap'd
+        accessMapped.set(accessMapped.length() - 1, null);
+        unpinCurrent();
+        // Only the root (not slices) owns the local file mapping.
+        guard.invalidateAndUnmap(localFileMapped);
       }
     }
   }
