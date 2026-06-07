@@ -53,10 +53,12 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
@@ -251,8 +253,10 @@ public class GCSDirectory extends MMapDirectory {
                   .getBytes(java.nio.charset.StandardCharsets.UTF_8))
           .getMostSignificantBits();
 
+  private static final ByteBufferGuard.BufferCleaner UNMAP = unmapHack();
+
   /** Obtains Lucene's unmap hack for explicit {@link java.nio.MappedByteBuffer} cleanup. */
-  static ByteBufferGuard.BufferCleaner unmapHack() {
+  private static ByteBufferGuard.BufferCleaner unmapHack() {
     Object hack = MappedByteBufferIndexInputProvider.unmapHackImpl();
     if (hack instanceof ByteBufferGuard.BufferCleaner) {
       return (ByteBufferGuard.BufferCleaner) hack;
@@ -280,8 +284,7 @@ public class GCSDirectory extends MMapDirectory {
    * GCS blob. Keyed by blob UUID so that rename (which only moves the local offset file) requires
    * no map update. Populated by the writer at write-close time; entries are removed on delete.
    */
-  private final ConcurrentHashMap<UUID, AtomicReferenceArray<BlockCache.Node>> pendingNodes =
-      new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<UUID, BlocksStruct> pendingNodes = new ConcurrentHashMap<>();
 
   private final ConcurrentHashMap<String, SegmentStruct> pendingWrites = new ConcurrentHashMap<>();
 
@@ -457,10 +460,11 @@ public class GCSDirectory extends MMapDirectory {
     UUID segUUID = header != null ? readSegmentUUID(header) : null;
     UUID blobUUID = header != null ? readBlobUUID(header) : null;
     if (blobUUID != null) {
-      AtomicReferenceArray<BlockCache.Node> stale = pendingNodes.remove(blobUUID);
+      BlocksStruct stale = pendingNodes.remove(blobUUID);
       if (stale != null) {
-        for (int i = 0; i < stale.length(); i++) {
-          BlockCache.Node node = stale.getAndSet(i, null);
+        AtomicReferenceArray<BlockCache.Node> staleNodes = stale.accessMapped;
+        for (int i = 0; i < staleNodes.length(); i++) {
+          BlockCache.Node node = staleNodes.getAndSet(i, null);
           if (node != null) cache.close(node);
         }
       }
@@ -1181,7 +1185,7 @@ public class GCSDirectory extends MMapDirectory {
               for (int i = 0; i < gcsBlockCount; i++) {
                 accessMapped.set(i, cachedNodes.get(i));
               }
-              dir.pendingNodes.put(uuid, accessMapped);
+              dir.pendingNodes.put(uuid, new BlocksStruct(accessMapped, 0, tailLen > 0));
             }
           }
         }
@@ -1237,6 +1241,33 @@ public class GCSDirectory extends MMapDirectory {
   // GCSIndexInput
   // ---------------------------------------------------------------------------
 
+  private static final class BlocksStruct {
+    private final AtomicInteger refCount;
+    private final AtomicReferenceArray<BlockCache.Node> accessMapped;
+    private final boolean hasTail;
+    private final CompletableFuture<ByteBuffer> origMapping = new CompletableFuture<>();
+    private final ByteBufferGuard guard = new ByteBufferGuard("gcsLocalFile", UNMAP);
+
+    private BlocksStruct(
+        AtomicReferenceArray<BlockCache.Node> accessMapped, int initialRefCount, boolean hasTail) {
+      this.accessMapped = accessMapped;
+      this.refCount = new AtomicInteger(initialRefCount);
+      this.hasTail = hasTail;
+      if (!hasTail) {
+        origMapping.complete(null);
+      }
+    }
+
+    private BlocksStruct copy() {
+      int len = accessMapped.length();
+      AtomicReferenceArray<BlockCache.Node> newAccessMapped = new AtomicReferenceArray<>(len);
+      for (int i = hasTail ? len - 2 : len - 1; i >= 0; i--) {
+        newAccessMapped.setPlain(i, accessMapped.getPlain(i)); // plain/best-effort
+      }
+      return new BlocksStruct(newAccessMapped, 0, hasTail);
+    }
+  }
+
   static final class GCSIndexInput extends IndexInput implements RandomAccessInput {
 
     private final GCSDirectory dir;
@@ -1247,15 +1278,16 @@ public class GCSDirectory extends MMapDirectory {
     private final int blockCount; // total logical blocks (GCS blocks + optional tail)
     private final int lastBlockIdx;
     private final int lastBlockDecompressedLen;
+    private final UUID blobUUID;
     private final String blobName;
     // Full mmap of the local file; non-null only in the root (not in slices).
-    private final java.nio.MappedByteBuffer localFileMapped;
+    private final BlocksStruct blocksStruct;
     // Guard for explicit unmap of localFileMapped on close. Created in root, shared with all slices
     // so that after root.close() any in-flight slice read through the guard throws instead of
     // producing a SIGSEGV on unmapped native memory (specifically the mmap-backed tail block).
     private final ByteBufferGuard guard;
 
-    private final AtomicReferenceArray<BlockCache.Node> accessMapped;
+    private AtomicReferenceArray<BlockCache.Node> accessMapped;
 
     private final long offset;
     private final long sliceLength;
@@ -1288,7 +1320,7 @@ public class GCSDirectory extends MMapDirectory {
       }
       hdr.readByte(); // compressionType (not yet used)
       hdr.readShort(); // reserved
-      UUID blobUUID = new UUID(hdr.readLong(), hdr.readLong());
+      blobUUID = new UUID(hdr.readLong(), hdr.readLong());
       blobName = blobUUID.toString();
       hdr.skipBytes(16); // segUUID — not needed for reads
       length = hdr.readLong();
@@ -1313,12 +1345,12 @@ public class GCSDirectory extends MMapDirectory {
 
       // Mmap the full local file once.
       long offsetFileSize;
+      ByteBuffer localFileMapped;
       try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
         offsetFileSize = ch.size();
         localFileMapped = ch.map(FileChannel.MapMode.READ_ONLY, 0, offsetFileSize);
       }
       localFileMapped.order(ByteOrder.LITTLE_ENDIAN);
-      guard = new ByteBufferGuard("gcsLocalFile", GCSDirectory.unmapHack());
 
       // Delta bytes sit between the tail region and the 52-byte trailer.
       int deltaEnd = (int) (offsetFileSize - OFFSET_FILE_HEADER_SIZE);
@@ -1342,18 +1374,44 @@ public class GCSDirectory extends MMapDirectory {
       }
       blockOffsets[gcsBlockCount] = gcsObjectSize;
 
-      AtomicReferenceArray<BlockCache.Node> local = new AtomicReferenceArray<>(blockCount);
-      AtomicReferenceArray<BlockCache.Node> existing =
-          dir.pendingNodes.putIfAbsent(blobUUID, local);
-      this.accessMapped = existing == null ? local : existing;
+      boolean[] weMap = new boolean[1];
+      this.blocksStruct =
+          dir.pendingNodes.compute(
+              blobUUID,
+              (k, v) -> {
+                if (v == null) {
+                  weMap[0] = true;
+                  v = new BlocksStruct(new AtomicReferenceArray<>(blockCount), 1, hasTail);
+                } else if (v.refCount.getAndIncrement() == 0) {
+                  weMap[0] = true;
+                }
+                return v;
+              });
+      this.accessMapped = blocksStruct.accessMapped;
+      this.guard = blocksStruct.guard;
 
       // Pre-pin the tail block into accessMapped[lastBlockIdx] as a synthetic always-pinned node
       // backed directly by the mmap slice — no GCS fetch or decompression ever needed for it.
       if (hasTail) {
-        ByteBuffer tailBuf = localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
-        BlockCache.Node tailNode = dir.cache.createNode(null, null, Integer.MAX_VALUE / 2);
-        tailNode.populateDirect(tailBuf);
-        accessMapped.set(lastBlockIdx, tailNode);
+        if (weMap[0]) {
+          try {
+            ByteBuffer tailBuf = localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
+            BlockCache.Node tailNode = dir.cache.createNode(null, null, Integer.MAX_VALUE / 2);
+            tailNode.populateDirect(tailBuf);
+            if (!accessMapped.compareAndSet(lastBlockIdx, null, tailNode)) {
+              throw new IllegalStateException("tailNode already set");
+            }
+            blocksStruct.origMapping.complete(localFileMapped);
+          } catch (Throwable t) {
+            blocksStruct.origMapping.completeExceptionally(t);
+            throw t;
+          }
+        } else {
+          UNMAP.freeBuffer("quick close localFileMapped", localFileMapped);
+          blocksStruct.origMapping.join(); // wait until initialized
+        }
+      } else {
+        UNMAP.freeBuffer("quick close localFileMapped", localFileMapped);
       }
 
       this.offset = 0;
@@ -1370,8 +1428,9 @@ public class GCSDirectory extends MMapDirectory {
       this.blockCount = parent.blockCount;
       this.lastBlockIdx = parent.lastBlockIdx;
       this.lastBlockDecompressedLen = parent.lastBlockDecompressedLen;
+      this.blobUUID = parent.blobUUID;
       this.blobName = parent.blobName;
-      this.localFileMapped = null; // slice does not own the mapping
+      this.blocksStruct = null; // slice does not own the mapping
       this.guard = parent.guard; // shared: root.close() invalidates all slices
       this.accessMapped = parent.accessMapped;
       this.offset = parent.offset + offset;
@@ -1803,15 +1862,45 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public void close() throws IOException {
-      if (localFileMapped == null) {
-        unpinCurrent();
-      } else {
-        // null out the tail node; probably local mmap'd
-        accessMapped.set(accessMapped.length() - 1, null);
-        unpinCurrent();
-        // Only the root (not slices) owns the local file mapping.
-        guard.invalidateAndUnmap(localFileMapped);
+      unpinCurrent();
+      try {
+        if (accessMapped == null) return;
+
+        unsetBuffers();
+
+        if (blocksStruct == null) return;
+
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        CompletableFuture<ByteBuffer>[] toUnmap = new CompletableFuture[1];
+        dir.pendingNodes.computeIfPresent(
+            blobUUID,
+            (k, v) -> {
+              int outstandingRefs = v.refCount.decrementAndGet();
+              if (outstandingRefs == 0) {
+                toUnmap[0] = v.hasTail ? v.origMapping : null;
+                return v.copy(); // keep non-local mappings only
+              } else if (outstandingRefs > 0) {
+                return v;
+              } else {
+                throw new IllegalStateException();
+              }
+            });
+        if (toUnmap[0] != null) {
+          // tell the guard to invalidate and later unmap the bytebuffers (if supported):
+          guard.invalidateAndUnmap(toUnmap[0].join());
+        }
+      } finally {
+        unsetBuffers();
       }
+    }
+
+    private void unsetBuffers() {
+      accessMapped = null;
+      currentBlockIdx = -1;
+      postBuffer = null;
+      floatViews = null;
+      intViews = null;
+      longViews = null;
     }
   }
 
