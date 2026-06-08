@@ -125,6 +125,7 @@ import org.slf4j.LoggerFactory;
 public class GCSDirectory extends MMapDirectory {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  private final ReferenceHandler<GCSIndexInput, NodeRefStruct> nodeRefHandler;
 
   public static Directory rawDirectoryView(Directory dir) {
     Directory unwrap = dir;
@@ -345,11 +346,13 @@ public class GCSDirectory extends MMapDirectory {
       BlockCache cache,
       Semaphore channelSemaphore,
       ExecutorService ioExec,
+      ReferenceHandler<GCSIndexInput, NodeRefStruct> nodeRefHandler,
       boolean useAsyncIO,
       DirectBufferPool bufferPool,
       BlobLifecycleCoordinator blobCoordinator)
       throws IOException {
     super(localPath, FSLockFactory.getDefault());
+    this.nodeRefHandler = nodeRefHandler;
     this.bucket = bucket;
     this.storage = storage;
     this.cache = cache;
@@ -1268,6 +1271,10 @@ public class GCSDirectory extends MMapDirectory {
     }
   }
 
+  static final class NodeRefStruct {
+    private volatile BlockCache.Node currentNode;
+  }
+
   static final class GCSIndexInput extends IndexInput implements RandomAccessInput {
 
     private final GCSDirectory dir;
@@ -1297,7 +1304,7 @@ public class GCSDirectory extends MMapDirectory {
     private ByteBuffer postBuffer = ByteBuffer.allocate(0);
     private int postBufferBaseline;
     private int currentBlockIdx = -1;
-    private BlockCache.Node currentNode;
+    private final NodeRefStruct currentNodeRef = new NodeRefStruct();
 
     private LongBuffer[] longViews;
     private IntBuffer[] intViews;
@@ -1438,6 +1445,7 @@ public class GCSDirectory extends MMapDirectory {
       this.filePointer = this.offset;
       this.sliceLength = length;
       this.postBuffer = ByteBuffer.allocate(0);
+      this.dir.nodeRefHandler.register(this, currentNodeRef); // for clones/slices
     }
 
     // ---------------------------------------------------------------------------
@@ -1445,9 +1453,10 @@ public class GCSDirectory extends MMapDirectory {
     // ---------------------------------------------------------------------------
 
     private void unpinCurrent() {
-      if (currentNode != null) {
-        dir.cache.unpin(currentNode);
-        currentNode = null;
+      BlockCache.Node toUnpin = currentNodeRef.currentNode;
+      if (toUnpin != null) {
+        setCurrentNode(null);
+        dir.cache.unpin(toUnpin);
       }
     }
 
@@ -1515,6 +1524,10 @@ public class GCSDirectory extends MMapDirectory {
       refill(blockOffset, compressedLen, blockIdx);
     }
 
+    private void setCurrentNode(BlockCache.Node node) {
+      currentNodeRef.currentNode = node;
+    }
+
     private void refill(final long pos, final int compressedLen, final int blockIdx)
         throws IOException {
       int decompressedLen =
@@ -1532,7 +1545,7 @@ public class GCSDirectory extends MMapDirectory {
           dir.cache.unpin(cached);
           throw unwrapException(e.getCause());
         }
-        currentNode = cached;
+        setCurrentNode(cached);
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         postBuffer.clear().limit(decompressedLen);
         postBufferBaseline = 0;
@@ -1559,7 +1572,7 @@ public class GCSDirectory extends MMapDirectory {
             dir.cache.close(node);
             throw unwrapException(t);
           }
-          currentNode = node;
+          setCurrentNode(node);
           postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         } else {
           // Another thread won the race; wait for its result.
@@ -1573,7 +1586,7 @@ public class GCSDirectory extends MMapDirectory {
               dir.cache.unpin(extant);
               throw unwrapException(e.getCause());
             }
-            currentNode = extant;
+            setCurrentNode(extant);
             postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
           } else {
             // Serve uncached.
@@ -1597,7 +1610,7 @@ public class GCSDirectory extends MMapDirectory {
     private void uncached(long pos, int compressedLen, int blockIdx, int decompressedLen)
         throws IOException {
       ByteBuffer heapBuf = supply(pos, compressedLen, decompressedLen);
-      currentNode = null;
+      setCurrentNode(null);
       postBuffer = heapBuf;
       postBufferBaseline = heapBuf.position();
       heapBuf.order(ByteOrder.LITTLE_ENDIAN);
