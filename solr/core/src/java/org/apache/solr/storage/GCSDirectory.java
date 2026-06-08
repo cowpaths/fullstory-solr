@@ -125,7 +125,7 @@ import org.slf4j.LoggerFactory;
 public class GCSDirectory extends MMapDirectory {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-  private final ReferenceHandler<GCSIndexInput, NodeRefStruct> nodeRefHandler;
+  private final GCSDirectoryFactory.PinSemaphore acquirePinPermit;
 
   public static Directory rawDirectoryView(Directory dir) {
     Directory unwrap = dir;
@@ -346,13 +346,13 @@ public class GCSDirectory extends MMapDirectory {
       BlockCache cache,
       Semaphore channelSemaphore,
       ExecutorService ioExec,
-      ReferenceHandler<GCSIndexInput, NodeRefStruct> nodeRefHandler,
+      GCSDirectoryFactory.PinSemaphore acquirePinPermit,
       boolean useAsyncIO,
       DirectBufferPool bufferPool,
       BlobLifecycleCoordinator blobCoordinator)
       throws IOException {
     super(localPath, FSLockFactory.getDefault());
-    this.nodeRefHandler = nodeRefHandler;
+    this.acquirePinPermit = acquirePinPermit;
     this.bucket = bucket;
     this.storage = storage;
     this.cache = cache;
@@ -1283,7 +1283,7 @@ public class GCSDirectory extends MMapDirectory {
     private BlockCache.Node currentNode;
     private int currentBlockIdx = -1;
 
-    private void localPin(BlockCache blockCache) {
+    private void localPin(BlockCache blockCache, GCSDirectoryFactory.PinSemaphore acquirePermit) {
       if (localRefCount++ == 0) {
         while (!state.compareAndSet(State.IDLE, State.PINNED)) {
           Thread.yield();
@@ -1296,6 +1296,7 @@ public class GCSDirectory extends MMapDirectory {
             currentNode = null;
             currentBlockIdx = -1;
           }
+          acquirePermit.acquirePinPermit(this);
         }
       }
     }
@@ -1362,10 +1363,12 @@ public class GCSDirectory extends MMapDirectory {
     }
 
     /** This is the only method that may be called from a different thread! */
-    void outOfBandUnpin(BlockCache blockCache) {
+    boolean outOfBandUnpin(BlockCache blockCache) {
       if (state.compareAndSet(State.IDLE, State.UNPINNING)) {
         doUnpin(blockCache, State.UNPINNING);
+        return true;
       }
+      return false;
     }
   }
 
@@ -1538,7 +1541,6 @@ public class GCSDirectory extends MMapDirectory {
       this.filePointer = this.offset;
       this.sliceLength = length;
       this.postBuffer = ByteBuffer.allocate(0);
-      this.dir.nodeRefHandler.register(this, currentNodeRef); // for clones/slices
     }
 
     // ---------------------------------------------------------------------------
@@ -1588,7 +1590,7 @@ public class GCSDirectory extends MMapDirectory {
     // ---------------------------------------------------------------------------
 
     private void localPin() throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      currentNodeRef.localPin(dir.cache, dir.acquirePinPermit);
       long pos = seekPos;
       if (pos != -1) {
         seekPos = -1;
@@ -1715,7 +1717,7 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public byte readByte(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      currentNodeRef.localPin(dir.cache, dir.acquirePinPermit);
       try {
         long absolutePos = pos + offset;
         int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
@@ -1729,7 +1731,7 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public short readShort(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      currentNodeRef.localPin(dir.cache, dir.acquirePinPermit);
       try {
         long absolutePos = pos + offset;
         int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
@@ -1746,7 +1748,7 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public int readInt(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      currentNodeRef.localPin(dir.cache, dir.acquirePinPermit);
       try {
         long absolutePos = pos + offset;
         int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
@@ -1766,7 +1768,7 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public long readLong(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      currentNodeRef.localPin(dir.cache, dir.acquirePinPermit);
       try {
         return (readInt(pos) & 0xFFFFFFFFL) | ((long) readInt(pos + 4) << 32);
       } finally {

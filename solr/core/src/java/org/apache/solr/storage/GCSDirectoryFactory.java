@@ -127,6 +127,32 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     }
   }
 
+  private static final int MAX_CONCURRENT_PINNED = 4096;
+
+  interface PinSemaphore {
+    void acquirePinPermit(GCSDirectory.NodeRefStruct instance);
+  }
+
+  static PinSemaphore defaultMaxPinned(BlockCache cache) {
+    Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> pinned =
+        new Cache<>(new GCSDirectory.NodeRefStruct[MAX_CONCURRENT_PINNED], false);
+    return (instance) -> {
+      Cache.Node<GCSDirectory.NodeRefStruct> nodeRefStructNode;
+      do {
+        nodeRefStructNode =
+            pinned.acquireNode(
+                (evicted) -> {
+                  if (evicted.outOfBandUnpin(cache)) {
+                    return instance;
+                  } else {
+                    // actively in use; put it back in the queue
+                    return evicted;
+                  }
+                });
+      } while (nodeRefStructNode.getValue() != instance);
+    };
+  }
+
   /** Node-level resources shared across all {@link GCSDirectory} instances on this node. */
   public static final class NodeLevelGCSDirectoryState implements Closeable {
     private final java.util.concurrent.ExecutorService ioExec =
@@ -134,8 +160,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     private final BlockCache blockCache;
     private final Storage storage;
     private final Semaphore channelSemaphore = new Semaphore(DEFAULT_MAX_OPEN_CHANNELS);
-    private final ReferenceHandler<GCSDirectory.GCSIndexInput, GCSDirectory.NodeRefStruct>
-        nodeRefHandler;
+    private final PinSemaphore acquirePinPermit;
 
     /**
      * Buffer pool for the double-buffered GCS write path. Buffers are 256 KB, 4-KiB aligned (no
@@ -170,13 +195,12 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         Path coreRootDirectory)
         throws IOException {
       this.blockCache = blockCache;
+      this.acquirePinPermit = defaultMaxPinned(blockCache);
       this.storage = storage;
       this.bufferPool = new DirectBufferPool(GCS_WRITE_BUFFER_SIZE, 4096, 1);
       this.metadataBucket = metadataBucket;
       this.zkClient = zkController != null ? zkController.getZkClient() : null;
       this.coreRootDirectory = coreRootDirectory;
-      this.nodeRefHandler =
-          new ReferenceHandler<>(ioExec, nodeRef -> nodeRef.outOfBandUnpin(blockCache));
     }
 
     /**
@@ -250,11 +274,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     public void close() throws IOException {
       try (AutoCloseable c1 = storage;
           Closeable c2 = blockCache) {
-        try {
-          nodeRefHandler.close();
-        } finally {
-          ExecutorUtil.shutdownAndAwaitTermination(ioExec);
-        }
+        ExecutorUtil.shutdownAndAwaitTermination(ioExec);
       } catch (IOException e) {
         throw e;
       } catch (Exception e) {
@@ -363,7 +383,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         nodeLevelState.storage,
         nodeLevelState.blockCache,
         nodeLevelState.ioExec,
-        nodeLevelState.nodeRefHandler,
+        nodeLevelState.acquirePinPermit,
         useAsyncIO,
         nodeLevelState.bufferPool);
   }
@@ -374,7 +394,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       Storage storage,
       BlockCache cache,
       ExecutorService ioExec,
-      ReferenceHandler<GCSDirectory.GCSIndexInput, GCSDirectory.NodeRefStruct> nodeRefHandler,
+      PinSemaphore acquirePinPermit,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
       throws IOException {
@@ -385,7 +405,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         cache,
         nodeLevelState.channelSemaphore,
         ioExec,
-        nodeRefHandler,
+        acquirePinPermit,
         useAsyncIO,
         bufferPool,
         nodeLevelState.createBlobCoordinator(localPath));
