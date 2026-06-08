@@ -1587,6 +1587,17 @@ public class GCSDirectory extends MMapDirectory {
     // Block navigation
     // ---------------------------------------------------------------------------
 
+    private void localPin() throws IOException {
+      currentNodeRef.localPin(dir.cache);
+      long pos = seekPos;
+      if (pos != -1) {
+        seekPos = -1;
+        actualSeek(pos);
+      } else if (currentNodeRef.currentBlockIdx == -1) {
+        actualSeek(filePointer);
+      }
+    }
+
     private void actualSeek(final long pos) throws IOException {
       filePointer = pos;
       int blockIdx = (int) (pos >> COMPRESSION_BLOCK_SHIFT);
@@ -1769,13 +1780,8 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public byte readByte() throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      localPin();
       try {
-        long pos = seekPos;
-        if (pos != -1) {
-          seekPos = -1;
-          actualSeek(pos);
-        }
         if (!postBuffer.hasRemaining()) refill();
         filePointer++;
         return guard.getByte(postBuffer);
@@ -1786,13 +1792,8 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public void readBytes(byte[] dst, int offset, int len) throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      localPin();
       try {
-        long pos = seekPos;
-        if (pos != -1) {
-          seekPos = -1;
-          actualSeek(pos);
-        }
         filePointer += len;
         int left = postBuffer.remaining();
         while (left < len) {
@@ -1836,13 +1837,8 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public void readLongs(final long[] dst, final int offset, final int length) throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      localPin();
       try {
-        long pos = seekPos;
-        if (pos != -1) {
-          seekPos = -1;
-          actualSeek(pos);
-        }
         if (longViews == null) {
           longViews = initLongViews();
         }
@@ -1866,13 +1862,8 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public void readInts(final int[] dst, final int offset, final int length) throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      localPin();
       try {
-        long pos = seekPos;
-        if (pos != -1) {
-          seekPos = -1;
-          actualSeek(pos);
-        }
         if (intViews == null) {
           intViews = initIntViews();
         }
@@ -1897,13 +1888,8 @@ public class GCSDirectory extends MMapDirectory {
     @Override
     public void readFloats(final float[] dst, final int offset, final int length)
         throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      localPin();
       try {
-        long pos = seekPos;
-        if (pos != -1) {
-          seekPos = -1;
-          actualSeek(pos);
-        }
         if (floatViews == null) {
           floatViews = initFloatViews();
         }
