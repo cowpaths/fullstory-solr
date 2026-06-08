@@ -130,26 +130,42 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   private static final int MAX_CONCURRENT_PINNED = 4096;
 
   interface PinSemaphore {
-    void acquirePinPermit(GCSDirectory.NodeRefStruct instance);
+    Cache.Node<GCSDirectory.NodeRefStruct> acquire(GCSDirectory.NodeRefStruct instance);
+
+    void release(Cache.Node<GCSDirectory.NodeRefStruct> readPermit);
   }
 
   static PinSemaphore defaultMaxPinned(BlockCache cache) {
     Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> pinned =
         new Cache<>(new GCSDirectory.NodeRefStruct[MAX_CONCURRENT_PINNED], false);
-    return (instance) -> {
-      Cache.Node<GCSDirectory.NodeRefStruct> nodeRefStructNode;
-      do {
-        nodeRefStructNode =
-            pinned.acquireNode(
-                (evicted) -> {
-                  if (evicted.outOfBandUnpin(cache)) {
-                    return instance;
-                  } else {
-                    // actively in use; put it back in the queue
-                    return evicted;
-                  }
-                });
-      } while (nodeRefStructNode.getValue() != instance);
+    return new PinSemaphore() {
+      @Override
+      public Cache.Node<GCSDirectory.NodeRefStruct> acquire(GCSDirectory.NodeRefStruct instance) {
+        Cache.Node<GCSDirectory.NodeRefStruct> nodeRefStructNode;
+        for (; ; ) {
+          nodeRefStructNode =
+              pinned.acquireNode(
+                  (evicted) -> {
+                    if (evicted == null || evicted.outOfBandUnpin(cache)) {
+                      return instance;
+                    } else {
+                      // actively in use; put it back in the queue
+                      return evicted;
+                    }
+                  });
+          if (nodeRefStructNode.getValue() == instance) {
+            return nodeRefStructNode;
+          } else {
+            pinned.unpin(nodeRefStructNode); // always return to LRU
+            Thread.yield(); // all busy; no deadlock possible, so progress is guaranteed
+          }
+        }
+      }
+
+      @Override
+      public void release(Cache.Node<GCSDirectory.NodeRefStruct> readPermit) {
+        pinned.unpin(readPermit);
+      }
     };
   }
 

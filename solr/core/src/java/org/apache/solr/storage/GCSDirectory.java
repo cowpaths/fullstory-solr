@@ -1282,8 +1282,9 @@ public class GCSDirectory extends MMapDirectory {
     private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
     private BlockCache.Node currentNode;
     private int currentBlockIdx = -1;
+    private Cache.Node<NodeRefStruct> readPermit;
 
-    private void localPin(BlockCache blockCache, GCSDirectoryFactory.PinSemaphore acquirePermit) {
+    private void localPin(BlockCache blockCache, GCSDirectoryFactory.PinSemaphore semaphore) {
       if (localRefCount++ == 0) {
         while (!state.compareAndSet(State.IDLE, State.PINNED)) {
           Thread.yield();
@@ -1296,15 +1297,25 @@ public class GCSDirectory extends MMapDirectory {
             currentNode = null;
             currentBlockIdx = -1;
           }
-          acquirePermit.acquirePinPermit(this);
+          // having been unpinned, it's guaranteed we're about to pin again, so we want to
+          // get a permit. Once the first read is complete, we'll release the permit
+          // and put ourselves on the LRU for reclamation.
+          readPermit = semaphore.acquire(this);
         }
       }
     }
 
-    private void localUnpin() {
+    private void localUnpin(GCSDirectoryFactory.PinSemaphore semaphore) {
       if (--localRefCount == 0) {
         if (!state.compareAndSet(State.PINNED, State.IDLE)) {
           throw new IllegalStateException();
+        }
+        Cache.Node<NodeRefStruct> toRelease = readPermit;
+        if (toRelease != null) {
+          // NOTE: this only covers the _first_ read, but it's cheap to defer to here, and
+          // the node's guaranteed to not be reclaimable until now anyway.
+          readPermit = null;
+          semaphore.release(toRelease);
         }
       } else if (localRefCount < 0) {
         throw new IllegalStateException();
@@ -1725,7 +1736,7 @@ public class GCSDirectory extends MMapDirectory {
         return guard.getByte(
             postBuffer, postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW));
       } finally {
-        currentNodeRef.localUnpin();
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
     }
 
@@ -1742,7 +1753,7 @@ public class GCSDirectory extends MMapDirectory {
         }
         return guard.getShort(postBuffer, localPos);
       } finally {
-        currentNodeRef.localUnpin();
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
     }
 
@@ -1762,7 +1773,7 @@ public class GCSDirectory extends MMapDirectory {
         }
         return guard.getInt(postBuffer, localPos);
       } finally {
-        currentNodeRef.localUnpin();
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
     }
 
@@ -1772,7 +1783,7 @@ public class GCSDirectory extends MMapDirectory {
       try {
         return (readInt(pos) & 0xFFFFFFFFL) | ((long) readInt(pos + 4) << 32);
       } finally {
-        currentNodeRef.localUnpin();
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
     }
 
@@ -1788,7 +1799,7 @@ public class GCSDirectory extends MMapDirectory {
         filePointer++;
         return guard.getByte(postBuffer);
       } finally {
-        currentNodeRef.localUnpin();
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
     }
 
@@ -1807,7 +1818,7 @@ public class GCSDirectory extends MMapDirectory {
         }
         guard.getBytes(postBuffer, dst, offset, len);
       } finally {
-        currentNodeRef.localUnpin();
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
     }
 
@@ -1858,7 +1869,7 @@ public class GCSDirectory extends MMapDirectory {
           postBuffer.position(position + (int) bytesRequested);
         }
       } finally {
-        currentNodeRef.localUnpin();
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
     }
 
@@ -1883,7 +1894,7 @@ public class GCSDirectory extends MMapDirectory {
           postBuffer.position(position + (int) bytesRequested);
         }
       } finally {
-        currentNodeRef.localUnpin();
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
     }
 
@@ -1910,7 +1921,7 @@ public class GCSDirectory extends MMapDirectory {
           postBuffer.position(position + (int) bytesRequested);
         }
       } finally {
-        currentNodeRef.localUnpin();
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
     }
 
