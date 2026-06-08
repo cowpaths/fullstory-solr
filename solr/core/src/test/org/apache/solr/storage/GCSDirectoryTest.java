@@ -48,6 +48,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
   private Storage storage;
   private BlockCache cache;
   private ExecutorService ioExec;
+  private ReferenceHandler<GCSDirectory.GCSIndexInput, GCSDirectory.NodeRefStruct> nodeRefHandler;
   private DirectBufferPool bufferPool;
   private GCSDirectory dir;
 
@@ -72,6 +73,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
     // so that cache-miss GCS reads are exercised.
     cache = new BlockCache(8L * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"));
     ioExec = ExecutorUtil.newMDCAwareCachedThreadPool("test-gcs-io");
+    nodeRefHandler = new ReferenceHandler<>(ioExec, nodeRef -> nodeRef.unpinFor(cache));
     bufferPool = new DirectBufferPool(GCSDirectoryFactory.GCS_WRITE_BUFFER_SIZE, 4096, 1);
     dir =
         new GCSDirectory(
@@ -81,6 +83,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             cache,
             new java.util.concurrent.Semaphore(Integer.MAX_VALUE),
             ioExec,
+            nodeRefHandler,
             false,
             bufferPool,
             null);
@@ -91,6 +94,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
     dir.close();
     cache.close();
     storage.close();
+    nodeRefHandler.close();
     ExecutorUtil.shutdownAndAwaitTermination(ioExec);
     super.tearDown();
   }
@@ -217,6 +221,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             cache,
             new java.util.concurrent.Semaphore(Integer.MAX_VALUE),
             ioExec,
+            nodeRefHandler,
             true,
             bufferPool,
             null);

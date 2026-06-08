@@ -1273,6 +1273,13 @@ public class GCSDirectory extends MMapDirectory {
 
   static final class NodeRefStruct {
     private volatile BlockCache.Node currentNode;
+
+    void unpinFor(BlockCache blockCache) {
+      BlockCache.Node toUnpin = currentNode;
+      if (toUnpin != null) {
+        blockCache.unpin(toUnpin);
+      }
+    }
   }
 
   static final class GCSIndexInput extends IndexInput implements RandomAccessInput {

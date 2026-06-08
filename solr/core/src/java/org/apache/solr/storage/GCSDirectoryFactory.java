@@ -133,7 +133,9 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         ExecutorUtil.newMDCAwareCachedThreadPool("gcsIOExec");
     private final BlockCache blockCache;
     private final Storage storage;
-    final Semaphore channelSemaphore = new Semaphore(DEFAULT_MAX_OPEN_CHANNELS);
+    private final Semaphore channelSemaphore = new Semaphore(DEFAULT_MAX_OPEN_CHANNELS);
+    private final ReferenceHandler<GCSDirectory.GCSIndexInput, GCSDirectory.NodeRefStruct>
+        nodeRefHandler;
 
     /**
      * Buffer pool for the double-buffered GCS write path. Buffers are 256 KB, 4-KiB aligned (no
@@ -165,13 +167,15 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         Storage storage,
         String metadataBucket,
         ZkController zkController,
-        Path coreRootDirectory) {
+        Path coreRootDirectory)
+        throws IOException {
       this.blockCache = blockCache;
       this.storage = storage;
       this.bufferPool = new DirectBufferPool(GCS_WRITE_BUFFER_SIZE, 4096, 1);
       this.metadataBucket = metadataBucket;
       this.zkClient = zkController != null ? zkController.getZkClient() : null;
       this.coreRootDirectory = coreRootDirectory;
+      this.nodeRefHandler = new ReferenceHandler<>(ioExec, nodeRef -> nodeRef.unpinFor(blockCache));
     }
 
     /**
@@ -245,7 +249,11 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     public void close() throws IOException {
       try (AutoCloseable c1 = storage;
           Closeable c2 = blockCache) {
-        ExecutorUtil.shutdownAndAwaitTermination(ioExec);
+        try {
+          nodeRefHandler.close();
+        } finally {
+          ExecutorUtil.shutdownAndAwaitTermination(ioExec);
+        }
       } catch (IOException e) {
         throw e;
       } catch (Exception e) {
@@ -354,6 +362,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         nodeLevelState.storage,
         nodeLevelState.blockCache,
         nodeLevelState.ioExec,
+        nodeLevelState.nodeRefHandler,
         useAsyncIO,
         nodeLevelState.bufferPool);
   }
@@ -364,6 +373,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       Storage storage,
       BlockCache cache,
       ExecutorService ioExec,
+      ReferenceHandler<GCSDirectory.GCSIndexInput, GCSDirectory.NodeRefStruct> nodeRefHandler,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
       throws IOException {
@@ -374,6 +384,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         cache,
         nodeLevelState.channelSemaphore,
         ioExec,
+        nodeRefHandler,
         useAsyncIO,
         bufferPool,
         nodeLevelState.createBlobCoordinator(localPath));
