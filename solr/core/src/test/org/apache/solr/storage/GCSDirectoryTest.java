@@ -73,7 +73,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
     // so that cache-miss GCS reads are exercised.
     cache = new BlockCache(8L * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"));
     ioExec = ExecutorUtil.newMDCAwareCachedThreadPool("test-gcs-io");
-    nodeRefHandler = new ReferenceHandler<>(ioExec, nodeRef -> nodeRef.unpinFor(cache));
+    nodeRefHandler = new ReferenceHandler<>(ioExec, nodeRef -> nodeRef.outOfBandUnpin(cache));
     bufferPool = new DirectBufferPool(GCSDirectoryFactory.GCS_WRITE_BUFFER_SIZE, 4096, 1);
     dir =
         new GCSDirectory(

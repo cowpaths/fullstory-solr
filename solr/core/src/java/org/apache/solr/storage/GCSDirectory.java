@@ -1271,13 +1271,85 @@ public class GCSDirectory extends MMapDirectory {
     }
   }
 
-  static final class NodeRefStruct {
-    private volatile BlockCache.Node currentNode;
+  private enum State {
+    UNPINNING,
+    IDLE,
+    PINNED
+  }
 
-    void unpinFor(BlockCache blockCache) {
+  static final class NodeRefStruct {
+    private int localRefCount = 0;
+    private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
+    private BlockCache.Node currentNode;
+    private int currentBlockIdx = -1;
+
+    private void localPin(BlockCache blockCache) {
+      if (localRefCount++ == 0) {
+        while (!state.compareAndSet(State.IDLE, State.PINNED)) {
+          Thread.yield();
+        }
+        if (currentBlockIdx < 0 && currentNode != null) {
+          // node has been unpinned, but we may be able to re-pin it
+          if (blockCache.pin(currentNode)) {
+            currentBlockIdx = ~currentBlockIdx;
+          } else {
+            currentNode = null;
+            currentBlockIdx = -1;
+          }
+        }
+      }
+    }
+
+    private void localUnpin() {
+      if (--localRefCount == 0) {
+        if (!state.compareAndSet(State.PINNED, State.IDLE)) {
+          throw new IllegalStateException();
+        }
+      } else if (localRefCount < 0) {
+        throw new IllegalStateException();
+      }
+    }
+
+    private void setCurrentNode(BlockCache.Node node, int blockIdx) {
+      while (!state.compareAndSet(State.IDLE, State.PINNED)) {
+        Thread.yield();
+      }
+      currentNode = node;
+      currentBlockIdx = blockIdx;
+      state.compareAndSet(State.PINNED, State.IDLE);
+    }
+
+    private void unpinFor(BlockCache blockCache) {
+      switch (state.compareAndExchange(State.IDLE, State.PINNED)) {
+        case IDLE:
+          doUnpin(blockCache, State.PINNED);
+          break;
+        case UNPINNING:
+          // another thread is unpinning; spin until it's done.
+          do {
+            Thread.yield();
+          } while (state.get() == State.UNPINNING);
+          break;
+        default:
+          throw new IllegalStateException();
+      }
+    }
+
+    private void doUnpin(BlockCache blockCache, State from) {
       BlockCache.Node toUnpin = currentNode;
       if (toUnpin != null) {
+        currentBlockIdx = ~currentBlockIdx;
         blockCache.unpin(toUnpin);
+      }
+      if (!state.compareAndSet(from, State.IDLE)) {
+        throw new IllegalStateException();
+      }
+    }
+
+    /** This is the only method that may be called from a different thread! */
+    void outOfBandUnpin(BlockCache blockCache) {
+      if (state.compareAndSet(State.IDLE, State.UNPINNING)) {
+        doUnpin(blockCache, State.UNPINNING);
       }
     }
   }
@@ -1310,7 +1382,6 @@ public class GCSDirectory extends MMapDirectory {
     private long filePointer = 0;
     private ByteBuffer postBuffer = ByteBuffer.allocate(0);
     private int postBufferBaseline;
-    private int currentBlockIdx = -1;
     private final NodeRefStruct currentNodeRef = new NodeRefStruct();
 
     private LongBuffer[] longViews;
@@ -1459,14 +1530,6 @@ public class GCSDirectory extends MMapDirectory {
     // Cache interaction
     // ---------------------------------------------------------------------------
 
-    private void unpinCurrent() {
-      BlockCache.Node toUnpin = currentNodeRef.currentNode;
-      if (toUnpin != null) {
-        setCurrentNode(null);
-        dir.cache.unpin(toUnpin);
-      }
-    }
-
     /**
      * Fetches the given compressed block from GCS and decompresses it. Called only on a cache miss.
      *
@@ -1512,7 +1575,7 @@ public class GCSDirectory extends MMapDirectory {
     private void actualSeek(final long pos) throws IOException {
       filePointer = pos;
       int blockIdx = (int) (pos >> COMPRESSION_BLOCK_SHIFT);
-      if (blockIdx != currentBlockIdx) initBlock(blockIdx);
+      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
       postBuffer.position(postBufferBaseline + (int) (pos & COMPRESSION_BLOCK_MASK_LOW));
     }
 
@@ -1524,22 +1587,18 @@ public class GCSDirectory extends MMapDirectory {
     }
 
     private void refill() throws IOException {
-      int blockIdx = currentBlockIdx + 1;
+      int blockIdx = currentNodeRef.currentBlockIdx + 1;
       if (blockIdx > lastBlockIdx) throw new EOFException();
       long blockOffset = blockOffsets[blockIdx];
       int compressedLen = (int) (blockOffsets[blockIdx + 1] - blockOffset);
       refill(blockOffset, compressedLen, blockIdx);
     }
 
-    private void setCurrentNode(BlockCache.Node node) {
-      currentNodeRef.currentNode = node;
-    }
-
     private void refill(final long pos, final int compressedLen, final int blockIdx)
         throws IOException {
       int decompressedLen =
           blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
-      unpinCurrent();
+      currentNodeRef.unpinFor(dir.cache);
 
       BlockCache.Node node;
       BlockCache.Node cached = accessMapped.get(blockIdx);
@@ -1552,11 +1611,10 @@ public class GCSDirectory extends MMapDirectory {
           dir.cache.unpin(cached);
           throw unwrapException(e.getCause());
         }
-        setCurrentNode(cached);
+        currentNodeRef.setCurrentNode(cached, blockIdx);
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         postBuffer.clear().limit(decompressedLen);
         postBufferBaseline = 0;
-        currentBlockIdx = blockIdx;
         longViews = null;
         intViews = null;
         floatViews = null;
@@ -1579,7 +1637,7 @@ public class GCSDirectory extends MMapDirectory {
             dir.cache.close(node);
             throw unwrapException(t);
           }
-          setCurrentNode(node);
+          currentNodeRef.setCurrentNode(node, blockIdx);
           postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         } else {
           // Another thread won the race; wait for its result.
@@ -1593,7 +1651,7 @@ public class GCSDirectory extends MMapDirectory {
               dir.cache.unpin(extant);
               throw unwrapException(e.getCause());
             }
-            setCurrentNode(extant);
+            currentNodeRef.setCurrentNode(extant, blockIdx);
             postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
           } else {
             // Serve uncached.
@@ -1603,7 +1661,6 @@ public class GCSDirectory extends MMapDirectory {
         }
         postBuffer.clear().limit(decompressedLen);
         postBufferBaseline = 0;
-        currentBlockIdx = blockIdx;
         longViews = null;
         intViews = null;
         floatViews = null;
@@ -1617,11 +1674,10 @@ public class GCSDirectory extends MMapDirectory {
     private void uncached(long pos, int compressedLen, int blockIdx, int decompressedLen)
         throws IOException {
       ByteBuffer heapBuf = supply(pos, compressedLen, decompressedLen);
-      setCurrentNode(null);
+      currentNodeRef.setCurrentNode(null, blockIdx);
       postBuffer = heapBuf;
       postBufferBaseline = heapBuf.position();
       heapBuf.order(ByteOrder.LITTLE_ENDIAN);
-      currentBlockIdx = blockIdx;
       longViews = null;
       intViews = null;
       floatViews = null;
@@ -1635,7 +1691,7 @@ public class GCSDirectory extends MMapDirectory {
     public byte readByte(final long pos) throws IOException {
       long absolutePos = pos + offset;
       int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-      if (blockIdx != currentBlockIdx) initBlock(blockIdx);
+      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
       return guard.getByte(
           postBuffer, postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW));
     }
@@ -1644,7 +1700,7 @@ public class GCSDirectory extends MMapDirectory {
     public short readShort(final long pos) throws IOException {
       long absolutePos = pos + offset;
       int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-      if (blockIdx != currentBlockIdx) initBlock(blockIdx);
+      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
       int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
       if (postBuffer.limit() - localPos < Short.BYTES) {
         return (short) (((readByte(pos + 1) & 0xFF) << 8) | (readByte(pos) & 0xFF));
@@ -1656,7 +1712,7 @@ public class GCSDirectory extends MMapDirectory {
     public int readInt(final long pos) throws IOException {
       long absolutePos = pos + offset;
       int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-      if (blockIdx != currentBlockIdx) initBlock(blockIdx);
+      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
       int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
       if (postBuffer.limit() - localPos < Integer.BYTES) {
         return ((readByte(pos + 3) & 0xFF) << 24)
@@ -1882,7 +1938,6 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public void close() throws IOException {
-      unpinCurrent();
       try {
         if (accessMapped == null) return;
 
@@ -1916,7 +1971,7 @@ public class GCSDirectory extends MMapDirectory {
 
     private void unsetBuffers() {
       accessMapped = null;
-      currentBlockIdx = -1;
+      currentNodeRef.unpinFor(dir.cache);
       postBuffer = null;
       floatViews = null;
       intViews = null;

@@ -175,7 +175,8 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       this.metadataBucket = metadataBucket;
       this.zkClient = zkController != null ? zkController.getZkClient() : null;
       this.coreRootDirectory = coreRootDirectory;
-      this.nodeRefHandler = new ReferenceHandler<>(ioExec, nodeRef -> nodeRef.unpinFor(blockCache));
+      this.nodeRefHandler =
+          new ReferenceHandler<>(ioExec, nodeRef -> nodeRef.outOfBandUnpin(blockCache));
     }
 
     /**
