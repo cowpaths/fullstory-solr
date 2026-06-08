@@ -1311,6 +1311,12 @@ public class GCSDirectory extends MMapDirectory {
     }
 
     private void setCurrentNode(BlockCache.Node node, int blockIdx) {
+      if (localRefCount > 0) {
+        // Called within a localPin context: state is already PINNED, direct update is safe.
+        currentNode = node;
+        currentBlockIdx = blockIdx;
+        return;
+      }
       while (!state.compareAndSet(State.IDLE, State.PINNED)) {
         Thread.yield();
       }
@@ -1320,6 +1326,15 @@ public class GCSDirectory extends MMapDirectory {
     }
 
     private void unpinFor(BlockCache blockCache) {
+      if (localRefCount > 0) {
+        // Called within a localPin context: state is already PINNED, direct unpin is safe.
+        BlockCache.Node toUnpin = currentNode;
+        if (toUnpin != null) {
+          currentBlockIdx = -1;
+          blockCache.unpin(toUnpin);
+        }
+        return;
+      }
       switch (state.compareAndExchange(State.IDLE, State.PINNED)) {
         case IDLE:
           doUnpin(blockCache, State.PINNED);
