@@ -1689,43 +1689,63 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public byte readByte(final long pos) throws IOException {
-      long absolutePos = pos + offset;
-      int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-      return guard.getByte(
-          postBuffer, postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW));
+      currentNodeRef.localPin(dir.cache);
+      try {
+        long absolutePos = pos + offset;
+        int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
+        if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
+        return guard.getByte(
+            postBuffer, postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW));
+      } finally {
+        currentNodeRef.localUnpin();
+      }
     }
 
     @Override
     public short readShort(final long pos) throws IOException {
-      long absolutePos = pos + offset;
-      int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-      int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
-      if (postBuffer.limit() - localPos < Short.BYTES) {
-        return (short) (((readByte(pos + 1) & 0xFF) << 8) | (readByte(pos) & 0xFF));
+      currentNodeRef.localPin(dir.cache);
+      try {
+        long absolutePos = pos + offset;
+        int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
+        if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
+        int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
+        if (postBuffer.limit() - localPos < Short.BYTES) {
+          return (short) (((readByte(pos + 1) & 0xFF) << 8) | (readByte(pos) & 0xFF));
+        }
+        return guard.getShort(postBuffer, localPos);
+      } finally {
+        currentNodeRef.localUnpin();
       }
-      return guard.getShort(postBuffer, localPos);
     }
 
     @Override
     public int readInt(final long pos) throws IOException {
-      long absolutePos = pos + offset;
-      int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-      int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
-      if (postBuffer.limit() - localPos < Integer.BYTES) {
-        return ((readByte(pos + 3) & 0xFF) << 24)
-            | ((readByte(pos + 2) & 0xFF) << 16)
-            | ((readByte(pos + 1) & 0xFF) << 8)
-            | (readByte(pos) & 0xFF);
+      currentNodeRef.localPin(dir.cache);
+      try {
+        long absolutePos = pos + offset;
+        int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
+        if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
+        int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
+        if (postBuffer.limit() - localPos < Integer.BYTES) {
+          return ((readByte(pos + 3) & 0xFF) << 24)
+              | ((readByte(pos + 2) & 0xFF) << 16)
+              | ((readByte(pos + 1) & 0xFF) << 8)
+              | (readByte(pos) & 0xFF);
+        }
+        return guard.getInt(postBuffer, localPos);
+      } finally {
+        currentNodeRef.localUnpin();
       }
-      return guard.getInt(postBuffer, localPos);
     }
 
     @Override
     public long readLong(final long pos) throws IOException {
-      return (readInt(pos) & 0xFFFFFFFFL) | ((long) readInt(pos + 4) << 32);
+      currentNodeRef.localPin(dir.cache);
+      try {
+        return (readInt(pos) & 0xFFFFFFFFL) | ((long) readInt(pos + 4) << 32);
+      } finally {
+        currentNodeRef.localUnpin();
+      }
     }
 
     // ---------------------------------------------------------------------------
@@ -1734,33 +1754,43 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public byte readByte() throws IOException {
-      long pos = seekPos;
-      if (pos != -1) {
-        seekPos = -1;
-        actualSeek(pos);
+      currentNodeRef.localPin(dir.cache);
+      try {
+        long pos = seekPos;
+        if (pos != -1) {
+          seekPos = -1;
+          actualSeek(pos);
+        }
+        if (!postBuffer.hasRemaining()) refill();
+        filePointer++;
+        return guard.getByte(postBuffer);
+      } finally {
+        currentNodeRef.localUnpin();
       }
-      if (!postBuffer.hasRemaining()) refill();
-      filePointer++;
-      return guard.getByte(postBuffer);
     }
 
     @Override
     public void readBytes(byte[] dst, int offset, int len) throws IOException {
-      long pos = seekPos;
-      if (pos != -1) {
-        seekPos = -1;
-        actualSeek(pos);
+      currentNodeRef.localPin(dir.cache);
+      try {
+        long pos = seekPos;
+        if (pos != -1) {
+          seekPos = -1;
+          actualSeek(pos);
+        }
+        filePointer += len;
+        int left = postBuffer.remaining();
+        while (left < len) {
+          guard.getBytes(postBuffer, dst, offset, left);
+          len -= left;
+          offset += left;
+          refill();
+          left = postBuffer.remaining();
+        }
+        guard.getBytes(postBuffer, dst, offset, len);
+      } finally {
+        currentNodeRef.localUnpin();
       }
-      filePointer += len;
-      int left = postBuffer.remaining();
-      while (left < len) {
-        guard.getBytes(postBuffer, dst, offset, left);
-        len -= left;
-        offset += left;
-        refill();
-        left = postBuffer.remaining();
-      }
-      guard.getBytes(postBuffer, dst, offset, len);
     }
 
     // ---------------------------------------------------------------------------
@@ -1791,77 +1821,93 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public void readLongs(final long[] dst, final int offset, final int length) throws IOException {
-      long pos = seekPos;
-      if (pos != -1) {
-        seekPos = -1;
-        actualSeek(pos);
-      }
-      if (longViews == null) {
-        longViews = initLongViews();
-      }
-      final int remaining = postBuffer.remaining();
-      final long bytesRequested = (long) length << 3;
-      if (remaining < bytesRequested) {
-        dst[offset] = _readLong(remaining);
-        for (int i = 1; i < length; i++) {
-          dst[offset + i] = _readLong(postBuffer.remaining());
+      currentNodeRef.localPin(dir.cache);
+      try {
+        long pos = seekPos;
+        if (pos != -1) {
+          seekPos = -1;
+          actualSeek(pos);
         }
-      } else {
-        final int position = postBuffer.position();
-        guard.getLongs(longViews[position & 0x07].position(position >>> 3), dst, offset, length);
-        filePointer += bytesRequested;
-        postBuffer.position(position + (int) bytesRequested);
+        if (longViews == null) {
+          longViews = initLongViews();
+        }
+        final int remaining = postBuffer.remaining();
+        final long bytesRequested = (long) length << 3;
+        if (remaining < bytesRequested) {
+          dst[offset] = _readLong(remaining);
+          for (int i = 1; i < length; i++) {
+            dst[offset + i] = _readLong(postBuffer.remaining());
+          }
+        } else {
+          final int position = postBuffer.position();
+          guard.getLongs(longViews[position & 0x07].position(position >>> 3), dst, offset, length);
+          filePointer += bytesRequested;
+          postBuffer.position(position + (int) bytesRequested);
+        }
+      } finally {
+        currentNodeRef.localUnpin();
       }
     }
 
     @Override
     public void readInts(final int[] dst, final int offset, final int length) throws IOException {
-      long pos = seekPos;
-      if (pos != -1) {
-        seekPos = -1;
-        actualSeek(pos);
-      }
-      if (intViews == null) {
-        intViews = initIntViews();
-      }
-      final int remaining = postBuffer.remaining();
-      final long bytesRequested = (long) length << 2;
-      if (remaining < bytesRequested) {
-        dst[offset] = _readInt(remaining);
-        for (int i = 1; i < length; i++) {
-          dst[offset + i] = _readInt(postBuffer.remaining());
+      currentNodeRef.localPin(dir.cache);
+      try {
+        long pos = seekPos;
+        if (pos != -1) {
+          seekPos = -1;
+          actualSeek(pos);
         }
-      } else {
-        final int position = postBuffer.position();
-        guard.getInts(intViews[position & 0x03].position(position >>> 2), dst, offset, length);
-        filePointer += bytesRequested;
-        postBuffer.position(position + (int) bytesRequested);
+        if (intViews == null) {
+          intViews = initIntViews();
+        }
+        final int remaining = postBuffer.remaining();
+        final long bytesRequested = (long) length << 2;
+        if (remaining < bytesRequested) {
+          dst[offset] = _readInt(remaining);
+          for (int i = 1; i < length; i++) {
+            dst[offset + i] = _readInt(postBuffer.remaining());
+          }
+        } else {
+          final int position = postBuffer.position();
+          guard.getInts(intViews[position & 0x03].position(position >>> 2), dst, offset, length);
+          filePointer += bytesRequested;
+          postBuffer.position(position + (int) bytesRequested);
+        }
+      } finally {
+        currentNodeRef.localUnpin();
       }
     }
 
     @Override
     public void readFloats(final float[] dst, final int offset, final int length)
         throws IOException {
-      long pos = seekPos;
-      if (pos != -1) {
-        seekPos = -1;
-        actualSeek(pos);
-      }
-      if (floatViews == null) {
-        floatViews = initFloatViews();
-      }
-      final int remaining = postBuffer.remaining();
-      final long bytesRequested = (long) length << 2;
-      if (remaining < bytesRequested) {
-        dst[offset] = Float.intBitsToFloat(_readInt(remaining));
-        for (int i = 1; i < length; i++) {
-          dst[offset + i] = Float.intBitsToFloat(_readInt(postBuffer.remaining()));
+      currentNodeRef.localPin(dir.cache);
+      try {
+        long pos = seekPos;
+        if (pos != -1) {
+          seekPos = -1;
+          actualSeek(pos);
         }
-      } else {
-        final int position = postBuffer.position();
-        guard.getFloats(floatViews[position & 0x03].position(position >>> 2), dst, offset, length);
-        filePointer += bytesRequested;
-        postBuffer.position(position + (int) bytesRequested);
+        if (floatViews == null) {
+          floatViews = initFloatViews();
+        }
+        final int remaining = postBuffer.remaining();
+        final long bytesRequested = (long) length << 2;
+        if (remaining < bytesRequested) {
+          dst[offset] = Float.intBitsToFloat(_readInt(remaining));
+          for (int i = 1; i < length; i++) {
+            dst[offset + i] = Float.intBitsToFloat(_readInt(postBuffer.remaining()));
+          }
+        } else {
+          final int position = postBuffer.position();
+          guard.getFloats(
+              floatViews[position & 0x03].position(position >>> 2), dst, offset, length);
+          filePointer += bytesRequested;
+          postBuffer.position(position + (int) bytesRequested);
+        }
+      } finally {
+        currentNodeRef.localUnpin();
       }
     }
 
