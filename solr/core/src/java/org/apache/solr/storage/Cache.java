@@ -341,7 +341,7 @@ class Cache<V, N extends Cache.Node<V>> {
           long now = System.nanoTime();
           long prev = node.lastUnpinNanos;
           node.lastUnpinNanos = now;
-          Node<V> listHead = toHot(prev, now) ? hotHead : lruHead;
+          Node<V> listHead = toHot(prev) ? hotHead : lruHead;
           node.prev = listHead;
           insertAtHead(listHead, node);
           if (!node.refCount.compareAndSet(UNPIN_SENTINEL, 0)) {
@@ -363,30 +363,12 @@ class Cache<V, N extends Cache.Node<V>> {
     }
   }
 
-  private boolean toHot(long prev, long now) {
-    // Promote to hot if previously used and fresher than the inferred cold-tail threshold.
-    // When cold is non-empty, compare directly against the cold tail. When cold is empty,
-    // reconstruct the pseudo-cold-tail timestamp from the hot tail using HOT_EVICTION_SHIFT,
-    // matching the steady-state age ratio maintained by acquireNode.
-    if (prev == 0) {
-      return false;
-    } else {
-      Node<V> coldTailNode = lruTail.prev;
-      if (coldTailNode != lruHead && coldTs != 0) {
-        return coldTs - prev < 0;
-      } else {
-        Node<V> hotTailNode = hotTail.prev;
-        if (hotTailNode == hotHead) {
-          // for `hotTailNode == hotHead` -> both queues are null. The only thing we know
-          // is that this has been accessed before, so fallback to put in the hot queue.
-          return true;
-        } else {
-          // inferred/pseudo cold tail age based on eviction-equivalent threshold
-          long inferredColdTailAge = (now - hotTailNode.lastUnpinNanos) >> HOT_EVICTION_SHIFT;
-          return (now - inferredColdTailAge) - prev < 0;
-        }
-      }
-    }
+  private boolean toHot(long prev) {
+    // Promote to hot if previously used and fresher than the last known cold-tail threshold.
+    // coldTs tracks the most recently observed non-zero cold tail timestamp (updated by
+    // acquireNode on each eviction). When zero (initial warm-up), fall back to hot.
+    long threshold;
+    return prev != 0 && ((threshold = coldTs) == 0 || threshold - prev < 0);
   }
 
   // ---------------------------------------------------------------------------
