@@ -1364,7 +1364,7 @@ public class GCSDirectory extends MMapDirectory {
 
     private void doUnpin(BlockCache blockCache, State from) {
       BlockCache.Node toUnpin = currentNode;
-      if (toUnpin != null) {
+      if (toUnpin != null && currentBlockIdx >= 0) {
         currentBlockIdx = ~currentBlockIdx;
         blockCache.unpin(toUnpin);
       }
