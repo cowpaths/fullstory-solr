@@ -1283,28 +1283,27 @@ public class GCSDirectory extends MMapDirectory {
     private BlockCache.Node currentNode;
     private int currentBlockIdx = -1;
     private Cache.Node<NodeRefStruct> readPermit;
+    private boolean readPermitAcquiredThisOp;
 
     private void acquirePermitIfAbsent(GCSDirectoryFactory.PinSemaphore semaphore) {
       if (readPermit == null) {
         readPermit = semaphore.acquire(this);
+        readPermitAcquiredThisOp = true;
       }
     }
 
-    private void localPin(BlockCache blockCache, GCSDirectoryFactory.PinSemaphore semaphore) {
+    private void releasePermit(GCSDirectoryFactory.PinSemaphore semaphore) {
+      if (readPermitAcquiredThisOp) {
+        readPermitAcquiredThisOp = false;
+        semaphore.release(readPermit);
+        readPermit = null;
+      }
+    }
+
+    private void localPin() {
       if (localRefCount++ == 0) {
         while (!state.compareAndSet(State.IDLE, State.PINNED)) {
           Thread.yield();
-        }
-        if (currentBlockIdx < 0 && currentNode != null) {
-          // node has been unpinned out-of-band; try to re-pin it to avoid a GCS fetch
-          if (blockCache.pin(currentNode)) {
-            currentBlockIdx = ~currentBlockIdx;
-            acquirePermitIfAbsent(semaphore);
-          } else {
-            currentNode = null;
-            currentBlockIdx = -1;
-            // permit will be acquired via setCurrentNode when refill() loads the next block
-          }
         }
       }
     }
@@ -1314,12 +1313,11 @@ public class GCSDirectory extends MMapDirectory {
         if (!state.compareAndSet(State.PINNED, State.IDLE)) {
           throw new IllegalStateException();
         }
-        Cache.Node<NodeRefStruct> toRelease = readPermit;
-        if (toRelease != null) {
-          // NOTE: this only covers the _first_ read, but it's cheap to defer to here, and
-          // the node's guaranteed to not be reclaimable until now anyway.
-          readPermit = null;
-          semaphore.release(toRelease);
+        if (readPermitAcquiredThisOp) {
+          readPermitAcquiredThisOp = false;
+          semaphore.release(readPermit);
+          // readPermit stays set: we remain in the pinned LRU and need not re-acquire
+          // until the scavenger evicts us (outOfBandUnpin -> doUnpin nulls readPermit).
         }
       } else if (localRefCount < 0) {
         throw new IllegalStateException();
@@ -1349,6 +1347,7 @@ public class GCSDirectory extends MMapDirectory {
         // Called within a localPin context: state is already PINNED, direct unpin is safe.
         BlockCache.Node toUnpin = currentNode;
         if (toUnpin != null) {
+          currentNode = null;
           currentBlockIdx = -1;
           blockCache.unpin(toUnpin);
         }
@@ -1371,8 +1370,9 @@ public class GCSDirectory extends MMapDirectory {
 
     private void doUnpin(BlockCache blockCache, State from) {
       BlockCache.Node toUnpin = currentNode;
-      if (toUnpin != null && currentBlockIdx >= 0) {
-        currentBlockIdx = ~currentBlockIdx;
+      if (toUnpin != null) {
+        currentNode = null;
+        currentBlockIdx = -1;
         blockCache.unpin(toUnpin);
       }
       if (!state.compareAndSet(from, State.IDLE)) {
@@ -1383,6 +1383,9 @@ public class GCSDirectory extends MMapDirectory {
     /** This is the only method that may be called from a different thread! */
     boolean outOfBandUnpin(BlockCache blockCache) {
       if (state.compareAndSet(State.IDLE, State.UNPINNING)) {
+        // scavenger has evicted our pinned-LRU slot; signal that re-acquire is needed
+        readPermit = null;
+        readPermitAcquiredThisOp = false;
         doUnpin(blockCache, State.UNPINNING);
         return true;
       }
@@ -1608,7 +1611,7 @@ public class GCSDirectory extends MMapDirectory {
     // ---------------------------------------------------------------------------
 
     private void localPin() throws IOException {
-      currentNodeRef.localPin(dir.cache, dir.acquirePinPermit);
+      currentNodeRef.localPin();
       long pos = seekPos;
       if (pos != -1) {
         seekPos = -1;
@@ -1735,7 +1738,7 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public byte readByte(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache, dir.acquirePinPermit);
+      currentNodeRef.localPin();
       try {
         long absolutePos = pos + offset;
         int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
@@ -1749,7 +1752,7 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public short readShort(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache, dir.acquirePinPermit);
+      currentNodeRef.localPin();
       try {
         long absolutePos = pos + offset;
         int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
@@ -1766,7 +1769,7 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public int readInt(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache, dir.acquirePinPermit);
+      currentNodeRef.localPin();
       try {
         long absolutePos = pos + offset;
         int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
@@ -1786,7 +1789,7 @@ public class GCSDirectory extends MMapDirectory {
 
     @Override
     public long readLong(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache, dir.acquirePinPermit);
+      currentNodeRef.localPin();
       try {
         return (readInt(pos) & 0xFFFFFFFFL) | ((long) readInt(pos + 4) << 32);
       } finally {
@@ -2039,6 +2042,7 @@ public class GCSDirectory extends MMapDirectory {
     private void unsetBuffers() {
       accessMapped = null;
       currentNodeRef.unpinFor(dir.cache);
+      currentNodeRef.releasePermit(dir.acquirePinPermit);
       postBuffer = null;
       floatViews = null;
       intViews = null;
