@@ -146,16 +146,23 @@ class Cache<V, N extends Cache.Node<V>> {
   private final boolean persistentVals;
 
   /**
-   * Extra recency credited to hot-queue nodes at eviction time. A hot node must be staler than the
-   * cold eviction candidate by at least this much before it is selected for eviction.
+   * Multiplier applied to the hot tail's age during eviction scoring. A hot node is evicted only
+   * when the cold tail is at least {@code HOT_EVICTION_MULTIPLIER} times as stale, giving hot nodes
+   * proportional protection regardless of absolute time scale.
    */
-  private static final long HOT_BONUS_NANOS = TimeUnit.MINUTES.toNanos(5);
+  private static final int HOT_EVICTION_SHIFT = 2;
+
+  /** A year should be stale enough for our purposes, without risking overflow. */
+  private static final long VERY_STALE = TimeUnit.DAYS.toNanos(365);
 
   /**
-   * Maximum inter-unpin interval for a node to be considered "recently re-accessed" and promoted to
-   * the hot queue. Nodes last unpinned longer ago than this are placed in the cold queue.
+   * Returns the age (nanos since last unpin) of a node given its {@code lastUnpinNanos} stamp.
+   * Returns a large sentinel age for never-used nodes ({@code lastUnpinNanos == 0}) so they are
+   * always preferred for eviction over any node that has been genuinely used.
    */
-  private static final long PROMOTION_TTL_NANOS = TimeUnit.SECONDS.toNanos(30);
+  private static long age(long now, long lastUnpinNanos) {
+    return lastUnpinNanos == 0 ? VERY_STALE : now - lastUnpinNanos;
+  }
 
   @SuppressWarnings("unchecked")
   private Cache(boolean persistentVals) {
@@ -334,8 +341,7 @@ class Cache<V, N extends Cache.Node<V>> {
           long now = System.nanoTime();
           long prev = node.lastUnpinNanos;
           node.lastUnpinNanos = now;
-          boolean toHot = prev != 0 && (now - prev) <= PROMOTION_TTL_NANOS;
-          Node<V> listHead = toHot ? hotHead : lruHead;
+          Node<V> listHead = toHot(prev, now) ? hotHead : lruHead;
           node.prev = listHead;
           insertAtHead(listHead, node);
           if (!node.refCount.compareAndSet(UNPIN_SENTINEL, 0)) {
@@ -352,6 +358,32 @@ class Cache<V, N extends Cache.Node<V>> {
           return;
         } else {
           rc = witness;
+        }
+      }
+    }
+  }
+
+  private boolean toHot(long prev, long now) {
+    // Promote to hot if previously used and fresher than the inferred cold-tail threshold.
+    // When cold is non-empty, compare directly against the cold tail. When cold is empty,
+    // reconstruct the pseudo-cold-tail timestamp from the hot tail using HOT_EVICTION_SHIFT,
+    // matching the steady-state age ratio maintained by acquireNode.
+    if (prev == 0) {
+      return false;
+    } else {
+      Node<V> coldTailNode = lruTail.prev;
+      if (coldTailNode != lruHead) {
+        return coldTailNode.lastUnpinNanos - prev < 0;
+      } else {
+        Node<V> hotTailNode = hotTail.prev;
+        if (hotTailNode == hotHead) {
+          // for `hotTailNode == hotHead` -> both queues are null. The only thing we know
+          // is that this has been accessed before, so fallback to put in the hot queue.
+          return true;
+        } else {
+          // inferred/pseudo cold tail age based on eviction-equivalent threshold
+          long inferredColdTailAge = (now - hotTailNode.lastUnpinNanos) >> HOT_EVICTION_SHIFT;
+          return (now - inferredColdTailAge) - prev < 0;
         }
       }
     }
@@ -385,11 +417,13 @@ class Cache<V, N extends Cache.Node<V>> {
       } else if (hotCandidate == hotHead) {
         candidate = coldCandidate;
       } else {
-        // Evict from hot when the cold tail is sufficiently more recent than the hot tail, even
-        // after crediting the hot tail HOT_BONUS_NANOS of extra recency. Subtraction avoids
-        // overflow: positive result means cold was accessed more recently than hot (by that delta).
+        // Evict from hot only when cold is at least HOT_EVICTION_MULTIPLIER times as stale,
+        // giving hot nodes proportional protection. age() maps lastUnpinNanos=0 to a large
+        // sentinel so never-used cold nodes are always preferred over any real hot node.
+        long now = System.nanoTime();
         candidate =
-            coldCandidate.lastUnpinNanos - hotCandidate.lastUnpinNanos > HOT_BONUS_NANOS
+            age(now, coldCandidate.lastUnpinNanos)
+                    > age(now, hotCandidate.lastUnpinNanos) << HOT_EVICTION_SHIFT
                 ? hotCandidate
                 : coldCandidate;
       }
