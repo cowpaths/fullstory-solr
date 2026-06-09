@@ -17,6 +17,7 @@
 
 package org.apache.solr.storage;
 
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -88,6 +89,13 @@ class Cache<V, N extends Cache.Node<V>> {
     /** LRU list link toward the tail (least-recently-used end). */
     private volatile Node<V> prev;
 
+    /**
+     * Nanosecond timestamp of the most recent {@link Cache#unpin}, or {@code 0} if never unpinned.
+     * {@code 0} is treated as maximally stale, making never-used nodes the highest-priority
+     * eviction candidates.
+     */
+    private long lastUnpinNanos;
+
     Node(V value, Node<V> prev, int initialRefCount) {
       this.value = value; // visibility guaranteed by callers incref'ing refCount before access
       this.prev = prev;
@@ -123,13 +131,31 @@ class Cache<V, N extends Cache.Node<V>> {
   private final Node<V> RESERVED;
   private final Node<V> REMOVED;
 
-  /** Most-recently-used sentinel. Real nodes are inserted immediately after this. */
+  /** Cold queue: head sentinel (most-recently-used end). */
   private final Node<V> lruHead = new Node<>();
 
-  /** Least-recently-used sentinel. Eviction candidates are immediately before this. */
+  /** Cold queue: tail sentinel (eviction end). */
   private final Node<V> lruTail = new Node<>();
 
+  /** Hot queue: head sentinel. Nodes promoted from cold are inserted here. */
+  private final Node<V> hotHead = new Node<>();
+
+  /** Hot queue: tail sentinel. */
+  private final Node<V> hotTail = new Node<>();
+
   private final boolean persistentVals;
+
+  /**
+   * Extra recency credited to hot-queue nodes at eviction time. A hot node must be staler than the
+   * cold eviction candidate by at least this much before it is selected for eviction.
+   */
+  private static final long HOT_BONUS_NANOS = TimeUnit.MINUTES.toNanos(5);
+
+  /**
+   * Maximum inter-unpin interval for a node to be considered "recently re-accessed" and promoted to
+   * the hot queue. Nodes last unpinned longer ago than this are placed in the cold queue.
+   */
+  private static final long PROMOTION_TTL_NANOS = TimeUnit.SECONDS.toNanos(30);
 
   @SuppressWarnings("unchecked")
   private Cache(boolean persistentVals) {
@@ -137,6 +163,8 @@ class Cache<V, N extends Cache.Node<V>> {
     REMOVED = (Node<V>) REMOVED_PROTO;
     lruHead.next.set(lruTail);
     lruTail.prev = lruHead;
+    hotHead.next.set(hotTail);
+    hotTail.prev = hotHead;
     this.persistentVals = persistentVals;
   }
 
@@ -200,13 +228,13 @@ class Cache<V, N extends Cache.Node<V>> {
     }
   }
 
-  private void insertAtHead(Node<V> node) {
-    Node<V> oldNext = reserve(lruHead, RESERVED);
-    assert oldNext != REMOVED_PROTO : "lruHead sentinel should never be removed";
+  private void insertAtHead(Node<V> listHead, Node<V> node) {
+    Node<V> oldNext = reserve(listHead, RESERVED);
+    assert oldNext != REMOVED_PROTO : "queue head sentinel should never be removed";
     node.next.set(oldNext);
     oldNext.prev = node;
-    if (!lruHead.next.compareAndSet(RESERVED, node)) {
-      throw new IllegalStateException("unexpected concurrent modification of lruHead.next");
+    if (!listHead.next.compareAndSet(RESERVED, node)) {
+      throw new IllegalStateException("unexpected concurrent modification of listHead.next");
     }
   }
 
@@ -303,8 +331,13 @@ class Cache<V, N extends Cache.Node<V>> {
       if (rc == 1) {
         int witness = node.refCount.compareAndExchange(1, UNPIN_SENTINEL);
         if (witness == 1) {
-          node.prev = lruHead;
-          insertAtHead(node);
+          long now = System.nanoTime();
+          long prev = node.lastUnpinNanos;
+          node.lastUnpinNanos = now;
+          boolean toHot = prev != 0 && (now - prev) <= PROMOTION_TTL_NANOS;
+          Node<V> listHead = toHot ? hotHead : lruHead;
+          node.prev = listHead;
+          insertAtHead(listHead, node);
           if (!node.refCount.compareAndSet(UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
@@ -340,7 +373,27 @@ class Cache<V, N extends Cache.Node<V>> {
   }
 
   N acquireNode(Function<V, V> valFunc) {
-    for (Node<V> candidate; (candidate = lruTail.prev) != lruHead; ) {
+    for (; ; ) {
+      Node<V> coldCandidate = lruTail.prev, hotCandidate = hotTail.prev;
+      Node<V> candidate;
+      if (coldCandidate == lruHead) {
+        // cold queue is empty
+        if (hotCandidate == hotHead) {
+          return null;
+        }
+        candidate = hotCandidate;
+      } else if (hotCandidate == hotHead) {
+        candidate = coldCandidate;
+      } else {
+        // Evict from hot when the cold tail is sufficiently more recent than the hot tail, even
+        // after crediting the hot tail HOT_BONUS_NANOS of extra recency. Subtraction avoids
+        // overflow: positive result means cold was accessed more recently than hot (by that delta).
+        candidate =
+            coldCandidate.lastUnpinNanos - hotCandidate.lastUnpinNanos > HOT_BONUS_NANOS
+                ? hotCandidate
+                : coldCandidate;
+      }
+
       if (candidate.refCount.compareAndSet(0, -1)) {
         if (!removeFromList(candidate)) {
           throw new IllegalStateException();
@@ -352,9 +405,8 @@ class Cache<V, N extends Cache.Node<V>> {
         return createNode(newVal, null, 1);
       }
       // CAS failed: a concurrent pin() or acquireNode() just claimed this node and is in the
-      // middle of removeFromList(). Spin briefly; lruTail.prev will change momentarily.
+      // middle of removeFromList(). Spin briefly; tail.prev will change momentarily.
     }
-    return null; // list empty — all nodes pinned
   }
 
   /**
