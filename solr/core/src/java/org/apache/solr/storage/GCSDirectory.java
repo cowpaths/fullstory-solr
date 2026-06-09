@@ -1284,23 +1284,27 @@ public class GCSDirectory extends MMapDirectory {
     private int currentBlockIdx = -1;
     private Cache.Node<NodeRefStruct> readPermit;
 
+    private void acquirePermitIfAbsent(GCSDirectoryFactory.PinSemaphore semaphore) {
+      if (readPermit == null) {
+        readPermit = semaphore.acquire(this);
+      }
+    }
+
     private void localPin(BlockCache blockCache, GCSDirectoryFactory.PinSemaphore semaphore) {
       if (localRefCount++ == 0) {
         while (!state.compareAndSet(State.IDLE, State.PINNED)) {
           Thread.yield();
         }
         if (currentBlockIdx < 0 && currentNode != null) {
-          // node has been unpinned, but we may be able to re-pin it
+          // node has been unpinned out-of-band; try to re-pin it to avoid a GCS fetch
           if (blockCache.pin(currentNode)) {
             currentBlockIdx = ~currentBlockIdx;
+            acquirePermitIfAbsent(semaphore);
           } else {
             currentNode = null;
             currentBlockIdx = -1;
+            // permit will be acquired via setCurrentNode when refill() loads the next block
           }
-          // having been unpinned, it's guaranteed we're about to pin again, so we want to
-          // get a permit. Once the first read is complete, we'll release the permit
-          // and put ourselves on the LRU for reclamation.
-          readPermit = semaphore.acquire(this);
         }
       }
     }
@@ -1322,11 +1326,13 @@ public class GCSDirectory extends MMapDirectory {
       }
     }
 
-    private void setCurrentNode(BlockCache.Node node, int blockIdx) {
+    private void setCurrentNode(
+        BlockCache.Node node, int blockIdx, GCSDirectoryFactory.PinSemaphore semaphore) {
       if (localRefCount > 0) {
         // Called within a localPin context: state is already PINNED, direct update is safe.
         currentNode = node;
         currentBlockIdx = blockIdx;
+        if (node != null) acquirePermitIfAbsent(semaphore);
         return;
       }
       while (!state.compareAndSet(State.IDLE, State.PINNED)) {
@@ -1334,6 +1340,7 @@ public class GCSDirectory extends MMapDirectory {
       }
       currentNode = node;
       currentBlockIdx = blockIdx;
+      if (node != null) acquirePermitIfAbsent(semaphore);
       state.compareAndSet(State.PINNED, State.IDLE);
     }
 
@@ -1650,7 +1657,7 @@ public class GCSDirectory extends MMapDirectory {
           dir.cache.unpin(cached);
           throw unwrapException(e.getCause());
         }
-        currentNodeRef.setCurrentNode(cached, blockIdx);
+        currentNodeRef.setCurrentNode(cached, blockIdx, dir.acquirePinPermit);
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         postBuffer.clear().limit(decompressedLen);
         postBufferBaseline = 0;
@@ -1676,7 +1683,7 @@ public class GCSDirectory extends MMapDirectory {
             dir.cache.close(node);
             throw unwrapException(t);
           }
-          currentNodeRef.setCurrentNode(node, blockIdx);
+          currentNodeRef.setCurrentNode(node, blockIdx, dir.acquirePinPermit);
           postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         } else {
           // Another thread won the race; wait for its result.
@@ -1690,7 +1697,7 @@ public class GCSDirectory extends MMapDirectory {
               dir.cache.unpin(extant);
               throw unwrapException(e.getCause());
             }
-            currentNodeRef.setCurrentNode(extant, blockIdx);
+            currentNodeRef.setCurrentNode(extant, blockIdx, dir.acquirePinPermit);
             postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
           } else {
             // Serve uncached.
@@ -1713,7 +1720,7 @@ public class GCSDirectory extends MMapDirectory {
     private void uncached(long pos, int compressedLen, int blockIdx, int decompressedLen)
         throws IOException {
       ByteBuffer heapBuf = supply(pos, compressedLen, decompressedLen);
-      currentNodeRef.setCurrentNode(null, blockIdx);
+      currentNodeRef.setCurrentNode(null, blockIdx, null);
       postBuffer = heapBuf;
       postBufferBaseline = heapBuf.position();
       heapBuf.order(ByteOrder.LITTLE_ENDIAN);
