@@ -373,7 +373,7 @@ class Cache<V, N extends Cache.Node<V>> {
     } else {
       Node<V> coldTailNode = lruTail.prev;
       if (coldTailNode != lruHead) {
-        return coldTailNode.lastUnpinNanos - prev < 0;
+        return coldTs - prev < 0;
       } else {
         Node<V> hotTailNode = hotTail.prev;
         if (hotTailNode == hotHead) {
@@ -400,35 +400,44 @@ class Cache<V, N extends Cache.Node<V>> {
    *
    * <p>Returns {@code null} if the list is empty (all nodes are pinned).
    */
-  N acquireNode() {
+  final N acquireNode() {
     return acquireNode(null);
   }
 
-  N acquireNode(Function<V, V> valFunc) {
+  /** Running memoization of last seen non-zero cold queue timestamp */
+  volatile long coldTs;
+
+  final N acquireNode(Function<V, V> valFunc) {
     for (; ; ) {
       Node<V> coldCandidate = lruTail.prev, hotCandidate = hotTail.prev;
       Node<V> candidate;
+      final long coldCandidateTs;
       if (coldCandidate == lruHead) {
         // cold queue is empty
         if (hotCandidate == hotHead) {
           return null;
         }
         candidate = hotCandidate;
+        coldCandidateTs = 0;
       } else if (hotCandidate == hotHead) {
         candidate = coldCandidate;
+        coldCandidateTs = coldCandidate.lastUnpinNanos;
       } else {
         // Evict from hot only when cold is at least HOT_EVICTION_MULTIPLIER times as stale,
         // giving hot nodes proportional protection. age() maps lastUnpinNanos=0 to a large
         // sentinel so never-used cold nodes are always preferred over any real hot node.
         long now = System.nanoTime();
+        coldCandidateTs = coldCandidate.lastUnpinNanos;
         candidate =
-            age(now, coldCandidate.lastUnpinNanos)
-                    > age(now, hotCandidate.lastUnpinNanos) << HOT_EVICTION_SHIFT
+            age(now, coldCandidateTs) > age(now, hotCandidate.lastUnpinNanos) << HOT_EVICTION_SHIFT
                 ? hotCandidate
                 : coldCandidate;
       }
 
       if (candidate.refCount.compareAndSet(0, -1)) {
+        if (coldCandidateTs != 0) {
+          this.coldTs = coldCandidateTs;
+        }
         if (!removeFromList(candidate)) {
           throw new IllegalStateException();
         }
