@@ -372,7 +372,7 @@ class Cache<V, N extends Cache.Node<V>> {
       return false;
     } else {
       Node<V> coldTailNode = lruTail.prev;
-      if (coldTailNode != lruHead) {
+      if (coldTailNode != lruHead && coldTs != 0) {
         return coldTs - prev < 0;
       } else {
         Node<V> hotTailNode = hotTail.prev;
