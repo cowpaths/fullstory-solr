@@ -156,7 +156,9 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
                       return evicted;
                     }
                   });
-          if (nodeRefStructNode.getValue() == instance) {
+          if (nodeRefStructNode == null) {
+            Thread.yield(); // all busy; no deadlock possible, so progress is guaranteed
+          } else if (nodeRefStructNode.getValue() == instance) {
             return nodeRefStructNode;
           } else {
             pinned.unpin(nodeRefStructNode); // always return to LRU
