@@ -64,10 +64,14 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
    */
   private final UUID refId;
 
-  public GcsBlobLifecycleCoordinator(Storage storage, String metadataBucket, UUID refId) {
+  private final boolean useMultipartUpload;
+
+  public GcsBlobLifecycleCoordinator(
+      Storage storage, String metadataBucket, UUID refId, boolean useMultipartUpload) {
     this.storage = storage;
     this.metadataBucket = metadataBucket;
     this.refId = refId;
+    this.useMultipartUpload = useMultipartUpload;
   }
 
   @Override
@@ -83,7 +87,7 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
         // the object first — retry and merge our ref into the now-existing object.
         byte[] newData = BlobMetadataCodec.encodeNew(refId, sortedBlobs);
         try {
-          writeViaChannel(blobInfo, newData, Storage.BlobWriteOption.generationMatch(0L));
+          writeBlob(blobInfo, newData, 0L);
           return;
         } catch (StorageException e) {
           if (e.getCode() != HTTP_PRECONDITION_FAILED) {
@@ -98,8 +102,7 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
         return; // Already registered; nothing to do.
       }
       try {
-        writeViaChannel(
-            blobInfo, merged, Storage.BlobWriteOption.generationMatch(blob.getGeneration()));
+        writeBlob(blobInfo, merged, blob.getGeneration());
         return;
       } catch (StorageException e) {
         if (e.getCode() != HTTP_PRECONDITION_FAILED) {
@@ -127,8 +130,7 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
       if (!BlobMetadataCodec.refsEmpty(updated)) {
         // Other refs remain; write back with our ref removed.
         try {
-          writeViaChannel(
-              blobInfo, updated, Storage.BlobWriteOption.generationMatch(blob.getGeneration()));
+          writeBlob(blobInfo, updated, blob.getGeneration());
           return Collections.emptyList();
         } catch (StorageException e) {
           if (e.getCode() != HTTP_PRECONDITION_FAILED) {
@@ -147,22 +149,47 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
     }
   }
 
-  // TODO: metadata blobs are tiny (< 1 KB). Resumable upload (WriteChannel) requires two HTTP
-  // round-trips vs. one for multipart upload (storage.create(BlobInfo, byte[], ...)), so it
-  // carries slightly higher per-write latency. We use resumable here because the fullstorydev GCS
-  // emulator used in integration tests does not support the multipart upload format. On real GCS
-  // the difference is negligible given how rarely registerBatch/release fire (once per segment
-  // batch). If metadata write latency ever shows up in profiling, options include: fixing the
-  // emulator to support multipart, switching to ZkBlobLifecycleCoordinator in prod (where ZK is
-  // available), or making the upload method configurable.
-  private void writeViaChannel(BlobInfo blobInfo, byte[] data, Storage.BlobWriteOption... options)
-      throws StorageException {
-    try (WriteChannel writer = storage.writer(blobInfo, options)) {
+  /**
+   * Dispatches to {@link #writeMultipart} or {@link #writeResumable} based on backend capability.
+   */
+  private void writeBlob(BlobInfo blobInfo, byte[] data, long ifGenerationMatch) {
+    if (useMultipartUpload) {
+      writeMultipart(blobInfo, data, ifGenerationMatch);
+    } else {
+      writeResumable(blobInfo, data, ifGenerationMatch);
+    }
+  }
+
+  /**
+   * Writes {@code data} as a single-request multipart upload with an {@code ifGenerationMatch}
+   * precondition. One HTTP round-trip.
+   */
+  private void writeMultipart(BlobInfo blobInfo, byte[] data, long ifGenerationMatch) {
+    try {
+      BlobInfo withGen =
+          BlobInfo.newBuilder(
+                  BlobId.of(blobInfo.getBucket(), blobInfo.getName(), ifGenerationMatch))
+              .build();
+      storage.create(withGen, data, Storage.BlobTargetOption.generationMatch());
+    } catch (StorageException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new StorageException(0, "Failed to write via multipart", e);
+    }
+  }
+
+  /**
+   * Writes {@code data} via a resumable upload channel with an {@code ifGenerationMatch}
+   * precondition. Two HTTP round-trips; used when the backend does not support multipart.
+   */
+  private void writeResumable(BlobInfo blobInfo, byte[] data, long ifGenerationMatch) {
+    try (WriteChannel writer =
+        storage.writer(blobInfo, Storage.BlobWriteOption.generationMatch(ifGenerationMatch))) {
       writer.write(ByteBuffer.wrap(data));
     } catch (StorageException e) {
       throw e;
     } catch (Exception e) {
-      throw new StorageException(0, "Failed to write via channel", e);
+      throw new StorageException(0, "Failed to write via resumable channel", e);
     }
   }
 }

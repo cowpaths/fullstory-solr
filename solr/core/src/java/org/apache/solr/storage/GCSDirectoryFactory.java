@@ -17,7 +17,10 @@
 
 package org.apache.solr.storage;
 
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageException;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
@@ -203,6 +206,13 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
      */
     private final Path coreRootDirectory;
 
+    /**
+     * True when the GCS backend supports single-request multipart uploads ({@code
+     * storage.create(BlobInfo, byte[], ...)}); false when only resumable uploads are supported
+     * (e.g. some emulators). Detected once at construction time via a probe write.
+     */
+    private final boolean useMultipartUpload;
+
     NodeLevelGCSDirectoryState(
         BlockCache blockCache,
         Storage storage,
@@ -217,6 +227,29 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       this.metadataBucket = metadataBucket;
       this.zkClient = zkController != null ? zkController.getZkClient() : null;
       this.coreRootDirectory = coreRootDirectory;
+      this.useMultipartUpload = probeMultipartUpload(storage, metadataBucket);
+    }
+
+    /**
+     * Probes whether the GCS backend supports multipart uploads by writing and deleting a tiny
+     * sentinel object. Returns {@code true} on success; {@code false} if a {@link StorageException}
+     * is thrown (e.g. when running against an emulator that only supports resumable uploads).
+     */
+    private static boolean probeMultipartUpload(Storage storage, String metadataBucket) {
+      String probeName = ".multipart-probe-" + UUID.randomUUID();
+      BlobInfo probe = BlobInfo.newBuilder(BlobId.of(metadataBucket, probeName)).build();
+      try {
+        storage.create(probe, "probe".getBytes(StandardCharsets.UTF_8));
+        storage.delete(BlobId.of(metadataBucket, probeName));
+        log.info(
+            "GCS metadata bucket supports multipart upload; using multipart for metadata writes");
+        return true;
+      } catch (StorageException e) {
+        log.info(
+            "GCS metadata bucket does not support multipart upload ({}); falling back to resumable upload",
+            e.getMessage());
+        return false;
+      }
     }
 
     /**
@@ -250,7 +283,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
           && zkClient != null) {
         return new ZkBlobLifecycleCoordinator(zkClient, refId);
       }
-      return new GcsBlobLifecycleCoordinator(storage, metadataBucket, refId);
+      return new GcsBlobLifecycleCoordinator(storage, metadataBucket, refId, useMultipartUpload);
     }
 
     /**
