@@ -149,20 +149,19 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
           nodeRefStructNode =
               pinned.acquireNode(
                   (evicted) -> {
-                    if (evicted == null || evicted.outOfBandUnpin(cache)) {
-                      return instance;
-                    } else {
-                      // actively in use; put it back in the queue
-                      return evicted;
+                    if (evicted != null) {
+                      while (!evicted.outOfBandUnpin(cache)) {
+                        // assumption is that individual reads will complete quickly.
+                        Thread.yield();
+                      }
                     }
+                    return instance;
                   });
           if (nodeRefStructNode == null) {
             Thread.yield(); // all busy; no deadlock possible, so progress is guaranteed
-          } else if (nodeRefStructNode.getValue() == instance) {
-            return nodeRefStructNode;
           } else {
-            pinned.unpin(nodeRefStructNode); // always return to LRU
-            Thread.yield(); // all busy; no deadlock possible, so progress is guaranteed
+            assert nodeRefStructNode.getValue() == instance;
+            return nodeRefStructNode;
           }
         }
       }
