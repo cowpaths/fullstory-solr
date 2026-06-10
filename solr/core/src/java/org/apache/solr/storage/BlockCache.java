@@ -48,10 +48,10 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Pin/unpin semantics and the LRU list protocol are inherited from {@link Cache}.
  *
- * <p>The pool is split across {@link #numPartitions()} independent {@link Cache.DualQueueCache}
- * instances (one per CPU, rounded to the next power of two). Each pin/unpin/acquire routes to a
- * randomly chosen partition via {@link ThreadLocalRandom}, distributing list-operation contention
- * across partitions without requiring any node-to-partition affinity.
+ * <p>The pool is split across N independent {@link Cache.DualQueueCache} instances (one per CPU,
+ * rounded to the next power of two). Each pin/unpin/acquire routes to a randomly chosen partition
+ * via {@link ThreadLocalRandom}, distributing list-operation contention across partitions without
+ * requiring any node-to-partition affinity.
  */
 public class BlockCache implements Closeable {
 

@@ -31,10 +31,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.IntSupplier;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.LockFactory;
@@ -140,15 +143,29 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   }
 
   static PinSemaphore defaultMaxPinned(BlockCache cache) {
-    Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> pinned =
-        new Cache<>(Arrays.asList(new GCSDirectory.NodeRefStruct[MAX_CONCURRENT_PINNED]), false);
+    int nPartitions = pinSemaphoreNPartitions();
+    int slotsPerPartition = MAX_CONCURRENT_PINNED / nPartitions;
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>>[] partitions =
+        new Cache[nPartitions];
+    final IntSupplier idx;
+    if (nPartitions == 1) {
+      idx = () -> 0;
+    } else {
+      idx = () -> ThreadLocalRandom.current().nextInt(nPartitions);
+    }
+    List<GCSDirectory.NodeRefStruct> dummy =
+        Arrays.asList(new GCSDirectory.NodeRefStruct[slotsPerPartition]);
+    for (int i = 0; i < nPartitions; i++) {
+      partitions[i] = new Cache<>(dummy, false);
+    }
     return new PinSemaphore() {
       @Override
       public Cache.Node<GCSDirectory.NodeRefStruct> acquire(GCSDirectory.NodeRefStruct instance) {
-        Cache.Node<GCSDirectory.NodeRefStruct> nodeRefStructNode;
+        Cache.Node<GCSDirectory.NodeRefStruct> permit;
         for (; ; ) {
-          nodeRefStructNode =
-              pinned.acquireNode(
+          permit =
+              partitions[idx.getAsInt()].acquireNode(
                   (evicted) -> {
                     if (evicted != null) {
                       while (!evicted.outOfBandUnpin(cache)) {
@@ -158,20 +175,27 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
                     }
                     return instance;
                   });
-          if (nodeRefStructNode == null) {
+          if (permit == null) {
             Thread.yield(); // all busy; no deadlock possible, so progress is guaranteed
           } else {
-            assert nodeRefStructNode.getValue() == instance;
-            return nodeRefStructNode;
+            assert permit.getValue() == instance;
+            return permit;
           }
         }
       }
 
       @Override
       public void release(Cache.Node<GCSDirectory.NodeRefStruct> readPermit) {
-        pinned.unpin(readPermit);
+        partitions[idx.getAsInt()].unpin(readPermit);
       }
     };
+  }
+
+  private static int pinSemaphoreNPartitions() {
+    // Largest power of two <= availableProcessors, capped so each partition retains at least
+    // that many slots (ensuring the pool stays meaningfully sized per partition).
+    int n = Integer.highestOneBit(Math.max(1, Runtime.getRuntime().availableProcessors()));
+    return n <= MAX_CONCURRENT_PINNED / n ? n : 1;
   }
 
   /** Node-level resources shared across all {@link GCSDirectory} instances on this node. */
