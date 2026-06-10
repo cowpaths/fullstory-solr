@@ -464,7 +464,7 @@ class Cache<V, N extends Cache.Node<V>> {
           coldCandidateTs = coldCandidate.lastUnpinNanos;
           candidate =
               age(now, coldCandidateTs)
-                      > age(now, hotCandidate.lastUnpinNanos) << HOT_EVICTION_SHIFT
+                      < age(now, hotCandidate.lastUnpinNanos) >> HOT_EVICTION_SHIFT
                   ? hotCandidate
                   : coldCandidate;
         }
