@@ -30,6 +30,7 @@ import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -140,7 +141,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
 
   static PinSemaphore defaultMaxPinned(BlockCache cache) {
     Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> pinned =
-        new Cache<>(new GCSDirectory.NodeRefStruct[MAX_CONCURRENT_PINNED], false);
+        new Cache<>(Arrays.asList(new GCSDirectory.NodeRefStruct[MAX_CONCURRENT_PINNED]), false);
     return new PinSemaphore() {
       @Override
       public Cache.Node<GCSDirectory.NodeRefStruct> acquire(GCSDirectory.NodeRefStruct instance) {

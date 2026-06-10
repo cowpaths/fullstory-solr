@@ -1520,8 +1520,7 @@ public class GCSDirectory extends MMapDirectory {
         if (weMap[0]) {
           try {
             ByteBuffer tailBuf = localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
-            BlockCache.Node tailNode = dir.cache.createNode(null, null, Integer.MAX_VALUE / 2);
-            tailNode.populateDirect(tailBuf);
+            BlockCache.Node tailNode = dir.cache.createTailNode(tailBuf);
             if (!accessMapped.compareAndSet(lastBlockIdx, null, tailNode)) {
               throw new IllegalStateException("tailNode already set");
             }

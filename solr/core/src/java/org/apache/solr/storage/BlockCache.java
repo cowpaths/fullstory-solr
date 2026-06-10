@@ -28,10 +28,13 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ThreadLocalRandom;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,9 +47,13 @@ import org.slf4j.LoggerFactory;
  * uncached.
  *
  * <p>Pin/unpin semantics and the LRU list protocol are inherited from {@link Cache}.
+ *
+ * <p>The pool is split across {@link #numPartitions()} independent {@link Cache.DualQueueCache}
+ * instances (one per CPU, rounded to the next power of two). Each pin/unpin/acquire routes to a
+ * randomly chosen partition via {@link ThreadLocalRandom}, distributing list-operation contention
+ * across partitions without requiring any node-to-partition affinity.
  */
-public class BlockCache extends Cache.DualQueueCache<ByteBuffer, BlockCache.Node>
-    implements Closeable {
+public class BlockCache implements Closeable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -85,7 +92,12 @@ public class BlockCache extends Cache.DualQueueCache<ByteBuffer, BlockCache.Node
      */
     private final CompletableFuture<ByteBuffer> future = new CompletableFuture<>();
 
-    private Node(ByteBuffer buf, Cache.Node<ByteBuffer> prev, int initialRefCount) {
+    private Node(ByteBuffer prepopulated) {
+      super(null, null, Integer.MAX_VALUE >> 1);
+      future.complete(prepopulated);
+    }
+
+    Node(ByteBuffer buf, Cache.Node<ByteBuffer> prev, int initialRefCount) {
       super(buf, prev, initialRefCount);
     }
 
@@ -106,17 +118,6 @@ public class BlockCache extends Cache.DualQueueCache<ByteBuffer, BlockCache.Node
       return future.join();
     }
 
-    /**
-     * Completes this node with an externally-owned buffer (e.g. an mmap slice) without copying.
-     * Unlike {@link #populate}, the node's {@link #getValue()} is not used; {@code buf} is stored
-     * directly as the future's result. Intended for synthetic always-pinned nodes (such as the
-     * local tail block) that are not backed by a pool slot.
-     */
-    ByteBuffer populateDirect(ByteBuffer buf) {
-      future.complete(buf);
-      return buf;
-    }
-
     /** Marks this node as failed, unblocking any threads waiting in {@link #join()}. */
     public boolean completeExceptionally(Throwable t) {
       return future.completeExceptionally(t);
@@ -124,19 +125,46 @@ public class BlockCache extends Cache.DualQueueCache<ByteBuffer, BlockCache.Node
   }
 
   // ---------------------------------------------------------------------------
+  // Partition
+  // ---------------------------------------------------------------------------
+
+  private static final class Partition extends Cache.DualQueueCache<ByteBuffer, Node> {
+    Partition(List<ByteBuffer> pool) {
+      super(pool, true);
+    }
+
+    @Override
+    protected BlockCache.Node createNode(
+        ByteBuffer value, Cache.Node<ByteBuffer> prev, int initialRefCount) {
+      return new BlockCache.Node(value, prev, initialRefCount);
+    }
+  }
+
+  /** Creates a synthetic node not backed by a pool slot (e.g. an always-pinned tail block). */
+  Node createTailNode(ByteBuffer tailBuf) {
+    return new Node(tailBuf);
+  }
+
+  // ---------------------------------------------------------------------------
   // Construction
   // ---------------------------------------------------------------------------
+
+  private final Partition[] partitions;
+  private final int partitionMask;
 
   /**
    * Creates a new block cache backed by a freshly-created temp file. The file is deleted
    * immediately after mapping so it does not outlive the JVM.
    */
   public BlockCache(long targetBytes, Path backingFile) throws IOException {
-    super(initPool(targetBytes, backingFile, true), true);
+    ByteBuffer[] pool = initPool(targetBytes, backingFile, true);
+    this.partitions = distribute(pool);
+    this.partitionMask = partitions.length - 1;
     log.info(
-        "BlockCache initialized: nBlocks={}, targetBytes={}",
-        targetBytes / COMPRESSION_BLOCK_SIZE,
-        targetBytes);
+        "BlockCache initialized: nBlocks={}, targetBytes={}, nPartitions={}",
+        pool.length,
+        targetBytes,
+        partitions.length);
   }
 
   /**
@@ -150,13 +178,97 @@ public class BlockCache extends Cache.DualQueueCache<ByteBuffer, BlockCache.Node
   }
 
   private BlockCache(Path existingBackingFile, long targetBytes) throws IOException {
-    super(initPool(targetBytes, existingBackingFile, false), true);
+    ByteBuffer[] pool = initPool(targetBytes, existingBackingFile, false);
+    this.partitions = distribute(pool);
+    this.partitionMask = partitions.length - 1;
     log.info(
-        "BlockCache initialized from existing file {}: nBlocks={}, targetBytes={}",
+        "BlockCache initialized from existing file {}: nBlocks={}, targetBytes={}, nPartitions={}",
         existingBackingFile,
-        targetBytes / COMPRESSION_BLOCK_SIZE,
-        targetBytes);
+        pool.length,
+        targetBytes,
+        partitions.length);
   }
+
+  private static Partition[] distribute(ByteBuffer[] pool) {
+    int nBlocks = pool.length;
+    int nPartitions = computeNPartitions(nBlocks);
+    Partition[] parts = new Partition[nPartitions];
+    int base = nBlocks / nPartitions;
+    int remainder = nBlocks % nPartitions;
+    int offset = 0;
+    List<ByteBuffer> poolList = Arrays.asList(pool);
+
+    for (int i = 0; i < nPartitions; i++) {
+      int count = base + (i < remainder ? 1 : 0);
+      parts[i] = new Partition(poolList.subList(offset, offset + count));
+      offset += count;
+    }
+    return parts;
+  }
+
+  private static int computeNPartitions(int nBlocks) {
+    int cpus = Runtime.getRuntime().availableProcessors();
+    int n = Integer.highestOneBit(Math.max(1, cpus));
+    if (n > nBlocks / n) {
+      // small number of blocks relative to processors; fallback to single partition
+      return 1;
+    }
+    return n;
+  }
+
+  // ---------------------------------------------------------------------------
+  // API
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Pins {@code node}. Partition-agnostic: delegates to partition 0 because {@link Cache#pin}
+   * operates solely on the node's refCount and list pointers, with no partition-local state.
+   *
+   * <p>{@link Cache#pin(Cache.Node)} is effectively a static method, so it doesn't matter which
+   * queue we call it on. TODO: make it <i>actually</i> static, for clarity?
+   */
+  boolean pin(Node node) {
+    return partitions[0].pin(node);
+  }
+
+  /**
+   * Releases a pin, routing the node to a randomly chosen partition's LRU head. No node-to-
+   * partition affinity is required: the ByteBuffer value is valid in any partition's pool.
+   */
+  void unpin(Node node) {
+    partitions[tlrIndex()].unpin(node);
+  }
+
+  /**
+   * Acquires a pinned node from a randomly chosen partition, falling back to other partitions if
+   * the first is fully pinned. Returns {@code null} only if all partitions are exhausted.
+   */
+  Node acquireNode() {
+    return partitions[tlrIndex()].acquireNode();
+  }
+
+  /**
+   * Recycles a node back to the pool at the eviction-tail of a randomly chosen partition (making it
+   * a high-priority reuse candidate). Used when a node was acquired but ultimately not needed (e.g.
+   * lost CAS race).
+   */
+  boolean close(Node node) {
+    return partitions[tlrIndex()].close(node);
+  }
+
+  private int tlrIndex() {
+    return ThreadLocalRandom.current().nextInt(partitions.length);
+  }
+
+  @Override
+  public void close() {
+    // MappedByteBuffers are not explicitly unmapped here; the JVM will release them on exit.
+    // TODO: add explicit unmap via ByteBufferGuard / unmapHack if needed.
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pool initialization
+  // ---------------------------------------------------------------------------
 
   /**
    * Allocates the pool as slices of a file-backed memory-mapped region (adapted from {@code
@@ -212,25 +324,5 @@ public class BlockCache extends Cache.DualQueueCache<ByteBuffer, BlockCache.Node
       }
     }
     return pool;
-  }
-
-  // ---------------------------------------------------------------------------
-  // API
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Creates a {@link BlockCache.Node} carrying the given buffer. Overrides the base factory so that
-   * all nodes inserted into this cache's list are of type {@link BlockCache.Node} and can be safely
-   * cast on acquisition.
-   */
-  @Override
-  protected Node createNode(ByteBuffer value, Cache.Node<ByteBuffer> prev, int initialRefCount) {
-    return new Node(value, prev, initialRefCount);
-  }
-
-  @Override
-  public void close() {
-    // MappedByteBuffers are not explicitly unmapped here; the JVM will release them on exit.
-    // TODO: add explicit unmap via ByteBufferGuard / unmapHack if needed.
   }
 }

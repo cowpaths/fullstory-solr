@@ -17,6 +17,7 @@
 
 package org.apache.solr.storage;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -173,7 +174,7 @@ class Cache<V, N extends Cache.Node<V>> {
    * constructor followed by {@link #insertAtTail} for each value, but faster because no CAS is
    * needed during single-threaded initialization.
    */
-  Cache(V[] initialValues, boolean persistentVals) {
+  Cache(List<V> initialValues, boolean persistentVals) {
     this(persistentVals);
     Node<V> prev = lruHead;
     for (V value : initialValues) {
@@ -426,7 +427,7 @@ class Cache<V, N extends Cache.Node<V>> {
     /** Hot queue: tail sentinel. */
     private final Node<V> hotTail = new Node<>();
 
-    DualQueueCache(V[] initialValues, boolean persistentVals) {
+    DualQueueCache(List<V> initialValues, boolean persistentVals) {
       super(initialValues, persistentVals);
       hotHead.next.set(hotTail);
       hotTail.prev = hotHead;
