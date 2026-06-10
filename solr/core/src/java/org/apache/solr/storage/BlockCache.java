@@ -45,7 +45,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Pin/unpin semantics and the LRU list protocol are inherited from {@link Cache}.
  */
-public class BlockCache extends Cache<ByteBuffer, BlockCache.Node> implements Closeable {
+public class BlockCache extends Cache.DualQueueCache<ByteBuffer, BlockCache.Node>
+    implements Closeable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 

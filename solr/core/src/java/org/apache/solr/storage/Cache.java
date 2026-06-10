@@ -137,12 +137,6 @@ class Cache<V, N extends Cache.Node<V>> {
   /** Cold queue: tail sentinel (eviction end). */
   private final Node<V> lruTail = new Node<>();
 
-  /** Hot queue: head sentinel. Nodes promoted from cold are inserted here. */
-  private final Node<V> hotHead = new Node<>();
-
-  /** Hot queue: tail sentinel. */
-  private final Node<V> hotTail = new Node<>();
-
   private final boolean persistentVals;
 
   /**
@@ -170,8 +164,6 @@ class Cache<V, N extends Cache.Node<V>> {
     REMOVED = (Node<V>) REMOVED_PROTO;
     lruHead.next.set(lruTail);
     lruTail.prev = lruHead;
-    hotHead.next.set(hotTail);
-    hotTail.prev = hotHead;
     this.persistentVals = persistentVals;
   }
 
@@ -235,7 +227,8 @@ class Cache<V, N extends Cache.Node<V>> {
     }
   }
 
-  private void insertAtHead(Node<V> listHead, Node<V> node) {
+  protected void insertAtHead(Node<V> listHead, Node<V> node) {
+    node.prev = listHead;
     Node<V> oldNext = reserve(listHead, RESERVED);
     assert oldNext != REMOVED_PROTO : "queue head sentinel should never be removed";
     node.next.set(oldNext);
@@ -338,12 +331,7 @@ class Cache<V, N extends Cache.Node<V>> {
       if (rc == 1) {
         int witness = node.refCount.compareAndExchange(1, UNPIN_SENTINEL);
         if (witness == 1) {
-          long now = System.nanoTime();
-          long prev = node.lastUnpinNanos;
-          node.lastUnpinNanos = now;
-          Node<V> listHead = toHot(prev) ? hotHead : lruHead;
-          node.prev = listHead;
-          insertAtHead(listHead, node);
+          insertAtHead(lruHead, node);
           if (!node.refCount.compareAndSet(UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
@@ -363,14 +351,6 @@ class Cache<V, N extends Cache.Node<V>> {
     }
   }
 
-  private boolean toHot(long prev) {
-    // Promote to hot if previously used and fresher than the last known cold-tail threshold.
-    // coldTs tracks the most recently observed non-zero cold tail timestamp (updated by
-    // acquireNode on each eviction). When zero (initial warm-up), fall back to hot.
-    long threshold;
-    return prev != 0 && ((threshold = coldTs) == 0 || threshold - prev < 0);
-  }
-
   // ---------------------------------------------------------------------------
   // Acquire / release
   // ---------------------------------------------------------------------------
@@ -386,52 +366,28 @@ class Cache<V, N extends Cache.Node<V>> {
     return acquireNode(null);
   }
 
-  /** Running memoization of last seen non-zero cold queue timestamp */
-  volatile long coldTs;
+  protected Node<V> acquireTail(Node<V> lruTail, Node<V> lruHead) {
+    for (Node<V> candidate; (candidate = lruTail.prev) != lruHead; ) {
+      if (candidate.refCount.compareAndSet(0, -1)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
 
   final N acquireNode(Function<V, V> valFunc) {
-    for (; ; ) {
-      Node<V> coldCandidate = lruTail.prev, hotCandidate = hotTail.prev;
-      Node<V> candidate;
-      final long coldCandidateTs;
-      if (coldCandidate == lruHead) {
-        // cold queue is empty
-        if (hotCandidate == hotHead) {
-          return null;
-        }
-        candidate = hotCandidate;
-        coldCandidateTs = 0;
-      } else if (hotCandidate == hotHead) {
-        candidate = coldCandidate;
-        coldCandidateTs = coldCandidate.lastUnpinNanos;
-      } else {
-        // Evict from hot only when cold is at least HOT_EVICTION_MULTIPLIER times as stale,
-        // giving hot nodes proportional protection. age() maps lastUnpinNanos=0 to a large
-        // sentinel so never-used cold nodes are always preferred over any real hot node.
-        long now = System.nanoTime();
-        coldCandidateTs = coldCandidate.lastUnpinNanos;
-        candidate =
-            age(now, coldCandidateTs) > age(now, hotCandidate.lastUnpinNanos) << HOT_EVICTION_SHIFT
-                ? hotCandidate
-                : coldCandidate;
-      }
-
-      if (candidate.refCount.compareAndSet(0, -1)) {
-        if (coldCandidateTs != 0) {
-          this.coldTs = coldCandidateTs;
-        }
-        if (!removeFromList(candidate)) {
-          throw new IllegalStateException();
-        }
-        V newVal = valFunc == null ? candidate.value : valFunc.apply(candidate.value);
-        if (newVal != candidate.value) {
-          candidate.value = null; // ensure eligible for GC
-        }
-        return createNode(newVal, null, 1);
-      }
-      // CAS failed: a concurrent pin() or acquireNode() just claimed this node and is in the
-      // middle of removeFromList(). Spin briefly; tail.prev will change momentarily.
+    Node<V> candidate = acquireTail(lruTail, lruHead);
+    if (candidate == null) {
+      return null;
     }
+    if (!removeFromList(candidate)) {
+      throw new IllegalStateException();
+    }
+    V newVal = valFunc == null ? candidate.value : valFunc.apply(candidate.value);
+    if (newVal != candidate.value) {
+      candidate.value = null; // ensure eligible for GC
+    }
+    return createNode(newVal, null, 1);
   }
 
   /**
@@ -457,5 +413,74 @@ class Cache<V, N extends Cache.Node<V>> {
       throw new IllegalStateException();
     }
     return true;
+  }
+
+  static class DualQueueCache<V, N extends Node<V>> extends Cache<V, N> {
+
+    /** Running memoization of last seen non-zero cold queue timestamp */
+    private volatile long coldTs;
+
+    /** Hot queue: head sentinel. Nodes promoted from cold are inserted here. */
+    private final Node<V> hotHead = new Node<>();
+
+    /** Hot queue: tail sentinel. */
+    private final Node<V> hotTail = new Node<>();
+
+    DualQueueCache(V[] initialValues, boolean persistentVals) {
+      super(initialValues, persistentVals);
+      hotHead.next.set(hotTail);
+      hotTail.prev = hotHead;
+    }
+
+    @Override
+    protected final void insertAtHead(Node<V> head, Node<V> node) {
+      long prev = node.lastUnpinNanos;
+      node.lastUnpinNanos = System.nanoTime();
+      super.insertAtHead(toHot(prev) ? hotHead : head, node);
+    }
+
+    @Override
+    protected Node<V> acquireTail(Node<V> lruTail, Node<V> lruHead) {
+      long coldCandidateTs;
+      Node<V> candidate;
+      long now = System.nanoTime();
+      do {
+        Node<V> coldCandidate = lruTail.prev, hotCandidate = hotTail.prev;
+        if (coldCandidate == lruHead) {
+          // cold queue is empty
+          if (hotCandidate == hotHead) {
+            // both queues empty
+            return null;
+          }
+          candidate = hotCandidate;
+          coldCandidateTs = 0;
+        } else if (hotCandidate == hotHead) {
+          candidate = coldCandidate;
+          coldCandidateTs = coldCandidate.lastUnpinNanos;
+        } else {
+          // Evict from hot only when cold is at least HOT_EVICTION_MULTIPLIER times as stale,
+          // giving hot nodes proportional protection. age() maps lastUnpinNanos=0 to a large
+          // sentinel so never-used cold nodes are always preferred over any real hot node.
+          coldCandidateTs = coldCandidate.lastUnpinNanos;
+          candidate =
+              age(now, coldCandidateTs)
+                      > age(now, hotCandidate.lastUnpinNanos) << HOT_EVICTION_SHIFT
+                  ? hotCandidate
+                  : coldCandidate;
+        }
+      } while (!candidate.refCount.compareAndSet(0, -1));
+      if (coldCandidateTs != 0) {
+        this.coldTs = coldCandidateTs;
+      }
+      return candidate;
+    }
+
+    private boolean toHot(long prev) {
+      // Promote to hot if previously used and fresher than the last known cold-tail threshold.
+      // coldTs tracks the most recently observed non-zero cold tail timestamp (updated by
+      // acquireNode on each eviction). When zero (initial warm-up), fall back to hot.
+      long threshold;
+      return prev != 0 && ((threshold = coldTs) == 0 || threshold - prev < 0);
+    }
   }
 }
