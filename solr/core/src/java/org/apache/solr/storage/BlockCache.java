@@ -111,8 +111,6 @@ public class BlockCache extends Cache.DualQueueCache<ByteBuffer, BlockCache.Node
      * Unlike {@link #populate}, the node's {@link #getValue()} is not used; {@code buf} is stored
      * directly as the future's result. Intended for synthetic always-pinned nodes (such as the
      * local tail block) that are not backed by a pool slot.
-     *
-     * <p>TODO: revisit — there may be a cleaner way to model this without a separate method.
      */
     ByteBuffer populateDirect(ByteBuffer buf) {
       future.complete(buf);
