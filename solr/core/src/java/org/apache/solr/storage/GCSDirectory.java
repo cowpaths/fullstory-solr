@@ -591,8 +591,25 @@ public class GCSDirectory extends MMapDirectory {
         log.error("async release failed for segUUID {}; blobs may be orphaned", segUUID, e);
         return;
       }
-      for (UUID id : toDelete) {
-        deleteBlob(id);
+      int nDeletes = toDelete.size();
+      switch (nDeletes) {
+        case 0:
+          // nothing to delete; we're done.
+          break;
+        case 1:
+          deleteBlob(toDelete.iterator().next());
+          break;
+        default:
+          List<Closeable> gcsDeleteFunctions = new ArrayList<>(nDeletes);
+          for (UUID id : toDelete) {
+            gcsDeleteFunctions.add(() -> deleteBlob(id));
+          }
+          try {
+            IOUtils.close(gcsDeleteFunctions);
+          } catch (IOException ex) {
+            throw new UncheckedIOException("should be impossible in practice", ex);
+          }
+          break;
       }
     }
   }
