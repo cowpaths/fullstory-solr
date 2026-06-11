@@ -68,6 +68,7 @@ import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.FSLockFactory;
 import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.IOContext;
@@ -124,33 +125,27 @@ import org.slf4j.LoggerFactory;
  * last bytes. Detection reads the last 8 bytes first; if they equal the sentinel the file is
  * local-only, otherwise the full 52-byte trailer is parsed.
  */
-public class GCSDirectory extends MMapDirectory {
+public class GCSDirectory extends SizeAwareDirectory {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private final GCSDirectoryFactory.PinSemaphore acquirePinPermit;
 
   public static Directory rawDirectoryView(Directory dir) {
     Directory unwrap = dir;
-    SizeAwareDirectory sad = null;
     while (unwrap instanceof FilterDirectory) {
-      if (unwrap instanceof SizeAwareDirectory) {
-        sad = (SizeAwareDirectory) unwrap;
+      if (unwrap instanceof GCSDirectory) {
+        return ((GCSDirectory) unwrap).rawDirectoryView();
       }
       unwrap = ((FilterDirectory) unwrap).getDelegate();
     }
-    if (unwrap instanceof GCSDirectory) {
-      Directory raw = ((GCSDirectory) unwrap).rawDirectoryView();
-      return sad == null ? raw : sad.rewrapRaw(raw);
-    } else {
-      return dir;
-    }
+    return dir;
   }
 
   private Directory rawDirectoryView() {
     return new Directory() {
       @Override
       public long fileLength(String name) throws IOException {
-        return GCSDirectory.super.fileLength(name);
+        return GCSDirectory.super.onDiskFileLength(name);
       }
 
       @Override
@@ -267,6 +262,7 @@ public class GCSDirectory extends MMapDirectory {
     throw new UnsupportedOperationException("MappedByteBuffer unmap not available on this JVM");
   }
 
+  private final Path directory;
   private final String bucket;
   protected final Storage storage;
   private final BlockCache cache;
@@ -353,7 +349,8 @@ public class GCSDirectory extends MMapDirectory {
       DirectBufferPool bufferPool,
       BlobLifecycleCoordinator blobCoordinator)
       throws IOException {
-    super(localPath, FSLockFactory.getDefault());
+    super(new MMapDirectory(localPath, FSLockFactory.getDefault()), 0);
+    this.directory = ((FSDirectory) getDelegate()).getDirectory();
     this.acquirePinPermit = acquirePinPermit;
     this.bucket = bucket;
     this.storage = storage;
@@ -779,18 +776,36 @@ public class GCSDirectory extends MMapDirectory {
     if (!isGcsBacked(name)) {
       return super.openInput(name, context);
     }
-    ensureCanRead(name);
     Path offsetFile = directory.resolve(name);
     byte[] header = readOffsetFileHeader(offsetFile);
     if (header == null) {
       throw new NoSuchFileException(name);
     }
     if (isLocalOnlyHeader(header)) {
-      long fileSize = Files.size(offsetFile);
+      long fileSize = onDiskFileLength(name);
       IndexInput raw = super.openInput(name, context);
       return raw.slice("local-only:" + name, 0, fileSize - 8);
     }
     return new GCSIndexInput("gcs:" + name, this, offsetFile, header);
+  }
+
+  /**
+   * In the spirit of {@link FSDirectory} {@code ensureCanRead(String)}; we do our own accounting
+   * (for our own purposes) that should be equivalent to {@link FSDirectory} {@code pendingDeletes}.
+   */
+  protected final void ensureCanRead(Path path, UUID blobUUID, UUID segUUID)
+      throws NoSuchFileException {
+    BlocksStruct v = pendingNodes.get(blobUUID);
+    if (v == null) {
+      Set<UUID> blobUUIDs = batched.get(segUUID);
+      if (blobUUIDs != null && blobUUIDs.contains(blobUUID)) {
+        return;
+      }
+    } else if (v.pendingDeletion == null) {
+      return;
+    }
+    throw new NoSuchFileException(
+        "file \"" + path + "\" is pending delete and cannot be opened for read");
   }
 
   // ---------------------------------------------------------------------------
@@ -1498,8 +1513,9 @@ public class GCSDirectory extends MMapDirectory {
       hdr.readByte(); // compressionType (not yet used)
       hdr.readShort(); // reserved
       blobUUID = new UUID(hdr.readLong(), hdr.readLong());
-      blobName = blobUUID.toString();
       segUUID = new UUID(hdr.readLong(), hdr.readLong());
+      dir.ensureCanRead(offsetFile, blobUUID, segUUID);
+      blobName = blobUUID.toString();
       length = hdr.readLong();
       long gcsObjectSize = hdr.readLong();
 
