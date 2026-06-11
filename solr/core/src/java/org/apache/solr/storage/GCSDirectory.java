@@ -517,14 +517,18 @@ public class GCSDirectory extends MMapDirectory {
   }
 
   private void runOrDeferFullDelete(Runnable gcsDelete, UUID blobUUID, UUID segUUID) {
-    // If there are open readers, defer gcsDelete to the last close();
-    // otherwise run it now. close() always removes the entry when refCount hits 0, so
-    // v != null here implies refCount > 0 (open readers present).
+    // If there are open readers, defer gcsDelete to the last close(); otherwise run it now.
+    // close() keeps a refCount=0 copy entry when pendingDeletion is null (warm re-open cache),
+    // so v != null does NOT imply open readers. Return null for stale copy entries to remove
+    // them and fall through to the immediate-run path.
     boolean runNow =
         null
             == pendingNodes.computeIfPresent(
                 blobUUID,
                 (k, v) -> {
+                  if (v.refCount.get() == 0) {
+                    return null; // stale copy entry; remove it and run now
+                  }
                   // atomically hand off gcsDelete responsibility to `close()` method
                   // NOTE: we cannot clear mappings here (nor `v.copy()`), because there
                   // are still open inputs!
@@ -2056,11 +2060,19 @@ public class GCSDirectory extends MMapDirectory {
               int outstandingRefs = v.refCount.decrementAndGet();
               if (outstandingRefs == 0) {
                 toUnmap[0] = v.hasTail ? v.origMapping : null;
-                deletionToRun[0] = v.pendingDeletion;
-                // `v.copy()` keeps non-local (cached) mappings only. Until our file
-                // is actually deleted, the cached mappings could be used again if
-                // someone reopens the file.
-                return v.copy();
+                if (v.pendingDeletion == null) {
+                  // file has not yet been deleted, and could be re-opened.
+                  // `v.copy()` keeps non-local (cached) mappings only. Until our file
+                  // is actually deleted, the cached mappings could be used again if
+                  // someone reopens the file.
+                  return v.copy();
+                } else {
+                  // file has been deleted (pendingDeletion != null), and we're now
+                  // closing the last open input. So set deletion to run, and delete
+                  // the entry (return null).
+                  deletionToRun[0] = v.pendingDeletion;
+                  return null;
+                }
               } else if (outstandingRefs > 0) {
                 return v;
               } else {
