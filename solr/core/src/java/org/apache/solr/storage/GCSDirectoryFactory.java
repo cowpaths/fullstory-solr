@@ -29,6 +29,7 @@ import java.lang.invoke.MethodHandles;
 import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
@@ -39,6 +40,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.IntSupplier;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.LockFactory;
 import org.apache.solr.cloud.ZkController;
@@ -496,6 +498,21 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   public void close() throws IOException {
     try (NodeLevelGCSDirectoryState close = ownNodeLevelState) {
       super.close();
+    }
+  }
+
+  @Override
+  @SuppressWarnings("try")
+  protected synchronized void removeDirectory(CacheValue cacheValue) throws IOException {
+    try (Closeable c = () -> super.removeDirectory(cacheValue)) {
+      Directory d = FilterDirectory.unwrap(cacheValue.directory);
+      if (d instanceof GCSDirectory) {
+        ((GCSDirectory) d).onDirectoryRemove();
+      }
+    } catch (NoSuchFileException ex) {
+      // swallow this. Depending on the order of Directory removal, a parent directory
+      // may have removed us first. In any event, the file's not there, which is what
+      // we wanted anyway.
     }
   }
 }

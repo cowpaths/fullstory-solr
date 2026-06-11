@@ -31,6 +31,7 @@ import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageException;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -77,6 +78,7 @@ import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.MappedByteBufferIndexInputProvider;
 import org.apache.lucene.store.OutputStreamDataOutput;
 import org.apache.lucene.store.RandomAccessInput;
+import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.compress.LZ4;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -468,115 +470,127 @@ public class GCSDirectory extends MMapDirectory {
     if (isGcsBacked(name)
         && (header = readOffsetFileHeader(directory.resolve(name))) != null
         && !isLocalOnlyHeader(header)) {
-      UUID segUUID = readSegmentUUID(header);
-      UUID blobUUID = readBlobUUID(header);
-      // Build a Runnable for the GCS deletion that needs to be deferred if readers are open.
-      // In-memory bookkeeping (batched, pendingWrites) runs immediately regardless.
-      final Runnable gcsDelete;
-      String segName = IndexFileNames.parseSegmentName(name);
-      if (blobCoordinator == null) {
-        // No coordinator: delete this blob directly, but defer if readers are open.
-        gcsDelete = () -> deleteBlob(blobUUID);
-      } else {
-        // Remove from pendingFiles if present (file was written but not yet sync'd).
-        // Safe to delete immediately — never-sync'd blobs should not have open readers.
-        SegmentStruct struct = pendingWrites.get(segName);
-        if (struct != null && struct.segUUID.equals(segUUID)) {
-          ConcurrentHashMap<String, UUID> pending = struct.pendingFiles.get();
-          UUID extantBlobUUID = null;
-          if (pending != null && blobUUID.equals(extantBlobUUID = pending.remove(name))) {
-            // not yet sync'd, delete the blob immediately
+      maybeGcsDelete(name, header);
+    }
+    super.deleteFile(name);
+  }
+
+  private void maybeGcsDelete(String name, byte[] header) {
+    UUID segUUID = readSegmentUUID(header);
+    UUID blobUUID = readBlobUUID(header);
+    // Build a Runnable for the GCS deletion that needs to be deferred if readers are open.
+    // In-memory bookkeeping (batched, pendingWrites) runs immediately regardless.
+    final Runnable gcsDelete;
+    String segName = IndexFileNames.parseSegmentName(name);
+    if (blobCoordinator == null) {
+      // No coordinator: delete this blob directly, but defer if readers are open.
+      gcsDelete =
+          () -> {
+            removeCachedMappings(blobUUID);
             deleteBlob(blobUUID);
-            // If this segment was never batched and all pending files are now gone,
-            // clean up the SegmentStruct so it doesn't linger in pendingWrites.
-            // NOTE: a new segUUID will be assigned if we see this seg prefix again,
-            // but that's fine because we're essentially "starting from scratch".
-            if (pending.isEmpty() && !batched.containsKey(segUUID)) {
-              // TODO (immediately): there's a race condition here.
-              pendingWrites.remove(segName, struct);
-            }
-          } else if (extantBlobUUID != null) {
-            log.warn("found unexpected blobUUID: {} != {}", extantBlobUUID, blobUUID);
+          };
+    } else {
+      // Remove from pendingFiles if present (file was written but not yet sync'd).
+      // Safe to delete immediately — never-sync'd blobs should not have open readers.
+      SegmentStruct struct = pendingWrites.get(segName);
+      if (struct != null && struct.segUUID.equals(segUUID)) {
+        ConcurrentHashMap<String, UUID> pending = struct.pendingFiles.get();
+        UUID extantBlobUUID = null;
+        if (pending != null && blobUUID.equals(extantBlobUUID = pending.remove(name))) {
+          // not yet sync'd, delete the blob immediately
+          deleteBlob(blobUUID);
+          // If this segment was never batched and all pending files are now gone,
+          // clean up the SegmentStruct so it doesn't linger in pendingWrites.
+          // NOTE: a new segUUID will be assigned if we see this seg prefix again,
+          // but that's fine because we're essentially "starting from scratch".
+          if (pending.isEmpty() && !batched.containsKey(segUUID)) {
+            // TODO (immediately): there's a race condition here.
+            pendingWrites.remove(segName, struct);
           }
+        } else if (extantBlobUUID != null) {
+          log.warn("found unexpected blobUUID: {} != {}", extantBlobUUID, blobUUID);
         }
-        gcsDelete =
-            () -> {
-              removeCachedMappings(blobUUID);
-              boolean[] removedFromBatched = new boolean[1];
-              batched.compute(
-                  segUUID,
-                  (k, v) -> {
-                    if (v == null) {
-                      // Not in batched: file was written but never sync'd. Direct delete above.
-                      return null;
-                    } else if (!v.remove(blobUUID)) {
-                      // blob not in batch: file was never sync'd for a partially-sync'd segment.
-                      return v;
-                    } else if (v.isEmpty()) {
-                      removedFromBatched[0] = true;
-                      return null;
-                    } else {
-                      return v;
-                    }
-                  });
-              if (removedFromBatched[0]) {
-                // Last local ref to this segment UUID batch is gone.
-                pendingWrites.compute(
-                    segName,
-                    (k, v) -> {
-                      if (v == null || !v.segUUID.equals(segUUID)) {
-                        return v;
-                      }
-                      ConcurrentHashMap<String, UUID> extant = v.pendingFiles.get();
-                      if (extant == null || extant.isEmpty()) {
-                        return null;
-                      } else {
-                        log.warn("unexpected entries left in pendingFiles {}", extant);
-                        return v;
-                      }
-                    });
-                Collection<UUID> toDelete;
-                try {
-                  toDelete = blobCoordinator.release(segUUID);
-                } catch (IOException e) {
-                  log.error(
-                      "async release failed for segUUID {}; blobs may be orphaned", segUUID, e);
-                  return;
-                }
-                for (UUID id : toDelete) {
-                  deleteBlob(id);
-                }
-              }
-            };
       }
-      // If there are open readers, defer gcsDelete to the last close();
-      // otherwise run it now. close() always removes the entry when refCount hits 0, so
-      // v != null here implies refCount > 0 (open readers present).
-      boolean runNow =
-          null
-              == pendingNodes.computeIfPresent(
-                  blobUUID,
-                  (k, v) -> {
-                    // atomically hand off gcsDelete responsibility to `close()` method
-                    // NOTE: we cannot clear mappings here (nor `v.copy()`), because there
-                    // are still open inputs!
-                    v.pendingDeletion = gcsDelete;
-                    return v;
-                  });
-      if (runNow) {
-        if (registerQueue == null) {
-          gcsDelete.run();
-        } else {
-          try {
-            registerQueue.put(gcsDelete);
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.error("interrupted while enqueuing release for {}; blobs may be orphaned", segUUID);
-          }
+      gcsDelete = () -> deleteFully(blobUUID, segName, segUUID);
+    }
+    runOrDeferFullDelete(gcsDelete, blobUUID, segUUID);
+  }
+
+  private void runOrDeferFullDelete(Runnable gcsDelete, UUID blobUUID, UUID segUUID) {
+    // If there are open readers, defer gcsDelete to the last close();
+    // otherwise run it now. close() always removes the entry when refCount hits 0, so
+    // v != null here implies refCount > 0 (open readers present).
+    boolean runNow =
+        null
+            == pendingNodes.computeIfPresent(
+                blobUUID,
+                (k, v) -> {
+                  // atomically hand off gcsDelete responsibility to `close()` method
+                  // NOTE: we cannot clear mappings here (nor `v.copy()`), because there
+                  // are still open inputs!
+                  v.pendingDeletion = gcsDelete;
+                  return v;
+                });
+    if (runNow) {
+      if (registerQueue == null) {
+        gcsDelete.run();
+      } else {
+        try {
+          registerQueue.put(gcsDelete);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          log.error("interrupted while enqueuing release for {}; blobs may be orphaned", segUUID);
         }
       }
     }
-    super.deleteFile(name);
+  }
+
+  private void deleteFully(UUID blobUUID, String segName, UUID segUUID) {
+    removeCachedMappings(blobUUID);
+    boolean[] removedFromBatched = new boolean[1];
+    batched.compute(
+        segUUID,
+        (k, v) -> {
+          if (v == null) {
+            // Not in batched: file was written but never sync'd. Direct delete above.
+            return null;
+          } else if (!v.remove(blobUUID)) {
+            // blob not in batch: file was never sync'd for a partially-sync'd segment.
+            return v;
+          } else if (v.isEmpty()) {
+            removedFromBatched[0] = true;
+            return null;
+          } else {
+            return v;
+          }
+        });
+    if (removedFromBatched[0]) {
+      // Last local ref to this segment UUID batch is gone.
+      pendingWrites.compute(
+          segName,
+          (k, v) -> {
+            if (v == null || !v.segUUID.equals(segUUID)) {
+              return v;
+            }
+            ConcurrentHashMap<String, UUID> extant = v.pendingFiles.get();
+            if (extant == null || extant.isEmpty()) {
+              return null;
+            } else {
+              log.warn("unexpected entries left in pendingFiles {}", extant);
+              return v;
+            }
+          });
+      Collection<UUID> toDelete;
+      try {
+        toDelete = blobCoordinator.release(segUUID);
+      } catch (IOException e) {
+        log.error("async release failed for segUUID {}; blobs may be orphaned", segUUID, e);
+        return;
+      }
+      for (UUID id : toDelete) {
+        deleteBlob(id);
+      }
+    }
   }
 
   @Override
@@ -2086,6 +2100,20 @@ public class GCSDirectory extends MMapDirectory {
       intViews = null;
       longViews = null;
     }
+  }
+
+  void onDirectoryRemove() throws IOException {
+    String[] allFiles = listAll();
+    List<Closeable> toRemove = new ArrayList<>(allFiles.length);
+    for (String name : allFiles) {
+      byte[] header;
+      if (isGcsBacked(name)
+          && (header = readOffsetFileHeader(directory.resolve(name))) != null
+          && !isLocalOnlyHeader(header)) {
+        toRemove.add(() -> maybeGcsDelete(name, header));
+      }
+    }
+    IOUtils.close(toRemove);
   }
 
   private static IOException unwrapException(Throwable t) {
