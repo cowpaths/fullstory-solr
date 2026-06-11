@@ -48,6 +48,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -286,7 +288,16 @@ public class GCSDirectory extends SizeAwareDirectory {
 
   private final ConcurrentHashMap<String, SegmentStruct> pendingWrites = new ConcurrentHashMap<>();
 
-  private final ConcurrentHashMap<UUID, Set<UUID>> batched = new ConcurrentHashMap<>();
+  private static final class BatchValue {
+    private final String segName;
+    private final Set<UUID> blobUUIDs = ConcurrentHashMap.newKeySet();
+
+    private BatchValue(String segName) {
+      this.segName = segName;
+    }
+  }
+
+  private final ConcurrentHashMap<UUID, BatchValue> batched = new ConcurrentHashMap<>();
 
   /** {@code null} in single-node/no-ZK mode; non-null enables distributed refcounting via ZK. */
   private final BlobLifecycleCoordinator blobCoordinator;
@@ -308,14 +319,17 @@ public class GCSDirectory extends SizeAwareDirectory {
 
   private static final class SegmentStruct {
     private final UUID segUUID;
+    private final String segName;
     private final AtomicReference<ConcurrentHashMap<String, UUID>> pendingFiles =
         new AtomicReference<>();
 
-    private SegmentStruct(UUID segUUID) {
+    private SegmentStruct(UUID segUUID, String segName) {
       this.segUUID = segUUID;
+      this.segName = segName;
     }
 
     private void registerFileUUID(String name, UUID uuid) throws IOException {
+      // TODO: check no race condition here?
       ConcurrentHashMap<String, UUID> pendingFiles = this.pendingFiles.get();
       if (pendingFiles == null) {
         pendingFiles = new ConcurrentHashMap<>();
@@ -393,12 +407,15 @@ public class GCSDirectory extends SizeAwareDirectory {
         }
         UUID segUUID = readSegmentUUID(header);
         UUID blobUUID = readBlobUUID(header);
-        batched.computeIfAbsent(segUUID, (k) -> ConcurrentHashMap.newKeySet()).add(blobUUID);
+        batched
+            .computeIfAbsent(segUUID, (k) -> new BatchValue(IndexFileNames.parseSegmentName(file)))
+            .blobUUIDs
+            .add(blobUUID);
         pendingWrites.compute(
             IndexFileNames.parseSegmentName(file),
             (segName, struct) -> {
               if (struct == null) {
-                return new SegmentStruct(segUUID);
+                return new SegmentStruct(segUUID, segName);
               } else {
                 if (!struct.segUUID.equals(segUUID)) {
                   // this should never happen, but we don't want to fail hard, because all we want
@@ -411,8 +428,8 @@ public class GCSDirectory extends SizeAwareDirectory {
               }
             });
       }
-      for (Map.Entry<UUID, Set<UUID>> entry : batched.entrySet()) {
-        blobCoordinator.registerBatch(entry.getKey(), entry.getValue());
+      for (Map.Entry<UUID, BatchValue> entry : batched.entrySet()) {
+        blobCoordinator.registerBatch(entry.getKey(), entry.getValue().blobUUIDs);
       }
     } else {
       this.registerQueue = null;
@@ -430,12 +447,13 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
     UUID segUUID = readSegmentUUID(header);
     UUID blobUUID = readBlobUUID(header);
+    String segName = IndexFileNames.parseSegmentName(file);
     SegmentStruct segStruct =
-        pendingWrites.computeIfAbsent(
-            IndexFileNames.parseSegmentName(file), (segName) -> new SegmentStruct(segUUID));
+        pendingWrites.computeIfAbsent(segName, (k) -> new SegmentStruct(segUUID, k));
     if (!segUUID.equals(segStruct.segUUID)) {
       segStruct =
-          pendingWrites.computeIfAbsent(segUUID.toString(), (k) -> new SegmentStruct(segUUID));
+          pendingWrites.computeIfAbsent(
+              segUUID.toString(), (k) -> new SegmentStruct(segUUID, segName));
     }
     segStruct.registerFileUUID(file, blobUUID);
   }
@@ -465,18 +483,19 @@ public class GCSDirectory extends SizeAwareDirectory {
     if (isGcsBacked(name)
         && (header = readOffsetFileHeader(directory.resolve(name))) != null
         && !isLocalOnlyHeader(header)) {
-      maybeGcsDelete(name, header);
+      maybeGcsDelete(
+          name,
+          readBlobUUID(header),
+          IndexFileNames.parseSegmentName(name),
+          readSegmentUUID(header));
     }
     super.deleteFile0(name);
   }
 
-  private void maybeGcsDelete(String name, byte[] header) {
-    UUID segUUID = readSegmentUUID(header);
-    UUID blobUUID = readBlobUUID(header);
+  private void maybeGcsDelete(String name, UUID blobUUID, String segName, UUID segUUID) {
     // Build a Runnable for the GCS deletion that needs to be deferred if readers are open.
     // In-memory bookkeeping (batched, pendingWrites) runs immediately regardless.
     final Runnable gcsDelete;
-    String segName = IndexFileNames.parseSegmentName(name);
     if (blobCoordinator == null) {
       // No coordinator: delete this blob directly, but defer if readers are open.
       gcsDelete =
@@ -487,8 +506,10 @@ public class GCSDirectory extends SizeAwareDirectory {
     } else {
       // Remove from pendingFiles if present (file was written but not yet sync'd).
       // Safe to delete immediately — never-sync'd blobs should not have open readers.
-      SegmentStruct struct = pendingWrites.get(segName);
-      if (struct != null && struct.segUUID.equals(segUUID)) {
+      SegmentStruct struct;
+      if (name != null
+          && (struct = pendingWrites.get(segName)) != null
+          && struct.segUUID.equals(segUUID)) {
         ConcurrentHashMap<String, UUID> pending = struct.pendingFiles.get();
         UUID extantBlobUUID = null;
         if (pending != null && blobUUID.equals(extantBlobUUID = pending.remove(name))) {
@@ -553,10 +574,10 @@ public class GCSDirectory extends SizeAwareDirectory {
           if (v == null) {
             // Not in batched: file was written but never sync'd. Direct delete above.
             return null;
-          } else if (!v.remove(blobUUID)) {
+          } else if (!v.blobUUIDs.remove(blobUUID)) {
             // blob not in batch: file was never sync'd for a partially-sync'd segment.
             return v;
-          } else if (v.isEmpty()) {
+          } else if (v.blobUUIDs.isEmpty()) {
             removedFromBatched[0] = true;
             return null;
           } else {
@@ -621,7 +642,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       throw new NoSuchFileException(name);
     }
     if (isLocalOnlyHeader(header)) {
-      return Files.size(offsetFile) - 8;
+      return onDiskFileLength(name) - 8;
     }
     // length is at trailer offset 36: blockType+comprType+reserved(4) + blobUUID(16) + segUUID(16)
     ByteArrayDataInput in = new ByteArrayDataInput(header);
@@ -644,7 +665,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     return pendingWrites
         .computeIfAbsent(
             IndexFileNames.parseSegmentName(name),
-            (segName) -> new SegmentStruct(UUID.randomUUID()))
+            (segName) -> new SegmentStruct(UUID.randomUUID(), segName))
         .createOutput(name, this, context);
   }
 
@@ -699,7 +720,8 @@ public class GCSDirectory extends SizeAwareDirectory {
           // all of them with `batched` and `blobCoordinator`.
           if (!addToManifest.isEmpty()) {
             batched
-                .computeIfAbsent(s.segUUID, (k) -> ConcurrentHashMap.newKeySet())
+                .computeIfAbsent(s.segUUID, (k) -> new BatchValue(s.segName))
+                .blobUUIDs
                 .addAll(addToManifest.values());
             UUID segUUID = s.segUUID;
             List<UUID> blobs = List.copyOf(addToManifest.values());
@@ -774,9 +796,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       throw new NoSuchFileException(name);
     }
     if (isLocalOnlyHeader(header)) {
-      long fileSize = onDiskFileLength(name);
       IndexInput raw = super.openInput(name, context);
-      return raw.slice("local-only:" + name, 0, fileSize - 8);
+      return raw.slice("local-only:" + name, 0, onDiskFileLength(name) - 8);
     }
     return new GCSIndexInput("gcs:" + name, this, offsetFile, header);
   }
@@ -789,8 +810,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       throws NoSuchFileException {
     BlocksStruct v = pendingNodes.get(blobUUID);
     if (v == null) {
-      Set<UUID> blobUUIDs = batched.get(segUUID);
-      if (blobUUIDs != null && blobUUIDs.contains(blobUUID)) {
+      BatchValue batch = batched.get(segUUID);
+      if (batch != null && batch.blobUUIDs.contains(blobUUID)) {
         return;
       }
     } else if (v.pendingDeletion == null) {
@@ -959,13 +980,14 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     private SegmentStruct initSegStruct(UUID segUUID) {
+      String segName = IndexFileNames.parseSegmentName(getName());
       SegmentStruct candidate =
-          registerUUIDs.computeIfAbsent(
-              IndexFileNames.parseSegmentName(getName()), (segName) -> new SegmentStruct(segUUID));
+          registerUUIDs.computeIfAbsent(segName, (k) -> new SegmentStruct(segUUID, k));
       if (segUUID.equals(candidate.segUUID)) {
         return candidate;
       } else {
-        return registerUUIDs.computeIfAbsent(segUUID.toString(), (k) -> new SegmentStruct(segUUID));
+        return registerUUIDs.computeIfAbsent(
+            segUUID.toString(), (k) -> new SegmentStruct(segUUID, segName));
       }
     }
 
@@ -1246,7 +1268,9 @@ public class GCSDirectory extends SizeAwareDirectory {
               for (int i = 0; i < gcsBlockCount; i++) {
                 accessMapped.set(i, cachedNodes.get(i));
               }
-              dir.pendingNodes.put(uuid, new BlocksStruct(accessMapped, 0, tailLen > 0));
+              dir.pendingNodes.put(
+                  uuid,
+                  new BlocksStruct(segUUID, registerUUID.segName, accessMapped, 0, tailLen > 0));
             }
           }
         }
@@ -1303,6 +1327,8 @@ public class GCSDirectory extends SizeAwareDirectory {
   // ---------------------------------------------------------------------------
 
   private static final class BlocksStruct {
+    private final UUID segUUID;
+    private final String segName;
     private final AtomicInteger refCount;
     private final AtomicReferenceArray<BlockCache.Node> accessMapped;
     private final boolean hasTail;
@@ -1311,7 +1337,13 @@ public class GCSDirectory extends SizeAwareDirectory {
     private Runnable pendingDeletion;
 
     private BlocksStruct(
-        AtomicReferenceArray<BlockCache.Node> accessMapped, int initialRefCount, boolean hasTail) {
+        UUID segUUID,
+        String segName,
+        AtomicReferenceArray<BlockCache.Node> accessMapped,
+        int initialRefCount,
+        boolean hasTail) {
+      this.segUUID = segUUID;
+      this.segName = segName;
       this.accessMapped = accessMapped;
       this.refCount = new AtomicInteger(initialRefCount);
       this.hasTail = hasTail;
@@ -1326,7 +1358,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       for (int i = hasTail ? len - 2 : len - 1; i >= 0; i--) {
         newAccessMapped.setPlain(i, accessMapped.getPlain(i)); // plain/best-effort
       }
-      return new BlocksStruct(newAccessMapped, 0, hasTail);
+      return new BlocksStruct(segUUID, segName, newAccessMapped, 0, hasTail);
     }
   }
 
@@ -1566,7 +1598,11 @@ public class GCSDirectory extends SizeAwareDirectory {
               (k, v) -> {
                 if (v == null) {
                   weMap[0] = true;
-                  v = new BlocksStruct(new AtomicReferenceArray<>(blockCount), 1, hasTail);
+                  String segName =
+                      IndexFileNames.parseSegmentName(offsetFile.getFileName().toString());
+                  v =
+                      new BlocksStruct(
+                          segUUID, segName, new AtomicReferenceArray<>(blockCount), 1, hasTail);
                 } else if (v.refCount.getAndIncrement() == 0) {
                   weMap[0] = true;
                 }
@@ -2140,17 +2176,62 @@ public class GCSDirectory extends SizeAwareDirectory {
   }
 
   void onDirectoryRemove() throws IOException {
-    String[] allFiles = listAll();
-    List<Closeable> toRemove = new ArrayList<>(allFiles.length);
-    for (String name : allFiles) {
-      byte[] header;
-      if (isGcsBacked(name)
-          && (header = readOffsetFileHeader(directory.resolve(name))) != null
-          && !isLocalOnlyHeader(header)) {
-        toRemove.add(() -> maybeGcsDelete(name, header));
+    Map<UUID, Closeable> toRemove = new HashMap<>();
+
+    // FIRST: pendingWrites require filename, if available, so do these first
+    for (SegmentStruct seg : pendingWrites.values()) {
+      UUID segUUID = seg.segUUID;
+      Map<String, UUID> active = seg.pendingFiles.get();
+      if (active != null) {
+        for (Map.Entry<String, UUID> e : active.entrySet()) {
+          toRemove.computeIfAbsent(
+              e.getValue(),
+              (blobUUID) ->
+                  () -> {
+                    maybeGcsDelete(e.getKey(), blobUUID, seg.segName, segUUID);
+                  });
+        }
       }
     }
-    IOUtils.close(toRemove);
+
+    // try to close the pending writes first
+    IOUtils.closeWhileHandlingException(toRemove.values());
+
+    HashSet<UUID> snapshot = new HashSet<>(toRemove.keySet());
+
+    // SECOND: `batched` has blobUUIDs nested under segUUIDs, so do these second.
+    for (Map.Entry<UUID, BatchValue> e : batched.entrySet()) {
+      UUID segUUID = e.getKey();
+      BatchValue batch = e.getValue();
+      String segName = batch.segName;
+      for (UUID blobUUID : batch.blobUUIDs) {
+        toRemove.computeIfAbsent(
+            blobUUID,
+            (k) ->
+                () -> {
+                  maybeGcsDelete(null, k, segName, segUUID);
+                });
+      }
+    }
+
+    toRemove.keySet().removeAll(snapshot); // remove the ones we've already done
+
+    try {
+      IOUtils.close(toRemove.values()); // sync'd so they really should be there.
+    } finally {
+      HashSet<Closeable> leftovers = new HashSet<>();
+      // THIRD: there really shouldn't be anything left over here, but in case there is ...
+      for (Map.Entry<UUID, BlocksStruct> e : pendingNodes.entrySet()) {
+        UUID blobUUID = e.getKey();
+        if (!toRemove.containsKey(blobUUID) && !snapshot.contains(blobUUID)) {
+          BlocksStruct v = e.getValue();
+          // inherently deduped by `pendingNodes`.
+          leftovers.add(() -> maybeGcsDelete(null, blobUUID, v.segName, v.segUUID));
+        }
+      }
+
+      IOUtils.closeWhileHandlingException(leftovers); // sync'd so they really should be there.
+    }
   }
 
   private static IOException unwrapException(Throwable t) {

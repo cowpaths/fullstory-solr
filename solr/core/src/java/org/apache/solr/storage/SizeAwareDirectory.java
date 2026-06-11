@@ -161,7 +161,7 @@ public class SizeAwareDirectory extends MMapDirectory
   public final long onDiskFileLength(String name) throws IOException {
     Sizes ret = fileSizeMap.get(name);
     SizeAccountingIndexOutput live;
-    if (ret != null) {
+    if (ret != null && ret.onDiskSize > 0) {
       return ret.onDiskSize;
     } else if ((live = liveOutputs.get(name)) != null) {
       if (live.backing instanceof CompressingDirectory.SizeReportingIndexOutput) {
@@ -404,7 +404,7 @@ public class SizeAwareDirectory extends MMapDirectory
 
     private final IndexOutput backing;
 
-    private final Directory backingDirectory;
+    private final SizeAwareDirectory backingDirectory;
 
     private final ConcurrentHashMap<String, Sizes> fileSizeMap;
 
@@ -420,7 +420,7 @@ public class SizeAwareDirectory extends MMapDirectory
         ConcurrentHashMap<String, Sizes> fileSizeMap,
         ConcurrentHashMap<String, SizeAccountingIndexOutput> liveOutputs,
         SizeWriter sizeWriter,
-        Directory backingDirectory) {
+        SizeAwareDirectory backingDirectory) {
       super("byteSize(" + name + ")", name);
       this.name = name;
       this.backing = backing;
@@ -430,7 +430,7 @@ public class SizeAwareDirectory extends MMapDirectory
       this.backingDirectory = backingDirectory;
     }
 
-    public Sizes setSizeWriter(SizeWriter sizeWriter) {
+    public Sizes setSizeWriter(SizeWriter sizeWriter) throws IOException {
       if (this.sizeWriter == sizeWriter) {
         return new Sizes(0, 0);
       } else {
@@ -440,10 +440,8 @@ public class SizeAwareDirectory extends MMapDirectory
         long onDiskSize;
         if (backing instanceof CompressingDirectory.SizeReportingIndexOutput) {
           onDiskSize = ((CompressingDirectory.SizeReportingIndexOutput) backing).getBytesWritten();
-        } else if (backingDirectory instanceof DirectoryFactory.OnDiskSizeDirectory) {
-          onDiskSize = 0;
         } else {
-          onDiskSize = getFilePointer();
+          onDiskSize = backingDirectory.onDiskFileLength0(name);
         }
         return new Sizes(this.getFilePointer(), onDiskSize);
       }
@@ -461,10 +459,8 @@ public class SizeAwareDirectory extends MMapDirectory
         // logical size should already be set through writeByte(s), but we need to finalize the
         // on-disk size here
         sizeWriter.apply(0, finalBytesWritten - lastBytesWritten, name);
-      } else if (backingDirectory instanceof DirectoryFactory.OnDiskSizeDirectory) {
-        onDiskSize = 0;
       } else {
-        onDiskSize = getFilePointer();
+        onDiskSize = backingDirectory.onDiskFileLength0(name);
       }
       fileSizeMap.put(name, new Sizes(backing.getFilePointer(), onDiskSize));
       liveOutputs.remove(name);
