@@ -22,7 +22,6 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.concurrent.ExecutorService;
 import org.apache.lucene.store.Directory;
-import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.LockFactory;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.ExecutorUtil;
@@ -48,14 +47,12 @@ public class CompressingDirectoryFactory extends StandardDirectoryFactory {
   @Override
   protected Directory create(String path, LockFactory lockFactory, DirContext dirContext)
       throws IOException {
-    Directory backing;
     Path p = Path.of(path);
     if (compress) {
-      backing = new CompressingDirectory(p, ioExec, useAsyncIO, useDirectIO);
+      return new CompressingDirectory(p, ioExec, useAsyncIO, useDirectIO);
     } else {
-      backing = FSDirectory.open(p, lockFactory);
+      return new SizeAwareDirectory(p, lockFactory, 0);
     }
-    return new SizeAwareDirectory(backing, 0);
   }
 
   @Override

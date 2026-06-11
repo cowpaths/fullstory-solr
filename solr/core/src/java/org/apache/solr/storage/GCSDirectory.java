@@ -262,7 +262,6 @@ public class GCSDirectory extends SizeAwareDirectory {
     throw new UnsupportedOperationException("MappedByteBuffer unmap not available on this JVM");
   }
 
-  private final Path directory;
   private final String bucket;
   protected final Storage storage;
   private final BlockCache cache;
@@ -349,8 +348,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       DirectBufferPool bufferPool,
       BlobLifecycleCoordinator blobCoordinator)
       throws IOException {
-    super(new MMapDirectory(localPath, FSLockFactory.getDefault()), 0);
-    this.directory = ((FSDirectory) getDelegate()).getDirectory();
+    super(localPath, FSLockFactory.getDefault(), 0);
     this.acquirePinPermit = acquirePinPermit;
     this.bucket = bucket;
     this.storage = storage;
@@ -461,7 +459,7 @@ public class GCSDirectory extends SizeAwareDirectory {
   }
 
   @Override
-  public void deleteFile(String name) throws IOException {
+  protected void deleteFile0(String name) throws IOException {
     ensureOpen();
     byte[] header;
     if (isGcsBacked(name)
@@ -469,7 +467,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         && !isLocalOnlyHeader(header)) {
       maybeGcsDelete(name, header);
     }
-    super.deleteFile(name);
+    super.deleteFile0(name);
   }
 
   private void maybeGcsDelete(String name, byte[] header) {
@@ -612,10 +610,10 @@ public class GCSDirectory extends SizeAwareDirectory {
   }
 
   @Override
-  public long fileLength(String name) throws IOException {
+  protected long fileLength0(String name) throws IOException {
     ensureOpen();
     if (!isGcsBacked(name)) {
-      return super.fileLength(name);
+      return super.fileLength0(name);
     }
     Path offsetFile = directory.resolve(name);
     byte[] header = readOffsetFileHeader(offsetFile);
@@ -632,16 +630,16 @@ public class GCSDirectory extends SizeAwareDirectory {
   }
 
   @Override
-  public IndexOutput createOutput(String name, IOContext context) throws IOException {
+  protected IndexOutput createOutput0(String name, IOContext context) throws IOException {
     if (!isGcsBacked(name)) {
-      return super.createOutput(name, context);
+      return super.createOutput0(name, context);
     }
     // Flush segments are short-lived and frequently replaced, so skip GCS upload for them.
     // A local-only sentinel is prepended so openInput/fileLength/deleteFile can detect them.
     // On merge, Lucene reads these files via openInput() (which strips the sentinel) and writes
     // the merged result via createOutput() with a MERGE context, taking the normal GCS path.
     if (context.context == IOContext.Context.FLUSH) {
-      return new LocalOnlyIndexOutput(name, super.createOutput(name, context));
+      return new LocalOnlyIndexOutput(name, super.createOutput0(name, context));
     }
     return pendingWrites
         .computeIfAbsent(
@@ -652,29 +650,23 @@ public class GCSDirectory extends SizeAwareDirectory {
 
   private IndexOutput createOutputDirect(String name, IOContext context) throws IOException {
     if (!isGcsBacked(name)) {
-      return super.createOutput(name, context);
+      return super.createOutput0(name, context);
     }
-    return new GCSIndexOutputDirect(pendingWrites, super.createOutput(name, context));
+    return new GCSIndexOutputDirect(pendingWrites, super.createOutput0(name, context));
   }
 
   private IndexOutput createOutput(String name, SegmentStruct struct, IOContext context)
       throws IOException {
-    return new GCSIndexOutput(this, struct, super.createOutput(name, context));
+    return new GCSIndexOutput(this, struct, super.createOutput0(name, context));
   }
 
   @Override
-  public IndexOutput createTempOutput(String prefix, String suffix, IOContext context)
-      throws IOException {
-    return super.createTempOutput(prefix, suffix, context);
-  }
-
-  @Override
-  public void rename(String source, String dest) throws IOException {
+  protected void rename0(String source, String dest) throws IOException {
     if (isGcsBacked(source) != isGcsBacked(dest)) {
       throw new IOException(
           "Rename across GCS/non-GCS boundary not supported: " + source + " -> " + dest);
     }
-    super.rename(source, dest);
+    super.rename0(source, dest);
   }
 
   @Override

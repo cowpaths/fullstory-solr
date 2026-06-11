@@ -31,17 +31,17 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import org.apache.lucene.store.DataInput;
 import org.apache.lucene.store.DataOutput;
-import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.FSLockFactory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.OutputStreamDataOutput;
 import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.compress.LZ4;
 import org.apache.solr.core.DirectoryFactory;
 
-public class CompressingDirectory extends FSDirectory
+public class CompressingDirectory extends MMapDirectory
     implements DirectoryFactory.OnDiskSizeDirectory {
 
   /**

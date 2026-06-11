@@ -485,24 +485,22 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
   @Override
   public Directory create(String path, LockFactory lockFactory, DirContext dirContext)
       throws IOException {
-    Directory backing;
+    Path persistentPath = Path.of(path);
     if (!isDataNode) {
-      backing = new MMapDirectory(Path.of(path), lockFactory);
+      return new MMapDirectory(persistentPath, lockFactory);
     } else {
-      Directory naive = super.create(path, lockFactory, dirContext);
-      Path compressedPath = Path.of(path);
+      final Directory naive = super.create(path, lockFactory, dirContext);
       IOFunction<Void, Map.Entry<String, Directory>> accessFunction =
           unused -> {
             String accessPath = getScopeName(accessDir, path);
+            Path access = Path.of(accessPath);
             Directory dir;
             if (nodeLevelState.blockCache != null) {
               dir =
                   new AccessDirectory2(
-                      Path.of(accessPath), lockFactory, compressedPath, nodeLevelState.blockCache);
+                      access, lockFactory, persistentPath, nodeLevelState.blockCache);
             } else {
-              dir =
-                  new AccessDirectory(
-                      Path.of(accessPath), lockFactory, compressedPath, nodeLevelState);
+              dir = new AccessDirectory(access, lockFactory, persistentPath, nodeLevelState);
             }
             return new AbstractMap.SimpleImmutableEntry<>(accessPath, dir);
           };
@@ -511,12 +509,11 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
             assert content == naive;
             content.close();
             content =
-                new CompressingDirectory(compressedPath, nodeLevelState, useAsyncIO, useDirectIO);
+                new CompressingDirectory(persistentPath, nodeLevelState, useAsyncIO, useDirectIO);
             return new AbstractMap.SimpleImmutableEntry<>(content, Collections.emptyList());
           };
-      backing = new TeeDirectory(naive, accessFunction, persistentFunction, nodeLevelState);
+      return new TeeDirectory(naive, accessFunction, persistentFunction, nodeLevelState);
     }
-    return new SizeAwareDirectory(backing, 0);
   }
 
   @Override
