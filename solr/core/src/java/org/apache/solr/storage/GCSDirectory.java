@@ -465,14 +465,18 @@ public class GCSDirectory extends SizeAwareDirectory {
   private void removeCachedMappings(UUID blobUUID) {
     BlocksStruct stale = pendingNodes.remove(blobUUID);
     if (stale != null) {
-      if (stale.refCount.get() != 0) {
-        log.warn("unexpected non-zero refcount {} in pendingNodes", blobUUID);
-      }
-      AtomicReferenceArray<BlockCache.Node> staleNodes = stale.accessMapped;
-      for (int i = 0; i < staleNodes.length(); i++) {
-        BlockCache.Node node = staleNodes.getAndSet(i, null);
-        if (node != null) cache.close(node);
-      }
+      removeCachedMappings(stale);
+    }
+  }
+
+  private void removeCachedMappings(BlocksStruct stale) {
+    if (stale.refCount.get() != 0) {
+      log.warn("unexpected non-zero refcount in removeCachedMappings");
+    }
+    AtomicReferenceArray<BlockCache.Node> staleNodes = stale.accessMapped;
+    for (int i = 0; i < staleNodes.length(); i++) {
+      BlockCache.Node node = staleNodes.getAndSet(i, null);
+      if (node != null) cache.close(node);
     }
   }
 
@@ -537,13 +541,15 @@ public class GCSDirectory extends SizeAwareDirectory {
     // close() keeps a refCount=0 copy entry when pendingDeletion is null (warm re-open cache),
     // so v != null does NOT imply open readers. Return null for stale copy entries to remove
     // them and fall through to the immediate-run path.
+    BlocksStruct[] staleToRecycle = new BlocksStruct[1];
     boolean runNow =
         null
             == pendingNodes.computeIfPresent(
                 blobUUID,
                 (k, v) -> {
                   if (v.refCount.get() == 0) {
-                    return null; // stale copy entry; remove it and run now
+                    staleToRecycle[0] = v; // stale copy entry; remove it and run now
+                    return null;
                   }
                   // atomically hand off gcsDelete responsibility to `close()` method
                   // NOTE: we cannot clear mappings here (nor `v.copy()`), because there
@@ -551,6 +557,9 @@ public class GCSDirectory extends SizeAwareDirectory {
                   v.pendingDeletion = gcsDelete;
                   return v;
                 });
+    if (staleToRecycle[0] != null) {
+      removeCachedMappings(staleToRecycle[0]);
+    }
     if (runNow) {
       if (registerQueue == null) {
         gcsDelete.run();
@@ -2115,6 +2124,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         @SuppressWarnings({"unchecked", "rawtypes"})
         CompletableFuture<ByteBuffer>[] toUnmap = new CompletableFuture[1];
         Runnable[] deletionToRun = new Runnable[1];
+        BlocksStruct[] toRecycle = new BlocksStruct[1];
         dir.pendingNodes.computeIfPresent(
             blobUUID,
             (k, v) -> {
@@ -2132,6 +2142,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                   // closing the last open input. So set deletion to run, and delete
                   // the entry (return null).
                   deletionToRun[0] = v.pendingDeletion;
+                  toRecycle[0] = v;
                   return null;
                 }
               } else if (outstandingRefs > 0) {
@@ -2140,6 +2151,9 @@ public class GCSDirectory extends SizeAwareDirectory {
                 throw new IllegalStateException();
               }
             });
+        if (toRecycle[0] != null) {
+          dir.removeCachedMappings(toRecycle[0]);
+        }
         if (toUnmap[0] != null) {
           // tell the guard to invalidate and later unmap the bytebuffers (if supported):
           guard.invalidateAndUnmap(toUnmap[0].join());
