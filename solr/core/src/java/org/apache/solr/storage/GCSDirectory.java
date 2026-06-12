@@ -1881,6 +1881,24 @@ public class GCSDirectory extends SizeAwareDirectory {
           | (_readByte(pos) & 0xFF);
     }
 
+    private long _readLong(final long pos) throws IOException {
+      final long absolutePos = pos + offset;
+      final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
+      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
+      final int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
+      if (postBuffer.limit() - localPos >= Long.BYTES) {
+        return guard.getLong(postBuffer, localPos);
+      }
+      return ((_readByte(pos + 7) & 0xFFL) << 56)
+          | ((_readByte(pos + 6) & 0xFFL) << 48)
+          | ((_readByte(pos + 5) & 0xFFL) << 40)
+          | ((_readByte(pos + 4) & 0xFFL) << 32)
+          | ((_readByte(pos + 3) & 0xFFL) << 24)
+          | ((_readByte(pos + 2) & 0xFFL) << 16)
+          | ((_readByte(pos + 1) & 0xFFL) << 8)
+          | (_readByte(pos) & 0xFFL);
+    }
+
     @Override
     public byte readByte(final long pos) throws IOException {
       currentNodeRef.localPin();
@@ -1922,7 +1940,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     public long readLong(final long pos) throws IOException {
       currentNodeRef.localPin();
       try {
-        return (_readInt(pos) & 0xFFFFFFFFL) | ((long) _readInt(pos + 4) << 32);
+        return _readLong(pos);
       } finally {
         currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
@@ -2271,8 +2289,22 @@ public class GCSDirectory extends SizeAwareDirectory {
         filePointer += Long.BYTES;
         return guard.getLong(postBuffer);
       }
-      return (_readInt(remaining) & 0xFFFFFFFFL)
-          | (((long) _readInt(postBuffer.remaining())) << 32);
+      final byte b0 = _readByte(remaining);
+      final byte b1 = _readByte(remaining - 1);
+      final byte b2 = _readByte(remaining - 2);
+      final byte b3 = _readByte(remaining - 3);
+      final byte b4 = _readByte(remaining - 4);
+      final byte b5 = _readByte(remaining - 5);
+      final byte b6 = _readByte(remaining - 6);
+      final byte b7 = _readByte(remaining - 7);
+      return ((b7 & 0xFFL) << 56)
+          | ((b6 & 0xFFL) << 48)
+          | ((b5 & 0xFFL) << 40)
+          | ((b4 & 0xFFL) << 32)
+          | ((b3 & 0xFFL) << 24)
+          | ((b2 & 0xFFL) << 16)
+          | ((b1 & 0xFFL) << 8)
+          | (b0 & 0xFFL);
     }
 
     @Override
