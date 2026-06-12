@@ -51,6 +51,11 @@ import org.slf4j.LoggerFactory;
 /**
  * This config object encapsulates IndexWriter config params, defined in the &lt;indexConfig&gt;
  * section of solrconfig.xml
+ *
+ * <p>Optional {@code <preferredMergePolicyFactory class="...">...</preferredMergePolicyFactory>}
+ * selects the merge policy factory when this Solr version understands it; if absent or without a
+ * {@code class}, {@code <mergePolicyFactory>} is used. Configsets can ship both so older nodes
+ * ignore the unknown preferred element and keep using {@code mergePolicyFactory}.
  */
 public class SolrIndexConfig implements MapSerializable {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
@@ -85,6 +90,11 @@ public class SolrIndexConfig implements MapSerializable {
 
   public final int writeLockTimeout;
   public final String lockType;
+  /**
+   * Effective merge-policy factory: {@code &lt;preferredMergePolicyFactory&gt;} when present with a
+   * non-blank {@code class} attribute, otherwise {@code &lt;mergePolicyFactory&gt;}. Older Solr
+   * versions ignore the preferred element and use only {@code mergePolicyFactory}.
+   */
   public final PluginInfo mergePolicyFactoryInfo;
   public final PluginInfo mergeSchedulerInfo;
   public final PluginInfo metricsInfo;
@@ -163,7 +173,18 @@ public class SolrIndexConfig implements MapSerializable {
 
     metricsInfo = getPluginInfo(get("metrics"), def.metricsInfo);
     mergeSchedulerInfo = getPluginInfo(get("mergeScheduler"), def.mergeSchedulerInfo);
-    mergePolicyFactoryInfo = getPluginInfo(get("mergePolicyFactory"), def.mergePolicyFactoryInfo);
+    PluginInfo mergePolicyFactory =
+        getPluginInfo(get("mergePolicyFactory"), def.mergePolicyFactoryInfo);
+    PluginInfo preferredMergePolicyFactory =
+        getPluginInfo(get("preferredMergePolicyFactory"), null);
+    if (preferredMergePolicyFactory != null) {
+      mergePolicyFactoryInfo = preferredMergePolicyFactory;
+      log.info(
+          "Using <preferredMergePolicyFactory> ({}) instead of <mergePolicyFactory>",
+          preferredMergePolicyFactory);
+    } else {
+      mergePolicyFactoryInfo = mergePolicyFactory;
+    }
 
     assertWarnOrFail(
         "Beginning with Solr 7.0, <mergePolicy> is no longer supported, use <mergePolicyFactory> instead.",
@@ -292,8 +313,9 @@ public class SolrIndexConfig implements MapSerializable {
   }
 
   /**
-   * Builds a MergePolicy using the configured MergePolicyFactory or if no factory is configured
-   * uses the configured mergePolicy PluginInfo.
+   * Builds a MergePolicy using the effective {@link #mergePolicyFactoryInfo} (see {@code
+   * preferredMergePolicyFactory} vs {@code mergePolicyFactory} in class javadoc), or the default
+   * factory if none is configured.
    */
   private MergePolicy buildMergePolicy(SolrResourceLoader resourceLoader, IndexSchema schema) {
 
