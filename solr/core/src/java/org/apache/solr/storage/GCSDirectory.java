@@ -1384,7 +1384,6 @@ public class GCSDirectory extends SizeAwareDirectory {
   }
 
   static final class NodeRefStruct {
-    private int localRefCount = 0;
     private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
     private BlockCache.Node currentNode;
     private int currentBlockIdx = -1;
@@ -1407,58 +1406,52 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     private void localPin() {
-      if (localRefCount++ == 0) {
-        while (!state.compareAndSet(State.IDLE, State.PINNED)) {
-          Thread.yield();
-        }
+      while (!state.compareAndSet(State.IDLE, State.PINNED)) {
+        Thread.yield();
       }
     }
 
     private void localUnpin(GCSDirectoryFactory.PinSemaphore semaphore) {
-      if (--localRefCount == 0) {
-        if (!state.compareAndSet(State.PINNED, State.IDLE)) {
-          throw new IllegalStateException();
-        }
-        if (readPermitAcquiredThisOp) {
-          readPermitAcquiredThisOp = false;
-          semaphore.release(readPermit);
-          // readPermit stays set: we remain in the pinned LRU and need not re-acquire
-          // until the scavenger evicts us (outOfBandUnpin -> doUnpin nulls readPermit).
-        }
-      } else if (localRefCount < 0) {
+      if (!state.compareAndSet(State.PINNED, State.IDLE)) {
         throw new IllegalStateException();
+      }
+      if (readPermitAcquiredThisOp) {
+        readPermitAcquiredThisOp = false;
+        semaphore.release(readPermit);
+        // readPermit stays set: we remain in the pinned LRU and need not re-acquire
+        // until the scavenger evicts us (outOfBandUnpin -> doUnpin nulls readPermit).
       }
     }
 
+    /**
+     * Updates the current cached block. Always called from within a {@code localPin()} context (via
+     * {@link GCSIndexInput#refill}), so state is already PINNED and direct update is safe.
+     */
     private void setCurrentNode(
         BlockCache.Node node, int blockIdx, GCSDirectoryFactory.PinSemaphore semaphore) {
-      if (localRefCount > 0) {
-        // Called within a localPin context: state is already PINNED, direct update is safe.
-        currentNode = node;
-        currentBlockIdx = blockIdx;
-        if (node != null) acquirePermitIfAbsent(semaphore);
-        return;
-      }
-      while (!state.compareAndSet(State.IDLE, State.PINNED)) {
-        Thread.yield();
-      }
       currentNode = node;
       currentBlockIdx = blockIdx;
       if (node != null) acquirePermitIfAbsent(semaphore);
-      state.compareAndSet(State.PINNED, State.IDLE);
     }
 
-    private void unpinFor(BlockCache blockCache) {
-      if (localRefCount > 0) {
-        // Called within a localPin context: state is already PINNED, direct unpin is safe.
-        BlockCache.Node toUnpin = currentNode;
-        if (toUnpin != null) {
-          currentNode = null;
-          currentBlockIdx = -1;
-          blockCache.unpin(toUnpin);
-        }
-        return;
+    /**
+     * Unpins the current block. Always called from within a {@code localPin()} context (via {@link
+     * GCSIndexInput#refill}), so state is already PINNED and direct update is safe.
+     */
+    private void unpinCurrentBlock(BlockCache blockCache) {
+      BlockCache.Node toUnpin = currentNode;
+      if (toUnpin != null) {
+        currentNode = null;
+        currentBlockIdx = -1;
+        blockCache.unpin(toUnpin);
       }
+    }
+
+    /**
+     * Unpins the current block from outside a {@code localPin()} context (i.e. from {@link
+     * GCSIndexInput#close}). Handles the race with {@link #outOfBandUnpin}.
+     */
+    private void unpinFor(BlockCache blockCache) {
       switch (state.compareAndExchange(State.IDLE, State.PINNED)) {
         case IDLE:
           doUnpin(blockCache, State.PINNED);
@@ -1777,7 +1770,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         throws IOException {
       int decompressedLen =
           blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
-      currentNodeRef.unpinFor(dir.cache);
+      currentNodeRef.unpinCurrentBlock(dir.cache);
 
       BlockCache.Node node;
       BlockCache.Node cached = accessMapped.get(blockIdx);
@@ -1866,15 +1859,33 @@ public class GCSDirectory extends SizeAwareDirectory {
     // RandomAccessInput
     // ---------------------------------------------------------------------------
 
+    private byte _readByte(final long pos) throws IOException {
+      final long absolutePos = pos + offset;
+      final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
+      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
+      return guard.getByte(
+          postBuffer, postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW));
+    }
+
+    private int _readInt(final long pos) throws IOException {
+      final long absolutePos = pos + offset;
+      final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
+      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
+      final int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
+      if (postBuffer.limit() - localPos >= Integer.BYTES) {
+        return guard.getInt(postBuffer, localPos);
+      }
+      return ((_readByte(pos + 3) & 0xFF) << 24)
+          | ((_readByte(pos + 2) & 0xFF) << 16)
+          | ((_readByte(pos + 1) & 0xFF) << 8)
+          | (_readByte(pos) & 0xFF);
+    }
+
     @Override
     public byte readByte(final long pos) throws IOException {
       currentNodeRef.localPin();
       try {
-        long absolutePos = pos + offset;
-        int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-        if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-        return guard.getByte(
-            postBuffer, postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW));
+        return _readByte(pos);
       } finally {
         currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
@@ -1884,14 +1895,14 @@ public class GCSDirectory extends SizeAwareDirectory {
     public short readShort(final long pos) throws IOException {
       currentNodeRef.localPin();
       try {
-        long absolutePos = pos + offset;
-        int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
+        final long absolutePos = pos + offset;
+        final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
         if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-        int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
-        if (postBuffer.limit() - localPos < Short.BYTES) {
-          return (short) (((readByte(pos + 1) & 0xFF) << 8) | (readByte(pos) & 0xFF));
+        final int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
+        if (postBuffer.limit() - localPos >= Short.BYTES) {
+          return guard.getShort(postBuffer, localPos);
         }
-        return guard.getShort(postBuffer, localPos);
+        return (short) (((_readByte(pos + 1) & 0xFF) << 8) | (_readByte(pos) & 0xFF));
       } finally {
         currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
@@ -1901,17 +1912,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     public int readInt(final long pos) throws IOException {
       currentNodeRef.localPin();
       try {
-        long absolutePos = pos + offset;
-        int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-        if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-        int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
-        if (postBuffer.limit() - localPos < Integer.BYTES) {
-          return ((readByte(pos + 3) & 0xFF) << 24)
-              | ((readByte(pos + 2) & 0xFF) << 16)
-              | ((readByte(pos + 1) & 0xFF) << 8)
-              | (readByte(pos) & 0xFF);
-        }
-        return guard.getInt(postBuffer, localPos);
+        return _readInt(pos);
       } finally {
         currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
@@ -1921,7 +1922,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     public long readLong(final long pos) throws IOException {
       currentNodeRef.localPin();
       try {
-        return (readInt(pos) & 0xFFFFFFFFL) | ((long) readInt(pos + 4) << 32);
+        return (_readInt(pos) & 0xFFFFFFFFL) | ((long) _readInt(pos + 4) << 32);
       } finally {
         currentNodeRef.localUnpin(dir.acquirePinPermit);
       }
