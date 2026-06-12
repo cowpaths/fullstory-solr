@@ -139,9 +139,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   private static final int MAX_CONCURRENT_PINNED = 4096;
 
   interface PinSemaphore {
-    Cache.Node<GCSDirectory.NodeRefStruct> acquire(GCSDirectory.NodeRefStruct instance);
-
-    void release(Cache.Node<GCSDirectory.NodeRefStruct> readPermit);
+    void register(GCSDirectory.NodeRefStruct instance);
   }
 
   static PinSemaphore defaultMaxPinned(BlockCache cache) {
@@ -161,34 +159,28 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     for (int i = 0; i < nPartitions; i++) {
       partitions[i] = new Cache<>(dummy, false);
     }
-    return new PinSemaphore() {
-      @Override
-      public Cache.Node<GCSDirectory.NodeRefStruct> acquire(GCSDirectory.NodeRefStruct instance) {
-        Cache.Node<GCSDirectory.NodeRefStruct> permit;
-        for (; ; ) {
-          permit =
-              partitions[idx.getAsInt()].acquireNode(
-                  (evicted) -> {
-                    if (evicted != null) {
-                      while (!evicted.outOfBandUnpin(cache)) {
-                        // assumption is that individual reads will complete quickly.
-                        Thread.yield();
-                      }
+    return instance -> {
+      for (; ; ) {
+        Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> p =
+            partitions[idx.getAsInt()];
+        Cache.Node<GCSDirectory.NodeRefStruct> permit =
+            p.acquireNode(
+                (evicted) -> {
+                  if (evicted != null) {
+                    while (!evicted.outOfBandUnpin(cache)) {
+                      // assumption is that individual reads will complete quickly.
+                      Thread.yield();
                     }
-                    return instance;
-                  });
-          if (permit == null) {
-            Thread.yield(); // all busy; no deadlock possible, so progress is guaranteed
-          } else {
-            assert permit.getValue() == instance;
-            return permit;
-          }
+                  }
+                  return instance;
+                });
+        if (permit == null) {
+          Thread.yield(); // all busy; no deadlock possible, so progress is guaranteed
+        } else {
+          assert permit.getValue() == instance;
+          p.unpin(permit);
+          return;
         }
-      }
-
-      @Override
-      public void release(Cache.Node<GCSDirectory.NodeRefStruct> readPermit) {
-        partitions[idx.getAsInt()].unpin(readPermit);
       }
     };
   }

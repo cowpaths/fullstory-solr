@@ -1387,23 +1387,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
     private BlockCache.Node currentNode;
     private int currentBlockIdx = -1;
-    private Cache.Node<NodeRefStruct> readPermit;
-    private boolean readPermitAcquiredThisOp;
-
-    private void acquirePermitIfAbsent(GCSDirectoryFactory.PinSemaphore semaphore) {
-      if (readPermit == null) {
-        readPermit = semaphore.acquire(this);
-        readPermitAcquiredThisOp = true;
-      }
-    }
-
-    private void releasePermit(GCSDirectoryFactory.PinSemaphore semaphore) {
-      if (readPermitAcquiredThisOp) {
-        readPermitAcquiredThisOp = false;
-        semaphore.release(readPermit);
-        readPermit = null;
-      }
-    }
+    private boolean readPermitRegistered;
 
     private void localPin() {
       while (!state.compareAndSet(State.IDLE, State.PINNED)) {
@@ -1415,12 +1399,6 @@ public class GCSDirectory extends SizeAwareDirectory {
       if (!state.compareAndSet(State.PINNED, State.IDLE)) {
         throw new IllegalStateException();
       }
-      if (readPermitAcquiredThisOp) {
-        readPermitAcquiredThisOp = false;
-        semaphore.release(readPermit);
-        // readPermit stays set: we remain in the pinned LRU and need not re-acquire
-        // until the scavenger evicts us (outOfBandUnpin -> doUnpin nulls readPermit).
-      }
     }
 
     /**
@@ -1429,9 +1407,13 @@ public class GCSDirectory extends SizeAwareDirectory {
      */
     private void setCurrentNode(
         BlockCache.Node node, int blockIdx, GCSDirectoryFactory.PinSemaphore semaphore) {
+      assert state.get() == State.PINNED; // should only be called from a pinned context
       currentNode = node;
       currentBlockIdx = blockIdx;
-      if (node != null) acquirePermitIfAbsent(semaphore);
+      if (node != null && !readPermitRegistered) {
+        readPermitRegistered = true;
+        semaphore.register(this);
+      }
     }
 
     /**
@@ -1483,8 +1465,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     boolean outOfBandUnpin(BlockCache blockCache) {
       if (state.compareAndSet(State.IDLE, State.UNPINNING)) {
         // scavenger has evicted our pinned-LRU slot; signal that re-acquire is needed
-        readPermit = null;
-        readPermitAcquiredThisOp = false;
+        readPermitRegistered = false;
         doUnpin(blockCache, State.UNPINNING);
         return true;
       }
@@ -2536,7 +2517,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private void unsetBuffers() {
       accessMapped = null;
       currentNodeRef.unpinFor(dir.cache);
-      currentNodeRef.releasePermit(dir.acquirePinPermit);
+      currentNodeRef.readPermitRegistered = false;
       postBuffer = null;
       floatViews = null;
       intViews = null;
