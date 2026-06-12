@@ -42,17 +42,21 @@ import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -81,6 +85,8 @@ import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.MappedByteBufferIndexInputProvider;
 import org.apache.lucene.store.OutputStreamDataOutput;
 import org.apache.lucene.store.RandomAccessInput;
+import org.apache.lucene.util.BitUtil;
+import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.compress.LZ4;
 import org.slf4j.Logger;
@@ -1528,6 +1534,24 @@ public class GCSDirectory extends SizeAwareDirectory {
     private IntBuffer[] intViews;
     private FloatBuffer[] floatViews;
 
+    @Override
+    public void readBytes(byte[] b, int offset, int len, boolean useBuffer) throws IOException {
+      // TODO: not suer whether it would be beneficial to override this
+      super.readBytes(b, offset, len, useBuffer);
+    }
+
+    @Override
+    protected void readGroupVInt(long[] dst, int offset) throws IOException {
+      // TODO: override this, I think we can do so effectively
+      super.readGroupVInt(dst, offset);
+    }
+
+    @Override
+    public int readZInt() throws IOException {
+      // don't override this, so long as it's simply a wrapper around `readVInt()`
+      return super.readZInt();
+    }
+
     // Root constructor: mmaps the full local file, parses the 52-byte trailer from the end,
     // pre-pins the uncompressed tail block (if any) into accessMapped, and decodes GCS block
     // offsets.
@@ -1939,6 +1963,292 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     // ---------------------------------------------------------------------------
+    // Sequential reads: short, int, long, vint, vlong, string
+    // (must be overridden here to avoid per-byte localPin/localUnpin in base class)
+    // ---------------------------------------------------------------------------
+
+    /** Read next byte within a localPin() context; refills block if at boundary. */
+    private byte _readByte(final int remaining) throws IOException {
+      if (remaining == 0) refill();
+      filePointer++;
+      return guard.getByte(postBuffer);
+    }
+
+    @Override
+    public short readShort() throws IOException {
+      localPin();
+      try {
+        final int remaining = postBuffer.remaining();
+        if (remaining >= Short.BYTES) {
+          filePointer += Short.BYTES;
+          return guard.getShort(postBuffer);
+        }
+        final byte b1 = _readByte(remaining);
+        final byte b2 = _readByte(remaining - 1);
+        return (short) (((b2 & 0xFF) << 8) | (b1 & 0xFF));
+      } finally {
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
+      }
+    }
+
+    @Override
+    public int readInt() throws IOException {
+      localPin();
+      try {
+        return _readInt(postBuffer.remaining());
+      } finally {
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
+      }
+    }
+
+    @Override
+    public long readLong() throws IOException {
+      localPin();
+      try {
+        return _readLong(postBuffer.remaining());
+      } finally {
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
+      }
+    }
+
+    @Override
+    public int readVInt() throws IOException {
+      localPin();
+      try {
+        return _readVInt(postBuffer.remaining());
+      } finally {
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
+      }
+    }
+
+    private int _readVInt(int remaining) throws IOException {
+      byte b;
+      if (remaining <= Integer.BYTES) {
+        b = _readByte(remaining);
+        if (b >= 0) return b;
+        int i = b & 0x7F;
+        b = _readByte(--remaining);
+        i |= (b & 0x7F) << 7;
+        if (b >= 0) return i;
+        b = _readByte(--remaining);
+        i |= (b & 0x7F) << 14;
+        if (b >= 0) return i;
+        b = _readByte(--remaining);
+        i |= (b & 0x7F) << 21;
+        if (b >= 0) return i;
+        b = _readByte(--remaining);
+        i |= (b & 0x0F) << 28;
+        if ((b & 0xF0) == 0) return i;
+      } else {
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        if (b >= 0) return b;
+        int i = b & 0x7F;
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        i |= (b & 0x7F) << 7;
+        if (b >= 0) return i;
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        i |= (b & 0x7F) << 14;
+        if (b >= 0) return i;
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        i |= (b & 0x7F) << 21;
+        if (b >= 0) return i;
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        i |= (b & 0x0F) << 28;
+        if ((b & 0xF0) == 0) return i;
+      }
+      throw new IOException("Invalid vInt detected (too many bits)");
+    }
+
+    @Override
+    public long readVLong() throws IOException {
+      localPin();
+      try {
+        return _readVLong(false);
+      } finally {
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
+      }
+    }
+
+    @Override
+    public long readZLong() throws IOException {
+      localPin();
+      try {
+        return BitUtil.zigZagDecode(_readVLong(true));
+      } finally {
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
+      }
+    }
+
+    private long _readVLong(final boolean allowNegative) throws IOException {
+      int remaining = postBuffer.remaining();
+      byte b;
+      long i;
+      if (remaining <= (allowNegative ? Long.BYTES + 1 : Long.BYTES)) {
+        b = _readByte(remaining);
+        if (b >= 0) return b;
+        i = b & 0x7FL;
+        b = _readByte(--remaining);
+        i |= (b & 0x7FL) << 7;
+        if (b >= 0) return i;
+        b = _readByte(--remaining);
+        i |= (b & 0x7FL) << 14;
+        if (b >= 0) return i;
+        b = _readByte(--remaining);
+        i |= (b & 0x7FL) << 21;
+        if (b >= 0) return i;
+        b = _readByte(--remaining);
+        i |= (b & 0x7FL) << 28;
+        if (b >= 0) return i;
+        b = _readByte(--remaining);
+        i |= (b & 0x7FL) << 35;
+        if (b >= 0) return i;
+        b = _readByte(--remaining);
+        i |= (b & 0x7FL) << 42;
+        if (b >= 0) return i;
+        b = _readByte(--remaining);
+        i |= (b & 0x7FL) << 49;
+        if (b >= 0) return i;
+        b = _readByte(--remaining);
+        i |= (b & 0x7FL) << 56;
+        if (b >= 0) return i;
+        if (!allowNegative) {
+          throw new IOException("Invalid vLong detected (negative values disallowed)");
+        }
+        b = _readByte(--remaining);
+      } else {
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        if (b >= 0) return b;
+        i = b & 0x7FL;
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        i |= (b & 0x7FL) << 7;
+        if (b >= 0) return i;
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        i |= (b & 0x7FL) << 14;
+        if (b >= 0) return i;
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        i |= (b & 0x7FL) << 21;
+        if (b >= 0) return i;
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        i |= (b & 0x7FL) << 28;
+        if (b >= 0) return i;
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        i |= (b & 0x7FL) << 35;
+        if (b >= 0) return i;
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        i |= (b & 0x7FL) << 42;
+        if (b >= 0) return i;
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        i |= (b & 0x7FL) << 49;
+        if (b >= 0) return i;
+        b = guard.getByte(postBuffer);
+        filePointer++;
+        i |= (b & 0x7FL) << 56;
+        if (b >= 0) return i;
+        if (!allowNegative) {
+          throw new IOException("Invalid vLong detected (negative values disallowed)");
+        }
+        b = guard.getByte(postBuffer);
+        filePointer++;
+      }
+      i |= (b & 0x7FL) << 63;
+      if (b == 0 || b == 1) return i;
+      throw new IOException("Invalid vLong detected (more than 64 bits)");
+    }
+
+    @Override
+    public String readString() throws IOException {
+      localPin();
+      try {
+        return _readString();
+      } finally {
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
+      }
+    }
+
+    public String _readString() throws IOException {
+      final int length = _readVInt(postBuffer.remaining());
+      final byte[] bytes = new byte[length];
+      final int left = postBuffer.remaining();
+      filePointer += length;
+      if (left < length) {
+        slowReadBytes(bytes, 0, length, left);
+      } else {
+        guard.getBytes(postBuffer, bytes, 0, length);
+      }
+      return new String(bytes, 0, length, StandardCharsets.UTF_8);
+    }
+
+    private void slowReadBytes(final byte[] dst, int offset, int toRead, int left)
+        throws IOException {
+      do {
+        guard.getBytes(postBuffer, dst, offset, left);
+        toRead -= left;
+        offset += left;
+        refill();
+        left = postBuffer.remaining();
+      } while (left < toRead);
+      guard.getBytes(postBuffer, dst, offset, toRead);
+    }
+
+    @Override
+    public Map<String, String> readMapOfStrings() throws IOException {
+      localPin();
+      try {
+        final int count = _readVInt(postBuffer.remaining());
+        switch (count) {
+          case 0:
+            return Collections.emptyMap();
+          case 1:
+            return Collections.singletonMap(_readString(), _readString());
+          default:
+            final Map<String, String> map =
+                count > 10 ? CollectionUtil.newHashMap(count) : new TreeMap<>();
+            for (int i = count; i > 0; i--) {
+              map.put(_readString(), _readString());
+            }
+            return Collections.unmodifiableMap(map);
+        }
+      } finally {
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
+      }
+    }
+
+    @Override
+    public Set<String> readSetOfStrings() throws IOException {
+      localPin();
+      try {
+        final int count = _readVInt(postBuffer.remaining());
+        switch (count) {
+          case 0:
+            return Collections.emptySet();
+          case 1:
+            return Collections.singleton(_readString());
+          default:
+            final Set<String> set = count > 10 ? CollectionUtil.newHashSet(count) : new TreeSet<>();
+            for (int i = count; i > 0; i--) {
+              set.add(_readString());
+            }
+            return Collections.unmodifiableSet(set);
+        }
+      } finally {
+        currentNodeRef.localUnpin(dir.acquirePinPermit);
+      }
+    }
+
+    // ---------------------------------------------------------------------------
     // Bulk typed reads with buffer views
     // ---------------------------------------------------------------------------
 
@@ -1947,12 +2257,12 @@ public class GCSDirectory extends SizeAwareDirectory {
         filePointer += Integer.BYTES;
         return guard.getInt(postBuffer);
       }
-      // Cross-block: read byte-by-byte (little-endian).
-      int b0 = readByte() & 0xFF;
-      int b1 = readByte() & 0xFF;
-      int b2 = readByte() & 0xFF;
-      int b3 = readByte() & 0xFF;
-      return (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
+      // Cross-block: use _readByte to avoid per-byte localPin/localUnpin overhead.
+      final byte b0 = _readByte(remaining);
+      final byte b1 = _readByte(remaining - 1);
+      final byte b2 = _readByte(remaining - 2);
+      final byte b3 = _readByte(remaining - 3);
+      return ((b3 & 0xFF) << 24) | ((b2 & 0xFF) << 16) | ((b1 & 0xFF) << 8) | (b0 & 0xFF);
     }
 
     private long _readLong(final int remaining) throws IOException {
