@@ -86,6 +86,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             maxPinned,
             false,
             bufferPool,
+            null,
             null);
   }
 
@@ -223,6 +224,7 @@ public class GCSDirectoryTest extends SolrTestCaseJ4 {
             maxPinned,
             true,
             bufferPool,
+            null,
             null);
     try {
       byte[] data = randomBytes(size);

@@ -58,7 +58,6 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -309,19 +308,13 @@ public class GCSDirectory extends SizeAwareDirectory {
   private final BlobLifecycleCoordinator blobCoordinator;
 
   /**
-   * Bounded queue of pending {@link BlobLifecycleCoordinator#registerBatch} calls. Non-null only
-   * when {@code blobCoordinator != null}. {@code sync()} enqueues tasks here instead of calling
-   * {@code registerBatch} directly, so the {@code SolrIndexWriter} monitor is not held across a
-   * blocking GCS write. If the queue fills up (GCS severely degraded), {@code sync()} blocks on
-   * {@code put()} — still preferable to blocking on the GCS round-trip itself.
+   * Node-level queue of pending {@link BlobLifecycleCoordinator#registerBatch} and delete calls.
+   * Non-null only when {@code blobCoordinator != null}. {@code sync()} enqueues tasks here instead
+   * of calling {@code registerBatch} directly, so the {@code SolrIndexWriter} monitor is not held
+   * across a blocking GCS write. Drained by a single background thread in {@link
+   * GCSDirectoryFactory.NodeLevelGCSDirectoryState}, which outlives individual directory instances.
    */
   private final BlockingQueue<Runnable> registerQueue;
-
-  /** Poison pill that signals {@link #registerThread} to exit after draining pending tasks. */
-  private static final Runnable REGISTER_POISON = () -> {};
-
-  /** Single background thread that drains {@link #registerQueue}. */
-  private final Thread registerThread;
 
   private static final class SegmentStruct {
     private final UUID segUUID;
@@ -366,7 +359,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       GCSDirectoryFactory.PinSemaphore acquirePinPermit,
       boolean useAsyncIO,
       DirectBufferPool bufferPool,
-      BlobLifecycleCoordinator blobCoordinator)
+      BlobLifecycleCoordinator blobCoordinator,
+      BlockingQueue<Runnable> registerQueue)
       throws IOException {
     super(localPath, FSLockFactory.getDefault(), 0);
     this.acquirePinPermit = acquirePinPermit;
@@ -379,30 +373,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     this.bufferPool = bufferPool;
     this.blobCoordinator = blobCoordinator;
     if (blobCoordinator != null) {
-      this.registerQueue = new ArrayBlockingQueue<>(512);
-      Thread t =
-          new Thread(
-              () -> {
-                while (true) {
-                  Runnable task;
-                  try {
-                    task = registerQueue.take();
-                  } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                  }
-                  if (task == REGISTER_POISON) break;
-                  try {
-                    task.run();
-                  } catch (Throwable th) {
-                    log.warn("exception registering", th);
-                  }
-                }
-              },
-              "gcs-register-" + localPath.getFileName());
-      t.setDaemon(true);
-      t.start();
-      this.registerThread = t;
+      this.registerQueue = registerQueue;
       for (String file : listAll()) {
         if (!isGcsBacked(file)) {
           continue;
@@ -439,7 +410,6 @@ public class GCSDirectory extends SizeAwareDirectory {
       }
     } else {
       this.registerQueue = null;
-      this.registerThread = null;
     }
   }
 
@@ -765,15 +735,6 @@ public class GCSDirectory extends SizeAwareDirectory {
 
   @Override
   public void close() throws IOException {
-    if (registerThread != null) {
-      try {
-        registerQueue.put(REGISTER_POISON);
-        registerThread.join(30_000);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        registerThread.interrupt(); // ensure thread exits if join was cut short
-      }
-    }
     super.close();
   }
 

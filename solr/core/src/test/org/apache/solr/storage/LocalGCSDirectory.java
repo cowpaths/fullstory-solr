@@ -62,6 +62,7 @@ public class LocalGCSDirectory extends GCSDirectory {
         pinned,
         useAsyncIO,
         bufferPool,
+        null,
         null);
   }
 

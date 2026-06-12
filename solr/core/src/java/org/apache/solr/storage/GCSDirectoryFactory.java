@@ -35,6 +35,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
@@ -194,6 +196,20 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
 
   /** Node-level resources shared across all {@link GCSDirectory} instances on this node. */
   public static final class NodeLevelGCSDirectoryState implements Closeable {
+    /** Poison pill: when the drain task sees this it exits, allowing the executor to shut down. */
+    private static final Runnable REGISTER_POISON = () -> {};
+
+    /**
+     * Node-level queue of pending {@link GCSDirectory.BlobLifecycleCoordinator#registerBatch} and
+     * GCS delete tasks. Shared across all {@link GCSDirectory} instances on this node; enqueued by
+     * {@code sync()} and {@code GCSIndexInput.close()}. Drained in FIFO order by a single task
+     * running on {@link #ioExec}. Using node-level lifecycle means the drain task outlives
+     * individual directory closes, so tasks enqueued after a directory is closed are still
+     * processed. On shutdown, {@link #close()} enqueues {@link #REGISTER_POISON} to flush all
+     * pending tasks before the executor terminates.
+     */
+    final BlockingQueue<Runnable> registerQueue = new ArrayBlockingQueue<>(4096);
+
     private final java.util.concurrent.ExecutorService ioExec =
         ExecutorUtil.newMDCAwareCachedThreadPool("gcsIOExec");
     private final BlockCache blockCache;
@@ -248,6 +264,24 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       this.zkClient = zkController != null ? zkController.getZkClient() : null;
       this.coreRootDirectory = coreRootDirectory;
       this.useMultipartUpload = probeMultipartUpload(storage, metadataBucket);
+      ioExec.submit(
+          () -> {
+            while (true) {
+              Runnable task;
+              try {
+                task = registerQueue.take();
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+              }
+              if (task == REGISTER_POISON) break;
+              try {
+                task.run();
+              } catch (Throwable th) {
+                log.warn("exception in gcs-register task", th);
+              }
+            }
+          });
     }
 
     /**
@@ -341,6 +375,14 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     @Override
     @SuppressWarnings("try")
     public void close() throws IOException {
+      // Signal the drain task to exit after processing all pending items, then shut down.
+      try {
+        registerQueue.put(REGISTER_POISON);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        log.warn(
+            "interrupted while enqueuing REGISTER_POISON; some register/delete tasks may be lost");
+      }
       try (AutoCloseable c1 = storage;
           Closeable c2 = blockCache) {
         ExecutorUtil.shutdownAndAwaitTermination(ioExec);
@@ -477,7 +519,8 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         acquirePinPermit,
         useAsyncIO,
         bufferPool,
-        nodeLevelState.createBlobCoordinator(localPath));
+        nodeLevelState.createBlobCoordinator(localPath),
+        nodeLevelState.registerQueue);
   }
 
   @Override
