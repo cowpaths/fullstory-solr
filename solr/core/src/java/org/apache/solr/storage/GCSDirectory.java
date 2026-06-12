@@ -1529,13 +1529,25 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     public void readBytes(byte[] b, int offset, int len, boolean useBuffer) throws IOException {
-      // TODO: not suer whether it would be beneficial to override this
+      // Intentional passthrough: the base class (DataInput) delegates to readBytes(b, offset, len),
+      // which we already override efficiently. The useBuffer hint is meaningful only to
+      // BufferedIndexInput subclasses that maintain an internal read buffer: useBuffer=false lets
+      // them skip refilling that buffer and go directly to readInternal() for small reads. We have
+      // no such buffer — our readBytes copies directly from the decompressed block — so the hint
+      // is irrelevant.
       super.readBytes(b, offset, len, useBuffer);
     }
 
     @Override
     protected void readGroupVInt(long[] dst, int offset) throws IOException {
-      // TODO: override this, I think we can do so effectively
+      // Intentional passthrough: readGroupVInt is a specific encoding (one control byte encoding
+      // widths for up to 4 integers, then 1-4 bytes each) — not a generic series of vints. It is
+      // the per-group hook called in a loop by the public readGroupVInts(), and is used exclusively
+      // by HNSW/KNN vector formats (Lucene99HnswVectorsFormat etc.) for neighbour lists. We do not
+      // currently use vector fields so this path is not exercised.
+      // If vector fields are added, the right fix is to override readGroupVInts() with a single
+      // localPin()/localUnpin() around a loop over a private _readGroupVInt() that uses our
+      // _readByte()/_readInt() helpers directly.
       super.readGroupVInt(dst, offset);
     }
 
