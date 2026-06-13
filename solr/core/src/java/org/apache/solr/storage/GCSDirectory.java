@@ -233,7 +233,7 @@ public class GCSDirectory extends SizeAwareDirectory {
      * for the batch (from ZK), which the caller should delete if the refcount reached zero. Returns
      * an empty collection if other nodes still hold references (nothing to delete yet).
      */
-    Collection<UUID> release(UUID segUUID) throws IOException;
+    Collection<BlobId> release(UUID segUUID, String bucket) throws IOException;
   }
 
   // Offset file header size: 8 (length) + 4 (blockType/comprType/reserved) + 16 (blobUUID)
@@ -585,32 +585,21 @@ public class GCSDirectory extends SizeAwareDirectory {
               return v;
             }
           });
-      Collection<UUID> toDelete;
+      Collection<BlobId> toDelete;
       try {
-        toDelete = blobCoordinator.release(segUUID);
+        toDelete = blobCoordinator.release(segUUID, bucket);
       } catch (IOException e) {
         log.error("async release failed for segUUID {}; blobs may be orphaned", segUUID, e);
         return;
       }
-      int nDeletes = toDelete.size();
-      switch (nDeletes) {
-        case 0:
-          // nothing to delete; we're done.
-          break;
-        case 1:
-          deleteBlob(toDelete.iterator().next());
-          break;
-        default:
-          List<Closeable> gcsDeleteFunctions = new ArrayList<>(nDeletes);
-          for (UUID id : toDelete) {
-            gcsDeleteFunctions.add(() -> deleteBlob(id));
-          }
-          try {
-            IOUtils.close(gcsDeleteFunctions);
-          } catch (IOException ex) {
-            throw new UncheckedIOException("should be impossible in practice", ex);
-          }
-          break;
+      if (!toDelete.isEmpty()) {
+        try {
+          storage.delete(toDelete);
+          // false results (blob not found) are fine — already gone
+        } catch (StorageException e) {
+          log.warn(
+              "Failed to batch-delete {} GCS blobs — they may be orphaned", toDelete.size(), e);
+        }
       }
     }
   }

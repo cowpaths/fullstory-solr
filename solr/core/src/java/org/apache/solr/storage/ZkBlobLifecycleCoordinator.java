@@ -17,6 +17,7 @@
 
 package org.apache.solr.storage;
 
+import com.google.cloud.storage.BlobId;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.util.Collection;
@@ -88,7 +89,7 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
   }
 
   @Override
-  public Collection<UUID> release(UUID segUUID) throws IOException {
+  public Collection<BlobId> release(UUID segUUID, String bucket) throws IOException {
     String batchPath = BASE_PATH + "/" + segUUID;
     try {
       byte[] existing;
@@ -114,7 +115,7 @@ public class ZkBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCoo
 
       // Last ref — claim cleanup via versioned delete.
       // setData at version V creates version V+1; delete at V+1 guarantees single winner.
-      List<UUID> manifest = BlobMetadataCodec.decodeManifest(existing);
+      List<BlobId> manifest = BlobMetadataCodec.decodeManifest(existing, bucket);
       try {
         zkClient.delete(batchPath, stat.getVersion() + 1, true);
       } catch (KeeperException.BadVersionException | KeeperException.NoNodeException e) {

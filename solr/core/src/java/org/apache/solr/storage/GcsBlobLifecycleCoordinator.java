@@ -114,7 +114,7 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
   }
 
   @Override
-  public Collection<UUID> release(UUID segUUID) throws IOException {
+  public Collection<BlobId> release(UUID segUUID, String bucket) throws IOException {
     String name = segUUID.toString();
     BlobInfo blobInfo = BlobInfo.newBuilder(BlobId.of(metadataBucket, name)).build();
     while (true) {
@@ -141,7 +141,7 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
       }
       // Last ref — claim cleanup via conditional delete at current generation.
       // GCS deletes at the specified generation only if it is still live; returns false otherwise.
-      List<UUID> manifest = BlobMetadataCodec.decodeManifest(existing);
+      List<BlobId> manifest = BlobMetadataCodec.decodeManifest(existing, bucket);
       if (storage.delete(BlobId.of(metadataBucket, name, blob.getGeneration()))) {
         return manifest;
       }

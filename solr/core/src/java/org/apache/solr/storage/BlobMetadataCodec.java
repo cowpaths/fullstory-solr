@@ -17,6 +17,7 @@
 
 package org.apache.solr.storage;
 
+import com.google.cloud.storage.BlobId;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -104,9 +105,9 @@ final class BlobMetadataCodec {
   }
 
   /** Decodes the manifest (blob UUID) section. */
-  static List<UUID> decodeManifest(byte[] data) {
+  static List<BlobId> decodeManifest(byte[] data, String bucket) {
     int n = ByteBuffer.wrap(data).getInt(0);
-    return deserializeUUIDs(data, n, data.length);
+    return deserializeUUIDs(data, n, data.length, bucket);
   }
 
   /** Returns a sorted copy of {@code uuids}. */
@@ -199,14 +200,14 @@ final class BlobMetadataCodec {
     return msbTarget == src.getLong() && lsbTarget == src.getLong();
   }
 
-  private static List<UUID> deserializeUUIDs(byte[] data, int from, int to) {
+  private static List<BlobId> deserializeUUIDs(byte[] data, int from, int to, String bucket) {
     if (to <= from) {
       return Collections.emptyList();
     }
     ByteBuffer buf = ByteBuffer.wrap(data, from, to - from);
-    List<UUID> result = new ArrayList<>((to - from) / UUID_BYTES);
+    List<BlobId> result = new ArrayList<>((to - from) / UUID_BYTES);
     while (buf.remaining() >= UUID_BYTES) {
-      result.add(new UUID(buf.getLong(), buf.getLong()));
+      result.add(BlobId.of(bucket, new UUID(buf.getLong(), buf.getLong()).toString()));
     }
     return result;
   }
