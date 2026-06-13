@@ -91,8 +91,8 @@ public class SolrIndexConfig implements MapSerializable {
   public final int writeLockTimeout;
   public final String lockType;
   /**
-   * Effective merge-policy factory: {@code &lt;preferredMergePolicyFactory&gt;} when present with a
-   * non-blank {@code class} attribute, otherwise {@code &lt;mergePolicyFactory&gt;}. Older Solr
+   * Effective merge-policy factory: {@code <preferredMergePolicyFactory>} when present with a
+   * non-blank {@code class} attribute, otherwise {@code <mergePolicyFactory>}. Older Solr
    * versions ignore the preferred element and use only {@code mergePolicyFactory}.
    */
   public final PluginInfo mergePolicyFactoryInfo;
