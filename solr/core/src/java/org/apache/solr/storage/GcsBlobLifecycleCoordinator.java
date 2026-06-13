@@ -92,8 +92,10 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
         } catch (StorageException e) {
           if (e.getCode() != HTTP_PRECONDITION_FAILED) {
             throw new IOException("Failed to register batch " + segUUID, e);
+          } else {
+            // Precondition failed; retry and merge our ref into the now-existing object.
+            blob = storage.get(BlobId.of(metadataBucket, name));
           }
-          // Precondition failed; retry and merge our ref into the now-existing object.
         }
       }
       byte[] existing = blob.getContent();
