@@ -150,7 +150,6 @@ public class BlockCache implements Closeable {
   // ---------------------------------------------------------------------------
 
   private final Partition[] partitions;
-  private final int partitionMask;
 
   /**
    * Creates a new block cache backed by a freshly-created temp file. The file is deleted
@@ -159,7 +158,6 @@ public class BlockCache implements Closeable {
   public BlockCache(long targetBytes, Path backingFile) throws IOException {
     ByteBuffer[] pool = initPool(targetBytes, backingFile, true);
     this.partitions = distribute(pool);
-    this.partitionMask = partitions.length - 1;
     log.info(
         "BlockCache initialized: nBlocks={}, targetBytes={}, nPartitions={}",
         pool.length,
@@ -180,7 +178,6 @@ public class BlockCache implements Closeable {
   private BlockCache(Path existingBackingFile, long targetBytes) throws IOException {
     ByteBuffer[] pool = initPool(targetBytes, existingBackingFile, false);
     this.partitions = distribute(pool);
-    this.partitionMask = partitions.length - 1;
     log.info(
         "BlockCache initialized from existing file {}: nBlocks={}, targetBytes={}, nPartitions={}",
         existingBackingFile,
