@@ -77,8 +77,9 @@ public class BlockCache implements Closeable {
    *   <li>Subsequent callers call {@link Cache#pin(Cache.Node)}, which either re-pins
    *       (refCount&gt;0 → increment only) or first-pins (refCount=0 → remove from list +
    *       increment).
-   *   <li>Each caller eventually calls {@link Cache#unpin(Cache.Node)}. The last unpin (refCount→0)
-   *       inserts the node at the LRU head (most-recently-used, lowest eviction priority).
+   *   <li>Each caller eventually calls {@link Cache#unpin(Cache.Node, boolean)}. The last unpin
+   *       (refCount→0) inserts the node at the LRU head (most-recently-used, lowest eviction
+   *       priority).
    *   <li>When evicted by {@link BlockCache#acquireNode()}, refCount is set to -1 permanently. Any
    *       reader that encounters the node via a stale slot sees the negative count, fails {@link
    *       Cache#pin(Cache.Node)}, and falls back to loading.

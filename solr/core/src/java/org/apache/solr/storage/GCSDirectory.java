@@ -592,13 +592,12 @@ public class GCSDirectory extends SizeAwareDirectory {
         log.error("async release failed for segUUID {}; blobs may be orphaned", segUUID, e);
         return;
       }
-      if (!toDelete.isEmpty()) {
+      for (BlobId blob : toDelete) {
         try {
-          storage.delete(toDelete);
           // false results (blob not found) are fine — already gone
+          storage.delete(blob);
         } catch (StorageException e) {
-          log.warn(
-              "Failed to batch-delete {} GCS blobs — they may be orphaned", toDelete.size(), e);
+          log.warn("Failed to batch-delete GCS blobs {} — it may be orphaned", blob, e);
         }
       }
     }
