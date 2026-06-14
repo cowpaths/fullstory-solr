@@ -1731,6 +1731,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       refill(blockOffset, compressedLen, blockIdx);
     }
 
+    private static final int MAX_READ_AHEAD = 16;
+
     private int readAheadTo = 0;
 
     private void setCurrentNode(BlockCache.Node node, int blockIdx) {
@@ -1747,7 +1749,9 @@ public class GCSDirectory extends SizeAwareDirectory {
       }
       int newReadAheadTo;
       if (readAhead > 0
-          && (newReadAheadTo = Math.min(accessMapped.length() - 1, blockIdx + readAhead))
+          && (newReadAheadTo =
+                  Math.min(
+                      accessMapped.length() - 1, blockIdx + Math.min(MAX_READ_AHEAD, readAhead)))
               > readAheadTo) {
         for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
           BlockCache.Node extant = accessMapped.get(i);
