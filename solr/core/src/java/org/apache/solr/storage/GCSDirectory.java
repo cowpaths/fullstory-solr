@@ -88,6 +88,7 @@ import org.apache.lucene.util.BitUtil;
 import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.compress.LZ4;
+import org.apache.solr.common.util.ExecutorUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -722,8 +723,11 @@ public class GCSDirectory extends SizeAwareDirectory {
   }
 
   @Override
+  @SuppressWarnings("try")
   public void close() throws IOException {
-    super.close();
+    try (Closeable c = super::close) {
+      ExecutorUtil.shutdownAndAwaitTermination(readahead);
+    }
   }
 
   /**
@@ -1754,23 +1758,37 @@ public class GCSDirectory extends SizeAwareDirectory {
               > readAheadTo) {
         for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
           BlockCache.Node extant = accessMapped.get(i);
-          BlockCache.Node toPopulate;
-          if ((extant == null || !extant.pinnable())
-              && (toPopulate = dir.cache.acquireNode()) != null) {
+          if ((extant == null || !extant.pinnable()) && dir.acquireReadaheadPermit()) {
+            BlockCache.Node toPopulate = dir.cache.acquireNode();
+            if (toPopulate == null) {
+              dir.releaseReadaheadPermit();
+              newReadAheadTo = i - 1;
+              break;
+            }
             // TODO: `lastBlockDecompressedLen` doesn't matter anymore?
             long blockOffset = blockOffsets[blockIdx];
             int compressedLen = (int) (blockOffsets[blockIdx + 1] - blockOffset);
             int decompressedLen =
                 blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
             int idx = i;
-            dir.ioExec.submit(
-                () -> {
-                  populateBuf(blockOffset, compressedLen, idx, decompressedLen, toPopulate);
-                  // NOTE: don't unpin in `finally` block! `populateBuf` already unpins the node
-                  // upon Exception
-                  dir.cache.unpin(toPopulate, false);
-                  return null;
-                });
+            try {
+              dir.readahead.submit(
+                  () -> {
+                    try {
+                      populateBuf(blockOffset, compressedLen, idx, decompressedLen, toPopulate);
+                      // NOTE: don't unpin in `finally` block! `populateBuf` already unpins the node
+                      // upon Exception
+                      dir.cache.unpin(toPopulate, false);
+                    } finally {
+                      dir.releaseReadaheadPermit();
+                    }
+                    return null;
+                  });
+            } catch (Throwable t) {
+              // TODO: ensure this won't double-release with submitted task
+              dir.releaseReadaheadPermit();
+              throw t;
+            }
           }
         }
         readAheadTo = newReadAheadTo;
@@ -2548,6 +2566,24 @@ public class GCSDirectory extends SizeAwareDirectory {
       intViews = null;
       longViews = null;
     }
+  }
+
+  private final ExecutorService readahead = ExecutorUtil.newMDCAwareCachedThreadPool("readahead");
+  private static final int READ_CHANNEL_HEADROOM =
+      GCSDirectoryFactory.DEFAULT_MAX_OPEN_CHANNELS >> 1;
+  private final AtomicInteger readaheadPermit = new AtomicInteger(0);
+
+  private boolean acquireReadaheadPermit() {
+    if (readaheadPermit.getAndIncrement() >= READ_CHANNEL_HEADROOM) {
+      readaheadPermit.decrementAndGet();
+      return false;
+    } else {
+      return true;
+    }
+  }
+
+  private void releaseReadaheadPermit() {
+    readaheadPermit.decrementAndGet();
   }
 
   void onDirectoryRemove() throws IOException {
