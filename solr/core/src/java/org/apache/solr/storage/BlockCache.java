@@ -233,7 +233,11 @@ public class BlockCache implements Closeable {
    * partition affinity is required: the ByteBuffer value is valid in any partition's pool.
    */
   void unpin(Node node) {
-    partitions[tlrIndex()].unpin(node);
+    unpin(node, true);
+  }
+
+  void unpin(Node node, boolean recordAccess) {
+    partitions[tlrIndex()].unpin(node, recordAccess);
   }
 
   /**

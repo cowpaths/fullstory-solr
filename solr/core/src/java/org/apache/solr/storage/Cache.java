@@ -232,7 +232,7 @@ class Cache<V, N extends Cache.Node<V>> {
     }
   }
 
-  protected void insertAtHead(Node<V> listHead, Node<V> node) {
+  protected void insertAtHead(Node<V> listHead, Node<V> node, boolean recordAccess) {
     node.prev = listHead;
     Node<V> oldNext = reserve(listHead, RESERVED);
     assert oldNext != REMOVED_PROTO : "queue head sentinel should never be removed";
@@ -330,13 +330,13 @@ class Cache<V, N extends Cache.Node<V>> {
    * Releases a read pin. If this is the last pin (refCount transitions 1&rarr;0), the node is
    * inserted at the LRU head (most-recently-used position) and becomes evictable.
    */
-  void unpin(Node<V> node) {
+  void unpin(Node<V> node, boolean recordAccess) {
     int rc = node.refCount.get();
     for (; ; ) {
       if (rc == 1) {
         int witness = node.refCount.compareAndExchange(1, UNPIN_SENTINEL);
         if (witness == 1) {
-          insertAtHead(lruHead, node);
+          insertAtHead(lruHead, node, recordAccess);
           if (!node.refCount.compareAndSet(UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
@@ -438,10 +438,10 @@ class Cache<V, N extends Cache.Node<V>> {
     }
 
     @Override
-    protected final void insertAtHead(Node<V> head, Node<V> node) {
+    protected final void insertAtHead(Node<V> head, Node<V> node, boolean recordAccess) {
       long prev = node.lastUnpinNanos;
-      node.lastUnpinNanos = System.nanoTime();
-      super.insertAtHead(toHot(prev) ? hotHead : head, node);
+      node.lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
+      super.insertAtHead(toHot(prev) ? hotHead : head, node, recordAccess);
     }
 
     @Override

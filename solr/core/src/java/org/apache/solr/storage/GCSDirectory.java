@@ -1140,7 +1140,8 @@ public class GCSDirectory extends SizeAwareDirectory {
         try {
           cacheNode.populate(compressBuffer, 0, COMPRESSION_BLOCK_SIZE);
         } finally {
-          dir.cache.unpin(cacheNode); // release writer's pin; node enters LRU, ready for readers
+          // release writer's pin; node enters LRU, ready for readers
+          dir.cache.unpin(cacheNode, false);
         }
       }
       cachedNodes.add(cacheNode); // null if pool exhausted; slot index == block number
@@ -1764,7 +1765,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                   populateBuf(blockOffset, compressedLen, idx, decompressedLen, toPopulate);
                   // NOTE: don't unpin in `finally` block! `populateBuf` already unpins the node
                   // upon Exception
-                  dir.cache.unpin(toPopulate);
+                  dir.cache.unpin(toPopulate, false);
                   return null;
                 });
           }

@@ -180,7 +180,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
           Thread.yield(); // all busy; no deadlock possible, so progress is guaranteed
         } else {
           assert permit.getValue() == instance;
-          p.unpin(permit);
+          p.unpin(permit, false);
           return;
         }
       }
