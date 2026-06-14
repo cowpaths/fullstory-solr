@@ -113,6 +113,10 @@ class Cache<V, N extends Cache.Node<V>> {
     protected final V getValue() {
       return value;
     }
+
+    boolean pinnable() {
+      return refCount.get() >= 0;
+    }
   }
 
   // ---------------------------------------------------------------------------
