@@ -1829,6 +1829,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
         if (extant == cached) {
           // We won the race: fetch from GCS and populate the node.
+          readAheadSeg();
           ByteBuffer buf = populateBuf(pos, compressedLen, blockIdx, decompressedLen, node);
           setCurrentNode(node, blockIdx);
           postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
@@ -1861,6 +1862,28 @@ public class GCSDirectory extends SizeAwareDirectory {
 
       // Serve uncached.
       uncached(pos, compressedLen, blockIdx, decompressedLen);
+    }
+
+    private void readAheadSeg() {
+      // TODO: determine the first block of each logical file in the associated segment, and
+      //  ensure that block is loaded
+      BatchValue batchValue = dir.batched.get(segUUID);
+      if (batchValue == null) {
+        return;
+      }
+      String segName = batchValue.segName;
+      Set<UUID> blobs = batchValue.blobUUIDs;
+      Path cfePath;
+      if (blobs.size() == 1
+          && Files.exists(cfePath = dir.directory.resolve(segName.concat(".cfe")))) {
+        BlocksStruct blocks = dir.pendingNodes.get(blobs.iterator().next());
+        // parse cfe and preload the first block of each logical file
+      } else {
+        for (UUID blob : blobs) {
+          BlocksStruct blocks = dir.pendingNodes.get(blob);
+          // preload the first block of each blob
+        }
+      }
     }
 
     private ByteBuffer populateBuf(
