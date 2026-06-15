@@ -1252,13 +1252,14 @@ public class GCSDirectory extends SizeAwareDirectory {
             if (filePos > 0) {
               int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
               int gcsBlockCount = tailLen > 0 ? blockCount - 1 : blockCount;
-              long[] blockOffsetsArr = new long[blockCount];
+              long[] blockOffsetsArr = new long[blockCount + 1];
               AtomicReferenceArray<BlockCache.Node> accessMapped =
                   new AtomicReferenceArray<>(blockCount);
               for (int i = 0; i < gcsBlockCount; i++) {
                 accessMapped.set(i, cachedNodes.get(i));
                 blockOffsetsArr[i] = blockOffsets.get(i);
               }
+              blockOffsetsArr[gcsBlockCount] = gcsObjectSize; // end of last GCS block
               dir.pendingNodes.put(
                   uuid,
                   new BlocksStruct(
