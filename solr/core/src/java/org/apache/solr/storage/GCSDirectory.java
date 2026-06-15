@@ -68,7 +68,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
+import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.index.IndexFileNames;
+import org.apache.lucene.internal.hppc.IntHashSet;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.DataOutput;
@@ -1865,8 +1867,6 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     private void readAheadSeg() {
-      // TODO: determine the first block of each logical file in the associated segment, and
-      //  ensure that block is loaded
       BatchValue batchValue = dir.batched.get(segUUID);
       if (batchValue == null) {
         return;
@@ -1877,13 +1877,41 @@ public class GCSDirectory extends SizeAwareDirectory {
       if (blobs.size() == 1
           && Files.exists(cfePath = dir.directory.resolve(segName.concat(".cfe")))) {
         BlocksStruct blocks = dir.pendingNodes.get(blobs.iterator().next());
-        // parse cfe and preload the first block of each logical file
+        IntHashSet blockIndexes = parseCfeBlockIndexes(cfePath);
+        // preload the first block of each logical file
       } else {
         for (UUID blob : blobs) {
           BlocksStruct blocks = dir.pendingNodes.get(blob);
           // preload the first block of each blob
         }
       }
+    }
+
+    /**
+     * Parses the local {@code .cfe} entry table and returns the block index (within the CFS GCS
+     * blob) of the first block of each logical sub-file. Block indices are computed as {@code
+     * subFileOffset >> COMPRESSION_BLOCK_SHIFT}.
+     */
+    private IntHashSet parseCfeBlockIndexes(Path cfePath) {
+      IntHashSet blockIndexes = new IntHashSet();
+      try (IndexInput cfeIn = dir.openInput(cfePath.getFileName().toString(), IOContext.READONCE)) {
+        // Skip index header without depending on the codec name (version-agnostic).
+        if (cfeIn.readInt() != CodecUtil.CODEC_MAGIC) return blockIndexes;
+        cfeIn.readString(); // codec name — discard
+        cfeIn.readInt(); // version — discard
+        cfeIn.skipBytes(16); // segment ID (StringHelper.ID_LENGTH)
+        cfeIn.skipBytes(cfeIn.readByte() & 0xFF); // suffix bytes (empty for Lucene90, but generic)
+        int n = cfeIn.readVInt();
+        for (int i = 0; i < n; i++) {
+          cfeIn.readString(); // sub-file name — discard
+          long offset = cfeIn.readLong(); // byte offset of this sub-file within the .cfs data
+          cfeIn.readLong(); // length — discard
+          blockIndexes.add((int) (offset >> COMPRESSION_BLOCK_SHIFT));
+        }
+      } catch (IOException e) {
+        log.debug("readAheadSeg: failed to parse {}", cfePath, e);
+      }
+      return blockIndexes;
     }
 
     private ByteBuffer populateBuf(
