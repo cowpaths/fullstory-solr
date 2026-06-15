@@ -1766,16 +1766,19 @@ public class GCSDirectory extends SizeAwareDirectory {
               break;
             }
             // TODO: `lastBlockDecompressedLen` doesn't matter anymore?
-            long blockOffset = blockOffsets[blockIdx];
-            int compressedLen = (int) (blockOffsets[blockIdx + 1] - blockOffset);
-            int decompressedLen =
-                blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
             int idx = i;
+            long blockOffset = blockOffsets[idx];
+            int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
+            int decompressedLen =
+                idx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
             try {
               dir.readahead.submit(
                   () -> {
                     try {
-                      populateBuf(blockOffset, compressedLen, idx, decompressedLen, toPopulate);
+                      BlockCache.Node witness = accessMapped.compareAndExchange(idx, extant, toPopulate);
+                      if (witness == extant) {
+                        populateBuf(blockOffset, compressedLen, idx, decompressedLen, toPopulate);
+                      }
                       // NOTE: don't unpin in `finally` block! `populateBuf` already unpins the node
                       // upon Exception
                       dir.cache.unpin(toPopulate, false);
