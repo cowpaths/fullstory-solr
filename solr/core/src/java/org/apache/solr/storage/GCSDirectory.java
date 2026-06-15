@@ -1717,6 +1717,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         throw new IOException("interrupted waiting for GCS channel slot", e);
       }
       try (ReadChannel ch = dir.storage.reader(BlobId.of(dir.bucket, blobName))) {
+        ch.setChunkSize(compressedLen); // otherwise client buffer is oversized
         ch.seek(pos);
         ch.limit(pos + compressedLen);
         while (compBuf.hasRemaining()) {
