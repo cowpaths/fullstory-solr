@@ -70,7 +70,9 @@ import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.index.IndexFileNames;
+import org.apache.lucene.internal.hppc.IntCursor;
 import org.apache.lucene.internal.hppc.IntHashSet;
+import org.apache.lucene.internal.hppc.LongArrayList;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.DataOutput;
@@ -1082,6 +1084,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     // Cache nodes pre-populated during dump(), one per GCS block (null if pool was exhausted).
     // Published into pendingNodes on close() so readers get cache hits instead of GCS fetches.
     private final ArrayList<BlockCache.Node> cachedNodes = new ArrayList<>();
+    private final LongArrayList blockOffsets = new LongArrayList();
 
     GCSIndexOutput(GCSDirectory dir, SegmentStruct registerUUID, IndexOutput localOut)
         throws IOException {
@@ -1150,6 +1153,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         }
       }
       cachedNodes.add(cacheNode); // null if pool exhausted; slot index == block number
+      blockOffsets.add(gcsObjectSize);
       LZ4.compressWithDictionary(compressBuffer, 0, 0, COMPRESSION_BLOCK_SIZE, out, ht);
       int nextBlockSize = out.resetSize();
       gcsObjectSize += nextBlockSize;
@@ -1234,14 +1238,22 @@ public class GCSDirectory extends SizeAwareDirectory {
             if (filePos > 0) {
               int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
               int gcsBlockCount = tailLen > 0 ? blockCount - 1 : blockCount;
+              long[] blockOffsetsArr = new long[blockCount];
               AtomicReferenceArray<BlockCache.Node> accessMapped =
                   new AtomicReferenceArray<>(blockCount);
               for (int i = 0; i < gcsBlockCount; i++) {
                 accessMapped.set(i, cachedNodes.get(i));
+                blockOffsetsArr[i] = blockOffsets.get(i);
               }
               dir.pendingNodes.put(
                   uuid,
-                  new BlocksStruct(segUUID, registerUUID.segName, accessMapped, 0, tailLen > 0));
+                  new BlocksStruct(
+                      segUUID,
+                      registerUUID.segName,
+                      blockOffsetsArr,
+                      accessMapped,
+                      0,
+                      tailLen > 0));
             }
           }
         }
@@ -1301,6 +1313,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private final UUID segUUID;
     private final String segName;
     private final AtomicInteger refCount;
+    private final long[] blockOffsets;
     private final AtomicReferenceArray<BlockCache.Node> accessMapped;
     private final boolean hasTail;
     private final CompletableFuture<ByteBuffer> origMapping = new CompletableFuture<>();
@@ -1310,11 +1323,13 @@ public class GCSDirectory extends SizeAwareDirectory {
     private BlocksStruct(
         UUID segUUID,
         String segName,
+        long[] blockOffsets,
         AtomicReferenceArray<BlockCache.Node> accessMapped,
         int initialRefCount,
         boolean hasTail) {
       this.segUUID = segUUID;
       this.segName = segName;
+      this.blockOffsets = blockOffsets;
       this.accessMapped = accessMapped;
       this.refCount = new AtomicInteger(initialRefCount);
       this.hasTail = hasTail;
@@ -1329,7 +1344,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       for (int i = hasTail ? len - 2 : len - 1; i >= 0; i--) {
         newAccessMapped.setPlain(i, accessMapped.getPlain(i)); // plain/best-effort
       }
-      return new BlocksStruct(segUUID, segName, newAccessMapped, 0, hasTail);
+      return new BlocksStruct(segUUID, segName, blockOffsets, newAccessMapped, 0, hasTail);
     }
   }
 
@@ -1548,13 +1563,14 @@ public class GCSDirectory extends SizeAwareDirectory {
       lastBlockIdx = blockCount - 1;
       lastBlockDecompressedLen = hasTail ? tailLen : COMPRESSION_BLOCK_SIZE;
 
+      // TODO: pretty sure all/most of this could be deduped by `weMap[0]`, below
       // gcsBlockCount = full blocks in GCS (all but the tail when hasTail).
       int gcsBlockCount = hasTail ? blockCount - 1 : blockCount;
       // blockOffsets[0..gcsBlockCount] = GCS start offsets; [gcsBlockCount] = gcsObjectSize
       // sentinel.
       // [blockCount] is the dummy entry for the tail (default 0, never used — tail always
       // cache-hits).
-      blockOffsets = new long[blockCount + 1];
+      long[] blockOffsetsLocal = new long[blockCount + 1];
 
       // Mmap the full local file once.
       long offsetFileSize;
@@ -1577,15 +1593,15 @@ public class GCSDirectory extends SizeAwareDirectory {
       // Decode GCS block offsets (gcsBlockCount - 1 deltas; blockOffsets[0] = 0 is implicit).
       long blockOffset = 0;
       int lastBlockSize = BLOCK_SIZE_ESTIMATE;
-      blockOffsets[0] = 0;
+      blockOffsetsLocal[0] = 0;
       for (int i = 1; i < gcsBlockCount; i++) {
         int delta = in.readZInt();
         int nextBlockSize = lastBlockSize + delta;
         blockOffset += nextBlockSize;
-        blockOffsets[i] = blockOffset;
+        blockOffsetsLocal[i] = blockOffset;
         lastBlockSize = nextBlockSize;
       }
-      blockOffsets[gcsBlockCount] = gcsObjectSize;
+      blockOffsetsLocal[gcsBlockCount] = gcsObjectSize;
 
       boolean[] weMap = new boolean[1];
       this.blocksStruct =
@@ -1598,12 +1614,18 @@ public class GCSDirectory extends SizeAwareDirectory {
                       IndexFileNames.parseSegmentName(offsetFile.getFileName().toString());
                   v =
                       new BlocksStruct(
-                          segUUID, segName, new AtomicReferenceArray<>(blockCount), 1, hasTail);
+                          segUUID,
+                          segName,
+                          blockOffsetsLocal,
+                          new AtomicReferenceArray<>(blockCount),
+                          1,
+                          hasTail);
                 } else if (v.refCount.getAndIncrement() == 0) {
                   weMap[0] = true;
                 }
                 return v;
               });
+      this.blockOffsets = blocksStruct.blockOffsets;
       this.accessMapped = blocksStruct.accessMapped;
       this.guard = blocksStruct.guard;
 
@@ -1876,13 +1898,21 @@ public class GCSDirectory extends SizeAwareDirectory {
       Path cfePath;
       if (blobs.size() == 1
           && Files.exists(cfePath = dir.directory.resolve(segName.concat(".cfe")))) {
-        BlocksStruct blocks = dir.pendingNodes.get(blobs.iterator().next());
-        IntHashSet blockIndexes = parseCfeBlockIndexes(cfePath);
+        UUID blob = blobs.iterator().next();
+        BlocksStruct blocks = dir.pendingNodes.get(blob);
+        if (blocks != null) {
+          IntHashSet blockIndexes = parseCfeBlockIndexes(cfePath);
+          for (IntCursor i : blockIndexes) {
+            ensureLoaded(blob, blocks, i.value);
+          }
+        }
         // preload the first block of each logical file
       } else {
         for (UUID blob : blobs) {
           BlocksStruct blocks = dir.pendingNodes.get(blob);
-          // preload the first block of each blob
+          if (blocks != null) {
+            ensureLoaded(blob, blocks, 0);
+          }
         }
       }
     }
