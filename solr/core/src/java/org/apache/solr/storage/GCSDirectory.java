@@ -1395,24 +1395,24 @@ public class GCSDirectory extends SizeAwareDirectory {
         BlockCache.Node node, int blockIdx, GCSDirectoryFactory.PinSemaphore semaphore) {
       assert state.get() == State.PINNED; // should only be called from a pinned context
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
-      int ret;
-      if (blockIdx == extant + 1) {
-        // sequential access.
-        ret = sequentialAccessCount + 1;
-      } else {
-        ret = blockIdx < extant ? -1 : 0;
-      }
       currentNode = node;
       currentBlockIdx = blockIdx;
       try {
-        switch (ret) {
-          case -1:
-          case 0:
-            sequentialAccessCount = 0;
-            return ret;
-          default:
-            sequentialAccessCount = ret;
-            return node == null ? 0 : ret;
+        if (blockIdx == extant + 1) {
+          // sequential access.
+          sequentialAccessCount++;
+          return node == null ? 0 : sequentialAccessCount;
+        } else if (blockIdx < extant) {
+          // gone backward, full reset
+          sequentialAccessCount = 0;
+          return -1;
+        } else if (blockIdx == extant) {
+          // same idx. This is an unusual case, but can happen if our block gets unpinned
+          // and we have to re-acquire.
+          return node == null ? 0 : sequentialAccessCount;
+        } else {
+          // skipped ahead, reset
+          return sequentialAccessCount = 0;
         }
       } finally {
         if (node != null && !readPermitRegistered) {
@@ -1777,23 +1777,31 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private int readAheadTo = 0;
 
+    private static int readAhead(int sequentialAccessCount) {
+      // determines how aggressively we ramp up read-ahead.
+      return sequentialAccessCount << 1;
+    }
+
     private void setCurrentNode(BlockCache.Node node, int blockIdx) {
-      int readAhead = currentNodeRef.setCurrentNode(node, blockIdx, dir.acquirePinPermit);
-      switch (readAhead) {
+      int seqAcccessCount = currentNodeRef.setCurrentNode(node, blockIdx, dir.acquirePinPermit);
+      switch (seqAcccessCount) {
         case -1:
           // reset, no read-ahead
           readAheadTo = 0;
           return;
         case 0:
-          // init to current new position, no read-ahead
-          readAheadTo = blockIdx;
+          // moved forward, init to current new position if necessary
+          if (blockIdx > readAheadTo) {
+            readAheadTo = blockIdx;
+          }
           return;
       }
       int newReadAheadTo;
-      if (readAhead > 0
+      if (seqAcccessCount > 0
           && (newReadAheadTo =
                   Math.min(
-                      accessMapped.length() - 1, blockIdx + Math.min(MAX_READ_AHEAD, readAhead)))
+                      accessMapped.length() - 1,
+                      blockIdx + Math.min(MAX_READ_AHEAD, readAhead(seqAcccessCount))))
               > readAheadTo) {
         for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
           if (!ensureLoaded(blobName, accessMapped, blockOffsets, i)) {
