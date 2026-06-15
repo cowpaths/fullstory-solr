@@ -1691,7 +1691,8 @@ public class GCSDirectory extends SizeAwareDirectory {
      * consumed. This prevents unbounded pre-parsing of surplus {@code ReadObjectResponse} messages
      * into the zero-copy lifecycle manager's unclosed-streams map.
      */
-    private ByteBuffer supply(long pos, int compressedLen, int decompressedLen) throws IOException {
+    private ByteBuffer supply(String blobName, long pos, int compressedLen, int decompressedLen)
+        throws IOException {
       byte[] compressed = new byte[compressedLen];
       ByteBuffer compBuf = ByteBuffer.wrap(compressed);
       try {
@@ -1781,46 +1782,54 @@ public class GCSDirectory extends SizeAwareDirectory {
                       accessMapped.length() - 1, blockIdx + Math.min(MAX_READ_AHEAD, readAhead)))
               > readAheadTo) {
         for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
-          BlockCache.Node extant = accessMapped.get(i);
-          if ((extant == null || !extant.pinnable()) && dir.acquireReadaheadPermit()) {
-            BlockCache.Node toPopulate = dir.cache.acquireNode();
-            if (toPopulate == null) {
-              dir.releaseReadaheadPermit();
-              newReadAheadTo = i - 1;
-              break;
-            }
-            int idx = i;
-            try {
-              dir.readahead.submit(
-                  () -> {
-                    try {
-                      if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-                        long blockOffset = blockOffsets[idx];
-                        int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
-                        // TODO: `lastBlockDecompressedLen` doesn't matter anymore?
-                        int decompressedLen =
-                            idx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
-                        populateBuf(blockOffset, compressedLen, idx, decompressedLen, toPopulate);
-                        // NOTE: don't unpin in `finally` block! `populateBuf` already unpins the
-                        // node upon Exception
-                        dir.cache.unpin(toPopulate, false);
-                      } else {
-                        dir.cache.close(toPopulate, true);
-                      }
-                    } finally {
-                      dir.releaseReadaheadPermit();
-                    }
-                    return null;
-                  });
-            } catch (Throwable t) {
-              // TODO: ensure this won't double-release with submitted task
-              dir.releaseReadaheadPermit();
-              throw t;
-            }
+          if (!ensureLoaded(blobName, accessMapped, blockOffsets, i)) {
+            newReadAheadTo = i - 1;
+            break;
           }
         }
         readAheadTo = newReadAheadTo;
       }
+    }
+
+    private boolean ensureLoaded(
+        String blob,
+        AtomicReferenceArray<BlockCache.Node> accessMapped,
+        long[] blockOffsets,
+        int idx) {
+      BlockCache.Node extant = accessMapped.get(idx);
+      if ((extant == null || !extant.pinnable()) && dir.acquireReadaheadPermit()) {
+        BlockCache.Node toPopulate = dir.cache.acquireNode();
+        if (toPopulate == null) {
+          dir.releaseReadaheadPermit();
+          return false;
+        }
+        try {
+          dir.readahead.submit(
+              () -> {
+                try {
+                  if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
+                    long blockOffset = blockOffsets[idx];
+                    int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
+                    populateBuf(
+                        blob, blockOffset, compressedLen, idx, COMPRESSION_BLOCK_SIZE, toPopulate);
+                    // NOTE: don't unpin in `finally` block! `populateBuf` already unpins the
+                    // node upon Exception
+                    dir.cache.unpin(toPopulate, false);
+                  } else {
+                    dir.cache.close(toPopulate, true);
+                  }
+                } finally {
+                  dir.releaseReadaheadPermit();
+                }
+                return null;
+              });
+        } catch (Throwable t) {
+          // TODO: ensure this won't double-release with submitted task
+          dir.releaseReadaheadPermit();
+          throw t;
+        }
+      }
+      return true;
     }
 
     private void refill(final long pos, final int compressedLen, final int blockIdx)
@@ -1854,7 +1863,8 @@ public class GCSDirectory extends SizeAwareDirectory {
         if (extant == cached) {
           // We won the race: fetch from GCS and populate the node.
           readAheadSeg();
-          ByteBuffer buf = populateBuf(pos, compressedLen, blockIdx, decompressedLen, node);
+          ByteBuffer buf =
+              populateBuf(blobName, pos, compressedLen, blockIdx, decompressedLen, node);
           setCurrentNode(node, blockIdx);
           postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         } else {
@@ -1903,7 +1913,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         if (blocks != null) {
           IntHashSet blockIndexes = parseCfeBlockIndexes(cfePath);
           for (IntCursor i : blockIndexes) {
-            ensureLoaded(blob, blocks, i.value);
+            ensureLoaded(blob.toString(), blocks.accessMapped, blocks.blockOffsets, i.value);
           }
         }
         // preload the first block of each logical file
@@ -1911,7 +1921,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         for (UUID blob : blobs) {
           BlocksStruct blocks = dir.pendingNodes.get(blob);
           if (blocks != null) {
-            ensureLoaded(blob, blocks, 0);
+            ensureLoaded(blob.toString(), blocks.accessMapped, blocks.blockOffsets, 0);
           }
         }
       }
@@ -1945,11 +1955,16 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     private ByteBuffer populateBuf(
-        long pos, int compressedLen, int blockIdx, int decompressedLen, BlockCache.Node node)
+        String blob,
+        long pos,
+        int compressedLen,
+        int blockIdx,
+        int decompressedLen,
+        BlockCache.Node node)
         throws IOException {
       ByteBuffer buf;
       try {
-        ByteBuffer heapBuf = supply(pos, compressedLen, decompressedLen);
+        ByteBuffer heapBuf = supply(blob, pos, compressedLen, decompressedLen);
         buf =
             node.populate(
                 heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
@@ -1965,7 +1980,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private void uncached(long pos, int compressedLen, int blockIdx, int decompressedLen)
         throws IOException {
-      ByteBuffer heapBuf = supply(pos, compressedLen, decompressedLen);
+      ByteBuffer heapBuf = supply(blobName, pos, compressedLen, decompressedLen);
       setCurrentNode(null, blockIdx);
       postBuffer = heapBuf;
       postBufferBaseline = heapBuf.position();
