@@ -64,14 +64,15 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.index.IndexFileNames;
+import org.apache.lucene.internal.hppc.IntArrayList;
 import org.apache.lucene.internal.hppc.IntCursor;
-import org.apache.lucene.internal.hppc.IntHashSet;
 import org.apache.lucene.internal.hppc.LongArrayList;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBufferGuard;
@@ -298,12 +299,25 @@ public class GCSDirectory extends SizeAwareDirectory {
 
   private final ConcurrentHashMap<String, SegmentStruct> pendingWrites = new ConcurrentHashMap<>();
 
+  private static final long RECHECK_NANOS = TimeUnit.MINUTES.toNanos(1);
+
   private static final class BatchValue {
     private final String segName;
     private final Set<UUID> blobUUIDs = ConcurrentHashMap.newKeySet();
+    private volatile long lastCheck = 0;
 
     private BatchValue(String segName) {
       this.segName = segName;
+    }
+
+    public boolean valid() {
+      long now = System.nanoTime();
+      if (now - lastCheck > RECHECK_NANOS) {
+        lastCheck = now;
+        return false;
+      } else {
+        return true;
+      }
     }
   }
 
@@ -1862,7 +1876,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
         if (extant == cached) {
           // We won the race: fetch from GCS and populate the node.
-          readAheadSeg();
+          maybeReadAheadSeg();
           ByteBuffer buf =
               populateBuf(blobName, pos, compressedLen, blockIdx, decompressedLen, node);
           setCurrentNode(node, blockIdx);
@@ -1898,33 +1912,36 @@ public class GCSDirectory extends SizeAwareDirectory {
       uncached(pos, compressedLen, blockIdx, decompressedLen);
     }
 
-    private void readAheadSeg() {
+    private void maybeReadAheadSeg() {
       BatchValue batchValue = dir.batched.get(segUUID);
-      if (batchValue == null) {
+      if (batchValue == null || batchValue.valid()) {
         return;
       }
       String segName = batchValue.segName;
       Set<UUID> blobs = batchValue.blobUUIDs;
-      Path cfePath;
-      if (blobs.size() == 1
-          && Files.exists(cfePath = dir.directory.resolve(segName.concat(".cfe")))) {
-        UUID blob = blobs.iterator().next();
-        BlocksStruct blocks = dir.pendingNodes.get(blob);
-        if (blocks != null) {
-          IntHashSet blockIndexes = parseCfeBlockIndexes(cfePath);
-          for (IntCursor i : blockIndexes) {
-            ensureLoaded(blob.toString(), blocks.accessMapped, blocks.blockOffsets, i.value);
-          }
-        }
-        // preload the first block of each logical file
-      } else {
-        for (UUID blob : blobs) {
-          BlocksStruct blocks = dir.pendingNodes.get(blob);
-          if (blocks != null) {
-            ensureLoaded(blob.toString(), blocks.accessMapped, blocks.blockOffsets, 0);
-          }
-        }
-      }
+      dir.readahead.submit(
+          () -> {
+            Path cfePath;
+            if (blobs.size() == 1
+                && Files.exists(cfePath = dir.directory.resolve(segName.concat(".cfe")))) {
+              UUID blob = blobs.iterator().next();
+              BlocksStruct blocks = dir.pendingNodes.get(blob);
+              if (blocks != null) {
+                IntArrayList blockIndexes = parseCfeBlockIndexes(cfePath);
+                for (IntCursor i : blockIndexes) {
+                  ensureLoaded(blob.toString(), blocks.accessMapped, blocks.blockOffsets, i.value);
+                }
+              }
+              // preload the first block of each logical file
+            } else {
+              for (UUID blob : blobs) {
+                BlocksStruct blocks = dir.pendingNodes.get(blob);
+                if (blocks != null) {
+                  ensureLoaded(blob.toString(), blocks.accessMapped, blocks.blockOffsets, 0);
+                }
+              }
+            }
+          });
     }
 
     /**
@@ -1932,21 +1949,26 @@ public class GCSDirectory extends SizeAwareDirectory {
      * blob) of the first block of each logical sub-file. Block indices are computed as {@code
      * subFileOffset >> COMPRESSION_BLOCK_SHIFT}.
      */
-    private IntHashSet parseCfeBlockIndexes(Path cfePath) {
-      IntHashSet blockIndexes = new IntHashSet();
+    private IntArrayList parseCfeBlockIndexes(Path cfePath) {
+      IntArrayList blockIndexes = new IntArrayList(16);
       try (IndexInput cfeIn = dir.openInput(cfePath.getFileName().toString(), IOContext.READONCE)) {
         // Skip index header without depending on the codec name (version-agnostic).
-        if (cfeIn.readInt() != CodecUtil.CODEC_MAGIC) return blockIndexes;
+        if (CodecUtil.readBEInt(cfeIn) != CodecUtil.CODEC_MAGIC) return blockIndexes;
         cfeIn.readString(); // codec name — discard
-        cfeIn.readInt(); // version — discard
+        CodecUtil.readBEInt(cfeIn); // version — discard
         cfeIn.skipBytes(16); // segment ID (StringHelper.ID_LENGTH)
         cfeIn.skipBytes(cfeIn.readByte() & 0xFF); // suffix bytes (empty for Lucene90, but generic)
         int n = cfeIn.readVInt();
+        int last = -1;
         for (int i = 0; i < n; i++) {
           cfeIn.readString(); // sub-file name — discard
           long offset = cfeIn.readLong(); // byte offset of this sub-file within the .cfs data
           cfeIn.readLong(); // length — discard
-          blockIndexes.add((int) (offset >> COMPRESSION_BLOCK_SHIFT));
+          int offsetBlock = (int) (offset >> COMPRESSION_BLOCK_SHIFT);
+          if (offsetBlock > last) {
+            blockIndexes.add(offsetBlock);
+            last = offsetBlock;
+          }
         }
       } catch (IOException e) {
         log.debug("readAheadSeg: failed to parse {}", cfePath, e);
