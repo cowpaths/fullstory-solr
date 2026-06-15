@@ -1765,23 +1765,24 @@ public class GCSDirectory extends SizeAwareDirectory {
               newReadAheadTo = i - 1;
               break;
             }
-            // TODO: `lastBlockDecompressedLen` doesn't matter anymore?
             int idx = i;
-            long blockOffset = blockOffsets[idx];
-            int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
-            int decompressedLen =
-                idx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
             try {
               dir.readahead.submit(
                   () -> {
                     try {
-                      BlockCache.Node witness = accessMapped.compareAndExchange(idx, extant, toPopulate);
-                      if (witness == extant) {
+                      if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
+                        long blockOffset = blockOffsets[idx];
+                        int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
+                        // TODO: `lastBlockDecompressedLen` doesn't matter anymore?
+                        int decompressedLen =
+                            idx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
                         populateBuf(blockOffset, compressedLen, idx, decompressedLen, toPopulate);
+                        // NOTE: don't unpin in `finally` block! `populateBuf` already unpins the
+                        // node upon Exception
+                        dir.cache.unpin(toPopulate, false);
+                      } else {
+                        dir.cache.close(toPopulate, true);
                       }
-                      // NOTE: don't unpin in `finally` block! `populateBuf` already unpins the node
-                      // upon Exception
-                      dir.cache.unpin(toPopulate, false);
                     } finally {
                       dir.releaseReadaheadPermit();
                     }
@@ -1833,8 +1834,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         } else {
           // Another thread won the race; wait for its result.
-          dir.cache.unpin(node);
-          dir.cache.close(node);
+          dir.cache.close(node, true);
           if (dir.cache.pin(extant)) {
             ByteBuffer buf;
             try {

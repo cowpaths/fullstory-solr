@@ -255,7 +255,11 @@ public class BlockCache implements Closeable {
    * lost CAS race).
    */
   boolean close(Node node) {
-    return partitions[tlrIndex()].close(node);
+    return close(node, false);
+  }
+
+  boolean close(Node node, boolean unconditional) {
+    return partitions[tlrIndex()].close(node, unconditional);
   }
 
   private int tlrIndex() {

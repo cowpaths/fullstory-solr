@@ -401,9 +401,12 @@ class Cache<V, N extends Cache.Node<V>> {
    * #insertAtTail}, making it the highest-priority eviction candidate for reuse. Returns {@code
    * true} if the node was successfully released, {@code false} if the node was already evicted or
    * pinned (best-effort; caller need not retry).
+   *
+   * <p>Only pass <code>unconditional=true</code> if caller is the only possible owner of a ref to
+   * this node (e.g., if CAS has failed).
    */
-  boolean close(Node<V> node) {
-    if (!node.refCount.compareAndSet(0, -1)) {
+  boolean close(Node<V> node, boolean unconditional) {
+    if (unconditional || !node.refCount.compareAndSet(0, -1)) {
       // pinned or already dead — best effort, bail
       return false;
     }
