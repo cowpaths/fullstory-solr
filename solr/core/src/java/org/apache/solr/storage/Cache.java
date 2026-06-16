@@ -406,11 +406,11 @@ class Cache<V, N extends Cache.Node<V>> {
    * this node (e.g., if CAS has failed).
    */
   boolean close(Node<V> node, boolean unconditional) {
-    if (unconditional || !node.refCount.compareAndSet(0, -1)) {
+    if (!unconditional && !node.refCount.compareAndSet(0, -1)) {
       // pinned or already dead — best effort, bail
       return false;
     }
-    if (removeFromList(node)) {
+    if (unconditional || removeFromList(node)) {
       if (persistentVals) {
         insertAtTail(node.value);
       } else {
