@@ -1691,17 +1691,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         // Pre-pin the tail and complete origMapping (publication barrier for blockOffsets).
         // For !hasTail, complete with null — non-winners join() to observe the filled array.
         if (hasTail) {
-          try {
-            ByteBuffer tailBuf = localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
-            BlockCache.Node tailNode = dir.cache.createTailNode(tailBuf);
-            if (!accessMapped.compareAndSet(lastBlockIdx, null, tailNode)) {
-              throw new IllegalStateException("tailNode already set");
-            }
-            blocksStruct.origMapping.complete(localFileMapped);
-          } catch (Throwable t) {
-            blocksStruct.origMapping.completeExceptionally(t);
-            throw t;
-          }
+          initTailNode(localFileMapped, tailLen, blocksStruct);
         } else {
           UNMAP.freeBuffer("quick close localFileMapped", localFileMapped);
           blocksStruct.origMapping.complete(null);
@@ -1709,22 +1699,12 @@ public class GCSDirectory extends SizeAwareDirectory {
       } else if (weMap[0]) {
         // refCount==0 re-win: blockOffsets already populated. Re-init tail if needed.
         if (hasTail) {
-          try {
-            ByteBuffer localFileMapped;
-            try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
-              localFileMapped = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size());
-            }
-            localFileMapped.order(ByteOrder.LITTLE_ENDIAN);
-            ByteBuffer tailBuf = localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
-            BlockCache.Node tailNode = dir.cache.createTailNode(tailBuf);
-            if (!accessMapped.compareAndSet(lastBlockIdx, null, tailNode)) {
-              throw new IllegalStateException("tailNode already set");
-            }
-            blocksStruct.origMapping.complete(localFileMapped);
-          } catch (Throwable t) {
-            blocksStruct.origMapping.completeExceptionally(t);
-            throw t;
+          ByteBuffer localFileMapped;
+          try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
+            localFileMapped = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size());
           }
+          localFileMapped.order(ByteOrder.LITTLE_ENDIAN);
+          initTailNode(localFileMapped, tailLen, blocksStruct);
         }
         // !hasTail: origMapping already complete(null) from copy(); nothing to do.
       } else {
@@ -1757,6 +1737,24 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.filePointer = this.offset;
       this.sliceLength = length;
       this.postBuffer = ByteBuffer.allocate(0);
+    }
+
+    /**
+     * Pre-pins the tail block from {@code localFileMapped} and completes {@code bs.origMapping} as
+     * the publication barrier for {@code blockOffsets}. Called only by the mapping winner.
+     */
+    private void initTailNode(ByteBuffer localFileMapped, int tailLen, BlocksStruct bs) {
+      try {
+        ByteBuffer tailBuf = localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
+        BlockCache.Node tailNode = dir.cache.createTailNode(tailBuf);
+        if (!accessMapped.compareAndSet(lastBlockIdx, null, tailNode)) {
+          throw new IllegalStateException("tailNode already set");
+        }
+        bs.origMapping.complete(localFileMapped);
+      } catch (Throwable t) {
+        bs.origMapping.completeExceptionally(t);
+        throw t;
+      }
     }
 
     // ---------------------------------------------------------------------------
