@@ -293,6 +293,12 @@ class Cache<V, N extends Cache.Node<V>> {
 
   private static final int UNPIN_SENTINEL = Integer.MIN_VALUE >> 1;
 
+  enum Pin {
+    PIN,
+    RE_PIN,
+    FAIL
+  }
+
   /**
    * Pins {@code node} for the duration of a read, preventing eviction. Returns {@code false} if the
    * node is permanently dead (evicted); the caller must then fall back to loading.
@@ -301,12 +307,12 @@ class Cache<V, N extends Cache.Node<V>> {
    * the LRU list (it is no longer evictable). If the node is already pinned (refCount&gt;0), the
    * refcount is simply incremented with no list operation.
    */
-  boolean pin(Node<V> node) {
+  Pin pin(Node<V> node) {
     int rc = node.refCount.get();
     for (; ; ) {
       switch (rc) {
         case -1:
-          return false;
+          return Pin.FAIL;
         case UNPIN_SENTINEL:
           rc = node.refCount.get();
           continue;
@@ -322,15 +328,17 @@ class Cache<V, N extends Cache.Node<V>> {
     if (rc == 0) {
       // First pin: remove from the evictable list.
       removeFromList(node);
+      return Pin.PIN;
+    } else {
+      return Pin.RE_PIN;
     }
-    return true;
   }
 
   /**
    * Releases a read pin. If this is the last pin (refCount transitions 1&rarr;0), the node is
    * inserted at the LRU head (most-recently-used position) and becomes evictable.
    */
-  void unpin(Node<V> node, boolean recordAccess) {
+  boolean unpin(Node<V> node, boolean recordAccess) {
     int rc = node.refCount.get();
     for (; ; ) {
       if (rc == 1) {
@@ -340,7 +348,7 @@ class Cache<V, N extends Cache.Node<V>> {
           if (!node.refCount.compareAndSet(UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
-          return;
+          return true;
         } else {
           rc = witness;
         }
@@ -348,7 +356,7 @@ class Cache<V, N extends Cache.Node<V>> {
         assert rc > 1;
         int witness = node.refCount.compareAndExchange(rc, rc - 1);
         if (witness == rc) {
-          return;
+          return false;
         } else {
           rc = witness;
         }

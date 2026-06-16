@@ -1417,7 +1417,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
     private BlockCache.Node currentNode;
     private int currentBlockIdx = -1;
-    private boolean readPermitRegistered;
+    private Closeable readPermit;
     private int sequentialAccessCount = 0;
 
     private void localPin() {
@@ -1460,9 +1460,8 @@ public class GCSDirectory extends SizeAwareDirectory {
           return sequentialAccessCount = 0;
         }
       } finally {
-        if (node != null && !readPermitRegistered) {
-          readPermitRegistered = true;
-          semaphore.register(this);
+        if (node != null && readPermit == null) {
+          readPermit = semaphore.register(this);
         }
       }
     }
@@ -1484,13 +1483,21 @@ public class GCSDirectory extends SizeAwareDirectory {
      * Unpins the current block from outside a {@code localPin()} context (i.e. from {@link
      * GCSIndexInput#close}). Handles the race with {@link #outOfBandUnpin}.
      */
+    @SuppressWarnings("try")
     private void unpinFor(BlockCache blockCache) {
       switch (state.compareAndExchange(State.IDLE, State.PINNED)) {
         case IDLE:
+          try (Closeable c = readPermit) {
+            readPermit = null;
+          } catch (IOException e) {
+            throw new UncheckedIOException(e);
+          }
           doUnpin(blockCache, State.PINNED);
           break;
         case UNPINNING:
           // another thread is unpinning; spin until it's done.
+          // NOTE: closing/nulling the `readPermit` is best-effort, so
+          // don't worry about it for this edge case.
           do {
             Thread.yield();
           } while (state.get() == State.UNPINNING);
@@ -1513,10 +1520,13 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     /** This is the only method that may be called from a different thread! */
+    @SuppressWarnings("try")
     boolean outOfBandUnpin(BlockCache blockCache) {
       if (state.compareAndSet(State.IDLE, State.UNPINNING)) {
-        // scavenger has evicted our pinned-LRU slot; signal that re-acquire is needed
-        readPermitRegistered = false;
+        // scavenger evicts our pinned-LRU slot; signal that re-acquire is needed
+        // NOTE: null out the `readPermit`, but _don't_ close it! closing re-inserts
+        // the permit in the readPermit eviction queue, which is _not_ what we want here.
+        readPermit = null;
         doUnpin(blockCache, State.UNPINNING);
         return true;
       }
@@ -2763,7 +2773,6 @@ public class GCSDirectory extends SizeAwareDirectory {
     private void unsetBuffers() {
       accessMapped = null;
       currentNodeRef.unpinFor(dir.cache);
-      currentNodeRef.readPermitRegistered = false;
       postBuffer = null;
       floatViews = null;
       intViews = null;
