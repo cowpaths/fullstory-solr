@@ -1627,15 +1627,13 @@ public class GCSDirectory extends SizeAwareDirectory {
 
       // Allocate the offsets array inside the compute() lambda (first-opener only) and fill it
       // afterward — no file I/O while holding the CHM bucket lock.
-      boolean[] weMap = new boolean[1];
-      boolean[] weCreated = new boolean[1];
+      int[] winType = new int[1];
       this.blocksStruct =
           dir.pendingNodes.compute(
               blobUUID,
               (k, v) -> {
                 if (v == null) {
-                  weMap[0] = true;
-                  weCreated[0] = true;
+                  winType[0] = 1;
                   // blockOffsets[0..gcsBlockCount] = GCS start offsets; [gcsBlockCount] =
                   // gcsObjectSize sentinel. [blockCount] is a dummy entry for the tail (default 0,
                   // never used — tail always cache-hits). Filled by the winner after compute().
@@ -1650,7 +1648,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                           1,
                           hasTail);
                 } else if (v.refCount.getAndIncrement() == 0) {
-                  weMap[0] = true;
+                  winType[0] = 2;
                   // blockOffsets already populated from prior mapping; only tail needs re-init.
                 }
                 return v;
@@ -1659,57 +1657,67 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.accessMapped = blocksStruct.accessMapped;
       this.guard = blocksStruct.guard;
 
-      if (weCreated[0]) {
-        // First opener: decode block offsets from file and publish via origMapping.
-        long offsetFileSize;
-        ByteBuffer localFileMapped;
-        try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
-          offsetFileSize = ch.size();
-          localFileMapped = ch.map(FileChannel.MapMode.READ_ONLY, 0, offsetFileSize);
-        }
-        localFileMapped.order(ByteOrder.LITTLE_ENDIAN);
-        // Delta bytes sit between the tail region and the 52-byte trailer.
-        int deltaEnd = (int) (offsetFileSize - OFFSET_FILE_HEADER_SIZE);
-        byte[] deltaBytes = new byte[Math.max(0, deltaEnd - tailLen)];
-        if (deltaBytes.length > 0) {
-          localFileMapped.position(tailLen);
-          localFileMapped.get(deltaBytes);
-        }
-        // Decode GCS block offsets (gcsBlockCount - 1 deltas; blockOffsets[0] = 0 is implicit).
-        ByteArrayDataInput in = new ByteArrayDataInput(deltaBytes);
-        long blockOffset = 0;
-        int lastBlockSize = BLOCK_SIZE_ESTIMATE;
-        blockOffsets[0] = 0;
-        for (int i = 1; i < gcsBlockCount; i++) {
-          int delta = in.readZInt();
-          int nextBlockSize = lastBlockSize + delta;
-          blockOffset += nextBlockSize;
-          blockOffsets[i] = blockOffset;
-          lastBlockSize = nextBlockSize;
-        }
-        blockOffsets[gcsBlockCount] = gcsObjectSize;
-        // Pre-pin the tail and complete origMapping (publication barrier for blockOffsets).
-        // For !hasTail, complete with null — non-winners join() to observe the filled array.
-        if (hasTail) {
-          initTailNode(localFileMapped, tailLen, blocksStruct);
-        } else {
-          UNMAP.freeBuffer("quick close localFileMapped", localFileMapped);
-          blocksStruct.origMapping.complete(null);
-        }
-      } else if (weMap[0]) {
-        // refCount==0 re-win: blockOffsets already populated. Re-init tail if needed.
-        if (hasTail) {
-          ByteBuffer localFileMapped;
-          try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
-            localFileMapped = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size());
+      switch (winType[0]) {
+        case 1:
+          {
+            // First opener: decode block offsets from file and publish via origMapping.
+            long offsetFileSize;
+            ByteBuffer localFileMapped;
+            try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
+              offsetFileSize = ch.size();
+              localFileMapped = ch.map(FileChannel.MapMode.READ_ONLY, 0, offsetFileSize);
+            }
+            localFileMapped.order(ByteOrder.LITTLE_ENDIAN);
+            // Delta bytes sit between the tail region and the 52-byte trailer.
+            int deltaEnd = (int) (offsetFileSize - OFFSET_FILE_HEADER_SIZE);
+            byte[] deltaBytes = new byte[Math.max(0, deltaEnd - tailLen)];
+            if (deltaBytes.length > 0) {
+              localFileMapped.position(tailLen);
+              localFileMapped.get(deltaBytes);
+            }
+            // Decode GCS block offsets (gcsBlockCount - 1 deltas; blockOffsets[0] = 0 is implicit).
+            ByteArrayDataInput in = new ByteArrayDataInput(deltaBytes);
+            long blockOffset = 0;
+            int lastBlockSize = BLOCK_SIZE_ESTIMATE;
+            blockOffsets[0] = 0;
+            for (int i = 1; i < gcsBlockCount; i++) {
+              int delta = in.readZInt();
+              int nextBlockSize = lastBlockSize + delta;
+              blockOffset += nextBlockSize;
+              blockOffsets[i] = blockOffset;
+              lastBlockSize = nextBlockSize;
+            }
+            blockOffsets[gcsBlockCount] = gcsObjectSize;
+            // Pre-pin the tail and complete origMapping (publication barrier for blockOffsets).
+            // For !hasTail, complete with null — non-winners join() to observe the filled array.
+            if (hasTail) {
+              initTailNode(localFileMapped, tailLen, blocksStruct);
+            } else {
+              UNMAP.freeBuffer("quick close localFileMapped", localFileMapped);
+              blocksStruct.origMapping.complete(null);
+            }
+            break;
           }
-          localFileMapped.order(ByteOrder.LITTLE_ENDIAN);
-          initTailNode(localFileMapped, tailLen, blocksStruct);
-        }
-        // !hasTail: origMapping already complete(null) from copy(); nothing to do.
-      } else {
-        // Non-winner: wait for the winner to publish blockOffsets via origMapping.
-        blocksStruct.origMapping.join();
+        case 2:
+          {
+            // refCount==0 re-win: blockOffsets already populated. Re-init tail if needed.
+            if (hasTail) {
+              ByteBuffer localFileRemapped;
+              try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
+                localFileRemapped = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size());
+              }
+              localFileRemapped.order(ByteOrder.LITTLE_ENDIAN);
+              initTailNode(localFileRemapped, tailLen, blocksStruct);
+            }
+            // !hasTail: origMapping already complete(null) from copy(); nothing to do.
+            break;
+          }
+        default:
+          {
+            // Non-winner: wait for the winner to publish blockOffsets via origMapping.
+            blocksStruct.origMapping.join();
+            break;
+          }
       }
 
       this.offset = 0;
