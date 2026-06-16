@@ -298,13 +298,13 @@ public class GCSDirectory extends SizeAwareDirectory {
 
   private final ConcurrentHashMap<String, SegmentStruct> pendingWrites = new ConcurrentHashMap<>();
 
-  private static final int RECHECK_NANOS = Math.toIntExact(TimeUnit.MINUTES.toNanos(2));
+  private static final long RECHECK_NANOS = TimeUnit.MINUTES.toNanos(2);
 
   private static final class BatchValue {
     private final String segName;
     private final Set<UUID> blobUUIDs = ConcurrentHashMap.newKeySet();
     private final AtomicLong lastCheck =
-        new AtomicLong(System.nanoTime() + ThreadLocalRandom.current().nextInt(RECHECK_NANOS));
+        new AtomicLong(System.nanoTime() + ThreadLocalRandom.current().nextLong(RECHECK_NANOS));
 
     private BatchValue(String segName) {
       this.segName = segName;
@@ -315,7 +315,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       long extant = lastCheck.get();
       return now - extant <= RECHECK_NANOS
           || !lastCheck.compareAndSet(
-              extant, now + ThreadLocalRandom.current().nextInt(RECHECK_NANOS));
+              extant, now + ThreadLocalRandom.current().nextLong(RECHECK_NANOS));
     }
   }
 
