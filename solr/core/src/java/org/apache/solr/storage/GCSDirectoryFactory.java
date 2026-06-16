@@ -144,16 +144,15 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     }
   }
 
-  private static final int MAX_CONCURRENT_PINNED_BLOCKS = 4096;
-  private static final int MAX_CONCURRENT_PERMITS = 5 * MAX_CONCURRENT_PINNED_BLOCKS;
+  private static final int MAX_CONCURRENT_PINNED = 4096;
 
   interface PinSemaphore {
-    Closeable register(GCSDirectory.NodeRefStruct instance);
+    void register(GCSDirectory.NodeRefStruct instance);
   }
 
   static PinSemaphore defaultMaxPinned(BlockCache cache) {
     int nPartitions = pinSemaphoreNPartitions();
-    int slotsPerPartition = MAX_CONCURRENT_PERMITS / nPartitions;
+    int slotsPerPartition = MAX_CONCURRENT_PINNED / nPartitions;
     @SuppressWarnings({"unchecked", "rawtypes"})
     Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>>[] partitions =
         new Cache[nPartitions];
@@ -169,10 +168,9 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       partitions[i] = new Cache<>(dummy, false);
     }
     return instance -> {
-      int i = idx.getAsInt();
-      int unpinTarget = (int) Math.max(0, cache.pinnedBlockCount() - MAX_CONCURRENT_PINNED_BLOCKS);
-      for (; ; i = idx.getAsInt()) {
-        Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> p = partitions[i];
+      for (; ; ) {
+        Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> p =
+            partitions[idx.getAsInt()];
         Cache.Node<GCSDirectory.NodeRefStruct> permit =
             p.acquireNode(
                 (evicted) -> {
@@ -186,13 +184,10 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
                 });
         if (permit == null) {
           Thread.yield(); // all busy; no deadlock possible, so progress is guaranteed
-        } else if (unpinTarget-- == 0) {
-          assert permit.getValue() == instance;
-          p.unpin(permit, false); // put the last one back in the unpin queue
-          return () -> p.close(permit, false);
         } else {
-          // TODO: this is WRONG! ends up thrashing the tail of the queue
-          p.close(permit, true);
+          assert permit.getValue() == instance;
+          p.unpin(permit, false);
+          return;
         }
       }
     };
@@ -202,7 +197,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     // Largest power of two <= availableProcessors, capped so each partition retains at least
     // that many slots (ensuring the pool stays meaningfully sized per partition).
     int n = Integer.highestOneBit(Math.max(1, Runtime.getRuntime().availableProcessors()));
-    return n <= MAX_CONCURRENT_PERMITS / n ? n : 1;
+    return n <= MAX_CONCURRENT_PINNED / n ? n : 1;
   }
 
   /** Node-level resources shared across all {@link GCSDirectory} instances on this node. */

@@ -35,7 +35,6 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.LongAdder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -59,12 +58,6 @@ public class BlockCache implements Closeable {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private static final int MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / COMPRESSION_BLOCK_SIZE;
-
-  private final LongAdder pinnedBlockCount = new LongAdder();
-
-  public long pinnedBlockCount() {
-    return pinnedBlockCount.sum();
-  }
 
   // ---------------------------------------------------------------------------
   // Node
@@ -233,31 +226,19 @@ public class BlockCache implements Closeable {
    * queue we call it on. TODO: make it <i>actually</i> static, for clarity?
    */
   boolean pin(Node node) {
-    switch (partitions[0].pin(node)) {
-      case PIN:
-        pinnedBlockCount.increment();
-        return true;
-      case RE_PIN:
-        return true;
-      case FAIL:
-        return false;
-      default:
-        throw new IllegalStateException();
-    }
+    return partitions[0].pin(node);
   }
 
   /**
    * Releases a pin, routing the node to a randomly chosen partition's LRU head. No node-to-
    * partition affinity is required: the ByteBuffer value is valid in any partition's pool.
    */
-  final void unpin(Node node) {
+  void unpin(Node node) {
     unpin(node, true);
   }
 
   void unpin(Node node, boolean recordAccess) {
-    if (partitions[tlrIndex()].unpin(node, recordAccess)) {
-      pinnedBlockCount.decrement();
-    }
+    partitions[tlrIndex()].unpin(node, recordAccess);
   }
 
   /**
@@ -265,13 +246,7 @@ public class BlockCache implements Closeable {
    * the first is fully pinned. Returns {@code null} only if all partitions are exhausted.
    */
   Node acquireNode() {
-    Node ret = partitions[tlrIndex()].acquireNode();
-    if (ret == null) {
-      return null;
-    } else {
-      pinnedBlockCount.increment();
-      return ret;
-    }
+    return partitions[tlrIndex()].acquireNode();
   }
 
   /**
