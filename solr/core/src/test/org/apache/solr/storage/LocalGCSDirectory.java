@@ -20,7 +20,6 @@ package org.apache.solr.storage;
 import com.google.cloud.RestorableState;
 import com.google.cloud.WriteChannel;
 import com.google.cloud.storage.BlobInfo;
-import com.google.cloud.storage.Storage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -30,7 +29,8 @@ import java.util.concurrent.Semaphore;
 
 /**
  * Test-only subclass of {@link GCSDirectory} that replaces the resumable-upload write path with a
- * simple buffered {@link Storage#create(BlobInfo, byte[], Storage.BlobTargetOption[])} call.
+ * simple buffered {@link com.google.cloud.storage.Storage#create(BlobInfo, byte[],
+ * com.google.cloud.storage.Storage.BlobTargetOption[])} call.
  *
  * <p>The GCS client's resumable-upload path ({@code storage.writer()}) builds {@code Content-Range}
  * headers via {@code String.format("%d", ...)} which is locale-sensitive. Under non-Latin locales

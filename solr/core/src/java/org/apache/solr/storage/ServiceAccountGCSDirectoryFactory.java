@@ -20,7 +20,6 @@ package org.apache.solr.storage;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
 import com.google.cloud.storage.GrpcStorageOptions;
-import com.google.cloud.storage.Storage;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -88,12 +87,13 @@ public class ServiceAccountGCSDirectoryFactory extends GCSDirectoryFactory {
           ServiceAccountCredentials.fromStream(is)
               .createScoped(
                   Collections.singleton("https://www.googleapis.com/auth/devstorage.read_write"));
-      return GrpcStorageOptions.newBuilder()
-          .setAttemptDirectPath(true)
-          .setCredentials(credentials)
-          .setProjectId(project)
-          .build()
-          .getService();
+      return Storage.of(
+          GrpcStorageOptions.newBuilder()
+              .setAttemptDirectPath(true)
+              .setCredentials(credentials)
+              .setProjectId(project)
+              .build()
+              .getService());
     } catch (IOException e) {
       throw new UncheckedIOException(
           "Failed to load GCS service account key from: " + keyFilePath, e);

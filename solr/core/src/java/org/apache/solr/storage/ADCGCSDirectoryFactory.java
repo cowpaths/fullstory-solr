@@ -19,7 +19,6 @@ package org.apache.solr.storage;
 
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.storage.GrpcStorageOptions;
-import com.google.cloud.storage.Storage;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Collections;
@@ -64,12 +63,13 @@ public class ADCGCSDirectoryFactory extends GCSDirectoryFactory {
           GoogleCredentials.getApplicationDefault()
               .createScoped(
                   Collections.singleton("https://www.googleapis.com/auth/devstorage.read_write"));
-      return GrpcStorageOptions.newBuilder()
-          .setAttemptDirectPath(true)
-          .setCredentials(credentials)
-          .setProjectId(PROJECT)
-          .build()
-          .getService();
+      return Storage.of(
+          GrpcStorageOptions.newBuilder()
+              .setAttemptDirectPath(true)
+              .setCredentials(credentials)
+              .setProjectId(PROJECT)
+              .build()
+              .getService());
     } catch (IOException e) {
       throw new UncheckedIOException("Failed to load application-default GCS credentials", e);
     }

@@ -17,7 +17,6 @@
 
 package org.apache.solr.storage;
 
-import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.contrib.nio.testing.LocalStorageHelper;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -56,7 +55,7 @@ public class LocalGCSDirectoryFactory extends GCSDirectoryFactory {
           Locale saved = Locale.getDefault();
           Locale.setDefault(Locale.ROOT);
           try {
-            storage = LocalStorageHelper.customOptions(false).getService();
+            storage = Storage.of(LocalStorageHelper.customOptions(false).getService());
           } finally {
             Locale.setDefault(saved);
           }

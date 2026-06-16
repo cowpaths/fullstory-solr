@@ -21,7 +21,8 @@ import com.google.cloud.WriteChannel;
 import com.google.cloud.storage.Blob;
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.BlobInfo;
-import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.Storage.BlobTargetOption;
+import com.google.cloud.storage.Storage.BlobWriteOption;
 import com.google.cloud.storage.StorageException;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
@@ -172,7 +173,7 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
           BlobInfo.newBuilder(
                   BlobId.of(blobInfo.getBucket(), blobInfo.getName(), ifGenerationMatch))
               .build();
-      storage.create(withGen, data, Storage.BlobTargetOption.generationMatch());
+      storage.create(withGen, data, BlobTargetOption.generationMatch());
     } catch (StorageException e) {
       throw e;
     } catch (Exception e) {
@@ -186,7 +187,7 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
    */
   private void writeResumable(BlobInfo blobInfo, byte[] data, long ifGenerationMatch) {
     try (WriteChannel writer =
-        storage.writer(blobInfo, Storage.BlobWriteOption.generationMatch(ifGenerationMatch))) {
+        storage.writer(blobInfo, BlobWriteOption.generationMatch(ifGenerationMatch))) {
       writer.write(ByteBuffer.wrap(data));
     } catch (StorageException e) {
       throw e;

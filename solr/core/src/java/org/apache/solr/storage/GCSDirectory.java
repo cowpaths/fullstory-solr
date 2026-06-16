@@ -28,7 +28,6 @@ import com.google.cloud.ReadChannel;
 import com.google.cloud.WriteChannel;
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.BlobInfo;
-import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageException;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;

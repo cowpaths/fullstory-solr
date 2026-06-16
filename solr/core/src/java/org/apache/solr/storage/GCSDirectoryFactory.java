@@ -19,7 +19,6 @@ package org.apache.solr.storage;
 
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.BlobInfo;
-import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageException;
 import java.io.Closeable;
 import java.io.IOException;

@@ -18,7 +18,6 @@
 package org.apache.solr.storage;
 
 import com.google.cloud.NoCredentials;
-import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.EnvUtils;
@@ -61,11 +60,12 @@ public class EmulatorGCSDirectoryFactory extends GCSDirectoryFactory {
               + "with non-ASCII digits. Run with -Ptests.locale=en (or root).");
     }
     String host = EnvUtils.getProperty("solr.gcsDirectory.emulatorHost", DEFAULT_EMULATOR_HOST);
-    return StorageOptions.newBuilder()
-        .setHost(host)
-        .setProjectId("emulator-project")
-        .setCredentials(NoCredentials.getInstance())
-        .build()
-        .getService();
+    return Storage.of(
+        StorageOptions.newBuilder()
+            .setHost(host)
+            .setProjectId("emulator-project")
+            .setCredentials(NoCredentials.getInstance())
+            .build()
+            .getService());
   }
 }
