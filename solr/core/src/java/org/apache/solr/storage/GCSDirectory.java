@@ -1840,7 +1840,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       if (seqAcccessCount > 0
           && (newReadAheadTo =
                   Math.min(
-                      accessMapped.length() - 1,
+                      lastBlockIdx,
                       blockIdx + Math.min(MAX_READ_AHEAD, readAhead(seqAcccessCount))))
               > readAheadTo) {
         for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
@@ -1970,13 +1970,13 @@ public class GCSDirectory extends SizeAwareDirectory {
       // TODO: potential for lock contention here, esp. w/ SynchronousQueue
       dir.ioExec.submit(
           () -> {
-            Path cfePath;
+            String cfeName;
             if (blobs.size() == 1
-                && Files.exists(cfePath = dir.directory.resolve(segName.concat(".cfe")))) {
+                && Files.exists(dir.directory.resolve(cfeName = segName.concat(".cfe")))) {
               UUID blob = blobs.iterator().next();
               BlocksStruct blocks = dir.pendingNodes.get(blob);
               if (blocks != null) {
-                IntArrayList blockIndexes = parseCfeBlockIndexes(cfePath);
+                IntArrayList blockIndexes = parseCfeBlockIndexes(cfeName);
                 for (IntCursor i : blockIndexes) {
                   ensureLoaded(blob.toString(), blocks.accessMapped, blocks.blockOffsets, i.value);
                 }
@@ -1998,9 +1998,9 @@ public class GCSDirectory extends SizeAwareDirectory {
      * blob) of the first block of each logical sub-file. Block indices are computed as {@code
      * subFileOffset >> COMPRESSION_BLOCK_SHIFT}.
      */
-    private IntArrayList parseCfeBlockIndexes(Path cfePath) {
+    private IntArrayList parseCfeBlockIndexes(String cfeName) {
       IntArrayList blockIndexes = new IntArrayList(16);
-      try (IndexInput cfeIn = dir.openInput(cfePath.getFileName().toString(), IOContext.READONCE)) {
+      try (IndexInput cfeIn = dir.openInput(cfeName, IOContext.READONCE)) {
         // Skip index header without depending on the codec name (version-agnostic).
         if (CodecUtil.readBEInt(cfeIn) != CodecUtil.CODEC_MAGIC) return blockIndexes;
         cfeIn.readString(); // codec name — discard
@@ -2020,7 +2020,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           }
         }
       } catch (IOException e) {
-        log.debug("readAheadSeg: failed to parse {}", cfePath, e);
+        log.debug("readAheadSeg: failed to parse {}", cfeName, e);
       }
       return blockIndexes;
     }
