@@ -142,14 +142,12 @@ public class GCSDirectory extends SizeAwareDirectory {
   private final GCSDirectoryFactory.PinSemaphore acquirePinPermit;
 
   public static Directory rawDirectoryView(Directory dir) {
-    Directory unwrap = dir;
-    while (unwrap instanceof FilterDirectory) {
-      if (unwrap instanceof GCSDirectory) {
-        return ((GCSDirectory) unwrap).rawDirectoryView();
-      }
-      unwrap = ((FilterDirectory) unwrap).getDelegate();
+    Directory unwrapped = FilterDirectory.unwrap(dir);
+    if (unwrapped instanceof GCSDirectory) {
+      return ((GCSDirectory) unwrapped).rawDirectoryView();
+    } else {
+      return dir;
     }
-    return dir;
   }
 
   private Directory rawDirectoryView() {
