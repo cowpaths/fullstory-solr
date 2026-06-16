@@ -26,6 +26,8 @@ import com.google.cloud.storage.Storage.BlobTargetOption;
 import com.google.cloud.storage.Storage.BlobWriteOption;
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.function.Supplier;
+import org.apache.lucene.util.IOUtils;
 
 /**
  * Facade over N independent {@link com.google.cloud.storage.Storage} client instances that
@@ -45,26 +47,34 @@ public final class Storage implements Closeable {
   private final int mask;
 
   /**
-   * @param stripes independent {@link com.google.cloud.storage.Storage} instances; length must be a
-   *     power of two
+   * Creates a {@link Storage} instance.
+   *
+   * @param stripeCount must be a power of 2
+   * @param factory supplies {@link com.google.cloud.storage.Storage} instances to populate the
+   *     client array.
    */
-  public Storage(com.google.cloud.storage.Storage[] stripes) {
-    if (stripes.length == 0 || Integer.bitCount(stripes.length) != 1) {
+  public Storage(int stripeCount, Supplier<com.google.cloud.storage.Storage> factory) {
+    if (stripeCount == 0 || Integer.bitCount(stripeCount) != 1) {
       throw new IllegalArgumentException(
-          "stripes.length must be a power of two, got " + stripes.length);
+          "stripes.length must be a power of two, got " + stripeCount);
     }
-    this.stripes = stripes.clone();
-    this.mask = stripes.length - 1;
+    this.stripes = new com.google.cloud.storage.Storage[stripeCount];
+    this.mask = stripeCount - 1;
+    for (int i = mask; i >= 0; i--) {
+      stripes[i] = factory.get();
+    }
   }
 
   /** Convenience factory for single-stripe use (tests, simple deployments). */
   public static Storage of(com.google.cloud.storage.Storage storage) {
-    return new Storage(new com.google.cloud.storage.Storage[] {storage});
+    return new Storage(1, () -> storage);
   }
 
   private com.google.cloud.storage.Storage stripeFor(String name) {
     return stripes[name.hashCode() & mask];
   }
+
+  private void uuidArrayIdx(String name) {}
 
   /** Returns the first stripe, e.g. for probe operations that only need one client. */
   public com.google.cloud.storage.Storage first() {
@@ -105,14 +115,20 @@ public final class Storage implements Closeable {
 
   @Override
   public void close() throws IOException {
-    IOException first = null;
-    for (com.google.cloud.storage.Storage stripe : stripes) {
+    // implementation ported from `lucene.IOUtils.close(Closeable...)`
+    Throwable th = null;
+    for (AutoCloseable object : stripes) {
       try {
-        stripe.close();
-      } catch (Exception e) {
-        if (first == null) first = e instanceof IOException ? (IOException) e : new IOException(e);
+        if (object != null) {
+          object.close();
+        }
+      } catch (Throwable t) {
+        th = IOUtils.useOrSuppress(th, t);
       }
     }
-    if (first != null) throw first;
+
+    if (th != null) {
+      throw IOUtils.rethrowAlways(th);
+    }
   }
 }
