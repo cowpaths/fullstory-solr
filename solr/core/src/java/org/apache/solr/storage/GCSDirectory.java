@@ -93,7 +93,6 @@ import org.apache.lucene.util.BitUtil;
 import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.compress.LZ4;
-import org.apache.solr.common.util.ExecutorUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -743,9 +742,7 @@ public class GCSDirectory extends SizeAwareDirectory {
   @Override
   @SuppressWarnings("try")
   public void close() throws IOException {
-    try (Closeable c = super::close) {
-      ExecutorUtil.shutdownAndAwaitTermination(readahead);
-    }
+    super.close();
   }
 
   /**
@@ -1828,7 +1825,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           return false;
         }
         try {
-          dir.readahead.submit(
+          dir.ioExec.submit(
               () -> {
                 try {
                   if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
@@ -1929,7 +1926,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       }
       String segName = batchValue.segName;
       Set<UUID> blobs = batchValue.blobUUIDs;
-      dir.readahead.submit(
+      dir.ioExec.submit(
           () -> {
             Path cfePath;
             if (blobs.size() == 1
@@ -2699,7 +2696,6 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
   }
 
-  private final ExecutorService readahead = ExecutorUtil.newMDCAwareCachedThreadPool("readahead");
   private static final int READ_CHANNEL_HEADROOM =
       GCSDirectoryFactory.DEFAULT_MAX_OPEN_CHANNELS >> 1;
   private final AtomicInteger readaheadPermit = new AtomicInteger(0);
