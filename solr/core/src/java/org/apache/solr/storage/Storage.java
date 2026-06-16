@@ -26,22 +26,34 @@ import com.google.cloud.storage.Storage.BlobTargetOption;
 import com.google.cloud.storage.Storage.BlobWriteOption;
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
 import org.apache.lucene.util.IOUtils;
+import org.apache.solr.common.util.EnvUtils;
 
 /**
  * Facade over N independent {@link com.google.cloud.storage.Storage} client instances that
- * distributes operations across them by hashing the blob name. Analogous to how {@link BlockCache}
- * stripes across multiple {@link Cache} partitions to reduce per-client gRPC channel contention.
+ * distributes operations across them to reduce per-client gRPC channel contention. Analogous to how
+ * {@link BlockCache} stripes across multiple {@link Cache} partitions.
  *
- * <p>The number of stripes must be a power of two. Each operation is routed to {@code
- * stripes[name.hashCode() & mask]}, so the same blob name always lands on the same client —
- * preserving any connection-reuse benefit while spreading load across channels.
+ * <p>The number of stripes must be a power of two. By default each operation picks a stripe via
+ * {@link ThreadLocalRandom}, spreading concurrent reads of the same blob across clients. Blob-name
+ * affinity routing (same blob → same client) can be enabled via the {@code
+ * solr.gcsDirectory.blobAffinity} system property.
  *
  * <p>Only the methods actually used by {@link GCSDirectory} and {@link GcsBlobLifecycleCoordinator}
  * are exposed.
  */
 public final class Storage implements Closeable {
+
+  /**
+   * When true, each operation is routed to the stripe determined by the blob name's UUID prefix, so
+   * the same blob always lands on the same client. When false (default), each operation picks a
+   * stripe via {@link ThreadLocalRandom}, spreading concurrent reads of the same blob across
+   * clients.
+   */
+  private static final boolean BLOB_AFFINITY =
+      EnvUtils.getPropertyAsBool("solr.gcsDirectory.blobAffinity", false);
 
   private final com.google.cloud.storage.Storage[] stripes;
   private final int mask;
@@ -72,12 +84,12 @@ public final class Storage implements Closeable {
     return new Storage(1, () -> storage);
   }
 
-  private com.google.cloud.storage.Storage stripeFor(String name) {
-    return stripes[uuidArrayIdx(name)];
-  }
-
-  private int uuidArrayIdx(String name) {
-    return Integer.parseInt(name, 0, routingCharCount, 16) & mask;
+  private com.google.cloud.storage.Storage stripeFor(BlobId blob) {
+    int idx =
+        BLOB_AFFINITY
+            ? Integer.parseInt(blob.getName(), 0, routingCharCount, 16) & mask
+            : ThreadLocalRandom.current().nextInt(stripes.length);
+    return stripes[idx];
   }
 
   // ---------------------------------------------------------------------------
@@ -85,15 +97,15 @@ public final class Storage implements Closeable {
   // ---------------------------------------------------------------------------
 
   public ReadChannel reader(BlobId blobId) {
-    return stripeFor(blobId.getName()).reader(blobId);
+    return stripeFor(blobId).reader(blobId);
   }
 
   public WriteChannel writer(BlobInfo blobInfo, BlobWriteOption... options) {
-    return stripeFor(blobInfo.getName()).writer(blobInfo, options);
+    return stripeFor(blobInfo.getBlobId()).writer(blobInfo, options);
   }
 
   public boolean delete(BlobId blobId) {
-    return stripeFor(blobId.getName()).delete(blobId);
+    return stripeFor(blobId).delete(blobId);
   }
 
   // ---------------------------------------------------------------------------
@@ -101,11 +113,11 @@ public final class Storage implements Closeable {
   // ---------------------------------------------------------------------------
 
   public Blob get(BlobId blobId) {
-    return stripeFor(blobId.getName()).get(blobId);
+    return stripeFor(blobId).get(blobId);
   }
 
   public Blob create(BlobInfo blobInfo, byte[] content, BlobTargetOption... options) {
-    return stripeFor(blobInfo.getName()).create(blobInfo, content, options);
+    return stripeFor(blobInfo.getBlobId()).create(blobInfo, content, options);
   }
 
   // ---------------------------------------------------------------------------

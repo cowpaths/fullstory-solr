@@ -18,7 +18,6 @@ package org.apache.solr.storage;
 
 import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZE;
 
-import com.google.cloud.storage.Storage;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
