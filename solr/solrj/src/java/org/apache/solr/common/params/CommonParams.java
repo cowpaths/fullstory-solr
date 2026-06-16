@@ -53,6 +53,13 @@ public interface CommonParams {
   /** distrib string */
   String DISTRIB = "distrib";
 
+  /**
+   * <p><b>Experimental / debugging only.</b> Restrict the Lucene search to a single segment's leaf
+   * reader (e.g. {@code _8kn}). Requires a non-distributed request ({@code distrib=false} in
+   * SolrCloud). Segment names change after merges; do not use for production.
+   */
+  String SEGMENT = "segment";
+
   /** sort order */
   String SORT = "sort";
 

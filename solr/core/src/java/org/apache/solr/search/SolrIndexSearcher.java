@@ -43,9 +43,11 @@ import org.apache.lucene.document.Document;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.ExitableDirectoryReader;
 import org.apache.lucene.index.FieldInfos;
+import org.apache.lucene.index.FilterLeafReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.SegmentReader;
 import org.apache.lucene.index.MultiPostingsEnum;
 import org.apache.lucene.index.OrdinalMap;
 import org.apache.lucene.index.PostingsEnum;
@@ -782,10 +784,12 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   @Override
   protected void search(List<LeafReaderContext> leaves, Weight weight, Collector collector)
       throws IOException {
+    final List<LeafReaderContext> leavesToSearch =
+        filterLeavesForExperimentalSegmentParam(leaves, getExperimentalSegmentLeafFilter());
     QueryLimits queryLimits = QueryLimits.getCurrentLimits();
     if (useExitableDirectoryReader || !queryLimits.isLimitsEnabled()) {
       // no timeout.  Pass through to super class
-      super.search(leaves, weight, collector);
+      super.search(leavesToSearch, weight, collector);
     } else {
       // Timeout enabled!  This impl is maybe a hack.  Use Lucene's IndexSearcher timeout.
       // But only some queries have it so don't use on "this" (SolrIndexSearcher), not to mention
@@ -794,7 +798,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       new IndexSearcher(reader) { // cheap, actually!
         void searchWithTimeout() throws IOException {
           setTimeout(queryLimits); // Lucene's method name is less than ideal here...
-          super.search(leaves, weight, collector); // FYI protected access
+          super.search(leavesToSearch, weight, collector); // FYI protected access
           if (timedOut()) {
             throw new QueryLimitsExceededException(
                 "Limits exceeded! (search): " + queryLimits.limitStatusMessage());
@@ -802,6 +806,49 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
         }
       }.searchWithTimeout();
     }
+  }
+
+  /**
+   * When {@link CommonParams#SEGMENT} is set on the current {@link SolrRequestInfo} request, returns
+   * that value (trimmed); otherwise null. Used only for experimental local segment-restricted
+   * search.
+   */
+  private static String getExperimentalSegmentLeafFilter() {
+    SolrRequestInfo ri = SolrRequestInfo.getRequestInfo();
+    if (ri == null || ri.getReq() == null) {
+      return null;
+    }
+    String raw = ri.getReq().getParams().get(CommonParams.SEGMENT);
+    return raw == null ? null : raw.trim();
+  }
+
+  /**
+   * Returns leaves whose underlying {@link SegmentReader} name matches {@code segmentLeafName}
+   * (after {@link #normalizeSegmentLeafName(String)}), or the original list if {@code
+   * segmentLeafName} is null/blank.
+   */
+  static List<LeafReaderContext> filterLeavesForExperimentalSegmentParam(
+      List<LeafReaderContext> leaves, String segmentLeafName) {
+    if (segmentLeafName == null || segmentLeafName.isBlank()) {
+      return leaves;
+    }
+    final String want = normalizeSegmentLeafName(segmentLeafName);
+    List<LeafReaderContext> out = new ArrayList<>();
+    for (LeafReaderContext ctx : leaves) {
+      LeafReader unwrapped = FilterLeafReader.unwrap(ctx.reader());
+      if (unwrapped instanceof SegmentReader) {
+        SegmentReader sr = (SegmentReader) unwrapped;
+          if (want.equals(sr.getSegmentInfo().info.name)) {
+            out.add(ctx);
+          }
+      }
+    }
+    return out;
+  }
+
+  static String normalizeSegmentLeafName(String raw) {
+    String t = raw.trim();
+    return t.startsWith("_") ? t : "_" + t;
   }
 
   /**
@@ -1599,8 +1646,8 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
 
   public static final int NO_CHECK_QCACHE = 0x80000000;
   public static final int GET_DOCSET = 0x40000000;
-  static final int NO_CHECK_FILTERCACHE = 0x20000000;
-  static final int NO_SET_QCACHE = 0x10000000;
+  public static final int NO_CHECK_FILTERCACHE = 0x20000000;
+  public static final int NO_SET_QCACHE = 0x10000000;
   static final int SEGMENT_TERMINATE_EARLY = 0x08;
   public static final int TERMINATE_EARLY = 0x04;
   public static final int GET_DOCLIST = 0x02; // get the documents actually returned in a response
@@ -1659,6 +1706,11 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       if (!eq.getCache()) {
         flags |= (NO_CHECK_QCACHE | NO_SET_QCACHE | NO_CHECK_FILTERCACHE);
       }
+    }
+
+    String segmentLeafFilter = getExperimentalSegmentLeafFilter();
+    if (segmentLeafFilter != null && !segmentLeafFilter.isBlank()) {
+      flags |= (NO_CHECK_QCACHE | NO_SET_QCACHE | NO_CHECK_FILTERCACHE);
     }
 
     // we can try and look up the complete query in the cache.

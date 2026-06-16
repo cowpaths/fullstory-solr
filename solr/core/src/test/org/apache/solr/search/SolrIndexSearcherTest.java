@@ -17,6 +17,8 @@
 package org.apache.solr.search;
 
 import java.io.IOException;
+import java.util.List;
+import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.IndexSearcher;
@@ -33,6 +35,8 @@ import org.apache.lucene.search.TopDocsCollector;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.Weight;
 import org.apache.solr.SolrTestCaseJ4;
+import org.apache.solr.common.SolrException;
+import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.handler.component.MergeStrategy;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -432,6 +436,41 @@ public class SolrIndexSearcherTest extends SolrTestCaseJ4 {
               cmd.setFilterList(filterQuery);
               assertNotNull(searcher.getProcessedFilter(null, cmd.getFilterList()).postFilter);
               assertMatchesEqual(NUM_DOCS, searcher, cmd);
+              return null;
+            });
+  }
+
+  public void testExperimentalSegmentParamNormalize() {
+    assertEquals("_ab", SolrIndexSearcher.normalizeSegmentLeafName("ab"));
+    assertEquals("_ab", SolrIndexSearcher.normalizeSegmentLeafName("_ab"));
+    assertEquals("_ab", SolrIndexSearcher.normalizeSegmentLeafName(" ab "));
+  }
+
+  public void testExperimentalSegmentParamUnknownSegmentNoHits() throws Exception {
+    assertJQ(
+        req("q", "*:*", "rows", "0", "distrib", "false", "segment", "__no_such_segment__"),
+        "/response/numFound==0");
+  }
+
+  public void testExperimentalSegmentParamRejectedWhenDistribTrue() {
+    SolrException ex =
+        expectThrows(
+            SolrException.class,
+            () -> h.query(req("q", "*:*", "distrib", "true", "segment", "_a")));
+    assertTrue(ex.getMessage().contains(CommonParams.SEGMENT));
+  }
+
+  public void testExperimentalSegmentFilterLeavesBogusName() throws Exception {
+    h.getCore()
+        .withSearcher(
+            searcher -> {
+              List<LeafReaderContext> leaves = searcher.getIndexReader().leaves();
+              assertTrue(leaves.size() >= 1);
+              assertEquals(
+                  0,
+                  SolrIndexSearcher.filterLeavesForExperimentalSegmentParam(
+                          leaves, "_bogus_segment_name_xyz")
+                      .size());
               return null;
             });
   }

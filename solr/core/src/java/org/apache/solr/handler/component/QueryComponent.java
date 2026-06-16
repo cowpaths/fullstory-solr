@@ -408,11 +408,35 @@ public class QueryComponent extends SearchComponent {
         params.getBool(
             CommonParams.SEGMENT_TERMINATE_EARLY, CommonParams.SEGMENT_TERMINATE_EARLY_DEFAULT));
 
+    final String segmentLeafName = params.get(CommonParams.SEGMENT);
+    if (segmentLeafName != null && !segmentLeafName.isBlank()) {
+      if (rb.isDistrib) {
+        throw new SolrException(
+            SolrException.ErrorCode.BAD_REQUEST,
+            "The "
+                + CommonParams.SEGMENT
+                + " parameter is only for local, non-distributed search. Use distrib=false and "
+                + "avoid cross-shard execution.");
+      }
+      cmd.setFlags(
+          SolrIndexSearcher.NO_CHECK_QCACHE
+              | SolrIndexSearcher.NO_SET_QCACHE
+              | SolrIndexSearcher.NO_CHECK_FILTERCACHE);
+      if (cmd.getMultiThreaded()) {
+        cmd.setMultiThreaded(false);
+      }
+    }
+
     //
     // grouping / field collapsing
     //
     GroupingSpecification groupingSpec = rb.getGroupingSpec();
     if (groupingSpec != null) {
+      if (segmentLeafName != null && !segmentLeafName.isBlank()) {
+        throw new SolrException(
+            SolrException.ErrorCode.BAD_REQUEST,
+            "The " + CommonParams.SEGMENT + " parameter is not supported with grouping.");
+      }
       // not supported, silently ignore any segmentTerminateEarly flag
       cmd.setSegmentTerminateEarly(false);
       try {
