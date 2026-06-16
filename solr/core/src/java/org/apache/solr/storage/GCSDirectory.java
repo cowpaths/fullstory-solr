@@ -303,8 +303,7 @@ public class GCSDirectory extends SizeAwareDirectory {
   private static final class BatchValue {
     private final String segName;
     private final Set<UUID> blobUUIDs = ConcurrentHashMap.newKeySet();
-    private final AtomicLong lastCheck =
-        new AtomicLong(System.nanoTime() + ThreadLocalRandom.current().nextLong(RECHECK_NANOS));
+    private final AtomicLong lastCheck = new AtomicLong(System.nanoTime() - RECHECK_NANOS);
 
     private BatchValue(String segName) {
       this.segName = segName;
