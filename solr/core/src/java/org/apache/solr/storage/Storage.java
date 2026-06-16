@@ -45,6 +45,7 @@ public final class Storage implements Closeable {
 
   private final com.google.cloud.storage.Storage[] stripes;
   private final int mask;
+  private final int routingCharCount;
 
   /**
    * Creates a {@link Storage} instance.
@@ -63,6 +64,7 @@ public final class Storage implements Closeable {
     for (int i = mask; i >= 0; i--) {
       stripes[i] = factory.get();
     }
+    routingCharCount = (mask / 16) + 1; // for hex
   }
 
   /** Convenience factory for single-stripe use (tests, simple deployments). */
@@ -71,14 +73,11 @@ public final class Storage implements Closeable {
   }
 
   private com.google.cloud.storage.Storage stripeFor(String name) {
-    return stripes[name.hashCode() & mask];
+    return stripes[uuidArrayIdx(name)];
   }
 
-  private void uuidArrayIdx(String name) {}
-
-  /** Returns the first stripe, e.g. for probe operations that only need one client. */
-  public com.google.cloud.storage.Storage first() {
-    return stripes[0];
+  private int uuidArrayIdx(String name) {
+    return Integer.parseInt(name, 0, routingCharCount, 16) & mask;
   }
 
   // ---------------------------------------------------------------------------

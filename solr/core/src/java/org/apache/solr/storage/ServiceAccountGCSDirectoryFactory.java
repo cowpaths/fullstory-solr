@@ -87,13 +87,15 @@ public class ServiceAccountGCSDirectoryFactory extends GCSDirectoryFactory {
           ServiceAccountCredentials.fromStream(is)
               .createScoped(
                   Collections.singleton("https://www.googleapis.com/auth/devstorage.read_write"));
-      return Storage.of(
-          GrpcStorageOptions.newBuilder()
-              .setAttemptDirectPath(true)
-              .setCredentials(credentials)
-              .setProjectId(project)
-              .build()
-              .getService());
+      return new Storage(
+          getClientCount(DEFAULT_MAX_OPEN_CHANNELS),
+          () ->
+              GrpcStorageOptions.newBuilder()
+                  .setAttemptDirectPath(true)
+                  .setCredentials(credentials)
+                  .setProjectId(project)
+                  .build()
+                  .getService());
     } catch (IOException e) {
       throw new UncheckedIOException(
           "Failed to load GCS service account key from: " + keyFilePath, e);

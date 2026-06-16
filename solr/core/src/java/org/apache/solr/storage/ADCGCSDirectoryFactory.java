@@ -63,13 +63,15 @@ public class ADCGCSDirectoryFactory extends GCSDirectoryFactory {
           GoogleCredentials.getApplicationDefault()
               .createScoped(
                   Collections.singleton("https://www.googleapis.com/auth/devstorage.read_write"));
-      return Storage.of(
-          GrpcStorageOptions.newBuilder()
-              .setAttemptDirectPath(true)
-              .setCredentials(credentials)
-              .setProjectId(PROJECT)
-              .build()
-              .getService());
+      return new Storage(
+          getClientCount(DEFAULT_MAX_OPEN_CHANNELS),
+          () ->
+              GrpcStorageOptions.newBuilder()
+                  .setAttemptDirectPath(true)
+                  .setCredentials(credentials)
+                  .setProjectId(PROJECT)
+                  .build()
+                  .getService());
     } catch (IOException e) {
       throw new UncheckedIOException("Failed to load application-default GCS credentials", e);
     }
