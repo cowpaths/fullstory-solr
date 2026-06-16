@@ -63,8 +63,10 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
@@ -295,12 +297,13 @@ public class GCSDirectory extends SizeAwareDirectory {
 
   private final ConcurrentHashMap<String, SegmentStruct> pendingWrites = new ConcurrentHashMap<>();
 
-  private static final long RECHECK_NANOS = TimeUnit.MINUTES.toNanos(1);
+  private static final int RECHECK_NANOS = Math.toIntExact(TimeUnit.MINUTES.toNanos(2));
 
   private static final class BatchValue {
     private final String segName;
     private final Set<UUID> blobUUIDs = ConcurrentHashMap.newKeySet();
-    private volatile long lastCheck = 0;
+    private final AtomicLong lastCheck =
+        new AtomicLong(System.nanoTime() + ThreadLocalRandom.current().nextInt(RECHECK_NANOS));
 
     private BatchValue(String segName) {
       this.segName = segName;
@@ -308,12 +311,10 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     public boolean valid() {
       long now = System.nanoTime();
-      if (now - lastCheck > RECHECK_NANOS) {
-        lastCheck = now;
-        return false;
-      } else {
-        return true;
-      }
+      long extant = lastCheck.get();
+      return now - extant <= RECHECK_NANOS
+          || !lastCheck.compareAndSet(
+              extant, now + ThreadLocalRandom.current().nextInt(RECHECK_NANOS));
     }
   }
 
@@ -1923,6 +1924,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       }
       String segName = batchValue.segName;
       Set<UUID> blobs = batchValue.blobUUIDs;
+      // TODO: potential for lock contention here, esp. w/ SynchronousQueue
       dir.ioExec.submit(
           () -> {
             Path cfePath;
