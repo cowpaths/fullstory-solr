@@ -93,6 +93,7 @@ import org.apache.lucene.store.RandomAccessInput;
 import org.apache.lucene.util.BitUtil;
 import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.IOUtils;
+import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.lucene.util.compress.LZ4;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -421,11 +422,54 @@ public class GCSDirectory extends SizeAwareDirectory {
               }
             });
       }
-      for (Map.Entry<UUID, BatchValue> entry : batched.entrySet()) {
-        blobCoordinator.registerBatch(entry.getKey(), entry.getValue().blobUUIDs);
-      }
+      registerBatches(ioExec, blobCoordinator);
     } else {
       this.registerQueue = null;
+    }
+  }
+
+  private static final int REGISTER_CONCURRENCY = 8;
+
+  private void registerBatches(ExecutorService ioExec, BlobLifecycleCoordinator blobCoordinator)
+      throws IOException {
+    final Semaphore control = new Semaphore(REGISTER_CONCURRENCY); // limit our local concurrency
+    for (Map.Entry<UUID, BatchValue> entry : batched.entrySet()) {
+      UUID segUUID = entry.getKey();
+      Set<UUID> blobUUIDs = entry.getValue().blobUUIDs;
+      boolean mustRelease = true;
+      try {
+        if (!control.tryAcquire(5, TimeUnit.SECONDS)) {
+          mustRelease = false; // no acquisition
+          blobCoordinator.registerBatch(segUUID, blobUUIDs); // execute inline
+        } else {
+          ioExec.submit(
+              () -> {
+                try {
+                  blobCoordinator.registerBatch(segUUID, blobUUIDs);
+                  return null;
+                } finally {
+                  control.release();
+                }
+              });
+          mustRelease = false; // will be released by the submitted task
+        }
+      } catch (InterruptedException ex) {
+        Thread.currentThread().interrupt();
+        throw new ThreadInterruptedException(ex);
+      } finally {
+        if (mustRelease) {
+          control.release();
+        }
+      }
+    }
+    try {
+      // block until all tasks finish
+      if (!control.tryAcquire(REGISTER_CONCURRENCY, 60, TimeUnit.SECONDS)) {
+        throw new RuntimeException("timed out waiting for batch registration tasks to complete");
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new ThreadInterruptedException(e);
     }
   }
 
