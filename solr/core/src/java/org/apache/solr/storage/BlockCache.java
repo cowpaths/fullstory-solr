@@ -35,6 +35,8 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicReference;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -123,6 +125,86 @@ public class BlockCache implements Closeable {
     public boolean completeExceptionally(Throwable t) {
       return future.completeExceptionally(t);
     }
+
+    PBS outOfBandTryUnpinAll() {
+      PBS extant = state.get();
+      if (extant == UPDATING_SENTINEL || !state.compareAndSet(extant, null)) {
+        return null;
+      } else {
+        return extant;
+      }
+    }
+
+    private static final PBS UPDATING_SENTINEL = new PBS(null, null);
+
+    private final AtomicReference<PBS> state = new AtomicReference<>();
+
+    PBS lock() {
+      for (PBS extant = state.get(); ; ) {
+        if (extant == UPDATING_SENTINEL) {
+          Thread.yield();
+          extant = state.get();
+        } else {
+          PBS witness = state.compareAndExchange(extant, UPDATING_SENTINEL);
+          if (witness == extant) {
+            return extant;
+          } else {
+            extant = witness;
+          }
+        }
+      }
+    }
+
+    void unlock(PBS set) {
+      if (!state.compareAndSet(UPDATING_SENTINEL, set)) {
+        throw new IllegalStateException();
+      }
+    }
+
+    public GCSDirectoryFactory.Refreshable register(GCSDirectory.NodeRefStruct nodeRefStruct, BlockCache cache) {
+      PBS ret = null;
+      PBS lock = lock();
+      try {
+        if (lock != null) {
+          ret = lock;
+        } else {
+          for (; ; ) {
+            Cache<Node, Cache.Node<Node>> p = cache.pinnedLru();
+            Cache.Node<Node> permit = p.acquireNode((evicted) -> {
+              if (evicted != null) {
+                GCSDirectoryFactory.PerBlockSemaphore pbs = evicted.outOfBandTryUnpinAll();
+                if (pbs == null) {
+                  new Exception("unable to evict").printStackTrace(System.out);
+                  return evicted;
+                } else {
+                  pbs.unpinAll(cache);
+                }
+              }
+              return this;
+            });
+            if (permit == null) {
+              Thread.yield();
+            } else {
+              try {
+                if (permit.getValue() == this) {
+                  ret = new PBS(this, permit);
+                  break;
+                }
+              } finally {
+                p.unpin(permit, false);
+              }
+            }
+          }
+        }
+        return ret.register(nodeRefStruct, cache);
+      } finally {
+        if (ret == null) {
+          unlock(lock); // only upon exception
+        } else {
+          unlock(ret);
+        }
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -152,6 +234,14 @@ public class BlockCache implements Closeable {
 
   private final Partition[] partitions;
 
+  private static final int MAX_PINNED_BLOCKS = 4096;
+
+  private final Cache<BlockCache.Node, Cache.Node<BlockCache.Node>>[] pinned;
+
+  private Cache<BlockCache.Node, Cache.Node<BlockCache.Node>> pinnedLru() {
+    return pinned[tlrIndex()];
+  }
+
   /**
    * Creates a new block cache backed by a freshly-created temp file. The file is deleted
    * immediately after mapping so it does not outlive the JVM.
@@ -159,11 +249,22 @@ public class BlockCache implements Closeable {
   public BlockCache(long targetBytes, Path backingFile) throws IOException {
     ByteBuffer[] pool = initPool(targetBytes, backingFile, true);
     this.partitions = distribute(pool);
+    this.pinned = initPinned();
     log.info(
         "BlockCache initialized: nBlocks={}, targetBytes={}, nPartitions={}",
         pool.length,
         targetBytes,
         partitions.length);
+  }
+
+  private Cache<BlockCache.Node, Cache.Node<BlockCache.Node>>[] initPinned() {
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    Cache<Node, Cache.Node<Node>>[] arr = new Cache[computeNPartitions(MAX_PINNED_BLOCKS)];
+    List<Node> dummy = Arrays.asList(new Node[(MAX_PINNED_BLOCKS / arr.length) + 1]);
+    for (int i = arr.length - 1; i >= 0; i--) {
+      arr[i] = new Cache<>(dummy, false);
+    }
+    return arr;
   }
 
   /**
@@ -179,6 +280,7 @@ public class BlockCache implements Closeable {
   private BlockCache(Path existingBackingFile, long targetBytes) throws IOException {
     ByteBuffer[] pool = initPool(targetBytes, existingBackingFile, false);
     this.partitions = distribute(pool);
+    this.pinned = initPinned();
     log.info(
         "BlockCache initialized from existing file {}: nBlocks={}, targetBytes={}, nPartitions={}",
         existingBackingFile,
@@ -226,7 +328,102 @@ public class BlockCache implements Closeable {
    * queue we call it on. TODO: make it <i>actually</i> static, for clarity?
    */
   boolean pin(Node node) {
-    return partitions[0].pin(node);
+    switch (partitions[0].pin(node)) {
+      case PIN:
+        //registerPinned(node, this);
+        return true;
+      case RE_PIN:
+        return true;
+      case FAIL:
+        return false;
+      default:
+        throw new IllegalStateException();
+    }
+  }
+
+  private static final int REF_LIMIT = 20;
+
+  private static class PBS implements GCSDirectoryFactory.PerBlockSemaphore {
+
+    private final Node blockNode;
+    private final Cache.Node<Node> permit;
+    private final Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> refLru = new Cache<>(List.of(), false);
+
+    private PBS(Node blockNode, Cache.Node<Node> permit) {
+      this.blockNode = blockNode;
+      this.permit = permit;
+    }
+
+    @Override
+    public GCSDirectoryFactory.Refreshable register(GCSDirectory.NodeRefStruct nrs, BlockCache cache) {
+      for (boolean firstPass = true; ; firstPass = false) {
+        int refCount = blockNode.refCount();
+        Cache.Node<GCSDirectory.NodeRefStruct> permitF;
+        if (refCount < REF_LIMIT) {
+          permitF = new Cache.Node<>(nrs, null, 1);
+        } else {
+          Cache.Node<GCSDirectory.NodeRefStruct> permit =
+              refLru.acquireNode(
+                  (evicted) -> {
+                    if (evicted != null) {
+                      while (!evicted.outOfBandUnpin(cache)) {
+                        // assumption is that individual reads will complete quickly.
+                        Thread.yield();
+                      }
+                      System.out.println("YYY unpinned from 1");
+                    }
+                    return nrs;
+                  });
+          if (permit == null) {
+            permitF = new Cache.Node<>(nrs, null, 1);
+          } else if (firstPass && refCount > REF_LIMIT) {
+            // too many permits issued ... discard one
+            continue;
+          } else {
+            permitF = permit;
+          }
+        }
+        refLru.unpin(permitF, false);
+        return new GCSDirectoryFactory.Refreshable() {
+          @Override
+          public boolean refresh() {
+            if (true) return false;
+            if (refLru.pin(permitF) != Cache.Pin.FAIL) {
+              refLru.unpin(permitF, false);
+              return true;
+            } else {
+              return false;
+            }
+          }
+
+          @Override
+          public void close() {
+            refLru.pin(permitF);
+          }
+        };
+      }
+    }
+
+    @Override
+    public void unpinAll(BlockCache cache) {
+      // TODO: pretty sure we have an effective lock at this point and can just
+      //  iterate entries instead of `acquireNode()` in a loop
+      Cache.Node<GCSDirectory.NodeRefStruct> permit;
+      do {
+        permit =
+            refLru.acquireNode(
+                (evicted) -> {
+                  if (evicted != null) {
+                    while (!evicted.outOfBandUnpin(cache)) {
+                      // assumption is that individual reads will complete quickly.
+                      Thread.yield();
+                    }
+                    System.out.println("YYY unpinned from 2");
+                  }
+                  return null;
+                });
+      } while (permit != null);
+    }
   }
 
   /**
@@ -238,7 +435,12 @@ public class BlockCache implements Closeable {
   }
 
   void unpin(Node node, boolean recordAccess) {
-    partitions[tlrIndex()].unpin(node, recordAccess);
+    if (partitions[tlrIndex()].unpin(node, recordAccess)) {
+      GCSDirectoryFactory.PerBlockSemaphore pbs = node.outOfBandTryUnpinAll();
+      if (pbs != null) {
+        //pbs.unpinAll(this); // TODO: wha?
+      }
+    }
   }
 
   /**
@@ -246,7 +448,9 @@ public class BlockCache implements Closeable {
    * the first is fully pinned. Returns {@code null} only if all partitions are exhausted.
    */
   Node acquireNode() {
-    return partitions[tlrIndex()].acquireNode();
+    Node ret = partitions[tlrIndex()].acquireNode();
+    //registerPinned(ret, this);
+    return ret;
   }
 
   /**

@@ -30,16 +30,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.util.Arrays;
-import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.function.IntSupplier;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.IOContext;
@@ -144,8 +140,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     }
   }
 
-  private static final int MAX_CONCURRENT_PINNED = 4096;
-
   interface Refreshable extends Closeable {
     boolean refresh();
 
@@ -153,73 +147,12 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     void close(); // no IOException
   }
 
+  interface PerBlockSemaphore {
+    Refreshable register(GCSDirectory.NodeRefStruct instance, BlockCache cache);
+    void unpinAll(BlockCache cache);
+  }
   interface PinSemaphore {
-    Refreshable register(GCSDirectory.NodeRefStruct instance);
-  }
-
-  static PinSemaphore defaultMaxPinned(BlockCache cache) {
-    int nPartitions = pinSemaphoreNPartitions();
-    int slotsPerPartition = MAX_CONCURRENT_PINNED / nPartitions;
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>>[] partitions =
-        new Cache[nPartitions];
-    final IntSupplier idx;
-    if (nPartitions == 1) {
-      idx = () -> 0;
-    } else {
-      idx = () -> ThreadLocalRandom.current().nextInt(nPartitions);
-    }
-    List<GCSDirectory.NodeRefStruct> dummy =
-        Arrays.asList(new GCSDirectory.NodeRefStruct[slotsPerPartition]);
-    for (int i = 0; i < nPartitions; i++) {
-      partitions[i] = new Cache<>(dummy, false);
-    }
-    return instance -> {
-      for (; ; ) {
-        Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> p =
-            partitions[idx.getAsInt()];
-        Cache.Node<GCSDirectory.NodeRefStruct> permit =
-            p.acquireNode(
-                (evicted) -> {
-                  if (evicted != null) {
-                    while (!evicted.outOfBandUnpin(cache)) {
-                      // assumption is that individual reads will complete quickly.
-                      Thread.yield();
-                    }
-                  }
-                  return instance;
-                });
-        if (permit == null) {
-          Thread.yield(); // all busy; no deadlock possible, so progress is guaranteed
-        } else {
-          assert permit.getValue() == instance;
-          p.unpin(permit, false);
-          return new Refreshable() {
-            @Override
-            public boolean refresh() {
-              if (p.pin(permit)) {
-                p.unpin(permit, false);
-                return true;
-              } else {
-                return false;
-              }
-            }
-
-            @Override
-            public void close() {
-              p.close(permit, false);
-            }
-          };
-        }
-      }
-    };
-  }
-
-  private static int pinSemaphoreNPartitions() {
-    // Largest power of two <= availableProcessors, capped so each partition retains at least
-    // that many slots (ensuring the pool stays meaningfully sized per partition).
-    int n = Integer.highestOneBit(Math.max(1, Runtime.getRuntime().availableProcessors()));
-    return n <= MAX_CONCURRENT_PINNED / n ? n : 1;
+    Refreshable register(BlockCache.Node instance, GCSDirectory.NodeRefStruct nrs);
   }
 
   /** Node-level resources shared across all {@link GCSDirectory} instances on this node. */
@@ -285,7 +218,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         Path coreRootDirectory)
         throws IOException {
       this.blockCache = blockCache;
-      this.acquirePinPermit = defaultMaxPinned(blockCache);
+      this.acquirePinPermit = null;
       this.storage = storage;
       this.bufferPool = new DirectBufferPool(GCS_WRITE_BUFFER_SIZE, 4096, 1);
       this.metadataBucket = metadataBucket;

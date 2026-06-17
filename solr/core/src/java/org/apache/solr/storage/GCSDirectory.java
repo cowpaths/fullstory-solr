@@ -1437,7 +1437,7 @@ public class GCSDirectory extends SizeAwareDirectory {
      * {@link GCSIndexInput#refill}), so state is already PINNED and direct update is safe.
      */
     private int setCurrentNode(
-        BlockCache.Node node, int blockIdx, GCSDirectoryFactory.PinSemaphore semaphore) {
+        BlockCache.Node node, int blockIdx, BlockCache cache) {
       assert state.get() == State.PINNED; // should only be called from a pinned context
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
       currentNode = node;
@@ -1460,12 +1460,12 @@ public class GCSDirectory extends SizeAwareDirectory {
           return sequentialAccessCount = 0;
         }
       } finally {
+        if (readPermit != null) {
+          readPermit.close(); // TODO: is this necessary?
+        }
         if (node != null) {
-          if (readPermit == null) {
-            readPermit = semaphore.register(this);
-          } else {
-            readPermit.refresh();
-          }
+          System.out.println(blockIdx+" "+this);
+          readPermit = node.register(this, cache);
         }
       }
     }
@@ -1474,9 +1474,13 @@ public class GCSDirectory extends SizeAwareDirectory {
      * Unpins the current block. Always called from within a {@code localPin()} context (via {@link
      * GCSIndexInput#refill}), so state is already PINNED and direct update is safe.
      */
+    @SuppressWarnings("try")
     private void unpinCurrentBlock(BlockCache blockCache) {
       BlockCache.Node toUnpin = currentNode;
       if (toUnpin != null) {
+        try (GCSDirectoryFactory.Refreshable c = readPermit) {
+          readPermit = null;
+        }
         currentNode = null;
         currentBlockIdx = ~currentBlockIdx;
         blockCache.unpin(toUnpin);
@@ -1524,6 +1528,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       if (state.compareAndSet(State.IDLE, State.UNPINNING)) {
         // scavenger has evicted our pinned-LRU slot; signal that re-acquire is needed
         // NOTE: null out `readPermit`, but do not close it
+        System.out.println("unpin "+(readPermit != null)+" "+currentBlockIdx+" "+this);
         readPermit = null;
         doUnpin(blockCache, State.UNPINNING);
         return true;
@@ -1864,7 +1869,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     private void setCurrentNode(BlockCache.Node node, int blockIdx) {
-      int seqAcccessCount = currentNodeRef.setCurrentNode(node, blockIdx, dir.acquirePinPermit);
+      int seqAcccessCount = currentNodeRef.setCurrentNode(node, blockIdx, dir.cache);
       switch (seqAcccessCount) {
         case -1:
           // reset, no read-ahead
@@ -1952,6 +1957,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           dir.cache.unpin(cached);
           throw unwrapException(e.getCause());
         }
+        System.out.println("XXX1 "+blockIdx+" "+this.currentNodeRef+", "+this+", "+System.identityHashCode(this));
         setCurrentNode(cached, blockIdx);
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         postBuffer.clear().limit(decompressedLen);
@@ -1968,6 +1974,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           maybeReadAheadSeg();
           ByteBuffer buf =
               populateBuf(blobName, pos, compressedLen, blockIdx, decompressedLen, node);
+          System.out.println("XXX2 "+blockIdx+" "+this.currentNodeRef+", "+this);
           setCurrentNode(node, blockIdx);
           postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         } else {
@@ -1981,6 +1988,7 @@ public class GCSDirectory extends SizeAwareDirectory {
               dir.cache.unpin(extant);
               throw unwrapException(e.getCause());
             }
+            System.out.println("XXX3 "+blockIdx+" "+this.currentNodeRef+", "+this);
             setCurrentNode(extant, blockIdx);
             postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
           } else {
