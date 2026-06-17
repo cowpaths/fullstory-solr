@@ -1417,7 +1417,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
     private BlockCache.Node currentNode;
     private int currentBlockIdx = -1;
-    private boolean readPermitRegistered;
+    private GCSDirectoryFactory.Refreshable readPermit;
     private int sequentialAccessCount = 0;
 
     private void localPin() {
@@ -1460,9 +1460,12 @@ public class GCSDirectory extends SizeAwareDirectory {
           return sequentialAccessCount = 0;
         }
       } finally {
-        if (node != null && !readPermitRegistered) {
-          readPermitRegistered = true;
-          semaphore.register(this);
+        if (node != null) {
+          if (readPermit == null) {
+            readPermit = semaphore.register(this);
+          } else {
+            readPermit.refresh();
+          }
         }
       }
     }
@@ -1484,9 +1487,13 @@ public class GCSDirectory extends SizeAwareDirectory {
      * Unpins the current block from outside a {@code localPin()} context (i.e. from {@link
      * GCSIndexInput#close}). Handles the race with {@link #outOfBandUnpin}.
      */
-    private void unpinFor(BlockCache blockCache) {
+    @SuppressWarnings("try")
+    private void closeFor(BlockCache blockCache) {
       switch (state.compareAndExchange(State.IDLE, State.PINNED)) {
         case IDLE:
+          try (GCSDirectoryFactory.Refreshable c = readPermit) {
+            readPermit = null;
+          }
           doUnpin(blockCache, State.PINNED);
           break;
         case UNPINNING:
@@ -1516,7 +1523,8 @@ public class GCSDirectory extends SizeAwareDirectory {
     boolean outOfBandUnpin(BlockCache blockCache) {
       if (state.compareAndSet(State.IDLE, State.UNPINNING)) {
         // scavenger has evicted our pinned-LRU slot; signal that re-acquire is needed
-        readPermitRegistered = false;
+        // NOTE: null out `readPermit`, but do not close it
+        readPermit = null;
         doUnpin(blockCache, State.UNPINNING);
         return true;
       }
@@ -2762,8 +2770,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private void unsetBuffers() {
       accessMapped = null;
-      currentNodeRef.unpinFor(dir.cache);
-      currentNodeRef.readPermitRegistered = false;
+      currentNodeRef.closeFor(dir.cache);
       postBuffer = null;
       floatViews = null;
       intViews = null;

@@ -146,8 +146,15 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
 
   private static final int MAX_CONCURRENT_PINNED = 4096;
 
+  interface Refreshable extends Closeable {
+    boolean refresh();
+
+    @Override
+    void close(); // no IOException
+  }
+
   interface PinSemaphore {
-    void register(GCSDirectory.NodeRefStruct instance);
+    Refreshable register(GCSDirectory.NodeRefStruct instance);
   }
 
   static PinSemaphore defaultMaxPinned(BlockCache cache) {
@@ -187,7 +194,22 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         } else {
           assert permit.getValue() == instance;
           p.unpin(permit, false);
-          return;
+          return new Refreshable() {
+            @Override
+            public boolean refresh() {
+              if (p.pin(permit)) {
+                p.unpin(permit, false);
+                return true;
+              } else {
+                return false;
+              }
+            }
+
+            @Override
+            public void close() {
+              p.close(permit, false);
+            }
+          };
         }
       }
     };
