@@ -1429,11 +1429,15 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.parent = parent;
     }
 
-    private void localPin(BlockCache cache) {
+    private void localPin(BlockCache cache, long pos) {
       if (parent != null) {
         NodeRefStruct p = parent;
         parent = null;
-        if (cloneSource == Thread.currentThread().getId()) {
+        // snapshot parent.currentBlockIdx, quick check whether there's any benefit to inheriting
+        int snapshot;
+        if (cloneSource == Thread.currentThread().getId()
+            && ((int) (pos >> COMPRESSION_BLOCK_SHIFT))
+                == ((snapshot = p.currentBlockIdx) < 0 ? ~snapshot : snapshot)) {
           while (!p.state.compareAndSet(State.IDLE, State.PINNED)) {
             Thread.yield();
           }
@@ -1861,8 +1865,8 @@ public class GCSDirectory extends SizeAwareDirectory {
     // ---------------------------------------------------------------------------
 
     private void localPin() throws IOException {
-      currentNodeRef.localPin(dir.cache);
       long pos = seekPos;
+      currentNodeRef.localPin(dir.cache, pos == -1 ? filePointer : pos);
       if (pos != -1) {
         seekPos = -1;
         actualSeek(pos);
@@ -2187,7 +2191,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     public byte readByte(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      currentNodeRef.localPin(dir.cache, pos);
       try {
         return _readByte(pos);
       } finally {
@@ -2197,7 +2201,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     public short readShort(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      currentNodeRef.localPin(dir.cache, pos);
       try {
         final long absolutePos = pos + offset;
         final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
@@ -2214,7 +2218,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     public int readInt(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      currentNodeRef.localPin(dir.cache, pos);
       try {
         return _readInt(pos);
       } finally {
@@ -2224,7 +2228,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     public long readLong(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache);
+      currentNodeRef.localPin(dir.cache, pos);
       try {
         return _readLong(pos);
       } finally {
