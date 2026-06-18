@@ -150,7 +150,13 @@ public class BlockCache implements Closeable {
         } else {
           PBS witness = state.compareAndExchange(extant, UPDATING_SENTINEL);
           if (witness == extant) {
-            if (extant == null || extant.pin()) {
+            if (extant == null) {
+              // keep UPDATING_SENTINEL in place while we init
+              return extant;
+            } else if (extant.pin()) {
+              if (!state.compareAndSet(UPDATING_SENTINEL, extant)) {
+                throw new IllegalStateException();
+              }
               return extant;
             } else if (!state.compareAndSet(UPDATING_SENTINEL, extant)) {
               // PBS are only permanently removed from `pinnedBlockLru` via eviction,
@@ -174,7 +180,7 @@ public class BlockCache implements Closeable {
 
     public PinRef register(GCSDirectory.NodeRefStruct nodeRefStruct, BlockCache cache) {
       PBS ret = null;
-      PBS lock = lock();
+      final PBS lock = lock();
       PBS[] deferredHolder = new PBS[1];
       try {
         if (lock != null) {
@@ -213,7 +219,9 @@ public class BlockCache implements Closeable {
         }
         return ret.register(nodeRefStruct, cache);
       } finally {
-        unlock(ret == null ? lock : ret);
+        if (lock == null) {
+          unlock(ret);
+        }
         if (deferredHolder[0] != null) {
           deferredHolder[0].unpinAll(cache);
         }
@@ -221,9 +229,27 @@ public class BlockCache implements Closeable {
     }
   }
 
-  interface PinRef extends Closeable {
+  static class PinRef implements Closeable {
+    private final PBS parent;
+    private final Cache.Node<GCSDirectory.NodeRefStruct> permit;
+
+    private PinRef(PBS parent, Cache.Node<GCSDirectory.NodeRefStruct> permit) {
+      this.parent = parent;
+      this.permit = permit;
+    }
+
+    public PinRef incRef(GCSDirectory.NodeRefStruct nrs, BlockCache cache) {
+      if (parent.pin()) {
+        return parent.register(nrs, cache); // unpins parent
+      } else {
+        return null;
+      }
+    }
+
     @Override
-    void close(); // no IOException
+    public void close() {
+      parent.refLru.pin(permit);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -395,7 +421,7 @@ public class BlockCache implements Closeable {
             }
           }
           refLru.unpin(permitF, false);
-          return () -> refLru.pin(permitF); // simply remove from LRU list and discard
+          return new PinRef(this, permitF);
         }
       } finally {
         blockLru.unpin(permit, false);
