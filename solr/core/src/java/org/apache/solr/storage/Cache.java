@@ -297,7 +297,11 @@ class Cache<V, N extends Cache.Node<V>> {
 
   private static final int UNPIN_SENTINEL = Integer.MIN_VALUE >> 1;
 
-  enum Pin {PIN, RE_PIN, FAIL}
+  enum Pin {
+    PIN,
+    RE_PIN,
+    FAIL
+  }
 
   /**
    * Pins {@code node} for the duration of a read, preventing eviction. Returns {@code false} if the

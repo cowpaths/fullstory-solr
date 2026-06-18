@@ -36,7 +36,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -136,7 +135,9 @@ public class BlockCache implements Closeable {
 
     private static final PBS UPDATING_SENTINEL = new PBS(null, null);
 
-    /** Sentinel returned by {@link #outOfBandTryUnpinAll} when the block had no PBS (already clean). */
+    /**
+     * Sentinel returned by {@link #outOfBandTryUnpinAll} when the block had no PBS (already clean).
+     */
     private static final PBS EVICTED = new PBS(null, null);
 
     private final AtomicReference<PBS> state = new AtomicReference<>();
@@ -163,7 +164,8 @@ public class BlockCache implements Closeable {
       }
     }
 
-    public GCSDirectoryFactory.Refreshable register(GCSDirectory.NodeRefStruct nodeRefStruct, BlockCache cache) {
+    public GCSDirectoryFactory.Refreshable register(
+        GCSDirectory.NodeRefStruct nodeRefStruct, BlockCache cache) {
       PBS ret = null;
       PBS lock = lock();
       PBS[] deferredHolder = new PBS[1];
@@ -173,22 +175,24 @@ public class BlockCache implements Closeable {
         } else {
           for (; ; ) {
             Cache<Node, Cache.Node<Node>> p = cache.pinnedLru();
-            Cache.Node<Node> permit = p.acquireNode((evicted) -> {
-              if (evicted != null) {
-                PBS pbs = evicted.outOfBandTryUnpinAll();
-                if (pbs == null) {
-                  return evicted; // sentinel held on evicted block; retry
-                }
-                if (pbs != EVICTED) {
-                  // Defer unpinAll to after our sentinel is released. Calling it now (while holding
-                  // the sentinel) causes livelock: an NRS thread in PINNED state that needs to
-                  // register with *our* block would spin on outOfBandUnpin while we spin waiting
-                  // for it to reach IDLE — classic hold-and-wait.
-                  deferredHolder[0] = pbs;
-                }
-              }
-              return this;
-            });
+            Cache.Node<Node> permit =
+                p.acquireNode(
+                    (evicted) -> {
+                      if (evicted != null) {
+                        PBS pbs = evicted.outOfBandTryUnpinAll();
+                        if (pbs == null) {
+                          return evicted; // sentinel held on evicted block; retry
+                        }
+                        if (pbs != EVICTED) {
+                          // Defer unpinAll to after our sentinel is released. Calling it now (while
+                          // holding the sentinel) causes livelock: an NRS thread in PINNED state
+                          // that needs to register with *our* block would spin on outOfBandUnpin
+                          // while we spin waiting for it to reach IDLE — classic hold-and-wait.
+                          deferredHolder[0] = pbs;
+                        }
+                      }
+                      return this;
+                    });
             if (permit == null) {
               Thread.yield();
             } else {
@@ -336,7 +340,6 @@ public class BlockCache implements Closeable {
   boolean pin(Node node) {
     switch (partitions[0].pin(node)) {
       case PIN:
-        //registerPinned(node, this);
         return true;
       case RE_PIN:
         return true;
@@ -353,7 +356,8 @@ public class BlockCache implements Closeable {
 
     private final Node blockNode;
     private final Cache.Node<Node> permit;
-    private final Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> refLru = new Cache<>(List.of(), false);
+    private final Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> refLru =
+        new Cache<>(List.of(), false);
 
     private PBS(Node blockNode, Cache.Node<Node> permit) {
       this.blockNode = blockNode;
@@ -361,7 +365,8 @@ public class BlockCache implements Closeable {
     }
 
     @Override
-    public GCSDirectoryFactory.Refreshable register(GCSDirectory.NodeRefStruct nrs, BlockCache cache) {
+    public GCSDirectoryFactory.Refreshable register(
+        GCSDirectory.NodeRefStruct nrs, BlockCache cache) {
       for (boolean firstPass = true; ; firstPass = false) {
         int refCount = blockNode.refCount();
         Cache.Node<GCSDirectory.NodeRefStruct> permitF;
@@ -447,9 +452,7 @@ public class BlockCache implements Closeable {
    * the first is fully pinned. Returns {@code null} only if all partitions are exhausted.
    */
   Node acquireNode() {
-    Node ret = partitions[tlrIndex()].acquireNode();
-    //registerPinned(ret, this);
-    return ret;
+    return partitions[tlrIndex()].acquireNode();
   }
 
   /**

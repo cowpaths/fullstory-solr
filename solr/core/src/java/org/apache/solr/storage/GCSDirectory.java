@@ -1437,8 +1437,7 @@ public class GCSDirectory extends SizeAwareDirectory {
      * Updates the current cached block. Always called from within a {@code localPin()} context (via
      * {@link GCSIndexInput#refill}), so state is already PINNED and direct update is safe.
      */
-    private int setCurrentNode(
-        BlockCache.Node node, int blockIdx, BlockCache cache) {
+    private int setCurrentNode(BlockCache.Node node, int blockIdx, BlockCache cache) {
       assert state.get() == State.PINNED; // should only be called from a pinned context
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
       currentNode = node;
