@@ -150,7 +150,15 @@ public class BlockCache implements Closeable {
         } else {
           PBS witness = state.compareAndExchange(extant, UPDATING_SENTINEL);
           if (witness == extant) {
-            return extant;
+            if (extant == null || extant.pin()) {
+              return extant;
+            } else if (!state.compareAndSet(UPDATING_SENTINEL, extant)) {
+              // PBS are only permanently removed from `pinnedBlockLru` via eviction,
+              // and eviction happens _before_ `state` gets nulled out, it's possible
+              // that we'll occasionally be unable to acquire a pin; just try again
+              // after releasing our `UPDATING_SENTINEL` claim (put back `extant`)
+              throw new IllegalStateException();
+            }
           } else {
             extant = witness;
           }
@@ -179,10 +187,10 @@ public class BlockCache implements Closeable {
                 p.acquireNode(
                     (evicted) -> {
                       if (evicted != null) {
-                        PBS pbs = evicted.outOfBandTryUnpinAll();
-                        if (pbs == null) {
-                          return evicted; // sentinel held on evicted block; retry
-                        }
+                        PBS pbs;
+                        do {
+                          pbs = evicted.outOfBandTryUnpinAll();
+                        } while (pbs == null);
                         if (pbs != EVICTED) {
                           // Defer unpinAll to after our sentinel is released. Calling it now (while
                           // holding the sentinel) causes livelock: an NRS thread in PINNED state
@@ -200,11 +208,11 @@ public class BlockCache implements Closeable {
               // `p.unpin(permit, false)` is called in `ret.register()` below
               break;
             } else {
-              p.unpin(permit, false);
+              throw new IllegalStateException();
             }
           }
         }
-        return ret.register(nodeRefStruct, cache, lock != null);
+        return ret.register(nodeRefStruct, cache);
       } finally {
         unlock(ret == null ? lock : ret);
         if (deferredHolder[0] != null) {
@@ -356,11 +364,7 @@ public class BlockCache implements Closeable {
 
     @Override
     public GCSDirectoryFactory.PinRef register(
-        GCSDirectory.NodeRefStruct nrs, BlockCache cache, boolean refresh) {
-      // if this is a re-access, re-insert node at head
-      if (refresh && !blockLru.pin(permit)) {
-        throw new IllegalStateException(); // TODO: if we fail to pin here, what then?
-      }
+        GCSDirectory.NodeRefStruct nrs, BlockCache cache) {
       try {
         for (boolean firstPass = true; ; firstPass = false) {
           int refCount = blockNode.refCount();
@@ -414,6 +418,10 @@ public class BlockCache implements Closeable {
                   return null;
                 });
       } while (permit != null);
+    }
+
+    boolean pin() {
+      return blockLru.pin(permit);
     }
   }
 

@@ -146,7 +146,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   }
 
   interface PerBlockSemaphore {
-    PinRef register(GCSDirectory.NodeRefStruct instance, BlockCache cache, boolean refresh);
+    PinRef register(GCSDirectory.NodeRefStruct instance, BlockCache cache);
 
     void unpinAll(BlockCache cache);
   }
