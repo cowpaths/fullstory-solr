@@ -1908,14 +1908,6 @@ public class GCSDirectory extends SizeAwareDirectory {
       refill(blockOffset, compressedLen, blockIdx);
     }
 
-    private void refill() throws IOException {
-      int blockIdx = currentNodeRef.currentBlockIdx + 1;
-      if (blockIdx > lastBlockIdx) throw new EOFException();
-      long blockOffset = blockOffsets[blockIdx];
-      int compressedLen = (int) (blockOffsets[blockIdx + 1] - blockOffset);
-      refill(blockOffset, compressedLen, blockIdx);
-    }
-
     private static final int MAX_READ_AHEAD = 16;
 
     private int readAheadTo = 0;
@@ -2263,7 +2255,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     public byte readByte() throws IOException {
       localPin();
       try {
-        if (!postBuffer.hasRemaining()) refill();
+        if (!postBuffer.hasRemaining()) initBlock(currentNodeRef.currentBlockIdx + 1);
         filePointer++;
         return guard.getByte(postBuffer);
       } finally {
@@ -2281,7 +2273,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           guard.getBytes(postBuffer, dst, offset, left);
           len -= left;
           offset += left;
-          refill();
+          initBlock(currentNodeRef.currentBlockIdx + 1);
           left = postBuffer.remaining();
         }
         guard.getBytes(postBuffer, dst, offset, len);
@@ -2297,7 +2289,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     /** Read next byte within a localPin() context; refills block if at boundary. */
     private byte _readByte(final int remaining) throws IOException {
-      if (remaining == 0) refill();
+      if (remaining == 0) initBlock(currentNodeRef.currentBlockIdx + 1);
       filePointer++;
       return guard.getByte(postBuffer);
     }
@@ -2525,7 +2517,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         guard.getBytes(postBuffer, dst, offset, left);
         toRead -= left;
         offset += left;
-        refill();
+        initBlock(currentNodeRef.currentBlockIdx + 1);
         left = postBuffer.remaining();
       } while (left < toRead);
       guard.getBytes(postBuffer, dst, offset, toRead);
