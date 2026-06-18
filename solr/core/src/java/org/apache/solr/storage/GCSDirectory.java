@@ -1433,45 +1433,49 @@ public class GCSDirectory extends SizeAwareDirectory {
       if (parent != null) {
         NodeRefStruct p = parent;
         parent = null;
-        // snapshot parent.currentBlockIdx, quick check whether there's any benefit to inheriting
-        int snapshot;
-        if (cloneSource == Thread.currentThread().getId()
-            && ((int) (pos >> COMPRESSION_BLOCK_SHIFT))
-                == ((snapshot = p.currentBlockIdx) < 0 ? ~snapshot : snapshot)) {
-          while (!p.state.compareAndSet(State.IDLE, State.PINNED)) {
-            // we have to pin the parent to be sure that it doesn't get
-            // "out-of-band closed" while we're inheriting its values
-            Thread.yield();
-          }
-          BlockCache.PinRef parentPermit;
-          BlockCache.Node candidate;
-          int parentBlockIdx;
-          try {
-            parentPermit = p.readPermit;
-            candidate = p.currentNode;
-            parentBlockIdx = p.currentBlockIdx;
-            sequentialAccessCount = p.sequentialAccessCount; // we can always inherit this
-          } finally {
-            p.localUnpin();
-          }
-          // `p.localUnpin()` before actually grabbing values, to prevent livelock.
-          if (parentPermit == null || !cache.pin(candidate)) {
-            currentBlockIdx = parentBlockIdx < 0 ? parentBlockIdx : ~parentBlockIdx; // negative
-          } else {
-            currentBlockIdx = parentBlockIdx < 0 ? ~parentBlockIdx : parentBlockIdx; // non-negative
-            currentNode = candidate;
-            if ((readPermit = parentPermit.copy(this, cache)) == null) {
-              // unable to acquire read permit.
-              // unpin, null out `currentNode`, and flip `currentBlockIdx`
-              cache.unpin(candidate, false);
-              currentNode = null;
-              currentBlockIdx = ~currentBlockIdx; // negative
-            }
-          }
-        }
+        maybeInheritPinned(p, cache, pos);
       }
       while (!state.compareAndSet(State.IDLE, State.PINNED)) {
         Thread.yield();
+      }
+    }
+
+    private void maybeInheritPinned(NodeRefStruct p, BlockCache cache, long pos) {
+      // snapshot parent.currentBlockIdx, quick check whether there's any benefit to inheriting
+      int snapshot;
+      if (cloneSource == Thread.currentThread().getId()
+          && ((int) (pos >> COMPRESSION_BLOCK_SHIFT))
+              == ((snapshot = p.currentBlockIdx) < 0 ? ~snapshot : snapshot)) {
+        while (!p.state.compareAndSet(State.IDLE, State.PINNED)) {
+          // we have to pin the parent to be sure that it doesn't get
+          // "out-of-band closed" while we're inheriting its values
+          Thread.yield();
+        }
+        BlockCache.PinRef parentPermit;
+        BlockCache.Node candidate;
+        int parentBlockIdx;
+        try {
+          parentPermit = p.readPermit;
+          candidate = p.currentNode;
+          parentBlockIdx = p.currentBlockIdx;
+          sequentialAccessCount = p.sequentialAccessCount; // we can always inherit this
+        } finally {
+          p.localUnpin();
+        }
+        // `p.localUnpin()` before actually grabbing values, to prevent livelock.
+        if (parentPermit == null || !cache.pin(candidate)) {
+          currentBlockIdx = parentBlockIdx < 0 ? parentBlockIdx : ~parentBlockIdx; // negative
+        } else {
+          currentBlockIdx = parentBlockIdx < 0 ? ~parentBlockIdx : parentBlockIdx; // non-negative
+          currentNode = candidate;
+          if ((readPermit = parentPermit.copy(this, cache)) == null) {
+            // unable to acquire read permit.
+            // unpin, null out `currentNode`, and flip `currentBlockIdx`
+            cache.unpin(candidate, false);
+            currentNode = null;
+            currentBlockIdx = ~currentBlockIdx; // negative
+          }
+        }
       }
     }
 
