@@ -1996,63 +1996,65 @@ public class GCSDirectory extends SizeAwareDirectory {
       currentNodeRef.unpinCurrentBlock(dir.cache);
 
       BlockCache.Node node;
+      ByteBuffer buf;
       BlockCache.Node cached = accessMapped.get(blockIdx);
       if (cached != null && dir.cache.pin(cached)) {
         // Cache hit (or in-flight by the winning thread — join() blocks until populated).
-        ByteBuffer buf;
+        node = cached;
         try {
           buf = cached.join();
         } catch (CompletionException e) {
           dir.cache.unpin(cached);
           throw unwrapException(e.getCause());
         }
-        setCurrentNode(cached, blockIdx);
-        postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-        postBuffer.clear().limit(decompressedLen);
-        postBufferBaseline = 0;
-        longViews = null;
-        intViews = null;
-        floatViews = null;
-        return;
-      } else if ((node = dir.cache.acquireNode()) != null) {
-        // cache miss
-        BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
-        if (extant == cached) {
-          // We won the race: fetch from GCS and populate the node.
-          maybeReadAheadSeg();
-          ByteBuffer buf =
-              populateBuf(blobName, pos, compressedLen, blockIdx, decompressedLen, node);
-          setCurrentNode(node, blockIdx);
-          postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-        } else {
-          // Another thread won the race; wait for its result.
-          dir.cache.close(node, true);
-          if (dir.cache.pin(extant)) {
-            ByteBuffer buf;
-            try {
-              buf = extant.join();
-            } catch (CompletionException e) {
-              dir.cache.unpin(extant);
-              throw unwrapException(e.getCause());
-            }
-            setCurrentNode(extant, blockIdx);
-            postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-          } else {
-            // Serve uncached.
-            uncached(pos, compressedLen, blockIdx, decompressedLen);
-            return;
-          }
-        }
-        postBuffer.clear().limit(decompressedLen);
-        postBufferBaseline = 0;
-        longViews = null;
-        intViews = null;
-        floatViews = null;
+      } else if ((node = dir.cache.acquireNode()) != null
+          && (node = cacheMiss(pos, compressedLen, blockIdx, cached, node, decompressedLen))
+              != null) {
+        buf = node.join(); // guaranteed to return immediately
+      } else {
+        // Serve uncached.
+        uncached(pos, compressedLen, blockIdx, decompressedLen);
         return;
       }
+      setCurrentNode(node, blockIdx);
+      postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+      postBuffer.clear().limit(decompressedLen);
+      postBufferBaseline = 0;
+      longViews = null;
+      intViews = null;
+      floatViews = null;
+    }
 
-      // Serve uncached.
-      uncached(pos, compressedLen, blockIdx, decompressedLen);
+    private BlockCache.Node cacheMiss(
+        long pos,
+        int compressedLen,
+        int blockIdx,
+        BlockCache.Node cached,
+        BlockCache.Node node,
+        int decompressedLen)
+        throws IOException {
+      BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
+      if (extant == cached) {
+        // We won the race: fetch from GCS and populate the node.
+        maybeReadAheadSeg();
+        populateBuf(blobName, pos, compressedLen, blockIdx, decompressedLen, node);
+        return node;
+      } else {
+        // Another thread won the race; wait for its result.
+        dir.cache.close(node, true);
+        if (dir.cache.pin(extant)) {
+          try {
+            extant.join();
+            return extant;
+          } catch (CompletionException e) {
+            dir.cache.unpin(extant);
+            throw unwrapException(e.getCause());
+          }
+        } else {
+          // Serve uncached.
+          return null;
+        }
+      }
     }
 
     private void maybeReadAheadSeg() {
