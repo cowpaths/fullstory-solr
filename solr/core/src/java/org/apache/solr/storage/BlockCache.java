@@ -133,12 +133,12 @@ public class BlockCache implements Closeable {
       return extant == null ? EVICTED : extant; // EVICTED = already clean, no NRS to unpin
     }
 
-    private static final PBS UPDATING_SENTINEL = new PBS(null, null);
+    private static final PBS UPDATING_SENTINEL = new PBS(null, null, null);
 
     /**
      * Sentinel returned by {@link #outOfBandTryUnpinAll} when the block had no PBS (already clean).
      */
-    private static final PBS EVICTED = new PBS(null, null);
+    private static final PBS EVICTED = new PBS(null, null, null);
 
     private final AtomicReference<PBS> state = new AtomicReference<>();
 
@@ -164,7 +164,7 @@ public class BlockCache implements Closeable {
       }
     }
 
-    public GCSDirectoryFactory.Refreshable register(
+    public GCSDirectoryFactory.PinRef register(
         GCSDirectory.NodeRefStruct nodeRefStruct, BlockCache cache) {
       PBS ret = null;
       PBS lock = lock();
@@ -195,19 +195,16 @@ public class BlockCache implements Closeable {
                     });
             if (permit == null) {
               Thread.yield();
+            } else if (permit.getValue() == this) {
+              ret = new PBS(this, permit, p);
+              // `p.unpin(permit, false)` is called in `ret.register()` below
+              break;
             } else {
-              try {
-                if (permit.getValue() == this) {
-                  ret = new PBS(this, permit);
-                  break;
-                }
-              } finally {
-                p.unpin(permit, false);
-              }
+              p.unpin(permit, false);
             }
           }
         }
-        return ret.register(nodeRefStruct, cache);
+        return ret.register(nodeRefStruct, cache, lock != null);
       } finally {
         unlock(ret == null ? lock : ret);
         if (deferredHolder[0] != null) {
@@ -338,16 +335,7 @@ public class BlockCache implements Closeable {
    * queue we call it on. TODO: make it <i>actually</i> static, for clarity?
    */
   boolean pin(Node node) {
-    switch (partitions[0].pin(node)) {
-      case PIN:
-        return true;
-      case RE_PIN:
-        return true;
-      case FAIL:
-        return false;
-      default:
-        throw new IllegalStateException();
-    }
+    return partitions[0].pin(node);
   }
 
   private static final int REF_LIMIT = 20;
@@ -356,61 +344,55 @@ public class BlockCache implements Closeable {
 
     private final Node blockNode;
     private final Cache.Node<Node> permit;
+    private final Cache<Node, Cache.Node<Node>> blockLru;
     private final Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> refLru =
         new Cache<>(List.of(), false);
 
-    private PBS(Node blockNode, Cache.Node<Node> permit) {
+    private PBS(Node blockNode, Cache.Node<Node> permit, Cache<Node, Cache.Node<Node>> blockLru) {
       this.blockNode = blockNode;
       this.permit = permit;
+      this.blockLru = blockLru;
     }
 
     @Override
-    public GCSDirectoryFactory.Refreshable register(
-        GCSDirectory.NodeRefStruct nrs, BlockCache cache) {
-      for (boolean firstPass = true; ; firstPass = false) {
-        int refCount = blockNode.refCount();
-        Cache.Node<GCSDirectory.NodeRefStruct> permitF;
-        if (refCount < REF_LIMIT) {
-          permitF = new Cache.Node<>(nrs, null, 1);
-        } else {
-          Cache.Node<GCSDirectory.NodeRefStruct> permit =
-              refLru.acquireNode(
-                  (evicted) -> {
-                    if (evicted != null) {
-                      while (!evicted.outOfBandUnpin(cache)) {
-                        // assumption is that individual reads will complete quickly.
-                        Thread.yield();
-                      }
-                    }
-                    return nrs;
-                  });
-          if (permit == null) {
+    public GCSDirectoryFactory.PinRef register(
+        GCSDirectory.NodeRefStruct nrs, BlockCache cache, boolean refresh) {
+      // if this is a re-access, re-insert node at head
+      if (refresh && !blockLru.pin(permit)) {
+        throw new IllegalStateException(); // TODO: if we fail to pin here, what then?
+      }
+      try {
+        for (boolean firstPass = true; ; firstPass = false) {
+          int refCount = blockNode.refCount();
+          Cache.Node<GCSDirectory.NodeRefStruct> permitF;
+          if (refCount < REF_LIMIT) {
             permitF = new Cache.Node<>(nrs, null, 1);
-          } else if (firstPass && refCount > REF_LIMIT) {
-            // too many permits issued ... discard one
-            continue;
           } else {
-            permitF = permit;
-          }
-        }
-        refLru.unpin(permitF, false);
-        return new GCSDirectoryFactory.Refreshable() {
-          @Override
-          public boolean refresh() {
-            if (true) return false;
-            if (refLru.pin(permitF) != Cache.Pin.FAIL) {
-              refLru.unpin(permitF, false);
-              return true;
+            Cache.Node<GCSDirectory.NodeRefStruct> permit =
+                refLru.acquireNode(
+                    (evicted) -> {
+                      if (evicted != null) {
+                        while (!evicted.outOfBandUnpin(cache)) {
+                          // assumption is that individual reads will complete quickly.
+                          Thread.yield();
+                        }
+                      }
+                      return nrs;
+                    });
+            if (permit == null) {
+              permitF = new Cache.Node<>(nrs, null, 1);
+            } else if (firstPass && refCount > REF_LIMIT) {
+              // too many permits issued ... discard one
+              continue;
             } else {
-              return false;
+              permitF = permit;
             }
           }
-
-          @Override
-          public void close() {
-            refLru.pin(permitF);
-          }
-        };
+          refLru.unpin(permitF, false);
+          return () -> refLru.pin(permitF); // simply remove from LRU list and discard
+        }
+      } finally {
+        blockLru.unpin(permit, false);
       }
     }
 

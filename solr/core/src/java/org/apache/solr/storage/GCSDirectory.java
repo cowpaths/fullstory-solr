@@ -1418,7 +1418,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
     private BlockCache.Node currentNode;
     private int currentBlockIdx = -1;
-    private GCSDirectoryFactory.Refreshable readPermit;
+    private GCSDirectoryFactory.PinRef readPermit;
     private int sequentialAccessCount = 0;
 
     private void localPin() {
@@ -1474,7 +1474,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private void unpinCurrentBlock(BlockCache blockCache) {
       BlockCache.Node toUnpin = currentNode;
       if (toUnpin != null) {
-        try (GCSDirectoryFactory.Refreshable c = readPermit) {
+        try (GCSDirectoryFactory.PinRef c = readPermit) {
           readPermit = null;
         }
         currentNode = null;
@@ -1491,7 +1491,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private void closeFor(BlockCache blockCache) {
       switch (state.compareAndExchange(State.IDLE, State.PINNED)) {
         case IDLE:
-          try (GCSDirectoryFactory.Refreshable c = readPermit) {
+          try (GCSDirectoryFactory.PinRef c = readPermit) {
             readPermit = null;
           }
           doUnpin(blockCache, State.PINNED);

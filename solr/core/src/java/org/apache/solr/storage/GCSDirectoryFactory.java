@@ -140,21 +140,19 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     }
   }
 
-  interface Refreshable extends Closeable {
-    boolean refresh();
-
+  interface PinRef extends Closeable {
     @Override
     void close(); // no IOException
   }
 
   interface PerBlockSemaphore {
-    Refreshable register(GCSDirectory.NodeRefStruct instance, BlockCache cache);
+    PinRef register(GCSDirectory.NodeRefStruct instance, BlockCache cache, boolean refresh);
 
     void unpinAll(BlockCache cache);
   }
 
   interface PinSemaphore {
-    Refreshable register(BlockCache.Node instance, GCSDirectory.NodeRefStruct nrs);
+    PinRef register(BlockCache.Node instance, GCSDirectory.NodeRefStruct nrs);
   }
 
   /** Node-level resources shared across all {@link GCSDirectory} instances on this node. */
