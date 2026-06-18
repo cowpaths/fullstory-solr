@@ -1465,7 +1465,6 @@ public class GCSDirectory extends SizeAwareDirectory {
           readPermit.close(); // TODO: is this necessary?
         }
         if (node != null) {
-          System.out.println(blockIdx+" "+this);
           readPermit = node.register(this, cache);
         }
       }
@@ -1529,7 +1528,6 @@ public class GCSDirectory extends SizeAwareDirectory {
       if (state.compareAndSet(State.IDLE, State.UNPINNING)) {
         // scavenger has evicted our pinned-LRU slot; signal that re-acquire is needed
         // NOTE: null out `readPermit`, but do not close it
-        System.out.println("unpin "+(readPermit != null)+" "+currentBlockIdx+" "+this);
         readPermit = null;
         doUnpin(blockCache, State.UNPINNING);
         return true;
@@ -1958,7 +1956,6 @@ public class GCSDirectory extends SizeAwareDirectory {
           dir.cache.unpin(cached);
           throw unwrapException(e.getCause());
         }
-        System.out.println("XXX1 "+blockIdx+" "+this.currentNodeRef+", "+this+", "+System.identityHashCode(this));
         setCurrentNode(cached, blockIdx);
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         postBuffer.clear().limit(decompressedLen);
@@ -1975,7 +1972,6 @@ public class GCSDirectory extends SizeAwareDirectory {
           maybeReadAheadSeg();
           ByteBuffer buf =
               populateBuf(blobName, pos, compressedLen, blockIdx, decompressedLen, node);
-          System.out.println("XXX2 "+blockIdx+" "+this.currentNodeRef+", "+this);
           setCurrentNode(node, blockIdx);
           postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         } else {
@@ -1989,7 +1985,6 @@ public class GCSDirectory extends SizeAwareDirectory {
               dir.cache.unpin(extant);
               throw unwrapException(e.getCause());
             }
-            System.out.println("XXX3 "+blockIdx+" "+this.currentNodeRef+", "+this);
             setCurrentNode(extant, blockIdx);
             postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
           } else {

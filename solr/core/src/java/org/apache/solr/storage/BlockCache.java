@@ -174,7 +174,6 @@ public class BlockCache implements Closeable {
               if (evicted != null) {
                 GCSDirectoryFactory.PerBlockSemaphore pbs = evicted.outOfBandTryUnpinAll();
                 if (pbs == null) {
-                  new Exception("unable to evict").printStackTrace(System.out);
                   return evicted;
                 } else {
                   pbs.unpinAll(cache);
@@ -370,7 +369,6 @@ public class BlockCache implements Closeable {
                         // assumption is that individual reads will complete quickly.
                         Thread.yield();
                       }
-                      System.out.println("YYY unpinned from 1");
                     }
                     return nrs;
                   });
@@ -418,7 +416,6 @@ public class BlockCache implements Closeable {
                       // assumption is that individual reads will complete quickly.
                       Thread.yield();
                     }
-                    System.out.println("YYY unpinned from 2");
                   }
                   return null;
                 });
