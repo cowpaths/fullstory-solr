@@ -1439,6 +1439,8 @@ public class GCSDirectory extends SizeAwareDirectory {
             && ((int) (pos >> COMPRESSION_BLOCK_SHIFT))
                 == ((snapshot = p.currentBlockIdx) < 0 ? ~snapshot : snapshot)) {
           while (!p.state.compareAndSet(State.IDLE, State.PINNED)) {
+            // we have to pin the parent to be sure that it doesn't get
+            // "out-of-band closed" while we're inheriting its values
             Thread.yield();
           }
           BlockCache.PinRef parentPermit;
@@ -1452,13 +1454,18 @@ public class GCSDirectory extends SizeAwareDirectory {
           } finally {
             p.localUnpin();
           }
-          if (parentPermit == null || (readPermit = parentPermit.incRef(this, cache)) == null) {
+          // `p.localUnpin()` before actually grabbing values, to prevent livelock.
+          if (parentPermit == null || !cache.pin(candidate)) {
             currentBlockIdx = parentBlockIdx < 0 ? parentBlockIdx : ~parentBlockIdx; // negative
           } else {
             currentBlockIdx = parentBlockIdx < 0 ? ~parentBlockIdx : parentBlockIdx; // non-negative
             currentNode = candidate;
-            if (!cache.pin(currentNode)) {
-              throw new IllegalStateException();
+            if ((readPermit = parentPermit.copy(this, cache)) == null) {
+              // unable to acquire read permit.
+              // unpin, null out `currentNode`, and flip `currentBlockIdx`
+              cache.unpin(candidate, false);
+              currentNode = null;
+              currentBlockIdx = ~currentBlockIdx; // negative
             }
           }
         }

@@ -238,7 +238,7 @@ public class BlockCache implements Closeable {
       this.permit = permit;
     }
 
-    public PinRef incRef(GCSDirectory.NodeRefStruct nrs, BlockCache cache) {
+    public PinRef copy(GCSDirectory.NodeRefStruct nrs, BlockCache cache) {
       if (parent.pin()) {
         return parent.register(nrs, cache); // unpins parent
       } else {
