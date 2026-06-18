@@ -72,11 +72,10 @@ public class LocalGCSDirectoryFactory extends GCSDirectoryFactory {
       Storage gcsStorage,
       BlockCache cache,
       ExecutorService ioExec,
-      PinSemaphore pinned,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
       throws IOException {
     return new LocalGCSDirectory(
-        localPath, bucket, gcsStorage, cache, ioExec, pinned, useAsyncIO, bufferPool);
+        localPath, bucket, gcsStorage, cache, ioExec, useAsyncIO, bufferPool);
   }
 }

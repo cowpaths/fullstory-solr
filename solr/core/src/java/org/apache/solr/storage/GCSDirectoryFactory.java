@@ -140,21 +140,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     }
   }
 
-  interface PinRef extends Closeable {
-    @Override
-    void close(); // no IOException
-  }
-
-  interface PerBlockSemaphore {
-    PinRef register(GCSDirectory.NodeRefStruct instance, BlockCache cache);
-
-    void unpinAll(BlockCache cache);
-  }
-
-  interface PinSemaphore {
-    PinRef register(BlockCache.Node instance, GCSDirectory.NodeRefStruct nrs);
-  }
-
   /** Node-level resources shared across all {@link GCSDirectory} instances on this node. */
   public static final class NodeLevelGCSDirectoryState implements Closeable {
     /** Poison pill: when the drain task sees this it exits, allowing the executor to shut down. */
@@ -176,7 +161,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     private final BlockCache blockCache;
     private final Storage storage;
     private final Semaphore channelSemaphore = new Semaphore(DEFAULT_MAX_OPEN_CHANNELS);
-    private final PinSemaphore acquirePinPermit;
 
     /**
      * Buffer pool for the double-buffered GCS write path. Buffers are 256 KB, 4-KiB aligned (no
@@ -218,7 +202,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         Path coreRootDirectory)
         throws IOException {
       this.blockCache = blockCache;
-      this.acquirePinPermit = null;
       this.storage = storage;
       this.bufferPool = new DirectBufferPool(GCS_WRITE_BUFFER_SIZE, 4096, 1);
       this.metadataBucket = metadataBucket;
@@ -455,7 +438,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         nodeLevelState.storage,
         nodeLevelState.blockCache,
         nodeLevelState.ioExec,
-        nodeLevelState.acquirePinPermit,
         useAsyncIO,
         nodeLevelState.bufferPool);
   }
@@ -466,7 +448,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       Storage storage,
       BlockCache cache,
       ExecutorService ioExec,
-      PinSemaphore acquirePinPermit,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
       throws IOException {
@@ -477,7 +458,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         cache,
         nodeLevelState.channelSemaphore,
         ioExec,
-        acquirePinPermit,
         useAsyncIO,
         bufferPool,
         nodeLevelState.createBlobCoordinator(localPath),

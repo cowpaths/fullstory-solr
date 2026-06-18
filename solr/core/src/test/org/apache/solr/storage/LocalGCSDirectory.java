@@ -48,7 +48,6 @@ public class LocalGCSDirectory extends GCSDirectory {
       Storage storage,
       BlockCache cache,
       ExecutorService ioExec,
-      GCSDirectoryFactory.PinSemaphore pinned,
       boolean useAsyncIO,
       DirectBufferPool bufferPool)
       throws IOException {
@@ -59,7 +58,6 @@ public class LocalGCSDirectory extends GCSDirectory {
         cache,
         new Semaphore(Integer.MAX_VALUE),
         ioExec,
-        pinned,
         useAsyncIO,
         bufferPool,
         null,

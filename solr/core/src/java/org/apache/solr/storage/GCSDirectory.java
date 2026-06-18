@@ -142,7 +142,6 @@ import org.slf4j.LoggerFactory;
 public class GCSDirectory extends SizeAwareDirectory {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-  private final GCSDirectoryFactory.PinSemaphore acquirePinPermit;
 
   public static Directory rawDirectoryView(Directory dir) {
     Directory unwrapped = FilterDirectory.unwrap(dir);
@@ -372,14 +371,12 @@ public class GCSDirectory extends SizeAwareDirectory {
       BlockCache cache,
       Semaphore channelSemaphore,
       ExecutorService ioExec,
-      GCSDirectoryFactory.PinSemaphore acquirePinPermit,
       boolean useAsyncIO,
       DirectBufferPool bufferPool,
       BlobLifecycleCoordinator blobCoordinator,
       BlockingQueue<Runnable> registerQueue)
       throws IOException {
     super(localPath, FSLockFactory.getDefault(), 0);
-    this.acquirePinPermit = acquirePinPermit;
     this.bucket = bucket;
     this.storage = storage;
     this.cache = cache;
@@ -1418,7 +1415,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
     private BlockCache.Node currentNode;
     private int currentBlockIdx = -1;
-    private GCSDirectoryFactory.PinRef readPermit;
+    private BlockCache.PinRef readPermit;
     private int sequentialAccessCount = 0;
 
     private void localPin() {
@@ -1427,7 +1424,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       }
     }
 
-    private void localUnpin(GCSDirectoryFactory.PinSemaphore semaphore) {
+    private void localUnpin() {
       if (!state.compareAndSet(State.PINNED, State.IDLE)) {
         throw new IllegalStateException();
       }
@@ -1474,7 +1471,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private void unpinCurrentBlock(BlockCache blockCache) {
       BlockCache.Node toUnpin = currentNode;
       if (toUnpin != null) {
-        try (GCSDirectoryFactory.PinRef c = readPermit) {
+        try (BlockCache.PinRef c = readPermit) {
           readPermit = null;
         }
         currentNode = null;
@@ -1491,7 +1488,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private void closeFor(BlockCache blockCache) {
       switch (state.compareAndExchange(State.IDLE, State.PINNED)) {
         case IDLE:
-          try (GCSDirectoryFactory.PinRef c = readPermit) {
+          try (BlockCache.PinRef c = readPermit) {
             readPermit = null;
           }
           doUnpin(blockCache, State.PINNED);
@@ -2152,7 +2149,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       try {
         return _readByte(pos);
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2169,7 +2166,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         }
         return (short) (((_readByte(pos + 1) & 0xFF) << 8) | (_readByte(pos) & 0xFF));
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2179,7 +2176,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       try {
         return _readInt(pos);
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2189,7 +2186,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       try {
         return _readLong(pos);
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2205,7 +2202,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         filePointer++;
         return guard.getByte(postBuffer);
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2224,7 +2221,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         }
         guard.getBytes(postBuffer, dst, offset, len);
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2253,7 +2250,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         final byte b2 = _readByte(remaining - 1);
         return (short) (((b2 & 0xFF) << 8) | (b1 & 0xFF));
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2263,7 +2260,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       try {
         return _readInt(postBuffer.remaining());
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2273,7 +2270,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       try {
         return _readLong(postBuffer.remaining());
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2283,7 +2280,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       try {
         return _readVInt(postBuffer.remaining());
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2336,7 +2333,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       try {
         return _readVLong(false);
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2346,7 +2343,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       try {
         return BitUtil.zigZagDecode(_readVLong(true));
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2440,7 +2437,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       try {
         return _readString();
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2488,7 +2485,7 @@ public class GCSDirectory extends SizeAwareDirectory {
             return Collections.unmodifiableMap(map);
         }
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2510,7 +2507,7 @@ public class GCSDirectory extends SizeAwareDirectory {
             return Collections.unmodifiableSet(set);
         }
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2575,7 +2572,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           postBuffer.position(position + (int) bytesRequested);
         }
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2600,7 +2597,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           postBuffer.position(position + (int) bytesRequested);
         }
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 
@@ -2627,7 +2624,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           postBuffer.position(position + (int) bytesRequested);
         }
       } finally {
-        currentNodeRef.localUnpin(dir.acquirePinPermit);
+        currentNodeRef.localUnpin();
       }
     }
 

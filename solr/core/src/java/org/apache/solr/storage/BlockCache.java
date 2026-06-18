@@ -172,8 +172,7 @@ public class BlockCache implements Closeable {
       }
     }
 
-    public GCSDirectoryFactory.PinRef register(
-        GCSDirectory.NodeRefStruct nodeRefStruct, BlockCache cache) {
+    public PinRef register(GCSDirectory.NodeRefStruct nodeRefStruct, BlockCache cache) {
       PBS ret = null;
       PBS lock = lock();
       PBS[] deferredHolder = new PBS[1];
@@ -220,6 +219,11 @@ public class BlockCache implements Closeable {
         }
       }
     }
+  }
+
+  interface PinRef extends Closeable {
+    @Override
+    void close(); // no IOException
   }
 
   // ---------------------------------------------------------------------------
@@ -348,7 +352,7 @@ public class BlockCache implements Closeable {
 
   private static final int REF_LIMIT = 20;
 
-  private static class PBS implements GCSDirectoryFactory.PerBlockSemaphore {
+  private static class PBS {
 
     private final Node blockNode;
     private final Cache.Node<Node> permit;
@@ -362,9 +366,7 @@ public class BlockCache implements Closeable {
       this.blockLru = blockLru;
     }
 
-    @Override
-    public GCSDirectoryFactory.PinRef register(
-        GCSDirectory.NodeRefStruct nrs, BlockCache cache) {
+    public PinRef register(GCSDirectory.NodeRefStruct nrs, BlockCache cache) {
       try {
         for (boolean firstPass = true; ; firstPass = false) {
           int refCount = blockNode.refCount();
@@ -400,7 +402,6 @@ public class BlockCache implements Closeable {
       }
     }
 
-    @Override
     public void unpinAll(BlockCache cache) {
       // TODO: pretty sure we have an effective lock at this point and can just
       //  iterate entries instead of `acquireNode()` in a loop
