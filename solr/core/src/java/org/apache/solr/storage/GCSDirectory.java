@@ -1437,6 +1437,7 @@ public class GCSDirectory extends SizeAwareDirectory {
      * Updates the current cached block. Always called from within a {@code localPin()} context (via
      * {@link GCSIndexInput#refill}), so state is already PINNED and direct update is safe.
      */
+    @SuppressWarnings("try")
     private int setCurrentNode(
         BlockCache.Node node, int blockIdx, BlockCache cache) {
       assert state.get() == State.PINNED; // should only be called from a pinned context
@@ -1461,11 +1462,12 @@ public class GCSDirectory extends SizeAwareDirectory {
           return sequentialAccessCount = 0;
         }
       } finally {
-        if (readPermit != null) {
-          readPermit.close(); // TODO: is this necessary?
-        }
-        if (node != null) {
-          readPermit = node.register(this, cache);
+        try (GCSDirectoryFactory.Refreshable c = readPermit) {
+          if (node == null) {
+            readPermit = null;
+          } else {
+            readPermit = node.register(this, cache);
+          }
         }
       }
     }
