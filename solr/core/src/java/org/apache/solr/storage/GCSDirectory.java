@@ -1411,6 +1411,12 @@ public class GCSDirectory extends SizeAwareDirectory {
     PINNED
   }
 
+  /**
+   * May be set to {@code true} to allow clones and slices to inherit pinned state from the parent
+   * {@link IndexInput}.
+   */
+  private static final boolean INHERIT_PINNED = false;
+
   static final class NodeRefStruct {
     private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
     private BlockCache.Node currentNode;
@@ -1425,12 +1431,14 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     private NodeRefStruct(NodeRefStruct parent) {
-      this.cloneSource = Thread.currentThread().getId();
-      this.parent = parent;
+      if (INHERIT_PINNED) {
+        this.cloneSource = Thread.currentThread().getId();
+        this.parent = parent;
+      }
     }
 
     private void localPin(BlockCache cache, long pos) {
-      if (parent != null) {
+      if (INHERIT_PINNED && parent != null) {
         NodeRefStruct p = parent;
         parent = null;
         maybeInheritPinned(p, cache, pos);
