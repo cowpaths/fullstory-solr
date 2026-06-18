@@ -187,9 +187,9 @@ public class BlockCache implements Closeable {
                     (evicted) -> {
                       if (evicted != null) {
                         PBS pbs;
-                        do {
-                          pbs = evicted.outOfBandTryUnpinAll();
-                        } while (pbs == null);
+                        while ((pbs = evicted.outOfBandTryUnpinAll()) == null) {
+                          Thread.yield();
+                        }
                         if (pbs != EVICTED) {
                           // Defer unpinAll to after our sentinel is released. Calling it now (while
                           // holding the sentinel) causes livelock: an NRS thread in PINNED state
