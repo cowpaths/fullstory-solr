@@ -1224,6 +1224,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         tailBytes = new byte[rem];
         preBuffer.get(tailBytes);
         tailLen = rem;
+        preBuffer.clear(); // reset so getFilePointer() = filePos (no double-counting)
       }
       if (writeHelper != null) {
         // Flush the GCS portion (full blocks only; tail was not written to buffer).

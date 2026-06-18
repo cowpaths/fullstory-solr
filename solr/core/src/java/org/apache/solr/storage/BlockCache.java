@@ -435,12 +435,7 @@ public class BlockCache implements Closeable {
   }
 
   void unpin(Node node, boolean recordAccess) {
-    if (partitions[tlrIndex()].unpin(node, recordAccess)) {
-      GCSDirectoryFactory.PerBlockSemaphore pbs = node.outOfBandTryUnpinAll();
-      if (pbs != null) {
-        //pbs.unpinAll(this); // TODO: wha?
-      }
-    }
+    partitions[tlrIndex()].unpin(node, recordAccess);
   }
 
   /**
