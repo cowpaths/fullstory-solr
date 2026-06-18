@@ -129,13 +129,15 @@ public class BlockCache implements Closeable {
     PBS outOfBandTryUnpinAll() {
       PBS extant = state.get();
       if (extant == UPDATING_SENTINEL || !state.compareAndSet(extant, null)) {
-        return null;
-      } else {
-        return extant;
+        return null; // sentinel held or concurrent CAS loss; caller should retry
       }
+      return extant == null ? EVICTED : extant; // EVICTED = already clean, no NRS to unpin
     }
 
     private static final PBS UPDATING_SENTINEL = new PBS(null, null);
+
+    /** Sentinel returned by {@link #outOfBandTryUnpinAll} when the block had no PBS (already clean). */
+    private static final PBS EVICTED = new PBS(null, null);
 
     private final AtomicReference<PBS> state = new AtomicReference<>();
 
@@ -164,6 +166,7 @@ public class BlockCache implements Closeable {
     public GCSDirectoryFactory.Refreshable register(GCSDirectory.NodeRefStruct nodeRefStruct, BlockCache cache) {
       PBS ret = null;
       PBS lock = lock();
+      PBS[] deferredHolder = new PBS[1];
       try {
         if (lock != null) {
           ret = lock;
@@ -172,11 +175,16 @@ public class BlockCache implements Closeable {
             Cache<Node, Cache.Node<Node>> p = cache.pinnedLru();
             Cache.Node<Node> permit = p.acquireNode((evicted) -> {
               if (evicted != null) {
-                GCSDirectoryFactory.PerBlockSemaphore pbs = evicted.outOfBandTryUnpinAll();
+                PBS pbs = evicted.outOfBandTryUnpinAll();
                 if (pbs == null) {
-                  return evicted;
-                } else {
-                  pbs.unpinAll(cache);
+                  return evicted; // sentinel held on evicted block; retry
+                }
+                if (pbs != EVICTED) {
+                  // Defer unpinAll to after our sentinel is released. Calling it now (while holding
+                  // the sentinel) causes livelock: an NRS thread in PINNED state that needs to
+                  // register with *our* block would spin on outOfBandUnpin while we spin waiting
+                  // for it to reach IDLE — classic hold-and-wait.
+                  deferredHolder[0] = pbs;
                 }
               }
               return this;
@@ -197,10 +205,9 @@ public class BlockCache implements Closeable {
         }
         return ret.register(nodeRefStruct, cache);
       } finally {
-        if (ret == null) {
-          unlock(lock); // only upon exception
-        } else {
-          unlock(ret);
+        unlock(ret == null ? lock : ret);
+        if (deferredHolder[0] != null) {
+          deferredHolder[0].unpinAll(cache);
         }
       }
     }
