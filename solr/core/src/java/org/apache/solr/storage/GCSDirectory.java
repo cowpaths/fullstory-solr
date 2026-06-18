@@ -1497,9 +1497,17 @@ public class GCSDirectory extends SizeAwareDirectory {
      * Updates the current cached block. Always called from within a {@code localPin()} context (via
      * {@link GCSIndexInput#refill}), so state is already PINNED and direct update is safe.
      */
+    @SuppressWarnings("try")
     private int setCurrentNode(BlockCache.Node node, int blockIdx, BlockCache cache) {
       assert state.get() == State.PINNED; // should only be called from a pinned context
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
+      BlockCache.Node toUnpin = currentNode;
+      if (toUnpin != null) {
+        try (BlockCache.PinRef c = readPermit) {
+          readPermit = null;
+        }
+        cache.unpin(toUnpin);
+      }
       currentNode = node;
       currentBlockIdx = blockIdx;
       try {
@@ -1993,7 +2001,6 @@ public class GCSDirectory extends SizeAwareDirectory {
         throws IOException {
       int decompressedLen =
           blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
-      currentNodeRef.unpinCurrentBlock(dir.cache);
 
       BlockCache.Node node;
       ByteBuffer buf;
