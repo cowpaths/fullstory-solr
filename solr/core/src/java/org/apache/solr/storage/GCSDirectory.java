@@ -2570,7 +2570,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     // ---------------------------------------------------------------------------
 
     private int _readInt(final int remaining) throws IOException {
-      if (remaining >= Integer.BYTES) {
+      if (remaining >= Integer.BYTES || refillAtBoundary(remaining)) {
         filePointer += Integer.BYTES;
         return guard.getInt(postBuffer);
       }
@@ -2582,8 +2582,17 @@ public class GCSDirectory extends SizeAwareDirectory {
       return ((b3 & 0xFF) << 24) | ((b2 & 0xFF) << 16) | ((b1 & 0xFF) << 8) | (b0 & 0xFF);
     }
 
+    private boolean refillAtBoundary(int remaining) throws IOException {
+      if (remaining == 0) {
+        initBlockSeq(currentNodeRef.currentBlockIdx + 1);
+        return true;
+      } else {
+        return false;
+      }
+    }
+
     private long _readLong(final int remaining) throws IOException {
-      if (remaining >= Long.BYTES) {
+      if (remaining >= Long.BYTES || refillAtBoundary(remaining)) {
         filePointer += Long.BYTES;
         return guard.getLong(postBuffer);
       }
