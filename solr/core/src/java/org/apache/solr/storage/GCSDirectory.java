@@ -1817,6 +1817,8 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private final long offset;
     private final long sliceLength;
+    private final int sliceFirstBlockIdx;
+    private final int sliceLastBlockIdx;
 
     private long seekPos = -1;
     private long filePointer = 0;
@@ -1992,6 +1994,9 @@ public class GCSDirectory extends SizeAwareDirectory {
 
       this.offset = 0;
       this.sliceLength = length;
+      this.sliceFirstBlockIdx = 0;
+      this.readAheadTo = sliceFirstBlockIdx;
+      this.sliceLastBlockIdx = lastBlockIdx;
     }
 
     // Clone / slice constructor: shares immutable state from parent; does not own the mmap.
@@ -2016,6 +2021,16 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.filePointer = this.offset;
       this.sliceLength = length;
       this.postBuffer = ByteBuffer.allocate(0);
+      this.sliceFirstBlockIdx = Math.toIntExact(this.offset >> COMPRESSION_BLOCK_SHIFT);
+      this.readAheadTo = sliceFirstBlockIdx;
+      this.sliceLastBlockIdx =
+          length == 0
+              ? sliceFirstBlockIdx
+              : Math.toIntExact((this.offset + length - 1) >> COMPRESSION_BLOCK_SHIFT);
+      if (sliceFirstBlockIdx == sliceLastBlockIdx && length != 0) {
+        // heuristic -- we will read from the only block
+        dir.ensureLoaded(blobName, accessMapped, blockOffsets, sliceFirstBlockIdx);
+      }
     }
 
     /**
@@ -2100,7 +2115,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private static final int MAX_READ_AHEAD = 16;
 
-    private int readAheadTo = 0;
+    private int readAheadTo;
 
     private static int readAhead(int sequentialAccessCount) {
       // determines how aggressively we ramp up read-ahead.
@@ -2109,11 +2124,11 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private void setCurrentNode(BlockCache.Node node, int blockIdx, int type, long loadNanos) {
       int seqAcccessCount = currentNodeRef.setCurrentNode(node, blockIdx, dir.cache);
-      System.out.println("XXX "+type+", "+blockIdx+", seq="+seqAcccessCount+", "+TimeUnit.NANOSECONDS.toMillis(loadNanos)+"ms, "+this);
+      System.out.println("XXX "+type+", "+blockIdx+" ("+sliceFirstBlockIdx+","+sliceLastBlockIdx+","+lastBlockIdx+"), seq="+seqAcccessCount+", "+TimeUnit.NANOSECONDS.toMillis(loadNanos)+"ms, "+this);
       switch (seqAcccessCount) {
         case -1:
           // reset, no read-ahead
-          readAheadTo = 0;
+          readAheadTo = sliceFirstBlockIdx;
           return;
         case 0:
           // moved forward, init to current new position if necessary
@@ -2126,7 +2141,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       if (seqAcccessCount > 0
           && (newReadAheadTo =
                   Math.min(
-                      lastBlockIdx,
+                      sliceLastBlockIdx, // don't read past this slice
                       blockIdx + Math.min(MAX_READ_AHEAD, readAhead(seqAcccessCount))))
               > readAheadTo) {
         for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
