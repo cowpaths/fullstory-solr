@@ -301,7 +301,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
   private static final class BatchValue {
     private final String segName;
-    private final Set<UUID> blobUUIDs = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, String> blobUUIDs = new ConcurrentHashMap<>();
     private final AtomicLong lastCheck = new AtomicLong(System.nanoTime() - RECHECK_NANOS);
 
     private BatchValue(String segName) {
@@ -400,7 +400,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         batched
             .computeIfAbsent(segUUID, (k) -> new BatchValue(IndexFileNames.parseSegmentName(file)))
             .blobUUIDs
-            .add(blobUUID);
+            .put(blobUUID, file);
         pendingWrites.compute(
             IndexFileNames.parseSegmentName(file),
             (segName, struct) -> {
@@ -431,7 +431,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     final Semaphore control = new Semaphore(REGISTER_CONCURRENCY); // limit our local concurrency
     for (Map.Entry<UUID, BatchValue> entry : batched.entrySet()) {
       UUID segUUID = entry.getKey();
-      Set<UUID> blobUUIDs = entry.getValue().blobUUIDs;
+      Set<UUID> blobUUIDs = entry.getValue().blobUUIDs.keySet();
       boolean mustRelease = true;
       try {
         if (!control.tryAcquire(5, TimeUnit.SECONDS)) {
@@ -615,7 +615,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           if (v == null) {
             // Not in batched: file was written but never sync'd. Direct delete above.
             return null;
-          } else if (!v.blobUUIDs.remove(blobUUID)) {
+          } else if (v.blobUUIDs.remove(blobUUID) == null) {
             // blob not in batch: file was never sync'd for a partially-sync'd segment.
             return v;
           } else if (v.blobUUIDs.isEmpty()) {
@@ -748,10 +748,11 @@ public class GCSDirectory extends SizeAwareDirectory {
           // (`s.pendingFiles.getAndSet(null)`). Therefore it's our responsibility to register
           // all of them with `batched` and `blobCoordinator`.
           if (!addToManifest.isEmpty()) {
-            batched
-                .computeIfAbsent(s.segUUID, (k) -> new BatchValue(s.segName))
-                .blobUUIDs
-                .addAll(addToManifest.values());
+            Map<UUID, String> blobUUIDs =
+                batched.computeIfAbsent(s.segUUID, (k) -> new BatchValue(s.segName)).blobUUIDs;
+            for (Map.Entry<String, UUID> e : addToManifest.entrySet()) {
+              blobUUIDs.put(e.getValue(), e.getKey());
+            }
             UUID segUUID = s.segUUID;
             List<UUID> blobs = List.copyOf(addToManifest.values());
             try {
@@ -832,7 +833,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     BlocksStruct v = pendingNodes.get(blobUUID);
     if (v == null) {
       BatchValue batch = batched.get(segUUID);
-      if (batch != null && batch.blobUUIDs.contains(blobUUID)) {
+      if (batch != null && batch.blobUUIDs.containsKey(blobUUID)) {
         return;
       }
     } else if (v.pendingDeletion == null) {
@@ -1600,6 +1601,198 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
   }
 
+  @SuppressWarnings("try")
+  private void maybeReadAheadSeg(UUID segUUID) {
+    BatchValue batchValue = batched.get(segUUID);
+    if (batchValue == null || batchValue.valid()) {
+      return;
+    }
+    String segName = batchValue.segName;
+    Map<UUID, String> blobs = batchValue.blobUUIDs;
+    // TODO: potential for lock contention here, esp. w/ SynchronousQueue
+    ioExec.submit(
+        () -> {
+          String cfeName;
+          if (blobs.size() == 1
+              && Files.exists(directory.resolve(cfeName = segName.concat(".cfe")))) {
+            UUID blob = blobs.keySet().iterator().next();
+            BlocksStruct blocks = pendingNodes.get(blob);
+            if (blocks != null) {
+              IntArrayList blockIndexes = parseCfeBlockIndexes(cfeName);
+              for (IntCursor i : blockIndexes) {
+                ensureLoaded(blob.toString(), blocks.accessMapped, blocks.blockOffsets, i.value);
+              }
+            }
+            // preload the first block of each logical file
+          } else {
+            for (Map.Entry<UUID, String> blob : blobs.entrySet()) {
+              UUID blobId = blob.getKey();
+              BlocksStruct blocks = pendingNodes.get(blobId);
+              if (blocks == null) {
+                // not initialized yet, so we have to force it the hacky way
+                BatchValue batch = batched.get(segUUID);
+                if (batch != null) {
+                  String filename = batch.blobUUIDs.get(blobId);
+                  try (IndexInput ignore = openInput(filename, IOContext.READONCE)) {
+                    // just to parse offsets and create an entry in `pendingNodes`
+                  } catch (IOException ex) {
+                    throw new UncheckedIOException(ex);
+                  }
+                  blocks = pendingNodes.get(blobId);
+                }
+              }
+              if (blocks != null) {
+                ensureLoaded(blobId.toString(), blocks.accessMapped, blocks.blockOffsets, 0);
+              }
+            }
+          }
+        });
+  }
+
+  /**
+   * Parses the local {@code .cfe} entry table and returns the block index (within the CFS GCS blob)
+   * of the first block of each logical sub-file. Block indices are computed as {@code subFileOffset
+   * >> COMPRESSION_BLOCK_SHIFT}.
+   */
+  private IntArrayList parseCfeBlockIndexes(String cfeName) {
+    IntArrayList blockIndexes = new IntArrayList(16);
+    try (IndexInput cfeIn = openInput(cfeName, IOContext.READONCE)) {
+      // Skip index header without depending on the codec name (version-agnostic).
+      if (CodecUtil.readBEInt(cfeIn) != CodecUtil.CODEC_MAGIC) return blockIndexes;
+      cfeIn.readString(); // codec name — discard
+      CodecUtil.readBEInt(cfeIn); // version — discard
+      cfeIn.skipBytes(16); // segment ID (StringHelper.ID_LENGTH)
+      cfeIn.skipBytes(cfeIn.readByte() & 0xFF); // suffix bytes (empty for Lucene90, but generic)
+      int n = cfeIn.readVInt();
+      int last = -1;
+      for (int i = 0; i < n; i++) {
+        cfeIn.readString(); // sub-file name — discard
+        long offset = cfeIn.readLong(); // byte offset of this sub-file within the .cfs data
+        cfeIn.readLong(); // length — discard
+        int offsetBlock = (int) (offset >> COMPRESSION_BLOCK_SHIFT);
+        if (offsetBlock > last) {
+          blockIndexes.add(offsetBlock);
+          last = offsetBlock;
+        }
+      }
+    } catch (IOException e) {
+      log.debug("readAheadSeg: failed to parse {}", cfeName, e);
+    }
+    return blockIndexes;
+  }
+
+  private boolean ensureLoaded(
+      String blob,
+      AtomicReferenceArray<BlockCache.Node> accessMapped,
+      long[] blockOffsets,
+      int idx) {
+    BlockCache.Node extant = accessMapped.get(idx);
+    if ((extant == null || !extant.pinnable()) && acquireReadaheadPermit()) {
+      BlockCache.Node toPopulate = cache.acquireNode();
+      if (toPopulate == null) {
+        releaseReadaheadPermit();
+        return false;
+      }
+      try {
+        ioExec.submit(
+            () -> {
+              try {
+                if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
+                  long blockOffset = blockOffsets[idx];
+                  int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
+                  populateBuf(
+                      blob,
+                      blockOffset,
+                      compressedLen,
+                      idx,
+                      COMPRESSION_BLOCK_SIZE,
+                      toPopulate,
+                      accessMapped);
+                  // NOTE: don't unpin in `finally` block! `populateBuf` already unpins the
+                  // node upon Exception
+                  cache.unpin(toPopulate, false);
+                } else {
+                  cache.close(toPopulate, true);
+                }
+              } finally {
+                releaseReadaheadPermit();
+              }
+              return null;
+            });
+      } catch (Throwable t) {
+        // TODO: ensure this won't double-release with submitted task
+        releaseReadaheadPermit();
+        throw t;
+      }
+    }
+    return true;
+  }
+
+  private ByteBuffer populateBuf(
+      String blob,
+      long pos,
+      int compressedLen,
+      int blockIdx,
+      int decompressedLen,
+      BlockCache.Node node,
+      AtomicReferenceArray<BlockCache.Node> accessMapped)
+      throws IOException {
+    ByteBuffer buf;
+    try {
+      ByteBuffer heapBuf = supply(blob, pos, compressedLen, decompressedLen);
+      buf =
+          node.populate(
+              heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
+    } catch (Throwable t) {
+      node.completeExceptionally(t);
+      accessMapped.compareAndSet(blockIdx, node, null);
+      cache.unpin(node);
+      cache.close(node);
+      throw unwrapException(t);
+    }
+    return buf;
+  }
+
+  /**
+   * Fetches the given compressed block from GCS and decompresses it. Called only on a cache miss.
+   *
+   * <p>Opens a fresh {@link ReadChannel} for each block, limited to exactly {@code compressedLen}
+   * bytes via {@link ReadChannel#limit}, so the gRPC stream ends naturally after the block is
+   * consumed. This prevents unbounded pre-parsing of surplus {@code ReadObjectResponse} messages
+   * into the zero-copy lifecycle manager's unclosed-streams map.
+   */
+  private ByteBuffer supply(String blobName, long pos, int compressedLen, int decompressedLen)
+      throws IOException {
+    byte[] compressed = new byte[compressedLen];
+    ByteBuffer compBuf = ByteBuffer.wrap(compressed);
+    try {
+      channelSemaphore.acquire();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IOException("interrupted waiting for GCS channel slot", e);
+    }
+    try (ReadChannel ch = storage.reader(BlobId.of(bucket, blobName))) {
+      ch.setChunkSize(compressedLen); // otherwise client buffer is oversized
+      ch.seek(pos);
+      ch.limit(pos + compressedLen);
+      while (compBuf.hasRemaining()) {
+        int n = ch.read(compBuf);
+        if (n == -1) {
+          throw new EOFException(
+              "unexpected EOF in GCS blob "
+                  + blobName
+                  + " at position "
+                  + (pos + compBuf.position()));
+        }
+      }
+    } finally {
+      channelSemaphore.release();
+    }
+    byte[] decompressed = new byte[decompressedLen + 7];
+    CompressingDirectory.decompress(compressed, 0, decompressedLen, decompressed, 0);
+    return ByteBuffer.wrap(decompressed, 0, decompressedLen);
+  }
+
   static final class GCSIndexInput extends IndexInput implements RandomAccessInput {
 
     private final GCSDirectory dir;
@@ -1847,46 +2040,6 @@ public class GCSDirectory extends SizeAwareDirectory {
     // Cache interaction
     // ---------------------------------------------------------------------------
 
-    /**
-     * Fetches the given compressed block from GCS and decompresses it. Called only on a cache miss.
-     *
-     * <p>Opens a fresh {@link ReadChannel} for each block, limited to exactly {@code compressedLen}
-     * bytes via {@link ReadChannel#limit}, so the gRPC stream ends naturally after the block is
-     * consumed. This prevents unbounded pre-parsing of surplus {@code ReadObjectResponse} messages
-     * into the zero-copy lifecycle manager's unclosed-streams map.
-     */
-    private ByteBuffer supply(String blobName, long pos, int compressedLen, int decompressedLen)
-        throws IOException {
-      byte[] compressed = new byte[compressedLen];
-      ByteBuffer compBuf = ByteBuffer.wrap(compressed);
-      try {
-        dir.channelSemaphore.acquire();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw new IOException("interrupted waiting for GCS channel slot", e);
-      }
-      try (ReadChannel ch = dir.storage.reader(BlobId.of(dir.bucket, blobName))) {
-        ch.setChunkSize(compressedLen); // otherwise client buffer is oversized
-        ch.seek(pos);
-        ch.limit(pos + compressedLen);
-        while (compBuf.hasRemaining()) {
-          int n = ch.read(compBuf);
-          if (n == -1) {
-            throw new EOFException(
-                "unexpected EOF in GCS blob "
-                    + blobName
-                    + " at position "
-                    + (pos + compBuf.position()));
-          }
-        }
-      } finally {
-        dir.channelSemaphore.release();
-      }
-      byte[] decompressed = new byte[decompressedLen + 7];
-      CompressingDirectory.decompress(compressed, 0, decompressedLen, decompressed, 0);
-      return ByteBuffer.wrap(decompressed, 0, decompressedLen);
-    }
-
     // ---------------------------------------------------------------------------
     // Block navigation
     // ---------------------------------------------------------------------------
@@ -1911,8 +2064,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       postBuffer.position(postBufferBaseline + (int) (pos & COMPRESSION_BLOCK_MASK_LOW));
     }
 
-    private void initBlockSeq(int blockIdx) throws IOException {
-      initBlock(blockIdx);
+    private void initBlockSeq() throws IOException {
+      initBlock(currentNodeRef.currentBlockIdx + 1);
     }
 
     private void initBlock(int blockIdx) throws IOException {
@@ -1921,20 +2074,23 @@ public class GCSDirectory extends SizeAwareDirectory {
       if (cached == null || !dir.cache.pin(cached)) {
         cacheMiss(cached, blockIdx);
       } else {
-        cacheHit(blockIdx, cached);
+        cacheHit(blockIdx, cached, 0);
       }
     }
 
-    private void cacheHit(int blockIdx, BlockCache.Node cached) throws IOException {
+    private void cacheHit(int blockIdx, BlockCache.Node cached, int type) throws IOException {
       // Cache hit (or in-flight by the winning thread — join() blocks until populated).
       ByteBuffer buf;
+      long loadNanos;
       try {
+        long start = System.nanoTime();
         buf = cached.join();
+        loadNanos = System.nanoTime() - start;
       } catch (CompletionException e) {
         dir.cache.unpin(cached);
         throw unwrapException(e.getCause());
       }
-      setCurrentNode(cached, blockIdx);
+      setCurrentNode(cached, blockIdx, type, loadNanos);
       postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
       postBufferBaseline = 0;
       longViews = null;
@@ -1951,8 +2107,9 @@ public class GCSDirectory extends SizeAwareDirectory {
       return sequentialAccessCount << 1;
     }
 
-    private void setCurrentNode(BlockCache.Node node, int blockIdx) {
+    private void setCurrentNode(BlockCache.Node node, int blockIdx, int type, long loadNanos) {
       int seqAcccessCount = currentNodeRef.setCurrentNode(node, blockIdx, dir.cache);
+      System.out.println("XXX "+type+", "+blockIdx+", seq="+seqAcccessCount+", "+TimeUnit.NANOSECONDS.toMillis(loadNanos)+"ms, "+this);
       switch (seqAcccessCount) {
         case -1:
           // reset, no read-ahead
@@ -1973,54 +2130,13 @@ public class GCSDirectory extends SizeAwareDirectory {
                       blockIdx + Math.min(MAX_READ_AHEAD, readAhead(seqAcccessCount))))
               > readAheadTo) {
         for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
-          if (!ensureLoaded(blobName, accessMapped, blockOffsets, i)) {
+          if (!dir.ensureLoaded(blobName, accessMapped, blockOffsets, i)) {
             newReadAheadTo = i - 1;
             break;
           }
         }
         readAheadTo = newReadAheadTo;
       }
-    }
-
-    private boolean ensureLoaded(
-        String blob,
-        AtomicReferenceArray<BlockCache.Node> accessMapped,
-        long[] blockOffsets,
-        int idx) {
-      BlockCache.Node extant = accessMapped.get(idx);
-      if ((extant == null || !extant.pinnable()) && dir.acquireReadaheadPermit()) {
-        BlockCache.Node toPopulate = dir.cache.acquireNode();
-        if (toPopulate == null) {
-          dir.releaseReadaheadPermit();
-          return false;
-        }
-        try {
-          dir.ioExec.submit(
-              () -> {
-                try {
-                  if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-                    long blockOffset = blockOffsets[idx];
-                    int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
-                    populateBuf(
-                        blob, blockOffset, compressedLen, idx, COMPRESSION_BLOCK_SIZE, toPopulate);
-                    // NOTE: don't unpin in `finally` block! `populateBuf` already unpins the
-                    // node upon Exception
-                    dir.cache.unpin(toPopulate, false);
-                  } else {
-                    dir.cache.close(toPopulate, true);
-                  }
-                } finally {
-                  dir.releaseReadaheadPermit();
-                }
-                return null;
-              });
-        } catch (Throwable t) {
-          // TODO: ensure this won't double-release with submitted task
-          dir.releaseReadaheadPermit();
-          throw t;
-        }
-      }
-      return true;
     }
 
     private void cacheMiss(final BlockCache.Node cached, final int blockIdx) throws IOException {
@@ -2034,10 +2150,18 @@ public class GCSDirectory extends SizeAwareDirectory {
         BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
         if (extant == cached) {
           // We won the race: fetch from GCS and populate the node.
-          maybeReadAheadSeg();
+          dir.maybeReadAheadSeg(segUUID);
+          long start = System.nanoTime();
           ByteBuffer buf =
-              populateBuf(blobName, blockOffset, compressedLen, blockIdx, decompressedLen, node);
-          setCurrentNode(node, blockIdx);
+              dir.populateBuf(
+                  blobName,
+                  blockOffset,
+                  compressedLen,
+                  blockIdx,
+                  decompressedLen,
+                  node,
+                  accessMapped);
+          setCurrentNode(node, blockIdx, 2, System.nanoTime() - start);
           postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
           postBufferBaseline = 0;
           longViews = null;
@@ -2048,109 +2172,21 @@ public class GCSDirectory extends SizeAwareDirectory {
           // Another thread won the race; wait for its result.
           dir.cache.close(node, true);
           if (dir.cache.pin(extant)) {
-            cacheHit(blockIdx, extant);
+            cacheHit(blockIdx, extant, 1);
             return;
           }
         }
       }
       // Serve uncached.
-      ByteBuffer heapBuf = supply(blobName, blockOffset, compressedLen, decompressedLen);
-      setCurrentNode(null, blockIdx);
+      long start = System.nanoTime();
+      ByteBuffer heapBuf = dir.supply(blobName, blockOffset, compressedLen, decompressedLen);
+      setCurrentNode(null, blockIdx, 3, System.nanoTime() - start);
       postBuffer = heapBuf;
       postBufferBaseline = heapBuf.position();
       heapBuf.order(ByteOrder.LITTLE_ENDIAN);
       longViews = null;
       intViews = null;
       floatViews = null;
-    }
-
-    private void maybeReadAheadSeg() {
-      BatchValue batchValue = dir.batched.get(segUUID);
-      if (batchValue == null || batchValue.valid()) {
-        return;
-      }
-      String segName = batchValue.segName;
-      Set<UUID> blobs = batchValue.blobUUIDs;
-      // TODO: potential for lock contention here, esp. w/ SynchronousQueue
-      dir.ioExec.submit(
-          () -> {
-            String cfeName;
-            if (blobs.size() == 1
-                && Files.exists(dir.directory.resolve(cfeName = segName.concat(".cfe")))) {
-              UUID blob = blobs.iterator().next();
-              BlocksStruct blocks = dir.pendingNodes.get(blob);
-              if (blocks != null) {
-                IntArrayList blockIndexes = parseCfeBlockIndexes(cfeName);
-                for (IntCursor i : blockIndexes) {
-                  ensureLoaded(blob.toString(), blocks.accessMapped, blocks.blockOffsets, i.value);
-                }
-              }
-              // preload the first block of each logical file
-            } else {
-              for (UUID blob : blobs) {
-                BlocksStruct blocks = dir.pendingNodes.get(blob);
-                if (blocks != null) {
-                  ensureLoaded(blob.toString(), blocks.accessMapped, blocks.blockOffsets, 0);
-                }
-              }
-            }
-          });
-    }
-
-    /**
-     * Parses the local {@code .cfe} entry table and returns the block index (within the CFS GCS
-     * blob) of the first block of each logical sub-file. Block indices are computed as {@code
-     * subFileOffset >> COMPRESSION_BLOCK_SHIFT}.
-     */
-    private IntArrayList parseCfeBlockIndexes(String cfeName) {
-      IntArrayList blockIndexes = new IntArrayList(16);
-      try (IndexInput cfeIn = dir.openInput(cfeName, IOContext.READONCE)) {
-        // Skip index header without depending on the codec name (version-agnostic).
-        if (CodecUtil.readBEInt(cfeIn) != CodecUtil.CODEC_MAGIC) return blockIndexes;
-        cfeIn.readString(); // codec name — discard
-        CodecUtil.readBEInt(cfeIn); // version — discard
-        cfeIn.skipBytes(16); // segment ID (StringHelper.ID_LENGTH)
-        cfeIn.skipBytes(cfeIn.readByte() & 0xFF); // suffix bytes (empty for Lucene90, but generic)
-        int n = cfeIn.readVInt();
-        int last = -1;
-        for (int i = 0; i < n; i++) {
-          cfeIn.readString(); // sub-file name — discard
-          long offset = cfeIn.readLong(); // byte offset of this sub-file within the .cfs data
-          cfeIn.readLong(); // length — discard
-          int offsetBlock = (int) (offset >> COMPRESSION_BLOCK_SHIFT);
-          if (offsetBlock > last) {
-            blockIndexes.add(offsetBlock);
-            last = offsetBlock;
-          }
-        }
-      } catch (IOException e) {
-        log.debug("readAheadSeg: failed to parse {}", cfeName, e);
-      }
-      return blockIndexes;
-    }
-
-    private ByteBuffer populateBuf(
-        String blob,
-        long pos,
-        int compressedLen,
-        int blockIdx,
-        int decompressedLen,
-        BlockCache.Node node)
-        throws IOException {
-      ByteBuffer buf;
-      try {
-        ByteBuffer heapBuf = supply(blob, pos, compressedLen, decompressedLen);
-        buf =
-            node.populate(
-                heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
-      } catch (Throwable t) {
-        node.completeExceptionally(t);
-        accessMapped.compareAndSet(blockIdx, node, null);
-        dir.cache.unpin(node);
-        dir.cache.close(node);
-        throw unwrapException(t);
-      }
-      return buf;
     }
 
     // ---------------------------------------------------------------------------
@@ -2252,7 +2288,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     public byte readByte() throws IOException {
       localPin();
       try {
-        if (!postBuffer.hasRemaining()) initBlockSeq(currentNodeRef.currentBlockIdx + 1);
+        if (!postBuffer.hasRemaining()) initBlockSeq();
         filePointer++;
         return guard.getByte(postBuffer);
       } finally {
@@ -2270,7 +2306,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           guard.getBytes(postBuffer, dst, offset, left);
           len -= left;
           offset += left;
-          initBlockSeq(currentNodeRef.currentBlockIdx + 1);
+          initBlockSeq();
           left = postBuffer.remaining();
         }
         guard.getBytes(postBuffer, dst, offset, len);
@@ -2286,7 +2322,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     /** Read next byte within a localPin() context; refills block if at boundary. */
     private byte _readByte(final int remaining) throws IOException {
-      if (remaining == 0) initBlockSeq(currentNodeRef.currentBlockIdx + 1);
+      if (remaining == 0) initBlockSeq();
       filePointer++;
       return guard.getByte(postBuffer);
     }
@@ -2514,7 +2550,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         guard.getBytes(postBuffer, dst, offset, left);
         toRead -= left;
         offset += left;
-        initBlockSeq(currentNodeRef.currentBlockIdx + 1);
+        initBlockSeq();
         left = postBuffer.remaining();
       } while (left < toRead);
       guard.getBytes(postBuffer, dst, offset, toRead);
@@ -2584,7 +2620,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private boolean refillAtBoundary(int remaining) throws IOException {
       if (remaining == 0) {
-        initBlockSeq(currentNodeRef.currentBlockIdx + 1);
+        initBlockSeq();
         return true;
       } else {
         return false;
@@ -2884,7 +2920,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       UUID segUUID = e.getKey();
       BatchValue batch = e.getValue();
       String segName = batch.segName;
-      for (UUID blobUUID : batch.blobUUIDs) {
+      for (UUID blobUUID : batch.blobUUIDs.keySet()) {
         toRemove.computeIfAbsent(
             blobUUID,
             (k) ->
