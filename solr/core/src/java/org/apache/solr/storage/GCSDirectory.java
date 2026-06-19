@@ -2165,7 +2165,9 @@ public class GCSDirectory extends SizeAwareDirectory {
         BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
         if (extant == cached) {
           // We won the race: fetch from GCS and populate the node.
-          dir.maybeReadAheadSeg(segUUID);
+          if (blockIdx == 0) {
+            dir.maybeReadAheadSeg(segUUID);
+          }
           long start = System.nanoTime();
           ByteBuffer buf =
               dir.populateBuf(
