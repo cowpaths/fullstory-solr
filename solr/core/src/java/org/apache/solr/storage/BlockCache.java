@@ -106,7 +106,7 @@ public class BlockCache implements Closeable {
     ByteBuffer populate(byte[] arr, int off, int len) {
       ByteBuffer value = getValue();
       assert value != null;
-      value.clear().put(arr, off, len);
+      value.clear().put(arr, off, len).flip();
       future.complete(value);
       return value;
     }

@@ -1431,18 +1431,18 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     private NodeRefStruct(NodeRefStruct parent) {
-      if (INHERIT_PINNED) {
-        this.cloneSource = Thread.currentThread().getId();
-        this.parent = parent;
-      }
+      //      if (INHERIT_PINNED) {
+      //        this.cloneSource = Thread.currentThread().getId();
+      //        this.parent = parent;
+      //      }
     }
 
-    private void localPin(BlockCache cache, long pos) {
-      if (INHERIT_PINNED && parent != null) {
-        NodeRefStruct p = parent;
-        parent = null;
-        maybeInheritPinned(p, cache, pos);
-      }
+    private void localPin(/*BlockCache cache, long pos*/ ) {
+      //      if (INHERIT_PINNED && parent != null) {
+      //        NodeRefStruct p = parent;
+      //        parent = null;
+      //        maybeInheritPinned(p, cache, pos);
+      //      }
       while (!state.compareAndSet(State.IDLE, State.PINNED)) {
         Thread.yield();
       }
@@ -1495,7 +1495,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     /**
      * Updates the current cached block. Always called from within a {@code localPin()} context (via
-     * {@link GCSIndexInput#refill}), so state is already PINNED and direct update is safe.
+     * {@link GCSIndexInput#initBlock(int)}), so state is already PINNED and direct update is safe.
      */
     @SuppressWarnings("try")
     private int setCurrentNode(BlockCache.Node node, int blockIdx, BlockCache cache) {
@@ -1536,7 +1536,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     /**
      * Unpins the current block. Always called from within a {@code localPin()} context (via {@link
-     * GCSIndexInput#refill}), so state is already PINNED and direct update is safe.
+     * GCSIndexInput#initBlock(int)}), so state is already PINNED and direct update is safe.
      */
     @SuppressWarnings("try")
     private void unpinCurrentBlock(BlockCache blockCache) {
@@ -1893,13 +1893,15 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private void localPin() throws IOException {
       long pos = seekPos;
-      currentNodeRef.localPin(dir.cache, pos == -1 ? filePointer : pos);
+      currentNodeRef.localPin(/*dir.cache, pos == -1 ? filePointer : pos*/ );
       if (pos != -1) {
         seekPos = -1;
-        actualSeek(pos);
       } else if (currentNodeRef.currentBlockIdx < 0) {
-        actualSeek(filePointer);
+        pos = filePointer;
+      } else {
+        return;
       }
+      actualSeek(pos);
     }
 
     private void actualSeek(final long pos) throws IOException {
@@ -1909,11 +1911,35 @@ public class GCSDirectory extends SizeAwareDirectory {
       postBuffer.position(postBufferBaseline + (int) (pos & COMPRESSION_BLOCK_MASK_LOW));
     }
 
+    private void initBlockSeq(int blockIdx) throws IOException {
+      initBlock(blockIdx);
+    }
+
     private void initBlock(int blockIdx) throws IOException {
       if (blockIdx > lastBlockIdx) throw new EOFException();
-      long blockOffset = blockOffsets[blockIdx];
-      int compressedLen = (int) (blockOffsets[blockIdx + 1] - blockOffset);
-      refill(blockOffset, compressedLen, blockIdx);
+      BlockCache.Node cached = accessMapped.get(blockIdx);
+      if (cached == null || !dir.cache.pin(cached)) {
+        cacheMiss(cached, blockIdx);
+      } else {
+        cacheHit(blockIdx, cached);
+      }
+    }
+
+    private void cacheHit(int blockIdx, BlockCache.Node cached) throws IOException {
+      // Cache hit (or in-flight by the winning thread — join() blocks until populated).
+      ByteBuffer buf;
+      try {
+        buf = cached.join();
+      } catch (CompletionException e) {
+        dir.cache.unpin(cached);
+        throw unwrapException(e.getCause());
+      }
+      setCurrentNode(cached, blockIdx);
+      postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
+      postBufferBaseline = 0;
+      longViews = null;
+      intViews = null;
+      floatViews = null;
     }
 
     private static final int MAX_READ_AHEAD = 16;
@@ -1997,71 +2023,45 @@ public class GCSDirectory extends SizeAwareDirectory {
       return true;
     }
 
-    private void refill(final long pos, final int compressedLen, final int blockIdx)
-        throws IOException {
+    private void cacheMiss(final BlockCache.Node cached, final int blockIdx) throws IOException {
+      long blockOffset = blockOffsets[blockIdx];
+      int compressedLen = (int) (blockOffsets[blockIdx + 1] - blockOffset);
       int decompressedLen =
           blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
 
       BlockCache.Node node;
-      ByteBuffer buf;
-      BlockCache.Node cached = accessMapped.get(blockIdx);
-      if (cached != null && dir.cache.pin(cached)) {
-        // Cache hit (or in-flight by the winning thread — join() blocks until populated).
-        node = cached;
-        try {
-          buf = cached.join();
-        } catch (CompletionException e) {
-          dir.cache.unpin(cached);
-          throw unwrapException(e.getCause());
+      if ((node = dir.cache.acquireNode()) != null) {
+        BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
+        if (extant == cached) {
+          // We won the race: fetch from GCS and populate the node.
+          maybeReadAheadSeg();
+          ByteBuffer buf =
+              populateBuf(blobName, blockOffset, compressedLen, blockIdx, decompressedLen, node);
+          setCurrentNode(node, blockIdx);
+          postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
+          postBufferBaseline = 0;
+          longViews = null;
+          intViews = null;
+          floatViews = null;
+          return;
+        } else {
+          // Another thread won the race; wait for its result.
+          dir.cache.close(node, true);
+          if (dir.cache.pin(extant)) {
+            cacheHit(blockIdx, extant);
+            return;
+          }
         }
-      } else if ((node = dir.cache.acquireNode()) != null
-          && (node = cacheMiss(pos, compressedLen, blockIdx, cached, node, decompressedLen))
-              != null) {
-        buf = node.join(); // guaranteed to return immediately
-      } else {
-        // Serve uncached.
-        uncached(pos, compressedLen, blockIdx, decompressedLen);
-        return;
       }
-      setCurrentNode(node, blockIdx);
-      postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-      postBuffer.clear().limit(decompressedLen);
-      postBufferBaseline = 0;
+      // Serve uncached.
+      ByteBuffer heapBuf = supply(blobName, blockOffset, compressedLen, decompressedLen);
+      setCurrentNode(null, blockIdx);
+      postBuffer = heapBuf;
+      postBufferBaseline = heapBuf.position();
+      heapBuf.order(ByteOrder.LITTLE_ENDIAN);
       longViews = null;
       intViews = null;
       floatViews = null;
-    }
-
-    private BlockCache.Node cacheMiss(
-        long pos,
-        int compressedLen,
-        int blockIdx,
-        BlockCache.Node cached,
-        BlockCache.Node node,
-        int decompressedLen)
-        throws IOException {
-      BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
-      if (extant == cached) {
-        // We won the race: fetch from GCS and populate the node.
-        maybeReadAheadSeg();
-        populateBuf(blobName, pos, compressedLen, blockIdx, decompressedLen, node);
-        return node;
-      } else {
-        // Another thread won the race; wait for its result.
-        dir.cache.close(node, true);
-        if (dir.cache.pin(extant)) {
-          try {
-            extant.join();
-            return extant;
-          } catch (CompletionException e) {
-            dir.cache.unpin(extant);
-            throw unwrapException(e.getCause());
-          }
-        } else {
-          // Serve uncached.
-          return null;
-        }
-      }
     }
 
     private void maybeReadAheadSeg() {
@@ -2153,18 +2153,6 @@ public class GCSDirectory extends SizeAwareDirectory {
       return buf;
     }
 
-    private void uncached(long pos, int compressedLen, int blockIdx, int decompressedLen)
-        throws IOException {
-      ByteBuffer heapBuf = supply(blobName, pos, compressedLen, decompressedLen);
-      setCurrentNode(null, blockIdx);
-      postBuffer = heapBuf;
-      postBufferBaseline = heapBuf.position();
-      heapBuf.order(ByteOrder.LITTLE_ENDIAN);
-      longViews = null;
-      intViews = null;
-      floatViews = null;
-    }
-
     // ---------------------------------------------------------------------------
     // RandomAccessInput
     // ---------------------------------------------------------------------------
@@ -2211,7 +2199,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     public byte readByte(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache, pos);
+      currentNodeRef.localPin(/*dir.cache, pos*/ );
       try {
         return _readByte(pos);
       } finally {
@@ -2221,7 +2209,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     public short readShort(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache, pos);
+      currentNodeRef.localPin(/*dir.cache, pos*/ );
       try {
         final long absolutePos = pos + offset;
         final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
@@ -2238,7 +2226,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     public int readInt(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache, pos);
+      currentNodeRef.localPin(/*dir.cache, pos*/ );
       try {
         return _readInt(pos);
       } finally {
@@ -2248,7 +2236,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     public long readLong(final long pos) throws IOException {
-      currentNodeRef.localPin(dir.cache, pos);
+      currentNodeRef.localPin(/*dir.cache, pos*/ );
       try {
         return _readLong(pos);
       } finally {
@@ -2264,7 +2252,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     public byte readByte() throws IOException {
       localPin();
       try {
-        if (!postBuffer.hasRemaining()) initBlock(currentNodeRef.currentBlockIdx + 1);
+        if (!postBuffer.hasRemaining()) initBlockSeq(currentNodeRef.currentBlockIdx + 1);
         filePointer++;
         return guard.getByte(postBuffer);
       } finally {
@@ -2282,7 +2270,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           guard.getBytes(postBuffer, dst, offset, left);
           len -= left;
           offset += left;
-          initBlock(currentNodeRef.currentBlockIdx + 1);
+          initBlockSeq(currentNodeRef.currentBlockIdx + 1);
           left = postBuffer.remaining();
         }
         guard.getBytes(postBuffer, dst, offset, len);
@@ -2298,7 +2286,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     /** Read next byte within a localPin() context; refills block if at boundary. */
     private byte _readByte(final int remaining) throws IOException {
-      if (remaining == 0) initBlock(currentNodeRef.currentBlockIdx + 1);
+      if (remaining == 0) initBlockSeq(currentNodeRef.currentBlockIdx + 1);
       filePointer++;
       return guard.getByte(postBuffer);
     }
@@ -2526,7 +2514,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         guard.getBytes(postBuffer, dst, offset, left);
         toRead -= left;
         offset += left;
-        initBlock(currentNodeRef.currentBlockIdx + 1);
+        initBlockSeq(currentNodeRef.currentBlockIdx + 1);
         left = postBuffer.remaining();
       } while (left < toRead);
       guard.getBytes(postBuffer, dst, offset, toRead);
