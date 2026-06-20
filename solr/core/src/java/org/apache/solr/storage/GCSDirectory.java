@@ -2089,20 +2089,23 @@ public class GCSDirectory extends SizeAwareDirectory {
       if (cached == null || !dir.cache.pin(cached)) {
         cacheMiss(cached, blockIdx);
       } else {
-        cacheHit(blockIdx, cached);
+        cacheHit(blockIdx, cached, 0);
       }
     }
 
-    private void cacheHit(int blockIdx, BlockCache.Node cached) throws IOException {
+    private void cacheHit(int blockIdx, BlockCache.Node cached, int type) throws IOException {
       // Cache hit (or in-flight by the winning thread — join() blocks until populated).
       ByteBuffer buf;
+      long loadNanos;
       try {
+        long start = System.nanoTime();
         buf = cached.join();
+        loadNanos = System.nanoTime() - start;
       } catch (CompletionException e) {
         dir.cache.unpin(cached);
         throw unwrapException(e.getCause());
       }
-      setCurrentNode(cached, blockIdx);
+      setCurrentNode(cached, blockIdx, type, loadNanos);
       postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
       postBufferBaseline = 0;
       longViews = null;
@@ -2119,8 +2122,9 @@ public class GCSDirectory extends SizeAwareDirectory {
       return sequentialAccessCount << 1;
     }
 
-    private void setCurrentNode(BlockCache.Node node, int blockIdx) {
+    private void setCurrentNode(BlockCache.Node node, int blockIdx, int type, long loadNanos) {
       int seqAcccessCount = currentNodeRef.setCurrentNode(node, blockIdx, dir.cache);
+      System.out.println("XXX "+type+", "+blockIdx+" ("+sliceFirstBlockIdx+","+sliceLastBlockIdx+","+lastBlockIdx+"), seq="+seqAcccessCount+", "+TimeUnit.NANOSECONDS.toMillis(loadNanos)+"ms, "+this);
       switch (seqAcccessCount) {
         case -1:
           // reset, no read-ahead
@@ -2164,6 +2168,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           if (blockIdx == 0) {
             dir.maybeReadAheadSeg(segUUID);
           }
+          long start = System.nanoTime();
           ByteBuffer buf =
               dir.populateBuf(
                   blobName,
@@ -2173,7 +2178,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                   decompressedLen,
                   node,
                   accessMapped);
-          setCurrentNode(node, blockIdx);
+          setCurrentNode(node, blockIdx, 2, System.nanoTime() - start);
           postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
           postBufferBaseline = 0;
           longViews = null;
@@ -2184,14 +2189,15 @@ public class GCSDirectory extends SizeAwareDirectory {
           // Another thread won the race; wait for its result.
           dir.cache.close(node, true);
           if (dir.cache.pin(extant)) {
-            cacheHit(blockIdx, extant);
+            cacheHit(blockIdx, extant, 1);
             return;
           }
         }
       }
       // Serve uncached.
+      long start = System.nanoTime();
       ByteBuffer heapBuf = dir.supply(blobName, blockOffset, compressedLen, decompressedLen);
-      setCurrentNode(null, blockIdx);
+      setCurrentNode(null, blockIdx, 3, System.nanoTime() - start);
       postBuffer = heapBuf;
       postBufferBaseline = heapBuf.position();
       heapBuf.order(ByteOrder.LITTLE_ENDIAN);
