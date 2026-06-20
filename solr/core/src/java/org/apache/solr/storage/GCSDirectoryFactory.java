@@ -107,7 +107,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   static final int DEFAULT_MAX_OPEN_CHANNELS =
       EnvUtils.getPropertyAsInteger("solr.gcsDirectory.maxOpenChannels", 256);
 
-  private static final int TARGET_CHANNELS_PER_CLIENT = 100;
+  private static final int TARGET_CHANNELS_PER_CLIENT = 25;
 
   static int getClientCount(int forChannels) {
     int clientCountTarget = ((forChannels - 1) / TARGET_CHANNELS_PER_CLIENT) + 1;

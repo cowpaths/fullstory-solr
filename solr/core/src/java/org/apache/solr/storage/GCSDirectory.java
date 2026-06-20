@@ -52,6 +52,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -432,18 +433,17 @@ public class GCSDirectory extends SizeAwareDirectory {
       registerBatches(ioExec, blobCoordinator);
       // `controls` limits local resource consumption; this request may submit at most 2 concurrent
       // seg requests, and overall process at most MAX_READ_AHEAD concurrent `ensureLoaded()` requests.
-      cfsSegs.sort((a, b) -> Long.compare(b.size, a.size)); // sort by size descending
-      ioExec.submit(() -> {
-        for (SegAndSizeEntry e : cfsSegs) {
-          maybeReadAheadSeg(e.segUUID, readAheadControls);
-        }
-      });
+      if (!cfsSegs.isEmpty()) {
+        cfsSegs.sort((a, b) -> Long.compare(b.size, a.size)); // sort by size descending
+        Iterator<UUID> iter = cfsSegs.stream().map((e) -> e.segUUID).iterator();
+        maybeReadAheadSeg(iter.next(), readAheadControl, iter);
+      }
     } else {
       this.registerQueue = null;
     }
   }
 
-  private final Semaphore[] readAheadControls = {new Semaphore(3), new Semaphore(32)};
+  private final Semaphore readAheadControl = new Semaphore(GCSIndexInput.MAX_READ_AHEAD << 2, true);
 
   private static final class SegAndSizeEntry {
     private final UUID segUUID;
@@ -1633,76 +1633,62 @@ public class GCSDirectory extends SizeAwareDirectory {
   }
 
   @SuppressWarnings("try")
-  private void maybeReadAheadSeg(UUID segUUID, Semaphore[] controls) {
-    BatchValue batchValue = batched.get(segUUID);
-    if (batchValue == null || batchValue.valid()) {
-      return;
+  private void maybeReadAheadSeg(UUID segUUID, Semaphore control, Iterator<UUID> nextSegs) {
+    BatchValue batchValue;
+    for (; ; ) {
+      batchValue = batched.get(segUUID);
+      if (batchValue != null && !batchValue.valid()) {
+        break;
+      } else if (nextSegs.hasNext()) {
+        segUUID = nextSegs.next();
+      } else {
+        return;
+      }
     }
+    UUID segUUIDF = segUUID;
     String segName = batchValue.segName;
     Map<UUID, String> blobs = batchValue.blobUUIDs;
     // TODO: potential for lock contention here, esp. w/ SynchronousQueue
-    try {
-      if (!controls[0].tryAcquire(2, TimeUnit.SECONDS)) {
-        System.out.println("failed here1 "+segName);
-        return;
-      }
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      throw new ThreadInterruptedException(e);
-    }
-    try {
-      ioExec.submit(
-          () -> {
-            String cfeName;
-            try {
-              if (blobs.size() == 1
-                  && Files.exists(directory.resolve(cfeName = segName.concat(".cfe")))) {
-                UUID blob = blobs.keySet().iterator().next();
-                BlocksStruct blocks = pendingNodes.get(blob);
-                if (blocks != null) {
-                  IntArrayList blockIndexes = parseCfeBlockIndexes(cfeName);
-                  CountDownLatch finished = new CountDownLatch(blockIndexes.size());
-                  for (IntCursor i : blockIndexes) {
-                    ensureLoaded(blob.toString(), blocks.accessMapped, blocks.blockOffsets, i.value, controls[1], finished);
+    ioExec.submit(
+        () -> {
+          String cfeName;
+          if (blobs.size() == 1
+              && Files.exists(directory.resolve(cfeName = segName.concat(".cfe")))) {
+            UUID blob = blobs.keySet().iterator().next();
+            BlocksStruct blocks = pendingNodes.get(blob);
+            if (blocks != null) {
+              IntArrayList blockIndexes = parseCfeBlockIndexes(cfeName);
+              for (IntCursor i : blockIndexes) {
+                ensureLoaded(blob.toString(), blocks.accessMapped, blocks.blockOffsets, i.value, control);
+              }
+            }
+            // preload the first block of each logical file
+          } else {
+            for (Map.Entry<UUID, String> blob : blobs.entrySet()) {
+              UUID blobId = blob.getKey();
+              BlocksStruct blocks = pendingNodes.get(blobId);
+              if (blocks == null) {
+                // not initialized yet, so we have to force it the hacky way
+                BatchValue batch = batched.get(segUUIDF);
+                if (batch != null) {
+                  String filename = batch.blobUUIDs.get(blobId);
+                  try (IndexInput ignore = openInput(filename, IOContext.READONCE)) {
+                    // just to parse offsets and create an entry in `pendingNodes`
+                  } catch (IOException ex) {
+                    throw new UncheckedIOException(ex);
                   }
-                  try {
-                    finished.await();
-                  } catch (InterruptedException ex) {
-                    Thread.currentThread().interrupt();
-                    throw new ThreadInterruptedException(ex);
-                  }
-                }
-                // preload the first block of each logical file
-              } else {
-                for (Map.Entry<UUID, String> blob : blobs.entrySet()) {
-                  UUID blobId = blob.getKey();
-                  BlocksStruct blocks = pendingNodes.get(blobId);
-                  if (blocks == null) {
-                    // not initialized yet, so we have to force it the hacky way
-                    BatchValue batch = batched.get(segUUID);
-                    if (batch != null) {
-                      String filename = batch.blobUUIDs.get(blobId);
-                      try (IndexInput ignore = openInput(filename, IOContext.READONCE)) {
-                        // just to parse offsets and create an entry in `pendingNodes`
-                      } catch (IOException ex) {
-                        throw new UncheckedIOException(ex);
-                      }
-                      blocks = pendingNodes.get(blobId);
-                    }
-                  }
-                  if (blocks != null) {
-                    ensureLoaded(blobId.toString(), blocks.accessMapped, blocks.blockOffsets, 0, controls[1], DUMMY);
-                  }
+                  blocks = pendingNodes.get(blobId);
                 }
               }
-            } finally {
-              controls[0].release();
+              if (blocks != null) {
+                ensureLoaded(blobId.toString(), blocks.accessMapped, blocks.blockOffsets, 0, control);
+              }
             }
-          });
-    } catch (Throwable t) {
-      controls[0].release();
-      throw t;
-    }
+          }
+          if (nextSegs.hasNext()) {
+            maybeReadAheadSeg(nextSegs.next(), control, nextSegs);
+          }
+        });
   }
 
   /**
@@ -1737,27 +1723,35 @@ public class GCSDirectory extends SizeAwareDirectory {
     return blockIndexes;
   }
 
+  private final AtomicInteger depth = new AtomicInteger();
+
+  private static final String[] INDENTS = new String[20];
+  static {
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < INDENTS.length; i++) {
+      sb.append("  ");
+      INDENTS[i] = sb.toString();
+    }
+  }
+
   private boolean ensureLoaded(
       String blob,
       AtomicReferenceArray<BlockCache.Node> accessMapped,
       long[] blockOffsets,
       int idx,
-      Semaphore control,
-      CountDownLatch finished) {
+      Semaphore control) {
     BlockCache.Node extant = accessMapped.get(idx);
-    if ((extant == null || !extant.pinnable()) && acquireReadaheadPermit()) {
+    if ((extant == null || !extant.pinnable()) && acquireReadaheadPermit(control)) {
       BlockCache.Node toPopulate = cache.acquireNode();
-      if (toPopulate == null || !control.tryAcquire()) {
-        if (toPopulate != null) {
-          cache.close(toPopulate, true);
-        }
-        releaseReadaheadPermit();
-        finished.countDown();
+      if (toPopulate == null) {
+        releaseReadaheadPermit(control);
         return false;
       }
       try {
         ioExec.submit(
             () -> {
+              int depth = this.depth.get();
+              System.out.println("YYY"+INDENTS[Math.min(INDENTS.length - 1, depth)]+depth);
               try {
                 if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
                   long blockOffset = blockOffsets[idx];
@@ -1777,27 +1771,15 @@ public class GCSDirectory extends SizeAwareDirectory {
                   cache.close(toPopulate, true);
                 }
               } finally {
-                try {
-                  releaseReadaheadPermit();
-                } finally {
-                  finished.countDown();
-                  control.release();
-                }
+                releaseReadaheadPermit(control);
               }
               return null;
             });
       } catch (Throwable t) {
         // TODO: ensure this won't double-release with submitted task
-        try {
-          releaseReadaheadPermit();
-        } finally {
-          finished.countDown();
-          control.release();
-        }
+        releaseReadaheadPermit(control);
         throw t;
       }
-    } else {
-      finished.countDown();
     }
     return true;
   }
@@ -1866,8 +1848,6 @@ public class GCSDirectory extends SizeAwareDirectory {
     CompressingDirectory.decompress(compressed, 0, decompressedLen, decompressed, 0);
     return ByteBuffer.wrap(decompressed, 0, decompressedLen);
   }
-
-  private static final CountDownLatch DUMMY = new CountDownLatch(0);
 
   static final class GCSIndexInput extends IndexInput implements RandomAccessInput {
 
@@ -2105,7 +2085,7 @@ public class GCSDirectory extends SizeAwareDirectory {
               : Math.toIntExact((this.offset + length - 1) >> COMPRESSION_BLOCK_SHIFT);
       if (sliceFirstBlockIdx == sliceLastBlockIdx && length != 0) {
         // heuristic -- we will read from the only block
-        dir.ensureLoaded(blobName, accessMapped, blockOffsets, sliceFirstBlockIdx, dir.readAheadControls[1], DUMMY);
+        dir.ensureLoaded(blobName, accessMapped, blockOffsets, sliceFirstBlockIdx, dir.readAheadControl);
       }
     }
 
@@ -2221,7 +2201,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                       blockIdx + Math.min(MAX_READ_AHEAD, readAhead(seqAcccessCount))))
               > readAheadTo) {
         for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
-          if (!dir.ensureLoaded(blobName, accessMapped, blockOffsets, i, dir.readAheadControls[1], DUMMY)) {
+          if (!dir.ensureLoaded(blobName, accessMapped, blockOffsets, i, dir.readAheadControl)) {
             newReadAheadTo = i - 1;
             break;
           }
@@ -2242,7 +2222,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         if (extant == cached) {
           // We won the race: fetch from GCS and populate the node.
           if (blockIdx == 0) {
-            dir.maybeReadAheadSeg(segUUID, dir.readAheadControls);
+            dir.maybeReadAheadSeg(segUUID, dir.readAheadControl, Collections.emptyIterator());
           }
           long start = System.nanoTime();
           ByteBuffer buf =
@@ -2971,16 +2951,29 @@ public class GCSDirectory extends SizeAwareDirectory {
       GCSDirectoryFactory.DEFAULT_MAX_OPEN_CHANNELS >> 1;
   private final AtomicInteger readaheadPermit = new AtomicInteger(0);
 
-  private boolean acquireReadaheadPermit() {
-    if (readaheadPermit.getAndIncrement() >= READ_CHANNEL_HEADROOM) {
-      readaheadPermit.decrementAndGet();
-      return false;
-    } else {
-      return true;
+  private boolean acquireReadaheadPermit(Semaphore localControl) {
+    try {
+      if (!localControl.tryAcquire(2, TimeUnit.SECONDS)) {
+        return false;
+      } else {
+        if (readaheadPermit.getAndIncrement() >= READ_CHANNEL_HEADROOM) {
+          localControl.release();
+          readaheadPermit.decrementAndGet();
+          return false;
+        } else {
+          depth.incrementAndGet();
+          return true;
+        }
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new ThreadInterruptedException(e);
     }
   }
 
-  private void releaseReadaheadPermit() {
+  private void releaseReadaheadPermit(Semaphore localControl) {
+    depth.decrementAndGet();
+    localControl.release();
     readaheadPermit.decrementAndGet();
   }
 
