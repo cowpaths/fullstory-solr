@@ -49,7 +49,6 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -63,7 +62,6 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
@@ -1679,25 +1677,10 @@ public class GCSDirectory extends SizeAwareDirectory {
             }
             // preload the first block of each logical file
           } else {
-            for (Map.Entry<UUID, String> blob : blobs.entrySet()) {
-              UUID blobId = blob.getKey();
-              BlocksStruct blocks = pendingNodes.get(blobId);
-              if (blocks == null) {
-                // not initialized yet, so we have to force it the hacky way
-                BatchValue batch = batched.get(segUUIDF);
-                if (batch != null) {
-                  String filename = batch.blobUUIDs.get(blobId);
-                  try (IndexInput ignore = openInput(filename, IOContext.READONCE)) {
-                    // just to parse offsets and create an entry in `pendingNodes`
-                  } catch (IOException ex) {
-                    throw new UncheckedIOException(ex);
-                  }
-                  blocks = pendingNodes.get(blobId);
-                }
-              }
-              if (blocks != null) {
-                ensureLoaded(blobId.toString(), blocks.accessMapped, blocks.blockOffsets, 0, control);
-              }
+            if (followup == null) {
+              preloadNonCfs(segUUIDF, blobs, control);
+            } else {
+              followup.add(() -> preloadNonCfs(segUUIDF, blobs, control));
             }
           }
           if (nextSegs.hasNext()) {
@@ -1710,6 +1693,28 @@ public class GCSDirectory extends SizeAwareDirectory {
             System.out.println("followup done");
           }
         });
+  }
+
+  private void preloadNonCfs(UUID segUUID, Map<UUID, String> blobs, Semaphore control) {
+    for (Map.Entry<UUID, String> blob : blobs.entrySet()) {
+      UUID blobId = blob.getKey();
+      BlocksStruct blocks = pendingNodes.get(blobId);
+      if (blocks == null) {
+        // not initialized yet, so we have to force it the hacky way
+        BatchValue batch = batched.get(segUUID);
+        if (batch != null) {
+          try (IndexInput ignore = openInput(batch.blobUUIDs.get(blobId), IOContext.READONCE)) {
+            // just to parse offsets and create an entry in `pendingNodes`
+          } catch (IOException ex) {
+            throw new UncheckedIOException(ex);
+          }
+          blocks = pendingNodes.get(blobId);
+        }
+      }
+      if (blocks != null) {
+        ensureLoaded(blobId.toString(), blocks.accessMapped, blocks.blockOffsets, 0, control);
+      }
+    }
   }
 
   /**
