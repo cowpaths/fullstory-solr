@@ -105,6 +105,7 @@ import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.lucene.util.compress.LZ4;
+import org.apache.solr.common.util.EnvUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -878,11 +879,27 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
   }
 
+  /**
+   * For files that are <i>not</i> GCS-backed, we can delegate {@link #openInput(String, IOContext)} ~directly
+   * to {@link MMapDirectory#openInput(String, IOContext)}, or we can mmap ourselves and create an "always-mapped"
+   * local-only {@link GCSIndexInput}. Since we already have all the tooling to trivially support the latter, and
+   * it avoids low-level polymorphism, this is probably the right thing to do, but it's sysprop-configurable for
+   * evaluation.
+   */
+  private static final boolean DIRECT_MMAP_DIR_INPUT = EnvUtils.getPropertyAsBool("solr.gcs.directMmapDirInput", false);
+
   @Override
   public IndexInput openInput(String name, IOContext context) throws IOException {
     ensureOpen();
     if (!isGcsBacked(name)) {
-      return super.openInput(name, context);
+      if (DIRECT_MMAP_DIR_INPUT) {
+        return super.openInput(name, context);
+      } else {
+        Path path = directory.resolve(name);
+        try (FileChannel ch = FileChannel.open(path, StandardOpenOption.READ)) {
+          return GCSIndexInput.ofMapped(name, this, ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size()));
+        }
+      }
     }
     Path offsetFile = directory.resolve(name);
     byte[] header = readOffsetFileHeader(offsetFile);
@@ -890,8 +907,16 @@ public class GCSDirectory extends SizeAwareDirectory {
       throw new NoSuchFileException(name);
     }
     if (isLocalOnlyHeader(header)) {
-      IndexInput raw = super.openInput(name, context);
-      return raw.slice("local-only:" + name, 0, onDiskFileLength(name) - 8);
+      long contentLen = onDiskFileLength(name) - 8;
+      if (DIRECT_MMAP_DIR_INPUT) {
+        IndexInput raw = super.openInput(name, context);
+        return raw.slice("local-only:" + name, 0, contentLen);
+      } else {
+        try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
+          return GCSIndexInput.ofMapped(
+              "local-only:" + name, this, ch.map(FileChannel.MapMode.READ_ONLY, 0, contentLen));
+        }
+      }
     }
     return new GCSIndexInput("gcs:" + name, this, offsetFile, header);
   }
@@ -2124,6 +2149,54 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.sliceLastBlockIdx = lastBlockIdx;
     }
 
+    // Always-mapped constructor: entire file content pre-pinned as tail nodes; no GCS machinery.
+    private GCSIndexInput(String resourceDescription, GCSDirectory dir, long fileLength, AtomicReferenceArray<BlockCache.Node> accessMapped, ByteBuffer content) {
+      super(resourceDescription);
+      this.currentNodeRef = new NodeRefStruct();
+      this.dir = dir;
+      this.length = fileLength;
+      int tailLen = (int) (fileLength & COMPRESSION_BLOCK_MASK_LOW);
+      boolean hasTail = tailLen > 0;
+      this.blockCount = fileLength == 0 ? 1 : (int) (((fileLength - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
+      this.lastBlockIdx = blockCount - 1;
+      this.lastBlockDecompressedLen = hasTail ? tailLen : COMPRESSION_BLOCK_SIZE;
+      this.blockOffsets = null; // never accessed (all blocks pre-pinned)
+      this.blobUUID = null;
+      this.blobName = null;
+      this.segUUID = null;
+      // `blocksStruct` placeholder here; only signals that we own the mapping (inspected in `close()`)
+      this.blocksStruct = new BlocksStruct(null, null, null, null, 0, hasTail);
+      this.blocksStruct.origMapping.complete(content);
+      this.guard = this.blocksStruct.guard;
+      this.accessMapped = accessMapped;
+      this.offset = 0;
+      this.sliceLength = fileLength;
+      this.sliceFirstBlockIdx = 0;
+      this.readAheadTo = 0;
+      this.sliceLastBlockIdx = lastBlockIdx;
+    }
+
+    /**
+     * Creates an always-mapped {@link GCSIndexInput} for a local file whose entire content is
+     * pre-pinned as tail nodes into {@code accessMapped}. Used instead of {@code
+     * super.openInput()} so that all {@link IndexInput} call sites remain monomorphic on {@link
+     * GCSIndexInput}.
+     */
+    static GCSIndexInput ofMapped(String resourceDescription, GCSDirectory dir, ByteBuffer content) {
+      int len = content.remaining();
+      int blockCount = len == 0 ? 1 : (((len - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
+      AtomicReferenceArray<BlockCache.Node> accessMapped = new AtomicReferenceArray<>(blockCount);
+      int base = content.position();
+      for (int i = 0; i < blockCount; i++) {
+        int blockStart = base + i * COMPRESSION_BLOCK_SIZE;
+        int blockEnd = i == blockCount - 1 ? base + len : blockStart + COMPRESSION_BLOCK_SIZE;
+        ByteBuffer blockBuf = content.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+        blockBuf.limit(blockEnd).position(blockStart);
+        accessMapped.set(i, dir.cache.createTailNode(blockBuf.slice()));
+      }
+      return new GCSIndexInput(resourceDescription, dir, len, accessMapped, content);
+    }
+
     // Clone / slice constructor: shares immutable state from parent; does not own the mmap.
     private GCSIndexInput(
         String resourceDescription, GCSIndexInput parent, long offset, long length) {
@@ -2950,6 +3023,12 @@ public class GCSDirectory extends SizeAwareDirectory {
         unsetBuffers();
 
         if (blocksStruct == null) return;
+
+        if (blobUUID == null) {
+          // always-mapped root: not registered in pendingNodes; just invalidate and unmap.
+          guard.invalidateAndUnmap(blocksStruct.origMapping.join());
+          return;
+        }
 
         @SuppressWarnings({"unchecked", "rawtypes"})
         CompletableFuture<ByteBuffer>[] toUnmap = new CompletableFuture[1];

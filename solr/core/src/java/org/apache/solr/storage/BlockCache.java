@@ -94,13 +94,17 @@ public class BlockCache implements Closeable {
      */
     private final CompletableFuture<ByteBuffer> future = new CompletableFuture<>();
 
+    final boolean tailNode;
+
     private Node(ByteBuffer prepopulated) {
       super(null, null, Integer.MAX_VALUE >> 1);
       future.complete(prepopulated);
+      this.tailNode = true;
     }
 
     Node(ByteBuffer buf, Cache.Node<ByteBuffer> prev, int initialRefCount) {
       super(buf, prev, initialRefCount);
+      this.tailNode = false;
     }
 
     ByteBuffer populate(byte[] arr, int off, int len) {
@@ -179,6 +183,7 @@ public class BlockCache implements Closeable {
     }
 
     public PinRef register(GCSDirectory.NodeRefStruct nodeRefStruct, BlockCache cache) {
+      if (tailNode) return NOOP_PINREF; // tail nodes are never evicted; PBS/refLru is unnecessary
       PBS ret = null;
       final PBS lock = lock();
       PBS[] deferredHolder = new PBS[1];
@@ -229,6 +234,8 @@ public class BlockCache implements Closeable {
     }
   }
 
+  static final PinRef NOOP_PINREF = new PinRef(null, null);
+
   static class PinRef implements Closeable {
     private final PBS parent;
     private final Cache.Node<GCSDirectory.NodeRefStruct> permit;
@@ -248,7 +255,7 @@ public class BlockCache implements Closeable {
 
     @Override
     public void close() {
-      parent.refLru.pin(permit);
+      if (parent != null) parent.refLru.pin(permit);
     }
   }
 
