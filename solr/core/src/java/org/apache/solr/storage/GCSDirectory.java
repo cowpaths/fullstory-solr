@@ -49,11 +49,15 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Queue;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -62,17 +66,22 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.stream.Collectors;
 import java.util.zip.CRC32;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.index.IndexFileNames;
+import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.internal.hppc.IntArrayList;
 import org.apache.lucene.internal.hppc.IntCursor;
 import org.apache.lucene.internal.hppc.LongArrayList;
@@ -389,9 +398,14 @@ public class GCSDirectory extends SizeAwareDirectory {
     this.blobCoordinator = blobCoordinator;
     if (blobCoordinator != null) {
       this.registerQueue = registerQueue;
-      List<SegAndSizeEntry> cfsSegs = new ArrayList<>();
-      for (String file : listAll()) {
+      Map<String, Integer> segOrds = new HashMap<>();
+      String[] files = listAll();
+      List<Closeable> toClose = new ArrayList<>(files.length);
+      for (String file : files) {
         if (!isGcsBacked(file)) {
+          if (file.startsWith("segments_")) {
+            parseSegOrds(file, segOrds);
+          }
           continue;
         }
         Path path = directory.resolve(file);
@@ -421,43 +435,63 @@ public class GCSDirectory extends SizeAwareDirectory {
                 return struct;
               }
             });
-        if (file.endsWith(".cfs")) {
-          try (IndexInput in = new GCSIndexInput("gcs:" + file, this, path, header)) {
-            // populate `pendingNodes`.
-            cfsSegs.add(new SegAndSizeEntry(segUUID, in.length()));
-          }
-        }
+        toClose.add(new GCSIndexInput("gcs:" + file, this, path, header));
       }
-      registerBatches(ioExec, blobCoordinator);
-      // `controls` limits local resource consumption; this request may submit at most 2 concurrent
-      // seg requests, and overall process at most MAX_READ_AHEAD concurrent `ensureLoaded()` requests.
-      if (!cfsSegs.isEmpty()) {
-        cfsSegs.sort((a, b) -> Long.compare(b.size, a.size)); // sort by size descending
-        Iterator<UUID> iter = cfsSegs.stream().map((e) -> e.segUUID).iterator();
-        maybeReadAheadSeg(iter.next(), readAheadControl, iter, new ArrayList<>(cfsSegs.size()));
+      if (!batched.isEmpty()) {
+        registerBatches(ioExec, blobCoordinator);
+        // `control` limits local resource consumption; this request may submit at most 2 concurrent
+        // seg requests, and overall process at most MAX_READ_AHEAD concurrent `ensureLoaded()` requests.
+        List<UUID> sorted = batched.entrySet().stream().map((e) -> {
+          Integer ord = segOrds.get(e.getValue().segName);
+          return ord == null ? null : new SegAndOrd(e.getKey(), ord, e.getValue().segName);
+        }).filter(Objects::nonNull).sorted(Comparator.comparingInt(a -> a.ord)).map((s) -> s.segId).collect(Collectors.toList());
+        if (!sorted.isEmpty()) {
+          Iterator<UUID> iter = sorted.iterator();
+          Runnable onComplete = () -> {
+            try (Closeable c = () -> IOUtils.close(toClose)) {
+              Thread.sleep(5000); // best-effort.
+            } catch (IOException ex) {
+              throw new UncheckedIOException(ex);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+              throw new ThreadInterruptedException(e);
+            }
+          };
+          maybeReadAheadSeg(iter.next(), readAheadControl, iter, new ArrayList<>(sorted.size()), onComplete, 2000);
+        }
       }
     } else {
       this.registerQueue = null;
     }
   }
 
-  private final Semaphore readAheadControl = new Semaphore(GCSIndexInput.MAX_READ_AHEAD << 2, true);
+  private static final class SegAndOrd {
+    private final UUID segId;
+    private final int ord;
+    private final String segName;
 
-  private static final class SegAndSizeEntry {
-    private final UUID segUUID;
-    private final long size;
-
-    private SegAndSizeEntry(UUID segUUID, long size) {
-      this.segUUID = segUUID;
-      this.size = size;
+    private SegAndOrd(UUID segId, int ord, String segName) {
+      this.segId = segId;
+      this.ord = ord;
+      this.segName = segName;
     }
   }
+
+  private void parseSegOrds(String file, Map<String, Integer> segOrds) throws IOException {
+    SegmentInfos infos = SegmentInfos.readCommit(this, file);
+    for (int i = 0; i < infos.size(); i++) {
+      segOrds.put(infos.info(i).info.name, i);
+    }
+  }
+
+  private final Semaphore readAheadControl = new Semaphore(GCSIndexInput.MAX_READ_AHEAD << 1, true);
 
   private static final int REGISTER_CONCURRENCY = 8;
 
   private void registerBatches(ExecutorService ioExec, BlobLifecycleCoordinator blobCoordinator)
       throws IOException {
     final Semaphore control = new Semaphore(REGISTER_CONCURRENCY); // limit our local concurrency
+    List<Future<?>> results = new ArrayList<>(batched.size());
     for (Map.Entry<UUID, BatchValue> entry : batched.entrySet()) {
       UUID segUUID = entry.getKey();
       Set<UUID> blobUUIDs = entry.getValue().blobUUIDs.keySet();
@@ -467,7 +501,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           mustRelease = false; // no acquisition
           blobCoordinator.registerBatch(segUUID, blobUUIDs); // execute inline
         } else {
-          ioExec.submit(
+          results.add(ioExec.submit(
               () -> {
                 try {
                   blobCoordinator.registerBatch(segUUID, blobUUIDs);
@@ -475,7 +509,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                 } finally {
                   control.release();
                 }
-              });
+              }));
           mustRelease = false; // will be released by the submitted task
         }
       } catch (InterruptedException ex) {
@@ -488,13 +522,22 @@ public class GCSDirectory extends SizeAwareDirectory {
       }
     }
     try {
-      // block until all tasks finish
-      if (!control.tryAcquire(REGISTER_CONCURRENCY, 60, TimeUnit.SECONDS)) {
-        throw new RuntimeException("timed out waiting for batch registration tasks to complete");
+      // block max 60s until all tasks finish
+      long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+      for (Future<?> r : results) {
+        long waitNanos = until - System.nanoTime();
+        if (waitNanos < 0) {
+          throw new TimeoutException();
+        }
+        r.get(waitNanos, TimeUnit.NANOSECONDS);
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new ThreadInterruptedException(e);
+    } catch (ExecutionException e) {
+      throw unwrapException(e.getCause());
+    } catch (TimeoutException e) {
+      throw new RuntimeException(e);
     }
   }
 
@@ -1630,8 +1673,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
   }
 
-  @SuppressWarnings("try")
-  private void maybeReadAheadSeg(UUID segUUID, Semaphore control, Iterator<UUID> nextSegs, List<Runnable> followup) {
+  private void maybeReadAheadSeg(UUID segUUID, Semaphore control, Iterator<UUID> nextSegs, List<Runnable> followup, Runnable onComplete, int timeoutMillis) {
     BatchValue batchValue;
     for (; ; ) {
       batchValue = batched.get(segUUID);
@@ -1640,6 +1682,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       } else if (nextSegs.hasNext()) {
         segUUID = nextSegs.next();
       } else {
+        finishSegReadahead(followup, onComplete);
         return;
       }
     }
@@ -1659,17 +1702,17 @@ public class GCSDirectory extends SizeAwareDirectory {
               String blobS = blob.toString();
               if (followup == null) {
                 for (IntCursor i : blockIndexes) {
-                  ensureLoaded(blobS, blocks.accessMapped, blocks.blockOffsets, i.value, control);
+                  ensureLoaded(blobS, blocks.accessMapped, blocks.blockOffsets, i.value, control, timeoutMillis);
                 }
               } else {
                 Iterator<IntCursor> iter = blockIndexes.iterator();
-                for (int i = 0; i < 3 && iter.hasNext(); i++) {
-                  ensureLoaded(blobS, blocks.accessMapped, blocks.blockOffsets, iter.next().value, control);
+                for (int i = 0; i < 4 && iter.hasNext(); i++) {
+                  ensureLoaded(blobS, blocks.accessMapped, blocks.blockOffsets, iter.next().value, control, timeoutMillis);
                 }
                 if (iter.hasNext()) {
                   followup.add(() -> {
                     do {
-                      ensureLoaded(blobS, blocks.accessMapped, blocks.blockOffsets, iter.next().value, control);
+                      ensureLoaded(blobS, blocks.accessMapped, blocks.blockOffsets, iter.next().value, control, timeoutMillis);
                     } while (iter.hasNext());
                   });
                 }
@@ -1678,28 +1721,40 @@ public class GCSDirectory extends SizeAwareDirectory {
             // preload the first block of each logical file
           } else {
             if (followup == null) {
-              preloadNonCfs(segUUIDF, blobs, control);
+              preloadNonCfs(segUUIDF, blobs, control, timeoutMillis);
             } else {
-              followup.add(() -> preloadNonCfs(segUUIDF, blobs, control));
+              followup.add(() -> preloadNonCfs(segUUIDF, blobs, control, timeoutMillis));
             }
           }
           if (nextSegs.hasNext()) {
-            maybeReadAheadSeg(nextSegs.next(), control, nextSegs, followup);
-          } else if (followup != null) {
-            System.out.println("running followup");
-            for (Runnable r : followup) {
-              r.run();
-            }
-            System.out.println("followup done");
+            maybeReadAheadSeg(nextSegs.next(), control, nextSegs, followup, onComplete, timeoutMillis);
+          } else {
+            finishSegReadahead(followup, onComplete);
           }
         });
   }
 
-  private void preloadNonCfs(UUID segUUID, Map<UUID, String> blobs, Semaphore control) {
+  private static void finishSegReadahead(List<Runnable> followup, Runnable onComplete) {
+    try {
+      if (followup != null) {
+        for (Runnable r : followup) {
+          r.run();
+        }
+      }
+    } finally {
+      if (onComplete != null) {
+        onComplete.run();
+      }
+    }
+  }
+
+  @SuppressWarnings("try")
+  private void preloadNonCfs(UUID segUUID, Map<UUID, String> blobs, Semaphore control, int timeoutMillis) {
     for (Map.Entry<UUID, String> blob : blobs.entrySet()) {
       UUID blobId = blob.getKey();
       BlocksStruct blocks = pendingNodes.get(blobId);
-      if (blocks == null) {
+      // TODO: now that we do this in Directory ctor, `blobs` can probably revert to `Set<UUID>`.
+      if (false && blocks == null) {
         // not initialized yet, so we have to force it the hacky way
         BatchValue batch = batched.get(segUUID);
         if (batch != null) {
@@ -1712,7 +1767,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         }
       }
       if (blocks != null) {
-        ensureLoaded(blobId.toString(), blocks.accessMapped, blocks.blockOffsets, 0, control);
+        ensureLoaded(blobId.toString(), blocks.accessMapped, blocks.blockOffsets, 0, control, timeoutMillis);
       }
     }
   }
@@ -1754,9 +1809,10 @@ public class GCSDirectory extends SizeAwareDirectory {
       AtomicReferenceArray<BlockCache.Node> accessMapped,
       long[] blockOffsets,
       int idx,
-      Semaphore control) {
+      Semaphore control,
+      int timeoutMillis) {
     BlockCache.Node extant = accessMapped.get(idx);
-    if ((extant == null || !extant.pinnable()) && acquireReadaheadPermit(control)) {
+    if ((extant == null || !extant.pinnable()) && acquireReadaheadPermit(control, timeoutMillis)) {
       BlockCache.Node toPopulate = cache.acquireNode();
       if (toPopulate == null) {
         releaseReadaheadPermit(control);
@@ -2098,7 +2154,7 @@ public class GCSDirectory extends SizeAwareDirectory {
               : Math.toIntExact((this.offset + length - 1) >> COMPRESSION_BLOCK_SHIFT);
       if (sliceFirstBlockIdx == sliceLastBlockIdx && length != 0) {
         // heuristic -- we will read from the only block
-        dir.ensureLoaded(blobName, accessMapped, blockOffsets, sliceFirstBlockIdx, dir.readAheadControl);
+        dir.ensureLoaded(blobName, accessMapped, blockOffsets, sliceFirstBlockIdx, dir.readAheadControl, 0);
       }
     }
 
@@ -2193,7 +2249,9 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private void setCurrentNode(BlockCache.Node node, int blockIdx, int type, long loadNanos) {
       int seqAcccessCount = currentNodeRef.setCurrentNode(node, blockIdx, dir.cache);
-      System.out.println("XXX "+type+", "+blockIdx+" ("+sliceFirstBlockIdx+","+sliceLastBlockIdx+","+lastBlockIdx+"), seq="+seqAcccessCount+", "+TimeUnit.NANOSECONDS.toMillis(loadNanos)+"ms, "+this);
+      // System.out.println("XXX "+type+", "+blockIdx+" ("+sliceFirstBlockIdx+","+sliceLastBlockIdx+
+      // ","+lastBlockIdx+"), seq="+seqAcccessCount+", "+TimeUnit.NANOSECONDS.toMillis(loadNanos)+
+      // "ms, "+this);
       switch (seqAcccessCount) {
         case -1:
           // reset, no read-ahead
@@ -2214,7 +2272,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                       blockIdx + Math.min(MAX_READ_AHEAD, readAhead(seqAcccessCount))))
               > readAheadTo) {
         for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
-          if (!dir.ensureLoaded(blobName, accessMapped, blockOffsets, i, dir.readAheadControl)) {
+          if (!dir.ensureLoaded(blobName, accessMapped, blockOffsets, i, dir.readAheadControl, 0)) {
             newReadAheadTo = i - 1;
             break;
           }
@@ -2235,7 +2293,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         if (extant == cached) {
           // We won the race: fetch from GCS and populate the node.
           if (blockIdx == 0) {
-            dir.maybeReadAheadSeg(segUUID, dir.readAheadControl, Collections.emptyIterator(), null);
+            dir.maybeReadAheadSeg(segUUID, dir.readAheadControl, Collections.emptyIterator(), null, null, 0);
           }
           long start = System.nanoTime();
           ByteBuffer buf =
@@ -2964,9 +3022,9 @@ public class GCSDirectory extends SizeAwareDirectory {
       GCSDirectoryFactory.DEFAULT_MAX_OPEN_CHANNELS >> 1;
   private final AtomicInteger readaheadPermit = new AtomicInteger(0);
 
-  private boolean acquireReadaheadPermit(Semaphore localControl) {
+  private boolean acquireReadaheadPermit(Semaphore localControl, int timeoutMillis) {
     try {
-      if (!localControl.tryAcquire(2, TimeUnit.SECONDS)) {
+      if (!localControl.tryAcquire(timeoutMillis, TimeUnit.MILLISECONDS)) {
         return false;
       } else {
         if (readaheadPermit.getAndIncrement() >= READ_CHANNEL_HEADROOM) {
