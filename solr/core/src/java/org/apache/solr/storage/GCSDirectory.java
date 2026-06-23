@@ -2042,6 +2042,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.blobName = parent.blobName;
       this.segUUID = parent.segUUID;
       this.blocksStruct = null; // slice does not own the mapping
+      maybePreloadSlice();
     }
 
     // -------------------------------------------------------------------------

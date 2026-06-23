@@ -221,8 +221,15 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         sliceLen == 0
             ? sliceFirstBlockIdx
             : Math.toIntExact((this.offset + sliceLen - 1) >> COMPRESSION_BLOCK_SHIFT);
-    if (sliceFirstBlockIdx == sliceLastBlockIdx && sliceLen != 0) {
-      // heuristic: we will read from the only block
+  }
+
+  /**
+   * Heuristic: if this slice spans exactly one block, pre-load it now. Must be called at the end of
+   * the subclass slice constructor, after all subclass fields are initialized, to avoid
+   * virtual-dispatch-before-initialization bugs.
+   */
+  protected final void maybePreloadSlice() {
+    if (sliceFirstBlockIdx == sliceLastBlockIdx && sliceLength != 0) {
       ensureBlockLoaded(sliceFirstBlockIdx);
     }
   }
