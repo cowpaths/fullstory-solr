@@ -131,7 +131,12 @@ public class AccessDirectory2 extends MMapDirectory {
 
   @Override
   public long fileLength(String name) throws IOException {
-    return readLengthFromHeader(compressedPath.resolve(name));
+    if (name.endsWith(".tmp")) {
+      return super.fileLength(name);
+    } else {
+      ensureOpen();
+      return readLengthFromHeader(compressedPath.resolve(name));
+    }
   }
 
   @Override

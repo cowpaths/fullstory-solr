@@ -375,7 +375,11 @@ public class TeeDirectory extends SizeAwareDirectory
 
   @Override
   protected long onDiskFileLength0(String name) throws IOException {
-    return persistent.onDiskFileLength(name);
+    if (name.endsWith(".tmp")) {
+      return access.fileLength(name);
+    } else {
+      return persistent.onDiskFileLength(name);
+    }
   }
 
   @Override
