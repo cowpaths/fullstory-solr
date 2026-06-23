@@ -37,9 +37,6 @@ import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.FloatBuffer;
-import java.nio.IntBuffer;
-import java.nio.LongBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -293,11 +290,7 @@ public class GCSDirectory extends SizeAwareDirectory {
   static final AtomicReferenceArray<BlockCache.Node> EMPTY_ACCESS_MAPPED =
       new AtomicReferenceArray<>(0);
 
-  static final LongBuffer EMPTY_LONGBUFFER = LongBuffer.allocate(0);
-  static final IntBuffer EMPTY_INTBUFFER = IntBuffer.allocate(0);
-  static final FloatBuffer EMPTY_FLOATBUFFER = FloatBuffer.allocate(0);
-
-  /**
+/**
    * Cache-node arrays shared across all root {@link GCSIndexInput} instances opened for the same
    * GCS blob. Keyed by blob UUID so that rename (which only moves the local offset file) requires
    * no map update. Populated by the writer at write-close time; entries are removed on delete.
@@ -506,7 +499,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
   }
 
-  private final Semaphore readAheadControl = new Semaphore(GCSIndexInput.MAX_READ_AHEAD << 1, true);
+  private final Semaphore readAheadControl = new Semaphore(CachedCompressedIndexInput.MAX_READ_AHEAD << 1, true);
 
   private static final int REGISTER_CONCURRENCY = 8;
 
@@ -1527,201 +1520,6 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
   }
 
-  private enum State {
-    UNPINNING,
-    IDLE,
-    PINNED
-  }
-
-  /**
-   * May be set to {@code true} to allow clones and slices to inherit pinned state from the parent
-   * {@link IndexInput}.
-   */
-  private static final boolean INHERIT_PINNED = false;
-
-  static final class NodeRefStruct {
-    private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
-    private BlockCache.Node currentNode;
-    private int currentBlockIdx = -1;
-    private BlockCache.PinRef readPermit;
-    private int sequentialAccessCount = 0;
-    private long cloneSource;
-    private volatile NodeRefStruct parent;
-
-    private NodeRefStruct() {
-      // default no-arg ctor
-    }
-
-    private NodeRefStruct(NodeRefStruct parent) {
-      //      if (INHERIT_PINNED) {
-      //        this.cloneSource = Thread.currentThread().getId();
-      //        this.parent = parent;
-      //      }
-    }
-
-    private void localPin(/*BlockCache cache, long pos*/ ) {
-      //      if (INHERIT_PINNED && parent != null) {
-      //        NodeRefStruct p = parent;
-      //        parent = null;
-      //        maybeInheritPinned(p, cache, pos);
-      //      }
-      while (!state.compareAndSet(State.IDLE, State.PINNED)) {
-        Thread.yield();
-      }
-    }
-
-    private void maybeInheritPinned(NodeRefStruct p, BlockCache cache, long pos) {
-      // snapshot parent.currentBlockIdx, quick check whether there's any benefit to inheriting
-      int snapshot;
-      if (cloneSource == Thread.currentThread().getId()
-          && ((int) (pos >> COMPRESSION_BLOCK_SHIFT))
-              == ((snapshot = p.currentBlockIdx) < 0 ? ~snapshot : snapshot)) {
-        while (!p.state.compareAndSet(State.IDLE, State.PINNED)) {
-          // we have to pin the parent to be sure that it doesn't get
-          // "out-of-band closed" while we're inheriting its values
-          Thread.yield();
-        }
-        BlockCache.PinRef parentPermit;
-        BlockCache.Node candidate;
-        int parentBlockIdx;
-        try {
-          parentPermit = p.readPermit;
-          candidate = p.currentNode;
-          parentBlockIdx = p.currentBlockIdx;
-          sequentialAccessCount = p.sequentialAccessCount; // we can always inherit this
-        } finally {
-          p.localUnpin();
-        }
-        // `p.localUnpin()` before actually grabbing values, to prevent livelock.
-        if (parentPermit == null || !cache.pin(candidate)) {
-          currentBlockIdx = parentBlockIdx < 0 ? parentBlockIdx : ~parentBlockIdx; // negative
-        } else {
-          currentBlockIdx = parentBlockIdx < 0 ? ~parentBlockIdx : parentBlockIdx; // non-negative
-          currentNode = candidate;
-          if ((readPermit = parentPermit.copy(this, cache)) == null) {
-            // unable to acquire read permit.
-            // unpin, null out `currentNode`, and flip `currentBlockIdx`
-            cache.unpin(candidate, false);
-            currentNode = null;
-            currentBlockIdx = ~currentBlockIdx; // negative
-          }
-        }
-      }
-    }
-
-    private void localUnpin() {
-      if (!state.compareAndSet(State.PINNED, State.IDLE)) {
-        throw new IllegalStateException();
-      }
-    }
-
-    /**
-     * Updates the current cached block. Always called from within a {@code localPin()} context (via
-     * {@link GCSIndexInput#initBlock(int)}), so state is already PINNED and direct update is safe.
-     */
-    @SuppressWarnings("try")
-    private int setCurrentNode(BlockCache.Node node, int blockIdx, BlockCache cache) {
-      assert state.get() == State.PINNED; // should only be called from a pinned context
-      int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
-      BlockCache.Node toUnpin = currentNode;
-      if (toUnpin != null) {
-        try (BlockCache.PinRef c = readPermit) {
-          readPermit = null;
-        }
-        cache.unpin(toUnpin);
-      }
-      currentNode = node;
-      currentBlockIdx = blockIdx;
-      try {
-        if (blockIdx == extant + 1) {
-          // sequential access.
-          sequentialAccessCount++;
-          return node == null ? 0 : sequentialAccessCount;
-        } else if (blockIdx < extant) {
-          // gone backward, full reset
-          sequentialAccessCount = 0;
-          return -1;
-        } else if (blockIdx == extant) {
-          // same idx. This is an unusual case, but can happen if our block gets unpinned
-          // and we have to re-acquire.
-          return node == null ? 0 : sequentialAccessCount;
-        } else {
-          // skipped ahead, reset
-          return sequentialAccessCount = 0;
-        }
-      } finally {
-        if (node != null) {
-          readPermit = node.register(this, cache);
-        }
-      }
-    }
-
-    /**
-     * Unpins the current block. Always called from within a {@code localPin()} context (via {@link
-     * GCSIndexInput#initBlock(int)}), so state is already PINNED and direct update is safe.
-     */
-    @SuppressWarnings("try")
-    private void unpinCurrentBlock(BlockCache blockCache) {
-      BlockCache.Node toUnpin = currentNode;
-      if (toUnpin != null) {
-        try (BlockCache.PinRef c = readPermit) {
-          readPermit = null;
-        }
-        currentNode = null;
-        currentBlockIdx = ~currentBlockIdx;
-        blockCache.unpin(toUnpin);
-      }
-    }
-
-    /**
-     * Unpins the current block from outside a {@code localPin()} context (i.e. from {@link
-     * GCSIndexInput#close}). Handles the race with {@link #outOfBandUnpin}.
-     */
-    @SuppressWarnings("try")
-    private void closeFor(BlockCache blockCache) {
-      switch (state.compareAndExchange(State.IDLE, State.PINNED)) {
-        case IDLE:
-          try (BlockCache.PinRef c = readPermit) {
-            readPermit = null;
-          }
-          doUnpin(blockCache, State.PINNED);
-          break;
-        case UNPINNING:
-          // another thread is unpinning; spin until it's done.
-          do {
-            Thread.yield();
-          } while (state.get() == State.UNPINNING);
-          break;
-        default:
-          throw new IllegalStateException();
-      }
-    }
-
-    private void doUnpin(BlockCache blockCache, State from) {
-      BlockCache.Node toUnpin = currentNode;
-      if (toUnpin != null) {
-        currentNode = null;
-        currentBlockIdx = ~currentBlockIdx;
-        blockCache.unpin(toUnpin);
-      }
-      if (!state.compareAndSet(from, State.IDLE)) {
-        throw new IllegalStateException();
-      }
-    }
-
-    /** This is the only method that may be called from a different thread! */
-    boolean outOfBandUnpin(BlockCache blockCache) {
-      if (state.compareAndSet(State.IDLE, State.UNPINNING)) {
-        // scavenger has evicted our pinned-LRU slot; signal that re-acquire is needed
-        // NOTE: null out `readPermit`, but do not close it
-        readPermit = null;
-        doUnpin(blockCache, State.UNPINNING);
-        return true;
-      }
-      return false;
-    }
-  }
-
   private void maybeReadAheadSeg(
       UUID segUUID,
       Semaphore control,
@@ -1995,82 +1793,46 @@ public class GCSDirectory extends SizeAwareDirectory {
     return ByteBuffer.wrap(decompressed, 0, decompressedLen);
   }
 
-  static final class GCSIndexInput extends IndexInput implements RandomAccessInput {
+  static final class GCSIndexInput extends CachedCompressedIndexInput {
 
     private final GCSDirectory dir;
-    private final long length;
-    // blockOffsets[i] = GCS byte offset of block i; [gcsBlockCount] = gcsObjectSize sentinel;
-    // [blockCount] = 0 (dummy, never used — tail block always hits accessMapped cache).
-    private final long[] blockOffsets;
-    private final int blockCount; // total logical blocks (GCS blocks + optional tail)
-    private final int lastBlockIdx;
-    private final int lastBlockDecompressedLen;
+    /** Null for always-mapped inputs and for slices. */
     private final UUID blobUUID;
+    /** Null for always-mapped inputs and for slices. */
     private final UUID segUUID;
+    /** Null for always-mapped inputs and for slices. */
     private final String blobName;
-    // Full mmap of the local file; non-null only in the root (not in slices).
+    /**
+     * Non-null only in the root input (not slices). For always-mapped roots: a minimal struct
+     * holding guard + origMapping only; for GCS-backed roots: the shared struct from pendingNodes.
+     */
     private final BlocksStruct blocksStruct;
-    // Guard for explicit unmap of localFileMapped on close. Created in root, shared with all slices
-    // so that after root.close() any in-flight slice read through the guard throws instead of
-    // producing a SIGSEGV on unmapped native memory (specifically the mmap-backed tail block).
-    private final ByteBufferGuard guard;
 
-    private AtomicReferenceArray<BlockCache.Node> accessMapped;
+    // -------------------------------------------------------------------------
+    // Root constructor (GCS-backed file)
+    // -------------------------------------------------------------------------
 
-    private final long offset;
-    private final long sliceLength;
-    private final int sliceFirstBlockIdx;
-    private final int sliceLastBlockIdx;
-
-    private long seekPos = -1;
-    private long filePointer = 0;
-    private ByteBuffer postBuffer = ByteBuffer.allocate(0);
-    private int postBufferBaseline;
-    private final NodeRefStruct currentNodeRef;
-
-    private LongBuffer[] longViews;
-    private IntBuffer[] intViews;
-    private FloatBuffer[] floatViews;
-
-    @Override
-    public void readBytes(byte[] b, int offset, int len, boolean useBuffer) throws IOException {
-      // Intentional passthrough: the base class (DataInput) delegates to readBytes(b, offset, len),
-      // which we already override efficiently. The useBuffer hint is meaningful only to
-      // BufferedIndexInput subclasses that maintain an internal read buffer: useBuffer=false lets
-      // them skip refilling that buffer and go directly to readInternal() for small reads. We have
-      // no such buffer — our readBytes copies directly from the decompressed block — so the hint
-      // is irrelevant.
-      super.readBytes(b, offset, len, useBuffer);
-    }
-
-    @Override
-    protected void readGroupVInt(long[] dst, int offset) throws IOException {
-      // Intentional passthrough: readGroupVInt is a specific encoding (one control byte encoding
-      // widths for up to 4 integers, then 1-4 bytes each) — not a generic series of vints. It is
-      // the per-group hook called in a loop by the public readGroupVInts(), and is used exclusively
-      // by HNSW/KNN vector formats (Lucene99HnswVectorsFormat etc.) for neighbour lists. We do not
-      // currently use vector fields so this path is not exercised.
-      // If vector fields are added, the right fix is to override readGroupVInts() with a single
-      // localPin()/localUnpin() around a loop over a private _readGroupVInt() that uses our
-      // _readByte()/_readInt() helpers directly.
-      super.readGroupVInt(dst, offset);
-    }
-
-    @Override
-    public int readZInt() throws IOException {
-      // don't override this, so long as it's simply a wrapper around `readVInt()`
-      return super.readZInt();
-    }
-
-    // Root constructor: mmaps the full local file, parses the 52-byte trailer from the end,
-    // pre-pins the uncompressed tail block (if any) into accessMapped, and decodes GCS block
-    // offsets.
     GCSIndexInput(String resourceDescription, GCSDirectory dir, Path offsetFile, byte[] trailer)
         throws IOException {
-      super(resourceDescription);
-      this.currentNodeRef = new NodeRefStruct();
-      this.dir = dir;
+      this(resourceDescription, dir, parseRootParams(dir, offsetFile, trailer));
+    }
 
+    private static final class RootParams {
+      final UUID blobUUID, segUUID;
+      final long length;
+      final BlocksStruct bs;
+
+      RootParams(UUID blobUUID, UUID segUUID, long length, BlocksStruct bs) {
+        this.blobUUID = blobUUID;
+        this.segUUID = segUUID;
+        this.length = length;
+        this.bs = bs;
+      }
+    }
+
+    /** Parses the 52-byte offset-file trailer, initialises pendingNodes, and returns computed params. */
+    private static RootParams parseRootParams(
+        GCSDirectory dir, Path offsetFile, byte[] trailer) throws IOException {
       // Parse the 52-byte trailer:
       // blockType(1)+comprType(1)+reserved(2)+blobUUID(16)+segUUID(16)+length(8)+gcsObjectSize(8)
       ByteArrayDataInput hdr = new ByteArrayDataInput(trailer);
@@ -2080,39 +1842,26 @@ public class GCSDirectory extends SizeAwareDirectory {
       }
       hdr.readByte(); // compressionType (not yet used)
       hdr.readShort(); // reserved
-      blobUUID = new UUID(hdr.readLong(), hdr.readLong());
-      segUUID = new UUID(hdr.readLong(), hdr.readLong());
+      UUID blobUUID = new UUID(hdr.readLong(), hdr.readLong());
+      UUID segUUID = new UUID(hdr.readLong(), hdr.readLong());
       dir.ensureCanRead(offsetFile, blobUUID, segUUID);
-      blobName = blobUUID.toString();
-      length = hdr.readLong();
+      long length = hdr.readLong();
       long gcsObjectSize = hdr.readLong();
 
-      // Tail: last partial block, stored uncompressed at offset 0 in the local file.
-      int tailLen =
-          (int) (length & COMPRESSION_BLOCK_MASK_LOW); // = length % COMPRESSION_BLOCK_SIZE
+      int tailLen = (int) (length & COMPRESSION_BLOCK_MASK_LOW);
       boolean hasTail = tailLen > 0;
-
-      blockCount = (int) (((length - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-      lastBlockIdx = blockCount - 1;
-      lastBlockDecompressedLen = hasTail ? tailLen : COMPRESSION_BLOCK_SIZE;
-
-      // gcsBlockCount = full GCS blocks (all but the tail when hasTail).
+      int blockCount = (int) (((length - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
+      int lastBlockIdx = blockCount - 1;
       int gcsBlockCount = hasTail ? blockCount - 1 : blockCount;
 
-      // Allocate the offsets array inside the compute() lambda (first-opener only) and fill it
-      // afterward — no file I/O while holding the CHM bucket lock.
+      String segName = IndexFileNames.parseSegmentName(offsetFile.getFileName().toString());
       int[] winType = new int[1];
-      this.blocksStruct =
+      BlocksStruct bs =
           dir.pendingNodes.compute(
               blobUUID,
               (k, v) -> {
                 if (v == null) {
                   winType[0] = 1;
-                  // blockOffsets[0..gcsBlockCount] = GCS start offsets; [gcsBlockCount] =
-                  // gcsObjectSize sentinel. [blockCount] is a dummy entry for the tail (default 0,
-                  // never used — tail always cache-hits). Filled by the winner after compute().
-                  String segName =
-                      IndexFileNames.parseSegmentName(offsetFile.getFileName().toString());
                   v =
                       new BlocksStruct(
                           segUUID,
@@ -2123,18 +1872,15 @@ public class GCSDirectory extends SizeAwareDirectory {
                           hasTail);
                 } else if (v.refCount.getAndIncrement() == 0) {
                   winType[0] = 2;
-                  // blockOffsets already populated from prior mapping; only tail needs re-init.
                 }
                 return v;
               });
-      this.blockOffsets = blocksStruct.blockOffsets;
-      this.accessMapped = blocksStruct.accessMapped;
-      this.guard = blocksStruct.guard;
+      long[] blockOffsets = bs.blockOffsets;
 
       switch (winType[0]) {
         case 1:
           {
-            // First opener: decode block offsets from file and publish via origMapping.
+            // First opener: decode block offsets from local file and publish via origMapping.
             long offsetFileSize;
             ByteBuffer localFileMapped;
             try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
@@ -2163,12 +1909,17 @@ public class GCSDirectory extends SizeAwareDirectory {
             }
             blockOffsets[gcsBlockCount] = gcsObjectSize;
             // Pre-pin the tail and complete origMapping (publication barrier for blockOffsets).
-            // For !hasTail, complete with null — non-winners join() to observe the filled array.
             if (hasTail) {
-              initTailNode(localFileMapped, tailLen, blocksStruct);
+              ByteBuffer tailBuf =
+                  localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
+              BlockCache.Node tailNode = dir.cache.createTailNode(tailBuf);
+              if (!bs.accessMapped.compareAndSet(lastBlockIdx, null, tailNode)) {
+                throw new IllegalStateException("tailNode already set");
+              }
+              bs.origMapping.complete(localFileMapped);
             } else {
               UNMAP.freeBuffer("quick close localFileMapped", localFileMapped);
-              blocksStruct.origMapping.complete(null);
+              bs.origMapping.complete(null);
             }
             break;
           }
@@ -2181,7 +1932,13 @@ public class GCSDirectory extends SizeAwareDirectory {
                 localFileRemapped = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size());
               }
               localFileRemapped.order(ByteOrder.LITTLE_ENDIAN);
-              initTailNode(localFileRemapped, tailLen, blocksStruct);
+              ByteBuffer tailBuf =
+                  localFileRemapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
+              BlockCache.Node tailNode = dir.cache.createTailNode(tailBuf);
+              if (!bs.accessMapped.compareAndSet(lastBlockIdx, null, tailNode)) {
+                throw new IllegalStateException("tailNode already set");
+              }
+              bs.origMapping.complete(localFileRemapped);
             }
             // !hasTail: origMapping already complete(null) from copy(); nothing to do.
             break;
@@ -2189,60 +1946,65 @@ public class GCSDirectory extends SizeAwareDirectory {
         default:
           {
             // Non-winner: wait for the winner to publish blockOffsets via origMapping.
-            blocksStruct.origMapping.join();
+            bs.origMapping.join();
             break;
           }
       }
 
-      this.offset = 0;
-      this.sliceLength = length;
-      this.sliceFirstBlockIdx = 0;
-      this.readAheadTo = sliceFirstBlockIdx;
-      this.sliceLastBlockIdx = lastBlockIdx;
+      return new RootParams(blobUUID, segUUID, length, bs);
     }
 
-    // Always-mapped constructor: entire file content pre-pinned as tail nodes; no GCS machinery.
-    private GCSIndexInput(
-        String resourceDescription,
-        GCSDirectory dir,
-        long fileLength,
-        AtomicReferenceArray<BlockCache.Node> accessMapped,
-        ByteBuffer content) {
-      super(resourceDescription);
-      this.currentNodeRef = new NodeRefStruct();
+    private GCSIndexInput(String resourceDescription, GCSDirectory dir, RootParams p) {
+      super(
+          resourceDescription,
+          dir.cache,
+          p.length,
+          p.bs.blockOffsets,
+          p.bs.guard,
+          p.bs.accessMapped);
       this.dir = dir;
-      this.length = fileLength;
-      int tailLen = (int) (fileLength & COMPRESSION_BLOCK_MASK_LOW);
-      boolean hasTail = tailLen > 0;
-      this.blockCount =
-          fileLength == 0 ? 1 : (int) (((fileLength - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-      this.lastBlockIdx = blockCount - 1;
-      this.lastBlockDecompressedLen = hasTail ? tailLen : COMPRESSION_BLOCK_SIZE;
-      this.blockOffsets = null; // never accessed (all blocks pre-pinned)
-      this.blobUUID = null;
-      this.blobName = null;
-      this.segUUID = null;
-      // `blocksStruct` placeholder here; only signals that we own
-      // the mapping (inspected in `close()`)
-      this.blocksStruct = new BlocksStruct(null, null, null, null, 0, hasTail);
-      this.blocksStruct.origMapping.complete(content);
-      this.guard = this.blocksStruct.guard;
-      this.accessMapped = accessMapped;
-      this.offset = 0;
-      this.sliceLength = fileLength;
-      this.sliceFirstBlockIdx = 0;
-      this.readAheadTo = 0;
-      this.sliceLastBlockIdx = lastBlockIdx;
+      this.blobUUID = p.blobUUID;
+      this.blobName = p.blobUUID.toString();
+      this.segUUID = p.segUUID;
+      this.blocksStruct = p.bs;
     }
+
+    // -------------------------------------------------------------------------
+    // Always-mapped constructor (local-only / non-GCS-backed files)
+    // -------------------------------------------------------------------------
 
     /**
      * Creates an always-mapped {@link GCSIndexInput} for a local file whose entire content is
-     * pre-pinned as tail nodes into {@code accessMapped}. Used instead of {@code super.openInput()}
-     * so that all {@link IndexInput} call sites remain monomorphic on {@link GCSIndexInput}.
+     * pre-pinned as tail nodes into {@code accessMapped}. Used instead of
+     * {@code super.openInput()} so that all {@link IndexInput} call sites remain monomorphic on
+     * {@link GCSIndexInput}.
      */
     static GCSIndexInput ofMapped(
         String resourceDescription, GCSDirectory dir, ByteBuffer content) {
+      return new GCSIndexInput(
+          resourceDescription, dir, makeAlwaysMappedParams(dir, content));
+    }
+
+    private static final class AlwaysMappedParams {
+      final long length;
+      final BlocksStruct bs;
+      final AtomicReferenceArray<BlockCache.Node> accessMapped;
+
+      AlwaysMappedParams(
+          long length,
+          BlocksStruct bs,
+          AtomicReferenceArray<BlockCache.Node> accessMapped) {
+        this.length = length;
+        this.bs = bs;
+        this.accessMapped = accessMapped;
+      }
+    }
+
+    private static AlwaysMappedParams makeAlwaysMappedParams(
+        GCSDirectory dir, ByteBuffer content) {
       int len = content.remaining();
+      int tailLen = len & COMPRESSION_BLOCK_MASK_LOW;
+      boolean hasTail = tailLen > 0;
       int blockCount = len == 0 ? 1 : (((len - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
       AtomicReferenceArray<BlockCache.Node> accessMapped = new AtomicReferenceArray<>(blockCount);
       int base = content.position();
@@ -2253,908 +2015,130 @@ public class GCSDirectory extends SizeAwareDirectory {
         blockBuf.limit(blockEnd).position(blockStart);
         accessMapped.set(i, dir.cache.createTailNode(blockBuf.slice()));
       }
-      return new GCSIndexInput(resourceDescription, dir, len, accessMapped, content);
+      BlocksStruct bs = new BlocksStruct(null, null, null, null, 0, hasTail);
+      bs.origMapping.complete(content);
+      return new AlwaysMappedParams(len, bs, accessMapped);
     }
 
-    // Clone / slice constructor: shares immutable state from parent; does not own the mmap.
     private GCSIndexInput(
-        String resourceDescription, GCSIndexInput parent, long offset, long length) {
-      super(resourceDescription);
+        String resourceDescription, GCSDirectory dir, AlwaysMappedParams p) {
+      super(
+          resourceDescription,
+          dir.cache,
+          p.length,
+          null /*blockOffsets — never accessed for always-mapped*/,
+          p.bs.guard,
+          p.accessMapped);
+      this.dir = dir;
+      this.blobUUID = null;
+      this.blobName = null;
+      this.segUUID = null;
+      this.blocksStruct = p.bs;
+    }
+
+    // -------------------------------------------------------------------------
+    // Slice / clone constructor
+    // -------------------------------------------------------------------------
+
+    private GCSIndexInput(
+        String resourceDescription, GCSIndexInput parent, long sliceOffset, long sliceLen) {
+      super(resourceDescription, parent, sliceOffset, sliceLen);
       this.dir = parent.dir;
-      this.currentNodeRef = new NodeRefStruct(parent.currentNodeRef);
-      this.length = parent.length;
-      this.blockOffsets = parent.blockOffsets;
-      this.blockCount = parent.blockCount;
-      this.lastBlockIdx = parent.lastBlockIdx;
-      this.lastBlockDecompressedLen = parent.lastBlockDecompressedLen;
       this.blobUUID = parent.blobUUID;
       this.blobName = parent.blobName;
       this.segUUID = parent.segUUID;
       this.blocksStruct = null; // slice does not own the mapping
-      this.guard = parent.guard; // shared: root.close() invalidates all slices
-      this.accessMapped = parent.accessMapped;
-      this.offset = parent.offset + offset;
-      this.seekPos = this.offset;
-      this.filePointer = this.offset;
-      this.sliceLength = length;
-      this.postBuffer = ByteBuffer.allocate(0);
-      this.sliceFirstBlockIdx = Math.toIntExact(this.offset >> COMPRESSION_BLOCK_SHIFT);
-      this.readAheadTo = sliceFirstBlockIdx;
-      this.sliceLastBlockIdx =
-          length == 0
-              ? sliceFirstBlockIdx
-              : Math.toIntExact((this.offset + length - 1) >> COMPRESSION_BLOCK_SHIFT);
-      if (sliceFirstBlockIdx == sliceLastBlockIdx && length != 0) {
-        // heuristic -- we will read from the only block
-        dir.ensureLoaded(
-            blobName, accessMapped, blockOffsets, sliceFirstBlockIdx, dir.readAheadControl, 0);
-      }
     }
 
-    /**
-     * Pre-pins the tail block from {@code localFileMapped} and completes {@code bs.origMapping} as
-     * the publication barrier for {@code blockOffsets}. Called only by the mapping winner.
-     */
-    private void initTailNode(ByteBuffer localFileMapped, int tailLen, BlocksStruct bs) {
-      try {
-        ByteBuffer tailBuf = localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
-        BlockCache.Node tailNode = dir.cache.createTailNode(tailBuf);
-        if (!accessMapped.compareAndSet(lastBlockIdx, null, tailNode)) {
-          throw new IllegalStateException("tailNode already set");
-        }
-        bs.origMapping.complete(localFileMapped);
-      } catch (Throwable t) {
-        bs.origMapping.completeExceptionally(t);
-        throw t;
-      }
+    // -------------------------------------------------------------------------
+    // CachedCompressedIndexInput abstract method implementations
+    // -------------------------------------------------------------------------
+
+    @Override
+    protected ByteBuffer supply(
+        int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
+        throws IOException {
+      return dir.supply(blobName, blockOffset, compressedLen, decompressedLen);
     }
 
-    // ---------------------------------------------------------------------------
-    // Cache interaction
-    // ---------------------------------------------------------------------------
+    @Override
+    protected GCSIndexInput cloneSlice(String description, long sliceOffset, long sliceLen) {
+      return new GCSIndexInput(description, this, sliceOffset, sliceLen);
+    }
 
-    // ---------------------------------------------------------------------------
-    // Block navigation
-    // ---------------------------------------------------------------------------
+    @Override
+    protected void doClose() throws IOException {
+      if (blocksStruct == null) return; // slice — nothing to do
 
-    private void localPin() throws IOException {
-      long pos = seekPos;
-      currentNodeRef.localPin(/*dir.cache, pos == -1 ? filePointer : pos*/ );
-      if (pos != -1) {
-        seekPos = -1;
-      } else if (currentNodeRef.currentBlockIdx < 0) {
-        pos = filePointer;
-      } else {
+      if (blobUUID == null) {
+        // always-mapped root: not registered in pendingNodes; just invalidate and unmap.
+        guard.invalidateAndUnmap(blocksStruct.origMapping.join());
         return;
       }
-      actualSeek(pos);
-    }
 
-    private void actualSeek(final long pos) throws IOException {
-      filePointer = pos;
-      int blockIdx = (int) (pos >> COMPRESSION_BLOCK_SHIFT);
-      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-      postBuffer.position(postBufferBaseline + (int) (pos & COMPRESSION_BLOCK_MASK_LOW));
-    }
-
-    private void initBlockSeq() throws IOException {
-      initBlock(currentNodeRef.currentBlockIdx + 1);
-    }
-
-    private void initBlock(int blockIdx) throws IOException {
-      if (blockIdx > lastBlockIdx) throw new EOFException();
-      BlockCache.Node cached = accessMapped.get(blockIdx);
-      if (cached == null || !dir.cache.pin(cached)) {
-        cacheMiss(cached, blockIdx);
-      } else {
-        cacheHit(blockIdx, cached, 0);
-      }
-    }
-
-    private void cacheHit(int blockIdx, BlockCache.Node cached, int type) throws IOException {
-      // Cache hit (or in-flight by the winning thread — join() blocks until populated).
-      ByteBuffer buf;
-      long loadNanos;
-      try {
-        long start = System.nanoTime();
-        buf = cached.join();
-        loadNanos = System.nanoTime() - start;
-      } catch (CompletionException e) {
-        dir.cache.unpin(cached);
-        throw unwrapException(e.getCause());
-      }
-      setCurrentNode(cached, blockIdx, type, loadNanos);
-      postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
-      postBufferBaseline = 0;
-      longViews = null;
-      intViews = null;
-      floatViews = null;
-    }
-
-    private static final int MAX_READ_AHEAD = 16;
-
-    private int readAheadTo;
-
-    private static int readAhead(int sequentialAccessCount) {
-      // determines how aggressively we ramp up read-ahead.
-      return sequentialAccessCount << 1;
-    }
-
-    private void setCurrentNode(BlockCache.Node node, int blockIdx, int type, long loadNanos) {
-      int seqAcccessCount = currentNodeRef.setCurrentNode(node, blockIdx, dir.cache);
-      // System.out.println("XXX "+type+", "+blockIdx+" ("+sliceFirstBlockIdx+","+sliceLastBlockIdx+
-      // ","+lastBlockIdx+"), seq="+seqAcccessCount+", "+TimeUnit.NANOSECONDS.toMillis(loadNanos)+
-      // "ms, "+this);
-      switch (seqAcccessCount) {
-        case -1:
-          // reset, no read-ahead
-          readAheadTo = sliceFirstBlockIdx;
-          return;
-        case 0:
-          // moved forward, init to current new position if necessary
-          if (blockIdx > readAheadTo) {
-            readAheadTo = blockIdx;
-          }
-          return;
-      }
-      int newReadAheadTo;
-      if (seqAcccessCount > 0
-          && (newReadAheadTo =
-                  Math.min(
-                      sliceLastBlockIdx, // don't read past this slice
-                      blockIdx + Math.min(MAX_READ_AHEAD, readAhead(seqAcccessCount))))
-              > readAheadTo) {
-        for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
-          if (!dir.ensureLoaded(blobName, accessMapped, blockOffsets, i, dir.readAheadControl, 0)) {
-            newReadAheadTo = i - 1;
-            break;
-          }
-        }
-        readAheadTo = newReadAheadTo;
-      }
-    }
-
-    private void cacheMiss(final BlockCache.Node cached, final int blockIdx) throws IOException {
-      long blockOffset = blockOffsets[blockIdx];
-      int compressedLen = (int) (blockOffsets[blockIdx + 1] - blockOffset);
-      int decompressedLen =
-          blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
-
-      BlockCache.Node node;
-      if ((node = dir.cache.acquireNode()) != null) {
-        BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
-        if (extant == cached) {
-          // We won the race: fetch from GCS and populate the node.
-          if (blockIdx == 0) {
-            dir.maybeReadAheadSeg(
-                segUUID, dir.readAheadControl, Collections.emptyIterator(), null, null, 0);
-          }
-          long start = System.nanoTime();
-          ByteBuffer buf =
-              dir.populateBuf(
-                  blobName,
-                  blockOffset,
-                  compressedLen,
-                  blockIdx,
-                  decompressedLen,
-                  node,
-                  accessMapped);
-          setCurrentNode(node, blockIdx, 2, System.nanoTime() - start);
-          postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
-          postBufferBaseline = 0;
-          longViews = null;
-          intViews = null;
-          floatViews = null;
-          return;
-        } else {
-          // Another thread won the race; wait for its result.
-          dir.cache.close(node, true);
-          if (dir.cache.pin(extant)) {
-            cacheHit(blockIdx, extant, 1);
-            return;
-          }
-        }
-      }
-      // Serve uncached.
-      long start = System.nanoTime();
-      ByteBuffer heapBuf = dir.supply(blobName, blockOffset, compressedLen, decompressedLen);
-      setCurrentNode(null, blockIdx, 3, System.nanoTime() - start);
-      postBuffer = heapBuf;
-      postBufferBaseline = heapBuf.position();
-      heapBuf.order(ByteOrder.LITTLE_ENDIAN);
-      longViews = null;
-      intViews = null;
-      floatViews = null;
-    }
-
-    // ---------------------------------------------------------------------------
-    // RandomAccessInput
-    // ---------------------------------------------------------------------------
-
-    private byte _readByte(final long pos) throws IOException {
-      final long absolutePos = pos + offset;
-      final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-      return guard.getByte(
-          postBuffer, postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW));
-    }
-
-    private int _readInt(final long pos) throws IOException {
-      final long absolutePos = pos + offset;
-      final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-      final int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
-      if (postBuffer.limit() - localPos >= Integer.BYTES) {
-        return guard.getInt(postBuffer, localPos);
-      }
-      return ((_readByte(pos + 3) & 0xFF) << 24)
-          | ((_readByte(pos + 2) & 0xFF) << 16)
-          | ((_readByte(pos + 1) & 0xFF) << 8)
-          | (_readByte(pos) & 0xFF);
-    }
-
-    private long _readLong(final long pos) throws IOException {
-      final long absolutePos = pos + offset;
-      final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-      final int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
-      if (postBuffer.limit() - localPos >= Long.BYTES) {
-        return guard.getLong(postBuffer, localPos);
-      }
-      return ((_readByte(pos + 7) & 0xFFL) << 56)
-          | ((_readByte(pos + 6) & 0xFFL) << 48)
-          | ((_readByte(pos + 5) & 0xFFL) << 40)
-          | ((_readByte(pos + 4) & 0xFFL) << 32)
-          | ((_readByte(pos + 3) & 0xFFL) << 24)
-          | ((_readByte(pos + 2) & 0xFFL) << 16)
-          | ((_readByte(pos + 1) & 0xFFL) << 8)
-          | (_readByte(pos) & 0xFFL);
-    }
-
-    @Override
-    public byte readByte(final long pos) throws IOException {
-      currentNodeRef.localPin(/*dir.cache, pos*/ );
-      try {
-        return _readByte(pos);
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    @Override
-    public short readShort(final long pos) throws IOException {
-      currentNodeRef.localPin(/*dir.cache, pos*/ );
-      try {
-        final long absolutePos = pos + offset;
-        final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-        if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-        final int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
-        if (postBuffer.limit() - localPos >= Short.BYTES) {
-          return guard.getShort(postBuffer, localPos);
-        }
-        return (short) (((_readByte(pos + 1) & 0xFF) << 8) | (_readByte(pos) & 0xFF));
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    @Override
-    public int readInt(final long pos) throws IOException {
-      currentNodeRef.localPin(/*dir.cache, pos*/ );
-      try {
-        return _readInt(pos);
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    @Override
-    public long readLong(final long pos) throws IOException {
-      currentNodeRef.localPin(/*dir.cache, pos*/ );
-      try {
-        return _readLong(pos);
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    // ---------------------------------------------------------------------------
-    // Sequential IndexInput
-    // ---------------------------------------------------------------------------
-
-    @Override
-    public byte readByte() throws IOException {
-      localPin();
-      try {
-        if (!postBuffer.hasRemaining()) initBlockSeq();
-        filePointer++;
-        return guard.getByte(postBuffer);
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    @Override
-    public void readBytes(byte[] dst, int offset, int len) throws IOException {
-      localPin();
-      try {
-        filePointer += len;
-        int left = postBuffer.remaining();
-        while (left < len) {
-          guard.getBytes(postBuffer, dst, offset, left);
-          len -= left;
-          offset += left;
-          initBlockSeq();
-          left = postBuffer.remaining();
-        }
-        guard.getBytes(postBuffer, dst, offset, len);
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    // ---------------------------------------------------------------------------
-    // Sequential reads: short, int, long, vint, vlong, string
-    // (must be overridden here to avoid per-byte localPin/localUnpin in base class)
-    // ---------------------------------------------------------------------------
-
-    /** Read next byte within a localPin() context; refills block if at boundary. */
-    private byte _readByte(final int remaining) throws IOException {
-      if (remaining == 0) initBlockSeq();
-      filePointer++;
-      return guard.getByte(postBuffer);
-    }
-
-    @Override
-    public short readShort() throws IOException {
-      localPin();
-      try {
-        final int remaining = postBuffer.remaining();
-        if (remaining >= Short.BYTES) {
-          filePointer += Short.BYTES;
-          return guard.getShort(postBuffer);
-        }
-        final byte b1 = _readByte(remaining);
-        final byte b2 = _readByte(remaining - 1);
-        return (short) (((b2 & 0xFF) << 8) | (b1 & 0xFF));
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    @Override
-    public int readInt() throws IOException {
-      localPin();
-      try {
-        return _readInt(postBuffer.remaining());
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    @Override
-    public long readLong() throws IOException {
-      localPin();
-      try {
-        return _readLong(postBuffer.remaining());
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    @Override
-    public int readVInt() throws IOException {
-      localPin();
-      try {
-        return _readVInt(postBuffer.remaining());
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    private int _readVInt(int remaining) throws IOException {
-      byte b;
-      if (remaining <= Integer.BYTES) {
-        b = _readByte(remaining);
-        if (b >= 0) return b;
-        int i = b & 0x7F;
-        b = _readByte(--remaining);
-        i |= (b & 0x7F) << 7;
-        if (b >= 0) return i;
-        b = _readByte(--remaining);
-        i |= (b & 0x7F) << 14;
-        if (b >= 0) return i;
-        b = _readByte(--remaining);
-        i |= (b & 0x7F) << 21;
-        if (b >= 0) return i;
-        b = _readByte(--remaining);
-        i |= (b & 0x0F) << 28;
-        if ((b & 0xF0) == 0) return i;
-      } else {
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        if (b >= 0) return b;
-        int i = b & 0x7F;
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        i |= (b & 0x7F) << 7;
-        if (b >= 0) return i;
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        i |= (b & 0x7F) << 14;
-        if (b >= 0) return i;
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        i |= (b & 0x7F) << 21;
-        if (b >= 0) return i;
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        i |= (b & 0x0F) << 28;
-        if ((b & 0xF0) == 0) return i;
-      }
-      throw new IOException("Invalid vInt detected (too many bits)");
-    }
-
-    @Override
-    public long readVLong() throws IOException {
-      localPin();
-      try {
-        return _readVLong(false);
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    @Override
-    public long readZLong() throws IOException {
-      localPin();
-      try {
-        return BitUtil.zigZagDecode(_readVLong(true));
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    private long _readVLong(final boolean allowNegative) throws IOException {
-      int remaining = postBuffer.remaining();
-      byte b;
-      long i;
-      if (remaining <= (allowNegative ? Long.BYTES + 1 : Long.BYTES)) {
-        b = _readByte(remaining);
-        if (b >= 0) return b;
-        i = b & 0x7FL;
-        b = _readByte(--remaining);
-        i |= (b & 0x7FL) << 7;
-        if (b >= 0) return i;
-        b = _readByte(--remaining);
-        i |= (b & 0x7FL) << 14;
-        if (b >= 0) return i;
-        b = _readByte(--remaining);
-        i |= (b & 0x7FL) << 21;
-        if (b >= 0) return i;
-        b = _readByte(--remaining);
-        i |= (b & 0x7FL) << 28;
-        if (b >= 0) return i;
-        b = _readByte(--remaining);
-        i |= (b & 0x7FL) << 35;
-        if (b >= 0) return i;
-        b = _readByte(--remaining);
-        i |= (b & 0x7FL) << 42;
-        if (b >= 0) return i;
-        b = _readByte(--remaining);
-        i |= (b & 0x7FL) << 49;
-        if (b >= 0) return i;
-        b = _readByte(--remaining);
-        i |= (b & 0x7FL) << 56;
-        if (b >= 0) return i;
-        if (!allowNegative) {
-          throw new IOException("Invalid vLong detected (negative values disallowed)");
-        }
-        b = _readByte(--remaining);
-      } else {
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        if (b >= 0) return b;
-        i = b & 0x7FL;
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        i |= (b & 0x7FL) << 7;
-        if (b >= 0) return i;
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        i |= (b & 0x7FL) << 14;
-        if (b >= 0) return i;
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        i |= (b & 0x7FL) << 21;
-        if (b >= 0) return i;
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        i |= (b & 0x7FL) << 28;
-        if (b >= 0) return i;
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        i |= (b & 0x7FL) << 35;
-        if (b >= 0) return i;
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        i |= (b & 0x7FL) << 42;
-        if (b >= 0) return i;
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        i |= (b & 0x7FL) << 49;
-        if (b >= 0) return i;
-        b = guard.getByte(postBuffer);
-        filePointer++;
-        i |= (b & 0x7FL) << 56;
-        if (b >= 0) return i;
-        if (!allowNegative) {
-          throw new IOException("Invalid vLong detected (negative values disallowed)");
-        }
-        b = guard.getByte(postBuffer);
-        filePointer++;
-      }
-      i |= (b & 0x7FL) << 63;
-      if (b == 0 || b == 1) return i;
-      throw new IOException("Invalid vLong detected (more than 64 bits)");
-    }
-
-    @Override
-    public String readString() throws IOException {
-      localPin();
-      try {
-        return _readString();
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    public String _readString() throws IOException {
-      final int length = _readVInt(postBuffer.remaining());
-      final byte[] bytes = new byte[length];
-      final int left = postBuffer.remaining();
-      filePointer += length;
-      if (left < length) {
-        slowReadBytes(bytes, 0, length, left);
-      } else {
-        guard.getBytes(postBuffer, bytes, 0, length);
-      }
-      return new String(bytes, 0, length, StandardCharsets.UTF_8);
-    }
-
-    private void slowReadBytes(final byte[] dst, int offset, int toRead, int left)
-        throws IOException {
-      do {
-        guard.getBytes(postBuffer, dst, offset, left);
-        toRead -= left;
-        offset += left;
-        initBlockSeq();
-        left = postBuffer.remaining();
-      } while (left < toRead);
-      guard.getBytes(postBuffer, dst, offset, toRead);
-    }
-
-    @Override
-    public Map<String, String> readMapOfStrings() throws IOException {
-      localPin();
-      try {
-        final int count = _readVInt(postBuffer.remaining());
-        switch (count) {
-          case 0:
-            return Collections.emptyMap();
-          case 1:
-            return Collections.singletonMap(_readString(), _readString());
-          default:
-            final Map<String, String> map =
-                count > 10 ? CollectionUtil.newHashMap(count) : new TreeMap<>();
-            for (int i = count; i > 0; i--) {
-              map.put(_readString(), _readString());
-            }
-            return Collections.unmodifiableMap(map);
-        }
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    @Override
-    public Set<String> readSetOfStrings() throws IOException {
-      localPin();
-      try {
-        final int count = _readVInt(postBuffer.remaining());
-        switch (count) {
-          case 0:
-            return Collections.emptySet();
-          case 1:
-            return Collections.singleton(_readString());
-          default:
-            final Set<String> set = count > 10 ? CollectionUtil.newHashSet(count) : new TreeSet<>();
-            for (int i = count; i > 0; i--) {
-              set.add(_readString());
-            }
-            return Collections.unmodifiableSet(set);
-        }
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    // ---------------------------------------------------------------------------
-    // Bulk typed reads with buffer views
-    // ---------------------------------------------------------------------------
-
-    private int _readInt(final int remaining) throws IOException {
-      if (remaining >= Integer.BYTES || refillAtBoundary(remaining)) {
-        filePointer += Integer.BYTES;
-        return guard.getInt(postBuffer);
-      }
-      // Cross-block: use _readByte to avoid per-byte localPin/localUnpin overhead.
-      final byte b0 = _readByte(remaining);
-      final byte b1 = _readByte(remaining - 1);
-      final byte b2 = _readByte(remaining - 2);
-      final byte b3 = _readByte(remaining - 3);
-      return ((b3 & 0xFF) << 24) | ((b2 & 0xFF) << 16) | ((b1 & 0xFF) << 8) | (b0 & 0xFF);
-    }
-
-    private boolean refillAtBoundary(int remaining) throws IOException {
-      if (remaining == 0) {
-        initBlockSeq();
-        return true;
-      } else {
-        return false;
-      }
-    }
-
-    private long _readLong(final int remaining) throws IOException {
-      if (remaining >= Long.BYTES || refillAtBoundary(remaining)) {
-        filePointer += Long.BYTES;
-        return guard.getLong(postBuffer);
-      }
-      final byte b0 = _readByte(remaining);
-      final byte b1 = _readByte(remaining - 1);
-      final byte b2 = _readByte(remaining - 2);
-      final byte b3 = _readByte(remaining - 3);
-      final byte b4 = _readByte(remaining - 4);
-      final byte b5 = _readByte(remaining - 5);
-      final byte b6 = _readByte(remaining - 6);
-      final byte b7 = _readByte(remaining - 7);
-      return ((b7 & 0xFFL) << 56)
-          | ((b6 & 0xFFL) << 48)
-          | ((b5 & 0xFFL) << 40)
-          | ((b4 & 0xFFL) << 32)
-          | ((b3 & 0xFFL) << 24)
-          | ((b2 & 0xFFL) << 16)
-          | ((b1 & 0xFFL) << 8)
-          | (b0 & 0xFFL);
-    }
-
-    @Override
-    public void readLongs(final long[] dst, final int offset, final int length) throws IOException {
-      localPin();
-      try {
-        if (longViews == null) {
-          longViews = initLongViews();
-        }
-        final int remaining = postBuffer.remaining();
-        final long bytesRequested = (long) length << 3;
-        if (remaining < bytesRequested) {
-          dst[offset] = _readLong(remaining);
-          for (int i = 1; i < length; i++) {
-            dst[offset + i] = _readLong(postBuffer.remaining());
-          }
-        } else {
-          final int position = postBuffer.position();
-          guard.getLongs(longViews[position & 0x07].position(position >>> 3), dst, offset, length);
-          filePointer += bytesRequested;
-          postBuffer.position(position + (int) bytesRequested);
-        }
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    @Override
-    public void readInts(final int[] dst, final int offset, final int length) throws IOException {
-      localPin();
-      try {
-        if (intViews == null) {
-          intViews = initIntViews();
-        }
-        final int remaining = postBuffer.remaining();
-        final long bytesRequested = (long) length << 2;
-        if (remaining < bytesRequested) {
-          dst[offset] = _readInt(remaining);
-          for (int i = 1; i < length; i++) {
-            dst[offset + i] = _readInt(postBuffer.remaining());
-          }
-        } else {
-          final int position = postBuffer.position();
-          guard.getInts(intViews[position & 0x03].position(position >>> 2), dst, offset, length);
-          filePointer += bytesRequested;
-          postBuffer.position(position + (int) bytesRequested);
-        }
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    @Override
-    public void readFloats(final float[] dst, final int offset, final int length)
-        throws IOException {
-      localPin();
-      try {
-        if (floatViews == null) {
-          floatViews = initFloatViews();
-        }
-        final int remaining = postBuffer.remaining();
-        final long bytesRequested = (long) length << 2;
-        if (remaining < bytesRequested) {
-          dst[offset] = Float.intBitsToFloat(_readInt(remaining));
-          for (int i = 1; i < length; i++) {
-            dst[offset + i] = Float.intBitsToFloat(_readInt(postBuffer.remaining()));
-          }
-        } else {
-          final int position = postBuffer.position();
-          guard.getFloats(
-              floatViews[position & 0x03].position(position >>> 2), dst, offset, length);
-          filePointer += bytesRequested;
-          postBuffer.position(position + (int) bytesRequested);
-        }
-      } finally {
-        currentNodeRef.localUnpin();
-      }
-    }
-
-    private LongBuffer[] initLongViews() {
-      final LongBuffer[] ret = new LongBuffer[Long.BYTES];
-      final ByteBuffer template = postBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-      final int lim = postBuffer.limit();
-      for (int i = Long.BYTES - 1; i >= 0; i--) {
-        ret[i] = i < lim ? template.position(i).asLongBuffer() : EMPTY_LONGBUFFER;
-      }
-      return ret;
-    }
-
-    private IntBuffer[] initIntViews() {
-      final IntBuffer[] ret = new IntBuffer[Integer.BYTES];
-      final ByteBuffer template = postBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-      final int lim = postBuffer.limit();
-      for (int i = Integer.BYTES - 1; i >= 0; i--) {
-        ret[i] = i < lim ? template.position(i).asIntBuffer() : EMPTY_INTBUFFER;
-      }
-      return ret;
-    }
-
-    private FloatBuffer[] initFloatViews() {
-      final FloatBuffer[] ret = new FloatBuffer[Float.BYTES];
-      final ByteBuffer template = postBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-      final int lim = postBuffer.limit();
-      for (int i = Float.BYTES - 1; i >= 0; i--) {
-        ret[i] = i < lim ? template.position(i).asFloatBuffer() : EMPTY_FLOATBUFFER;
-      }
-      return ret;
-    }
-
-    // ---------------------------------------------------------------------------
-    // IndexInput lifecycle
-    // ---------------------------------------------------------------------------
-
-    @Override
-    public long getFilePointer() {
-      return filePointer - offset;
-    }
-
-    @Override
-    public void seek(long pos) throws IOException {
-      seekPos = pos + offset;
-      filePointer = pos + offset;
-    }
-
-    @Override
-    public long length() {
-      return sliceLength;
-    }
-
-    @Override
-    public IndexInput slice(String sliceDescription, long sliceOffset, long sliceLength)
-        throws IOException {
-      if (sliceOffset < 0 || sliceLength < 0 || sliceOffset + sliceLength > this.sliceLength) {
-        throw new IllegalArgumentException("slice out of bounds");
-      }
-      return new GCSIndexInput(
-          getFullSliceDescription(sliceDescription), this, sliceOffset, sliceLength);
-    }
-
-    @Override
-    public GCSIndexInput clone() {
-      GCSIndexInput clone = new GCSIndexInput(toString(), this, 0, sliceLength);
-      try {
-        clone.seek(getFilePointer());
-      } catch (IOException e) {
-        throw new UncheckedIOException(e);
-      }
-      return clone;
-    }
-
-    @Override
-    public void close() throws IOException {
-      try {
-        if (accessMapped == null) return;
-
-        unsetBuffers();
-
-        if (blocksStruct == null) return;
-
-        if (blobUUID == null) {
-          // always-mapped root: not registered in pendingNodes; just invalidate and unmap.
-          guard.invalidateAndUnmap(blocksStruct.origMapping.join());
-          return;
-        }
-
-        @SuppressWarnings({"unchecked", "rawtypes"})
-        CompletableFuture<ByteBuffer>[] toUnmap = new CompletableFuture[1];
-        Runnable[] deletionToRun = new Runnable[1];
-        BlocksStruct[] toRecycle = new BlocksStruct[1];
-        dir.pendingNodes.computeIfPresent(
-            blobUUID,
-            (k, v) -> {
-              int outstandingRefs = v.refCount.decrementAndGet();
-              if (outstandingRefs == 0) {
-                toUnmap[0] = v.hasTail ? v.origMapping : null;
-                if (v.pendingDeletion == null) {
-                  // file has not yet been deleted, and could be re-opened.
-                  // `v.copy()` keeps non-local (cached) mappings only. Until our file
-                  // is actually deleted, the cached mappings could be used again if
-                  // someone reopens the file.
-                  return v.copy();
-                } else {
-                  // file has been deleted (pendingDeletion != null), and we're now
-                  // closing the last open input. So set deletion to run, and delete
-                  // the entry (return null).
-                  deletionToRun[0] = v.pendingDeletion;
-                  toRecycle[0] = v;
-                  return null;
-                }
-              } else if (outstandingRefs > 0) {
-                return v;
+      @SuppressWarnings({"unchecked", "rawtypes"})
+      CompletableFuture<ByteBuffer>[] toUnmap = new CompletableFuture[1];
+      Runnable[] deletionToRun = new Runnable[1];
+      BlocksStruct[] toRecycle = new BlocksStruct[1];
+      dir.pendingNodes.computeIfPresent(
+          blobUUID,
+          (k, v) -> {
+            int outstandingRefs = v.refCount.decrementAndGet();
+            if (outstandingRefs == 0) {
+              toUnmap[0] = v.hasTail ? v.origMapping : null;
+              if (v.pendingDeletion == null) {
+                // file has not yet been deleted, and could be re-opened.
+                // `v.copy()` keeps non-local (cached) mappings only.
+                return v.copy();
               } else {
-                throw new IllegalStateException();
+                // file has been deleted: run deletion and remove entry.
+                deletionToRun[0] = v.pendingDeletion;
+                toRecycle[0] = v;
+                return null;
               }
-            });
-        if (toRecycle[0] != null) {
-          dir.removeCachedMappings(toRecycle[0]);
-        }
-        if (toUnmap[0] != null) {
-          // tell the guard to invalidate and later unmap the bytebuffers (if supported):
-          guard.invalidateAndUnmap(toUnmap[0].join());
-        }
-        if (deletionToRun[0] != null) {
-          if (dir.registerQueue == null) {
-            deletionToRun[0].run();
-          } else {
-            try {
-              // NOTE: this `put()` may block if the queue buffer is full, but that should
-              // be ok because root IndexInput are not closed in a latency-sensitive path.
-              dir.registerQueue.put(deletionToRun[0]);
-            } catch (InterruptedException e) {
-              Thread.currentThread().interrupt();
-              log.error(
-                  "interrupted while enqueuing release for {}; blobs may be orphaned", segUUID);
+            } else if (outstandingRefs > 0) {
+              return v;
+            } else {
+              throw new IllegalStateException();
             }
+          });
+      if (toRecycle[0] != null) {
+        dir.removeCachedMappings(toRecycle[0]);
+      }
+      if (toUnmap[0] != null) {
+        guard.invalidateAndUnmap(toUnmap[0].join());
+      }
+      if (deletionToRun[0] != null) {
+        if (dir.registerQueue == null) {
+          deletionToRun[0].run();
+        } else {
+          try {
+            // NOTE: this `put()` may block if the queue buffer is full, but that should
+            // be ok because root IndexInput are not closed in a latency-sensitive path.
+            dir.registerQueue.put(deletionToRun[0]);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error(
+                "interrupted while enqueuing release for {}; blobs may be orphaned", segUUID);
           }
         }
-      } finally {
-        unsetBuffers();
       }
     }
 
-    private void unsetBuffers() {
-      accessMapped = null;
-      currentNodeRef.closeFor(dir.cache);
-      postBuffer = null;
-      floatViews = null;
-      intViews = null;
-      longViews = null;
+    // -------------------------------------------------------------------------
+    // Hook overrides
+    // -------------------------------------------------------------------------
+
+    @Override
+    protected boolean ensureBlockLoaded(int blockIdx) {
+      return dir.ensureLoaded(
+          blobName, accessMapped, blockOffsets, blockIdx, dir.readAheadControl, 0);
+    }
+
+    @Override
+    protected void onFirstBlockMiss() {
+      dir.maybeReadAheadSeg(
+          segUUID, dir.readAheadControl, Collections.emptyIterator(), null, null, 0);
     }
   }
 

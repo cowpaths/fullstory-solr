@@ -36,6 +36,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.solr.storage.CachedCompressedIndexInput.NodeRefStruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -182,7 +183,7 @@ public class BlockCache implements Closeable {
       }
     }
 
-    public PinRef register(GCSDirectory.NodeRefStruct nodeRefStruct, BlockCache cache) {
+    public PinRef register(NodeRefStruct nodeRefStruct, BlockCache cache) {
       if (tailNode) return NOOP_PINREF; // tail nodes are never evicted; PBS/refLru is unnecessary
       PBS ret = null;
       final PBS lock = lock();
@@ -238,14 +239,14 @@ public class BlockCache implements Closeable {
 
   static class PinRef implements Closeable {
     private final PBS parent;
-    private final Cache.Node<GCSDirectory.NodeRefStruct> permit;
+    private final Cache.Node<NodeRefStruct> permit;
 
-    private PinRef(PBS parent, Cache.Node<GCSDirectory.NodeRefStruct> permit) {
+    private PinRef(PBS parent, Cache.Node<NodeRefStruct> permit) {
       this.parent = parent;
       this.permit = permit;
     }
 
-    public PinRef copy(GCSDirectory.NodeRefStruct nrs, BlockCache cache) {
+    public PinRef copy(NodeRefStruct nrs, BlockCache cache) {
       if (parent.pin()) {
         return parent.register(nrs, cache); // unpins parent
       } else {
@@ -390,7 +391,7 @@ public class BlockCache implements Closeable {
     private final Node blockNode;
     private final Cache.Node<Node> permit;
     private final Cache<Node, Cache.Node<Node>> blockLru;
-    private final Cache<GCSDirectory.NodeRefStruct, Cache.Node<GCSDirectory.NodeRefStruct>> refLru =
+    private final Cache<NodeRefStruct, Cache.Node<NodeRefStruct>> refLru =
         new Cache<>(List.of(), false);
 
     private PBS(Node blockNode, Cache.Node<Node> permit, Cache<Node, Cache.Node<Node>> blockLru) {
@@ -399,15 +400,15 @@ public class BlockCache implements Closeable {
       this.blockLru = blockLru;
     }
 
-    public PinRef register(GCSDirectory.NodeRefStruct nrs, BlockCache cache) {
+    public PinRef register(NodeRefStruct nrs, BlockCache cache) {
       try {
         for (boolean firstPass = true; ; firstPass = false) {
           int refCount = blockNode.refCount();
-          Cache.Node<GCSDirectory.NodeRefStruct> permitF;
+          Cache.Node<NodeRefStruct> permitF;
           if (refCount < REF_LIMIT) {
             permitF = new Cache.Node<>(nrs, null, 1);
           } else {
-            Cache.Node<GCSDirectory.NodeRefStruct> permit =
+            Cache.Node<NodeRefStruct> permit =
                 refLru.acquireNode(
                     (evicted) -> {
                       if (evicted != null) {
@@ -438,7 +439,7 @@ public class BlockCache implements Closeable {
     public void unpinAll(BlockCache cache) {
       // TODO: pretty sure we have an effective lock at this point and can just
       //  iterate entries instead of `acquireNode()` in a loop
-      Cache.Node<GCSDirectory.NodeRefStruct> permit;
+      Cache.Node<NodeRefStruct> permit;
       do {
         permit =
             refLru.acquireNode(
