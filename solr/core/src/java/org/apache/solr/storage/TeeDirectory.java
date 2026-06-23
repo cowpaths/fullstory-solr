@@ -124,6 +124,12 @@ public class TeeDirectory extends SizeAwareDirectory
 
   private List<String> associatedPaths;
 
+  // TODO: init() is triggered only by a pending_segments_* write, which implicitly distinguishes
+  // index directories (where IndexWriter always writes pending_segments_* first) from non-index
+  // directories (snapshot_metadata, tlog, etc.) that are also opened via the factory. When
+  // persistent == null, all file operations fall back to access (naive MMapDirectory), which is
+  // correct for non-index directories but relies on an unenforced convention. A cleaner fix would
+  // be to detect non-index directories at factory time and return a plain MMapDirectory instead.
   private void init() throws IOException {
     synchronized (persistentFunction) {
       if (this.persistent == null) {
@@ -375,7 +381,7 @@ public class TeeDirectory extends SizeAwareDirectory
 
   @Override
   protected long onDiskFileLength0(String name) throws IOException {
-    if (name.endsWith(".tmp")) {
+    if (name.endsWith(".tmp") || persistent == null) {
       return access.fileLength(name);
     } else {
       return persistent.onDiskFileLength(name);

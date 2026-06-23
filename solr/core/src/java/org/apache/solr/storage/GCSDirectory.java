@@ -965,6 +965,13 @@ public class GCSDirectory extends SizeAwareDirectory {
   /**
    * Returns true for files that are backed by a GCS blob with a local offset file. Temp files
    * (*.tmp) and non-segment files (segments_N, pending_segments_N, etc.) are local-only.
+   *
+   * <p>TODO: this relies on the Lucene convention that all segment files start with {@code _}.
+   * Within an index directory this always holds, but GCSDirectoryFactory is a general-purpose
+   * factory and may be called for non-index directories (snapshot_metadata, tlog, etc.). Those
+   * directories happen not to contain {@code _}-prefixed files today, so routing is correct by
+   * accident. A cleaner fix would be to detect non-index directories at factory time and return a
+   * plain MMapDirectory instead of a GCSDirectory.
    */
   static boolean isGcsBacked(String name) {
     int extIdx;
