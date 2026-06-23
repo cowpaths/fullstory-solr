@@ -492,6 +492,22 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
   }
 
   /**
+   * Temporal field names for segment date-range display. Defaults to {@code EventStart}; overridden
+   * by {@code lucene.temporalField.name} when set (comma-separated list, first match wins per
+   * segment).
+   */
+  static List<String> resolveTemporalFields() {
+    String spec = System.getProperty("lucene.temporalField.name");
+    if (spec == null || spec.isBlank()) {
+      return List.of("EventStart");
+    }
+    return Arrays.stream(spec.split(", *"))
+        .map(String::trim)
+        .filter(s -> !s.isEmpty())
+        .collect(Collectors.toList());
+  }
+
+  /**
    * Extract date range (min/max timestamps) from a single segment by reading point values.
    *
    * @param segmentInfo the segment to read from
@@ -514,63 +530,65 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
       FieldInfos fieldInfos =
           si.getCodec().fieldInfosFormat().read(readerDir, si, "", IOContext.READONCE);
 
-      String temporalField = "EventStart";
-      // Validate that the temporal field exists and is a point field
-      FieldInfo fieldInfo = fieldInfos.fieldInfo(temporalField);
-      if (fieldInfo == null) {
-        return null;
-      }
-
-      if (fieldInfo.getPointDimensionCount() == 0) {
-        if (log.isWarnEnabled()) {
-          log.warn(
-              "Segment {}: temporal field '{}' is not indexed as a point field (found: {}). "
-                  + "Skipping this segment for date-tiered merging. This may occur with legacy segments "
-                  + "or after schema changes.",
-              si.name,
-              temporalField,
-              fieldInfo);
-        }
-        return null;
-      }
-
-      // Read point values using the codec
+      List<String> temporalFields = resolveTemporalFields();
       PointsFormat pointsFormat = si.getCodec().pointsFormat();
       try (PointsReader pointsReader =
           pointsFormat.fieldsReader(
               new SegmentReadState(readerDir, si, fieldInfos, IOContext.READONCE))) {
 
-        PointValues pointValues = pointsReader.getValues(temporalField);
-        if (pointValues == null) {
-          return null;
+        for (String temporalField : temporalFields) {
+          FieldInfo fieldInfo = fieldInfos.fieldInfo(temporalField);
+          if (fieldInfo == null) {
+            continue;
+          }
+
+          if (fieldInfo.getPointDimensionCount() == 0) {
+            if (log.isWarnEnabled()) {
+              log.warn(
+                  "Segment {}: temporal field '{}' is not indexed as a point field (found: {}). "
+                      + "Skipping this field. This may occur with legacy segments "
+                      + "or after schema changes.",
+                  si.name,
+                  temporalField,
+                  fieldInfo);
+            }
+            continue;
+          }
+
+          PointValues pointValues = pointsReader.getValues(temporalField);
+          if (pointValues == null) {
+            continue;
+          }
+
+          byte[] minPackedValue = pointValues.getMinPackedValue();
+          byte[] maxPackedValue = pointValues.getMaxPackedValue();
+
+          if (minPackedValue == null || maxPackedValue == null) {
+            continue;
+          }
+
+          // Decode the packed values as longs, we have to make an assumption here
+          // since we don't have the schema :/
+          long minDate = LongPoint.decodeDimension(minPackedValue, 0);
+          long maxDate = LongPoint.decodeDimension(maxPackedValue, 0);
+
+          // Convert to milliseconds based on detected unit
+          long divisor = getTemporalFieldDivisor(maxDate);
+          long minDateMillis, maxDateMillis;
+          if (divisor < 0) {
+            long multiplier = -divisor;
+            minDateMillis = minDate * multiplier;
+            maxDateMillis = maxDate * multiplier;
+          } else {
+            minDateMillis = minDate / divisor;
+            maxDateMillis = maxDate / divisor;
+          }
+
+          return new SegmentDateRange(minDateMillis, maxDateMillis);
         }
-
-        byte[] minPackedValue = pointValues.getMinPackedValue();
-        byte[] maxPackedValue = pointValues.getMaxPackedValue();
-
-        if (minPackedValue == null || maxPackedValue == null) {
-          return null;
-        }
-
-        // Decode the packed values as longs, we have to make an assumption here
-        // since we don't have the schema :/
-        long minDate = LongPoint.decodeDimension(minPackedValue, 0);
-        long maxDate = LongPoint.decodeDimension(maxPackedValue, 0);
-
-        // Convert to milliseconds based on detected unit
-        long divisor = getTemporalFieldDivisor(maxDate);
-        long minDateMillis, maxDateMillis;
-        if (divisor < 0) {
-          long multiplier = -divisor;
-          minDateMillis = minDate * multiplier;
-          maxDateMillis = maxDate * multiplier;
-        } else {
-          minDateMillis = minDate / divisor;
-          maxDateMillis = maxDate / divisor;
-        }
-
-        return new SegmentDateRange(minDateMillis, maxDateMillis);
       }
+
+      return null;
     } finally {
       // Close compound directory if we opened it (never close si.dir)
       if (compoundDir != null) {
