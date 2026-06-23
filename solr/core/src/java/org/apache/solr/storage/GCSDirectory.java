@@ -38,7 +38,6 @@ import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -54,12 +53,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -94,9 +90,6 @@ import org.apache.lucene.store.Lock;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.MappedByteBufferIndexInputProvider;
 import org.apache.lucene.store.OutputStreamDataOutput;
-import org.apache.lucene.store.RandomAccessInput;
-import org.apache.lucene.util.BitUtil;
-import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.lucene.util.compress.LZ4;
@@ -290,7 +283,7 @@ public class GCSDirectory extends SizeAwareDirectory {
   static final AtomicReferenceArray<BlockCache.Node> EMPTY_ACCESS_MAPPED =
       new AtomicReferenceArray<>(0);
 
-/**
+  /**
    * Cache-node arrays shared across all root {@link GCSIndexInput} instances opened for the same
    * GCS blob. Keyed by blob UUID so that rename (which only moves the local offset file) requires
    * no map update. Populated by the writer at write-close time; entries are removed on delete.
@@ -499,7 +492,8 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
   }
 
-  private final Semaphore readAheadControl = new Semaphore(CachedCompressedIndexInput.MAX_READ_AHEAD << 1, true);
+  private final Semaphore readAheadControl =
+      new Semaphore(CachedCompressedIndexInput.MAX_READ_AHEAD << 1, true);
 
   private static final int REGISTER_CONCURRENCY = 8;
 
@@ -1796,12 +1790,16 @@ public class GCSDirectory extends SizeAwareDirectory {
   static final class GCSIndexInput extends CachedCompressedIndexInput {
 
     private final GCSDirectory dir;
+
     /** Null for always-mapped inputs and for slices. */
     private final UUID blobUUID;
+
     /** Null for always-mapped inputs and for slices. */
     private final UUID segUUID;
+
     /** Null for always-mapped inputs and for slices. */
     private final String blobName;
+
     /**
      * Non-null only in the root input (not slices). For always-mapped roots: a minimal struct
      * holding guard + origMapping only; for GCS-backed roots: the shared struct from pendingNodes.
@@ -1830,9 +1828,12 @@ public class GCSDirectory extends SizeAwareDirectory {
       }
     }
 
-    /** Parses the 52-byte offset-file trailer, initialises pendingNodes, and returns computed params. */
-    private static RootParams parseRootParams(
-        GCSDirectory dir, Path offsetFile, byte[] trailer) throws IOException {
+    /**
+     * Parses the 52-byte offset-file trailer, initialises pendingNodes, and returns computed
+     * params.
+     */
+    private static RootParams parseRootParams(GCSDirectory dir, Path offsetFile, byte[] trailer)
+        throws IOException {
       // Parse the 52-byte trailer:
       // blockType(1)+comprType(1)+reserved(2)+blobUUID(16)+segUUID(16)+length(8)+gcsObjectSize(8)
       ByteArrayDataInput hdr = new ByteArrayDataInput(trailer);
@@ -1910,8 +1911,7 @@ public class GCSDirectory extends SizeAwareDirectory {
             blockOffsets[gcsBlockCount] = gcsObjectSize;
             // Pre-pin the tail and complete origMapping (publication barrier for blockOffsets).
             if (hasTail) {
-              ByteBuffer tailBuf =
-                  localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
+              ByteBuffer tailBuf = localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
               BlockCache.Node tailNode = dir.cache.createTailNode(tailBuf);
               if (!bs.accessMapped.compareAndSet(lastBlockIdx, null, tailNode)) {
                 throw new IllegalStateException("tailNode already set");
@@ -1975,14 +1975,12 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     /**
      * Creates an always-mapped {@link GCSIndexInput} for a local file whose entire content is
-     * pre-pinned as tail nodes into {@code accessMapped}. Used instead of
-     * {@code super.openInput()} so that all {@link IndexInput} call sites remain monomorphic on
-     * {@link GCSIndexInput}.
+     * pre-pinned as tail nodes into {@code accessMapped}. Used instead of {@code super.openInput()}
+     * so that all {@link IndexInput} call sites remain monomorphic on {@link GCSIndexInput}.
      */
     static GCSIndexInput ofMapped(
         String resourceDescription, GCSDirectory dir, ByteBuffer content) {
-      return new GCSIndexInput(
-          resourceDescription, dir, makeAlwaysMappedParams(dir, content));
+      return new GCSIndexInput(resourceDescription, dir, makeAlwaysMappedParams(dir, content));
     }
 
     private static final class AlwaysMappedParams {
@@ -1991,17 +1989,14 @@ public class GCSDirectory extends SizeAwareDirectory {
       final AtomicReferenceArray<BlockCache.Node> accessMapped;
 
       AlwaysMappedParams(
-          long length,
-          BlocksStruct bs,
-          AtomicReferenceArray<BlockCache.Node> accessMapped) {
+          long length, BlocksStruct bs, AtomicReferenceArray<BlockCache.Node> accessMapped) {
         this.length = length;
         this.bs = bs;
         this.accessMapped = accessMapped;
       }
     }
 
-    private static AlwaysMappedParams makeAlwaysMappedParams(
-        GCSDirectory dir, ByteBuffer content) {
+    private static AlwaysMappedParams makeAlwaysMappedParams(GCSDirectory dir, ByteBuffer content) {
       int len = content.remaining();
       int tailLen = len & COMPRESSION_BLOCK_MASK_LOW;
       boolean hasTail = tailLen > 0;
@@ -2020,8 +2015,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       return new AlwaysMappedParams(len, bs, accessMapped);
     }
 
-    private GCSIndexInput(
-        String resourceDescription, GCSDirectory dir, AlwaysMappedParams p) {
+    private GCSIndexInput(String resourceDescription, GCSDirectory dir, AlwaysMappedParams p) {
       super(
           resourceDescription,
           dir.cache,
@@ -2056,8 +2050,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     protected ByteBuffer supply(
-        int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
-        throws IOException {
+        int blockIdx, long blockOffset, int compressedLen, int decompressedLen) throws IOException {
       return dir.supply(blobName, blockOffset, compressedLen, decompressedLen);
     }
 
@@ -2067,13 +2060,12 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     @Override
-    protected void doClose() throws IOException {
-      if (blocksStruct == null) return; // slice — nothing to do
+    protected ByteBuffer doClose() throws IOException {
+      if (blocksStruct == null) return null; // slice — nothing to do
 
       if (blobUUID == null) {
         // always-mapped root: not registered in pendingNodes; just invalidate and unmap.
-        guard.invalidateAndUnmap(blocksStruct.origMapping.join());
-        return;
+        return blocksStruct.origMapping.join();
       }
 
       @SuppressWarnings({"unchecked", "rawtypes"})
@@ -2105,9 +2097,6 @@ public class GCSDirectory extends SizeAwareDirectory {
       if (toRecycle[0] != null) {
         dir.removeCachedMappings(toRecycle[0]);
       }
-      if (toUnmap[0] != null) {
-        guard.invalidateAndUnmap(toUnmap[0].join());
-      }
       if (deletionToRun[0] != null) {
         if (dir.registerQueue == null) {
           deletionToRun[0].run();
@@ -2118,11 +2107,11 @@ public class GCSDirectory extends SizeAwareDirectory {
             dir.registerQueue.put(deletionToRun[0]);
           } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            log.error(
-                "interrupted while enqueuing release for {}; blobs may be orphaned", segUUID);
+            log.error("interrupted while enqueuing release for {}; blobs may be orphaned", segUUID);
           }
         }
       }
+      return toUnmap[0] == null ? null : toUnmap[0].join();
     }
 
     // -------------------------------------------------------------------------

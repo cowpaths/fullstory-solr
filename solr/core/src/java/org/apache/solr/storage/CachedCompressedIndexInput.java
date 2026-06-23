@@ -49,9 +49,9 @@ import org.apache.lucene.util.CollectionUtil;
  * decompressed blocks. Subclasses supply compressed block bytes (via {@link #supply}) and handle
  * lifecycle management specific to their storage backend.
  *
- * <p>Reads are served from {@link #accessMapped}: a per-file {@link AtomicReferenceArray} of
- * {@link BlockCache.Node} entries keyed by block index. On a cache miss, {@link #supply} is invoked
- * to fetch and decompress the block, which is then inserted into the cache for subsequent hits.
+ * <p>Reads are served from {@link #accessMapped}: a per-file {@link AtomicReferenceArray} of {@link
+ * BlockCache.Node} entries keyed by block index. On a cache miss, {@link #supply} is invoked to
+ * fetch and decompress the block, which is then inserted into the cache for subsequent hits.
  *
  * <p>Threading: each instance (root or slice) is accessed by at most one thread at a time via
  * {@link NodeRefStruct} local-pin/unpin. The {@link #accessMapped} array is shared across all
@@ -64,35 +64,36 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private static final IntBuffer EMPTY_INTBUFFER = IntBuffer.allocate(0);
   private static final FloatBuffer EMPTY_FLOATBUFFER = FloatBuffer.allocate(0);
 
-  protected final BlockCache cache;
+  private final BlockCache cache;
   // Total logical (decompressed) length of the underlying file.
-  protected final long length;
+  private final long length;
   // blockOffsets[i] = compressed byte offset of block i within the backend storage;
   // blockOffsets[blockCount] = total compressed size sentinel. Null for always-mapped inputs
   // (where all blocks are pre-pinned as tail nodes and no compressed reads occur).
   protected final long[] blockOffsets;
-  protected final int blockCount;
-  protected final int lastBlockIdx;
-  protected final int lastBlockDecompressedLen;
-  // Guard for unmap; shared across all slices/clones so root.close() invalidates all in-flight reads.
-  protected final ByteBufferGuard guard;
+  private final int blockCount;
+  private final int lastBlockIdx;
+  private final int lastBlockDecompressedLen;
+  // Guard for unmap; shared across all slices/clones so root.close() invalidates all in-flight
+  // reads.
+  private final ByteBufferGuard guard;
   // Shared per-file array; null'd on close.
   protected AtomicReferenceArray<BlockCache.Node> accessMapped;
 
-  protected final long offset; // absolute start offset of this slice within the file
-  protected final long sliceLength;
-  protected final int sliceFirstBlockIdx;
-  protected final int sliceLastBlockIdx;
+  private final long offset; // absolute start offset of this slice within the file
+  private final long sliceLength;
+  private final int sliceFirstBlockIdx;
+  private final int sliceLastBlockIdx;
 
-  protected long seekPos = -1;
-  protected long filePointer = 0;
-  protected ByteBuffer postBuffer = ByteBuffer.allocate(0);
-  protected int postBufferBaseline;
-  protected final NodeRefStruct currentNodeRef;
+  private long seekPos = -1;
+  private long filePointer = 0;
+  private ByteBuffer postBuffer = ByteBuffer.allocate(0);
+  private int postBufferBaseline;
+  private final NodeRefStruct currentNodeRef;
 
-  protected LongBuffer[] longViews;
-  protected IntBuffer[] intViews;
-  protected FloatBuffer[] floatViews;
+  private LongBuffer[] longViews;
+  private IntBuffer[] intViews;
+  private FloatBuffer[] floatViews;
 
   static final int MAX_READ_AHEAD = 16;
   private int readAheadTo;
@@ -130,19 +131,19 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * not own the mapping). Called inside a {@code try-finally} by {@link #close()}; {@link
    * #unsetBuffers()} always executes in the {@code finally} block regardless of exceptions here.
    */
-  protected abstract void doClose() throws IOException;
+  protected abstract ByteBuffer doClose() throws IOException;
 
   // ---------------------------------------------------------------------------
   // Protected hook methods (no-op defaults)
   // ---------------------------------------------------------------------------
 
   /**
-   * Attempt to pre-load block {@code blockIdx} asynchronously. Returns {@code true} if loading
-   * was initiated or the block is already present; {@code false} to signal that read-ahead should
-   * stop (e.g., thread-pool or semaphore saturation). Default: no-op, always returns {@code true}.
+   * Attempt to pre-load block {@code blockIdx} asynchronously. Returns {@code true} if loading was
+   * initiated or the block is already present; {@code false} to signal that read-ahead should stop
+   * (e.g., thread-pool or semaphore saturation). Default: no-op, always returns {@code false}.
    */
   protected boolean ensureBlockLoaded(int blockIdx) {
-    return true;
+    return false;
   }
 
   /**
@@ -191,7 +192,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // Slice / clone constructor
   // ---------------------------------------------------------------------------
 
-  /** Slice/clone constructor: shares immutable state from parent without owning the backend mapping. */
+  /**
+   * Slice/clone constructor: shares immutable state from parent without owning the backend mapping.
+   */
   protected CachedCompressedIndexInput(
       String resourceDescription,
       CachedCompressedIndexInput parent,
@@ -231,14 +234,18 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   @Override
   public final void close() throws IOException {
     if (accessMapped == null) return;
+    unsetBuffers();
     try {
-      doClose();
+      ByteBuffer toUnmap = doClose();
+      if (toUnmap != null) {
+        guard.invalidateAndUnmap(toUnmap);
+      }
     } finally {
       unsetBuffers();
     }
   }
 
-  protected final void unsetBuffers() {
+  private void unsetBuffers() {
     accessMapped = null;
     currentNodeRef.closeFor(cache);
     postBuffer = null;
@@ -798,7 +805,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  String _readString() throws IOException {
+  private String _readString() throws IOException {
     final int length = _readVInt(postBuffer.remaining());
     final byte[] bytes = new byte[length];
     final int left = postBuffer.remaining();
@@ -968,8 +975,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   }
 
   @Override
-  public void readFloats(final float[] dst, final int offset, final int length)
-      throws IOException {
+  public void readFloats(final float[] dst, final int offset, final int length) throws IOException {
     localPin();
     try {
       if (floatViews == null) {
@@ -984,8 +990,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         }
       } else {
         final int position = postBuffer.position();
-        guard.getFloats(
-            floatViews[position & 0x03].position(position >>> 2), dst, offset, length);
+        guard.getFloats(floatViews[position & 0x03].position(position >>> 2), dst, offset, length);
         filePointer += bytesRequested;
         postBuffer.position(position + (int) bytesRequested);
       }
@@ -1044,9 +1049,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // ---------------------------------------------------------------------------
 
   /**
-   * Per-{@link CachedCompressedIndexInput}-instance struct tracking the currently pinned
-   * {@link BlockCache.Node} and sequential-access statistics. Each instance is accessed by at most
-   * one thread at a time via local-pin/local-unpin; out-of-band unpin (eviction) may occur from the
+   * Per-{@link CachedCompressedIndexInput}-instance struct tracking the currently pinned {@link
+   * BlockCache.Node} and sequential-access statistics. Each instance is accessed by at most one
+   * thread at a time via local-pin/local-unpin; out-of-band unpin (eviction) may occur from the
    * cache scavenger thread.
    */
   static final class NodeRefStruct {
@@ -1057,31 +1062,31 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     private BlockCache.PinRef readPermit;
     private int sequentialAccessCount = 0;
 
-    NodeRefStruct() {}
+    private NodeRefStruct() {}
 
-    NodeRefStruct(NodeRefStruct parent) {
+    private NodeRefStruct(NodeRefStruct parent) {
       // Reserved for future clone-inheritance optimisations.
     }
 
-    void localPin() {
+    private void localPin() {
       while (!state.compareAndSet(State.IDLE, State.PINNED)) {
         Thread.yield();
       }
     }
 
-    void localUnpin() {
+    private void localUnpin() {
       if (!state.compareAndSet(State.PINNED, State.IDLE)) {
         throw new IllegalStateException();
       }
     }
 
     /**
-     * Updates the current cached block. Always called from within a {@code localPin()} context
-     * (via {@link CachedCompressedIndexInput#initBlock(int)}), so state is already PINNED and
-     * direct update is safe.
+     * Updates the current cached block. Always called from within a {@code localPin()} context (via
+     * {@link CachedCompressedIndexInput#initBlock(int)}), so state is already PINNED and direct
+     * update is safe.
      */
     @SuppressWarnings("try")
-    int setCurrentNode(BlockCache.Node node, int blockIdx, BlockCache cache) {
+    private int setCurrentNode(BlockCache.Node node, int blockIdx, BlockCache cache) {
       assert state.get() == State.PINNED; // should only be called from a pinned context
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
       BlockCache.Node toUnpin = currentNode;
@@ -1117,11 +1122,11 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
 
     /**
-     * Unpins the current block. Always called from within a {@code localPin()} context, so state
-     * is already PINNED and direct update is safe.
+     * Unpins the current block. Always called from within a {@code localPin()} context, so state is
+     * already PINNED and direct update is safe.
      */
     @SuppressWarnings("try")
-    void unpinCurrentBlock(BlockCache blockCache) {
+    private void unpinCurrentBlock(BlockCache blockCache) {
       BlockCache.Node toUnpin = currentNode;
       if (toUnpin != null) {
         try (BlockCache.PinRef c = readPermit) {
@@ -1138,7 +1143,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
      * CachedCompressedIndexInput#close()}). Handles the race with {@link #outOfBandUnpin}.
      */
     @SuppressWarnings("try")
-    void closeFor(BlockCache blockCache) {
+    private void closeFor(BlockCache blockCache) {
       switch (state.compareAndExchange(State.IDLE, State.PINNED)) {
         case IDLE:
           try (BlockCache.PinRef c = readPermit) {
