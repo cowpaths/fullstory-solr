@@ -393,10 +393,14 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
                 Long.getLong(
                     "solr.teeDirectory.blockCacheKilobytes", DEFAULT_BLOCK_CACHE_KILOBYTES))
             * 1024L;
+    final String blockCachePath =
+        params.get("blockCachePath", System.getProperty("solr.teeDirectory.blockCachePath", ""));
     final Path blockCacheBackingFile =
         useBlockCache
-            ? Path.of(System.getProperty("java.io.tmpdir"))
-                .resolve("solr-block-cache-" + java.util.UUID.randomUUID() + ".tmp")
+            ? (!blockCachePath.isEmpty()
+                ? Path.of(blockCachePath)
+                : Path.of(System.getProperty("java.io.tmpdir"))
+                    .resolve("solr-block-cache-" + java.util.UUID.randomUUID() + ".tmp"))
             : null;
 
     if (this.cc != null) {
@@ -410,10 +414,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
                   NodeLevelTeeDirectoryState.class,
                   (k) -> {
                     try {
-                      BlockCache cache =
-                          blockCacheBackingFile != null
-                              ? new BlockCache(blockCacheBytes, blockCacheBackingFile)
-                              : null;
+                      BlockCache cache = buildBlockCache(blockCacheBackingFile, blockCacheBytes);
                       NodeLevelTeeDirectoryState ret = new NodeLevelTeeDirectoryState(4096, cache);
                       ret.initializeMetrics(
                           cc.getMetricsHandler().getSolrMetricsContext(), "teeDirectory");
@@ -424,10 +425,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
                   });
     } else {
       try {
-        BlockCache cache =
-            blockCacheBackingFile != null
-                ? new BlockCache(blockCacheBytes, blockCacheBackingFile)
-                : null;
+        BlockCache cache = buildBlockCache(blockCacheBackingFile, blockCacheBytes);
         nodeLevelState = new NodeLevelTeeDirectoryState(64, cache);
       } catch (IOException e) {
         throw new UncheckedIOException(e);
@@ -480,6 +478,16 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
       }
     }
     return accessDir.concat(ret);
+  }
+
+  private static BlockCache buildBlockCache(Path backingFile, long bytes) throws IOException {
+    if (backingFile == null) {
+      return null;
+    }
+    if (Files.exists(backingFile)) {
+      return new BlockCache(backingFile);
+    }
+    return new BlockCache(bytes, backingFile);
   }
 
   @Override
