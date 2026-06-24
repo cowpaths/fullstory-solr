@@ -1081,7 +1081,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       while (unpinning.get()) {
         // very rare, we're being out-of-band-unpinned
         // spin-wait for the unpin op to complete or abort
+        pinned = false;
         Thread.yield();
+        pinned = true;
       }
     }
 
@@ -1125,7 +1127,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         }
       } finally {
         if (node != null) {
+          assert pinned;
+          pinned = false;
           readPermit = node.register(this, cache);
+          localPin();
         }
       }
     }
