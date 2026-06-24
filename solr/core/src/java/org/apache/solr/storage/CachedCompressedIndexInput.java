@@ -36,6 +36,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import org.apache.lucene.store.ByteBufferGuard;
@@ -1062,7 +1063,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * cache scavenger thread.
    */
   static final class NodeRefStruct {
-    private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
+    private volatile boolean pinned = false;
+    private final AtomicBoolean unpinning = new AtomicBoolean();
     private BlockCache.Node currentNode;
     // Positive = current block index; negative (~idx) = block index with no live pin.
     private int currentBlockIdx = -1;
@@ -1076,15 +1078,16 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
 
     private void localPin() {
-      while (!state.compareAndSet(State.IDLE, State.PINNED)) {
+      pinned = true;
+      while (unpinning.get()) {
+        // very rare, we're being out-of-band-unpinned
+        // spin-wait for the unpin op to complete or abort
         Thread.yield();
       }
     }
 
     private void localUnpin() {
-      if (!state.compareAndSet(State.PINNED, State.IDLE)) {
-        throw new IllegalStateException();
-      }
+      pinned = false;
     }
 
     /**
@@ -1094,7 +1097,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
      */
     @SuppressWarnings("try")
     private int setCurrentNode(BlockCache.Node node, int blockIdx, BlockCache cache) {
-      assert state.get() == State.PINNED; // should only be called from a pinned context
+      assert pinned; // should only be called from a pinned context
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
       BlockCache.Node toUnpin = currentNode;
       if (toUnpin != null) {
@@ -1151,52 +1154,48 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
      */
     @SuppressWarnings("try")
     private void closeFor(BlockCache blockCache) {
-      switch (state.compareAndExchange(State.IDLE, State.PINNED)) {
-        case IDLE:
-          try (BlockCache.PinRef c = readPermit) {
-            readPermit = null;
-          }
-          doUnpin(blockCache, State.PINNED);
-          break;
-        case UNPINNING:
-          // another thread is unpinning; spin until it's done.
-          do {
-            Thread.yield();
-          } while (state.get() == State.UNPINNING);
-          break;
-        default:
-          throw new IllegalStateException();
+      if (unpinning.compareAndSet(false, true)) {
+        try (BlockCache.PinRef c = readPermit) {
+          readPermit = null;
+        }
+        doUnpin(blockCache);
+      } else {
+        // another thread is unpinning; spin until it's done.
+        do {
+          Thread.yield();
+        } while (unpinning.get());
       }
     }
 
-    private void doUnpin(BlockCache blockCache, State from) {
+    private void doUnpin(BlockCache blockCache) {
       BlockCache.Node toUnpin = currentNode;
       if (toUnpin != null) {
         currentNode = null;
         currentBlockIdx = ~currentBlockIdx;
         blockCache.unpin(toUnpin);
       }
-      if (!state.compareAndSet(from, State.IDLE)) {
+      if (!unpinning.compareAndSet(true, false)) {
         throw new IllegalStateException();
       }
     }
 
     /** This is the only method that may be called from a different thread! */
     boolean outOfBandUnpin(BlockCache blockCache) {
-      if (state.compareAndSet(State.IDLE, State.UNPINNING)) {
+      if (unpinning.compareAndSet(false, true)) {
         // scavenger has evicted our pinned-LRU slot; signal that re-acquire is needed
         // NOTE: null out `readPermit`, but do not close it
+        if (pinned) {
+          if (unpinning.compareAndSet(true, false)) {
+            return false;
+          } else {
+            throw new IllegalStateException();
+          }
+        }
         readPermit = null;
-        doUnpin(blockCache, State.UNPINNING);
+        doUnpin(blockCache);
         return true;
       }
       return false;
-    }
-
-    private enum State {
-      UNPINNING,
-      IDLE,
-      PINNED
     }
   }
 }
