@@ -292,7 +292,7 @@ public class BlockCache implements Closeable {
   private final Cache<BlockCache.Node, Cache.Node<BlockCache.Node>>[] pinned;
 
   private Cache<BlockCache.Node, Cache.Node<BlockCache.Node>> pinnedLru() {
-    return pinned[tlrIndex()];
+    return pinned[ThreadLocalRandom.current().nextInt(pinned.length)];
   }
 
   /**
