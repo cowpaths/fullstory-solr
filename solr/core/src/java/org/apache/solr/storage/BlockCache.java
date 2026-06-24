@@ -412,10 +412,7 @@ public class BlockCache implements Closeable {
                 refLru.acquireNode(
                     (evicted) -> {
                       if (evicted != null) {
-                        while (!evicted.outOfBandUnpin(cache)) {
-                          // assumption is that individual reads will complete quickly.
-                          Thread.yield();
-                        }
+                        evicted.outOfBandUnpin(cache);
                       }
                       return nrs;
                     });
@@ -445,10 +442,7 @@ public class BlockCache implements Closeable {
             refLru.acquireNode(
                 (evicted) -> {
                   if (evicted != null) {
-                    while (!evicted.outOfBandUnpin(cache)) {
-                      // assumption is that individual reads will complete quickly.
-                      Thread.yield();
-                    }
+                    evicted.outOfBandUnpin(cache);
                   }
                   return null;
                 });

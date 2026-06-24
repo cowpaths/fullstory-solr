@@ -37,7 +37,6 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.IndexInput;
@@ -1180,22 +1179,21 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
 
     /** This is the only method that may be called from a different thread! */
-    boolean outOfBandUnpin(BlockCache blockCache) {
-      if (unpinning.compareAndSet(false, true)) {
-        // scavenger has evicted our pinned-LRU slot; signal that re-acquire is needed
-        // NOTE: null out `readPermit`, but do not close it
-        if (pinned) {
-          if (unpinning.compareAndSet(true, false)) {
-            return false;
-          } else {
+    void outOfBandUnpin(BlockCache blockCache) {
+      for (; ; ) {
+        if (unpinning.compareAndSet(false, true)) {
+          if (!pinned) {
+            // scavenger has evicted our pinned-LRU slot; signal that re-acquire is needed
+            // NOTE: null out `readPermit`, but do not close it
+            readPermit = null;
+            doUnpin(blockCache);
+            return;
+          } else if (!unpinning.compareAndSet(true, false)) {
             throw new IllegalStateException();
           }
         }
-        readPermit = null;
-        doUnpin(blockCache);
-        return true;
+        Thread.yield();
       }
-      return false;
     }
   }
 }
