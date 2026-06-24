@@ -487,14 +487,14 @@ public class CompressingDirectory extends MMapDirectory
   }
 
   enum CompressionBlockType {
-    SIZE_1K(0, 10),
-    SIZE_2K(1, 11),
-    SIZE_4K(2, 12),
-    SIZE_8K(3, 13),
-    SIZE_16K(4, 14),
-    SIZE_32K(5, 15),
-    SIZE_64K(6, 16),
-    SIZE_256K(7, 18);
+    SIZE_1K(7, 10),
+    SIZE_2K(6, 11),
+    SIZE_4K(5, 12),
+    SIZE_8K(4, 13),
+    SIZE_16K(3, 14),
+    SIZE_32K(2, 15),
+    SIZE_64K(1, 16),
+    SIZE_256K(0, 18); // 0 is the legacy/default value
 
     CompressionBlockType(int id, int blockShift) {
       this.id = id;
