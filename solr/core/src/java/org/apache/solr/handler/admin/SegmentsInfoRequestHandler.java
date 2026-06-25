@@ -26,7 +26,9 @@ import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.apache.lucene.codecs.PointsFormat;
@@ -183,6 +185,7 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
     List<LeafReaderContext> leafContexts = searcher.getIndexReader().leaves();
     IndexSchema schema = req.getSchema();
     long now = System.currentTimeMillis();
+    Map<String, Integer> temporalBucketCounters = new HashMap<>();
     for (SegmentCommitInfo segmentCommitInfo : sortable) {
       segmentInfo =
           getSegmentInfo(segmentCommitInfo, withSizeInfo, withFieldInfo, leafContexts, schema);
@@ -198,7 +201,9 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
           long temporalBucket =
               SegmentRoutingUtil.mapToBucket(segmentDateRange.maxDate, now);
           segmentInfo.add("temporalBucket", temporalBucket);
-          segmentInfo.add("temporalBucketLabel", formatTemporalBucket(temporalBucket));
+          String bucketLabel = formatTemporalBucket(temporalBucket);
+          int count = temporalBucketCounters.merge(bucketLabel, 1, Integer::sum);
+          segmentInfo.add("temporalBucketLabel", bucketLabel + "(" + count + ")");
         }
       } catch (IOException e) {
         log.warn("Exception segment range info on segment {}", segmentCommitInfo.info.name, e);
