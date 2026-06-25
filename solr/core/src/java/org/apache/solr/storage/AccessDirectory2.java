@@ -72,8 +72,8 @@ public class AccessDirectory2 extends MMapDirectory {
    * so they all see the same cached blocks. Entries are removed (and nodes released) in {@link
    * #deleteFile} or {@link #rename}.
    */
-  private final HashMap<String, AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>>> pendingNodes =
-      new HashMap<>();
+  private final HashMap<String, AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>>>
+      pendingNodes = new HashMap<>();
 
   public AccessDirectory2(Path path, LockFactory lockFactory, Path compressedPath, BlockCache cache)
       throws IOException {
@@ -83,7 +83,9 @@ public class AccessDirectory2 extends MMapDirectory {
   }
 
   /** Stores the shared {@code accessMapped} array for {@code name}, pre-populated by the writer. */
-  void storeNodes(String name, AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> sharedAccessMapped) {
+  void storeNodes(
+      String name,
+      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> sharedAccessMapped) {
     synchronized (pendingNodes) {
       pendingNodes.put(name, sharedAccessMapped);
     }
@@ -109,7 +111,8 @@ public class AccessDirectory2 extends MMapDirectory {
   @Override
   public void rename(String source, String dest) throws IOException {
     synchronized (pendingNodes) {
-      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> nodes = pendingNodes.remove(source);
+      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> nodes =
+          pendingNodes.remove(source);
       if (nodes != null) pendingNodes.put(dest, nodes);
     }
     if (source.endsWith(".tmp")) {

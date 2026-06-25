@@ -93,7 +93,9 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       assertNotNull(n3);
       n3.getPayload().populate(dummy, 0, 0);
       assertSame(
-          "close() should recycle the buffer to tail for immediate reuse", n2Buf, n3.getPayload().join());
+          "close() should recycle the buffer to tail for immediate reuse",
+          n2Buf,
+          n3.getPayload().join());
 
       cache.unpin(n3);
     }
@@ -103,8 +105,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
   public void testPinEvictedNodeReturnsFalse() throws IOException {
     Path tmpDir = createTempDir();
     byte[] dummy = new byte[0];
-    try (BlockCache cache =
-        new BlockCache(COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
+    try (BlockCache cache = new BlockCache(COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
       Cache.Node<ByteBuffer, BlockCache.Val> n1 = cache.acquireNode();
       assertNotNull(n1);
       n1.getPayload().populate(dummy, 0, 0);
@@ -146,7 +147,8 @@ public class TestBlockCache extends SolrTestCaseJ4 {
     try (BlockCache cache =
         new BlockCache((long) nBlocks * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
 
-      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> slots = new AtomicReferenceArray<>(nSlots);
+      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> slots =
+          new AtomicReferenceArray<>(nSlots);
 
       ExecutorService exec =
           ExecutorUtil.newMDCAwareFixedThreadPool(

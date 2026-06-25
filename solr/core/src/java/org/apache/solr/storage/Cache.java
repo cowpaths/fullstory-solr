@@ -27,8 +27,8 @@ import java.util.function.Function;
  * Generic concurrent LRU cache with pin/unpin support.
  *
  * <p>Subclasses supply the concrete {@link Node} subtype (which carries the payload) and override
- * {@link #createPayload} to construct it. This class manages the doubly-linked LRU list, the pin/unpin
- * reference-count protocol, and the acquire/release/recycle lifecycle.
+ * {@link #createPayload} to construct it. This class manages the doubly-linked LRU list, the
+ * pin/unpin reference-count protocol, and the acquire/release/recycle lifecycle.
  *
  * <p><b>LRU invariant:</b> a node is in the doubly-linked list if and only if its {@code refCount}
  * is 0 (evictable). Pinned nodes (refCount &gt; 0) are spliced out of the list.
@@ -126,7 +126,9 @@ class Cache<V, N extends Cache.Val<V>> {
       return ((Cache.Val<V>) payload).value;
     }
 
-    /** Return the associated payload. If called on a pinned node, is guaranteed to return non-null */
+    /**
+     * Return the associated payload. If called on a pinned node, is guaranteed to return non-null
+     */
     N getPayload() {
       return payload;
     }
@@ -386,8 +388,8 @@ class Cache<V, N extends Cache.Val<V>> {
 
   /**
    * Acquires a pinned node whose value is ready to be used. Evicts the least-recently-used
-   * evictable node from the tail of the list, then returns a fresh node (via {@link #createPayload})
-   * carrying the same value, pinned (refCount=1) and not yet in the list.
+   * evictable node from the tail of the list, then returns a fresh node (via {@link
+   * #createPayload}) carrying the same value, pinned (refCount=1) and not yet in the list.
    *
    * <p>Returns {@code null} if the list is empty (all nodes are pinned).
    */

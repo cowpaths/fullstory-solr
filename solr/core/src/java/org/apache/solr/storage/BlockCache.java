@@ -393,7 +393,10 @@ public class BlockCache implements Closeable {
     private final Cache<NodeRefStruct, Cache.Val<NodeRefStruct>> refLru =
         new Cache<>(List.of(), false);
 
-    private PBS(Val blockNode, Cache.Node<Val, Cache.Val<Val>> permit, Cache<Val, Cache.Val<Val>> blockLru) {
+    private PBS(
+        Val blockNode,
+        Cache.Node<Val, Cache.Val<Val>> permit,
+        Cache<Val, Cache.Val<Val>> blockLru) {
       this.blockNode = blockNode;
       this.permit = permit;
       this.blockLru = blockLru;

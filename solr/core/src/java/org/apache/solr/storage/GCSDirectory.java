@@ -280,9 +280,6 @@ public class GCSDirectory extends SizeAwareDirectory {
   private final boolean useAsyncIO;
   private final DirectBufferPool bufferPool;
 
-  static final AtomicReferenceArray<BlockCache.Val> EMPTY_ACCESS_MAPPED =
-      new AtomicReferenceArray<>(0);
-
   /**
    * Cache-node arrays shared across all root {@link GCSIndexInput} instances opened for the same
    * GCS blob. Keyed by blob UUID so that rename (which only moves the local offset file) requires
@@ -1506,7 +1503,8 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private BlocksStruct copy() {
       int len = accessMapped.length();
-      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> newAccessMapped = new AtomicReferenceArray<>(len);
+      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> newAccessMapped =
+          new AtomicReferenceArray<>(len);
       for (int i = hasTail ? len - 2 : len - 1; i >= 0; i--) {
         newAccessMapped.setPlain(i, accessMapped.getPlain(i)); // plain/best-effort
       }
@@ -1742,8 +1740,9 @@ public class GCSDirectory extends SizeAwareDirectory {
     try {
       ByteBuffer heapBuf = supply(blob, pos, compressedLen, decompressedLen);
       buf =
-          node.getPayload().populate(
-              heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
+          node.getPayload()
+              .populate(
+                  heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
     } catch (Throwable t) {
       node.getPayload().completeExceptionally(t);
       accessMapped.compareAndSet(blockIdx, node, null);
@@ -1996,7 +1995,9 @@ public class GCSDirectory extends SizeAwareDirectory {
       final AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped;
 
       AlwaysMappedParams(
-          long length, BlocksStruct bs, AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped) {
+          long length,
+          BlocksStruct bs,
+          AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped) {
         this.length = length;
         this.bs = bs;
         this.accessMapped = accessMapped;
@@ -2008,7 +2009,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       int tailLen = len & COMPRESSION_BLOCK_MASK_LOW;
       boolean hasTail = tailLen > 0;
       int blockCount = len == 0 ? 1 : (((len - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped = new AtomicReferenceArray<>(blockCount);
+      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped =
+          new AtomicReferenceArray<>(blockCount);
       int base = content.position();
       for (int i = 0; i < blockCount; i++) {
         int blockStart = base + i * COMPRESSION_BLOCK_SIZE;

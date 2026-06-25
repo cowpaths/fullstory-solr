@@ -335,7 +335,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  private void cacheHit(int blockIdx, Cache.Node<ByteBuffer, BlockCache.Val> cached, int type) throws IOException {
+  private void cacheHit(int blockIdx, Cache.Node<ByteBuffer, BlockCache.Val> cached, int type)
+      throws IOException {
     ByteBuffer buf;
     long loadNanos;
     try {
@@ -358,7 +359,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     return sequentialAccessCount << 1;
   }
 
-  private void setCurrentNode(Cache.Node<ByteBuffer, BlockCache.Val> node, int blockIdx, int type, long loadNanos) {
+  private void setCurrentNode(
+      Cache.Node<ByteBuffer, BlockCache.Val> node, int blockIdx, int type, long loadNanos) {
     int seqAccessCount = currentNodeRef.setCurrentNode(node, blockIdx, cache);
     switch (seqAccessCount) {
       case -1:
@@ -389,7 +391,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  private void cacheMiss(final Cache.Node<ByteBuffer, BlockCache.Val> cached, final int blockIdx) throws IOException {
+  private void cacheMiss(final Cache.Node<ByteBuffer, BlockCache.Val> cached, final int blockIdx)
+      throws IOException {
     long blockOffset = blockOffsets[blockIdx];
     int compressedLen = (int) (blockOffsets[blockIdx + 1] - blockOffset);
     int decompressedLen =
@@ -397,7 +400,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
     Cache.Node<ByteBuffer, BlockCache.Val> node;
     if ((node = cache.acquireNode()) != null) {
-      Cache.Node<ByteBuffer, BlockCache.Val> extant = accessMapped.compareAndExchange(blockIdx, cached, node);
+      Cache.Node<ByteBuffer, BlockCache.Val> extant =
+          accessMapped.compareAndExchange(blockIdx, cached, node);
       if (extant == cached) {
         // We won the race: fetch from backend and populate the node.
         if (blockIdx == 0) onFirstBlockMiss();
@@ -406,8 +410,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         try {
           ByteBuffer heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
           buf =
-              node.getPayload().populate(
-                  heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
+              node.getPayload()
+                  .populate(
+                      heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
         } catch (Throwable t) {
           node.getPayload().completeExceptionally(t);
           accessMapped.compareAndSet(blockIdx, node, null);
@@ -1097,7 +1102,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
      * update is safe.
      */
     @SuppressWarnings("try")
-    private int setCurrentNode(Cache.Node<ByteBuffer, BlockCache.Val> node, int blockIdx, BlockCache cache) {
+    private int setCurrentNode(
+        Cache.Node<ByteBuffer, BlockCache.Val> node, int blockIdx, BlockCache cache) {
       assert pinned; // should only be called from a pinned context
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
       Cache.Node<ByteBuffer, BlockCache.Val> toUnpin = currentNode;
