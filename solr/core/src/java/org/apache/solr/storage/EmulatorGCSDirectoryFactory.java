@@ -52,6 +52,7 @@ public class EmulatorGCSDirectoryFactory extends GCSDirectoryFactory {
   private static final String DEFAULT_EMULATOR_HOST = "http://localhost:4443";
 
   @Override
+  @SuppressWarnings("StringFormatWithLiteral")
   protected Storage initStorage(SolrParams params) {
     if (!String.format("%d", 0).equals("0")) {
       throw new IllegalStateException(

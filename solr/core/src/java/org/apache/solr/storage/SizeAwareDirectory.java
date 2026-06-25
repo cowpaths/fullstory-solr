@@ -198,21 +198,21 @@ public class SizeAwareDirectory extends MMapDirectory
 
   private static final class RawViewDirectory extends FilterDirectory
       implements DirectoryFactory.OnDiskSizeDirectory {
-    private final SizeAwareDirectory in;
+    private final SizeAwareDirectory sadIn;
 
-    private RawViewDirectory(SizeAwareDirectory in) {
-      super(in);
-      this.in = in;
+    private RawViewDirectory(SizeAwareDirectory sadIn) {
+      super(sadIn);
+      this.sadIn = sadIn;
     }
 
     @Override
     public long onDiskFileLength(String name) throws IOException {
-      return in.onDiskFileLength0(name);
+      return sadIn.onDiskFileLength0(name);
     }
 
     @Override
     public long fileLength(String name) throws IOException {
-      return in.fileLength0(name);
+      return sadIn.fileLength0(name);
     }
   }
 

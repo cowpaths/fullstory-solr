@@ -140,10 +140,12 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     }
   }
 
+  private static void doNothing() {}
+
   /** Node-level resources shared across all {@link GCSDirectory} instances on this node. */
   public static final class NodeLevelGCSDirectoryState implements Closeable {
     /** Poison pill: when the drain task sees this it exits, allowing the executor to shut down. */
-    private static final Runnable REGISTER_POISON = () -> {};
+    private static final Runnable REGISTER_POISON = GCSDirectoryFactory::doNothing;
 
     /**
      * Node-level queue of pending {@link GCSDirectory.BlobLifecycleCoordinator#registerBatch} and

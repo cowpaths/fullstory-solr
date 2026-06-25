@@ -630,7 +630,7 @@ public class TeeDirectory extends SizeAwareDirectory
 
   @Override
   @SuppressWarnings("try")
-  public void close() throws IOException {
+  public synchronized void close() throws IOException {
     try (closeLocal;
         Closeable a = access;
         Closeable b = persistent) {
@@ -641,7 +641,7 @@ public class TeeDirectory extends SizeAwareDirectory
   }
 
   @Override
-  public Set<String> getPendingDeletions() throws IOException {
+  public synchronized Set<String> getPendingDeletions() throws IOException {
     Set<String> a = access.getPendingDeletions();
     if (persistent == null) {
       return a;

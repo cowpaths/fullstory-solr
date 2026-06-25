@@ -134,6 +134,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
    * is verified on every successful pin, proving that pinned buffers are never concurrently
    * overwritten.
    */
+  @SuppressWarnings("AssertionFailureIgnored") // for now ... TODO: re-evaluate
   public void testStress() throws InterruptedException, ExecutionException, IOException {
     final int nBlocks = 32;
     final int nSlots = 64; // more slots than blocks to force eviction

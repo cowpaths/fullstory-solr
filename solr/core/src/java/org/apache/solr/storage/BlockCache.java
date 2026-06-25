@@ -514,7 +514,7 @@ public class BlockCache implements Closeable {
     final ByteBuffer[] pool = new ByteBuffer[nBlocks];
     final long blockSizeL = COMPRESSION_BLOCK_SIZE;
     // Round partition size down to a 2 MiB boundary (matches HeapCacheFbsModifier convention).
-    final long partitionMaxBytes = ((long) MAX_BLOCKS_PER_PARTITION * blockSizeL >> 21) << 21;
+    final long partitionMaxBytes = ((MAX_BLOCKS_PER_PARTITION * blockSizeL) >> 21) << 21;
     final int effectiveMaxBlocksPerPartition = Math.toIntExact(partitionMaxBytes / blockSizeL);
     final int numPartitions = ((nBlocks - 1) / effectiveMaxBlocksPerPartition) + 1;
 
