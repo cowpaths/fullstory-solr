@@ -78,7 +78,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // reads.
   private final ByteBufferGuard guard;
   // Shared per-file array; null'd on close.
-  protected AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped;
+  protected AtomicReferenceArray<Cache.Node<Integer, BlockCache.Val>> accessMapped;
 
   private final long offset; // absolute start offset of this slice within the file
   private final long sliceLength;
@@ -168,7 +168,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long length,
       long[] blockOffsets,
       ByteBufferGuard guard,
-      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped) {
+      AtomicReferenceArray<Cache.Node<Integer, BlockCache.Val>> accessMapped) {
     super(resourceDescription);
     this.cache = cache;
     this.currentNodeRef = new NodeRefStruct();
@@ -327,7 +327,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   private void initBlock(int blockIdx) throws IOException {
     if (blockIdx > lastBlockIdx) throw new EOFException();
-    Cache.Node<ByteBuffer, BlockCache.Val> cached = accessMapped.get(blockIdx);
+    Cache.Node<Integer, BlockCache.Val> cached = accessMapped.get(blockIdx);
     if (cached == null || !cache.pin(cached)) {
       cacheMiss(cached, blockIdx);
     } else {
@@ -335,13 +335,13 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  private void cacheHit(int blockIdx, Cache.Node<ByteBuffer, BlockCache.Val> cached, int type)
+  private void cacheHit(int blockIdx, Cache.Node<Integer, BlockCache.Val> cached, int type)
       throws IOException {
     ByteBuffer buf;
     long loadNanos;
     try {
       long start = System.nanoTime();
-      buf = cached.getPayload().join();
+      buf = cached.getPayload().join(cache);
       loadNanos = System.nanoTime() - start;
     } catch (CompletionException e) {
       cache.unpin(cached);
@@ -360,7 +360,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   }
 
   private void setCurrentNode(
-      Cache.Node<ByteBuffer, BlockCache.Val> node, int blockIdx, int type, long loadNanos) {
+      Cache.Node<Integer, BlockCache.Val> node, int blockIdx, int type, long loadNanos) {
     int seqAccessCount = currentNodeRef.setCurrentNode(node, blockIdx, cache);
     switch (seqAccessCount) {
       case -1:
@@ -391,16 +391,16 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  private void cacheMiss(final Cache.Node<ByteBuffer, BlockCache.Val> cached, final int blockIdx)
+  private void cacheMiss(final Cache.Node<Integer, BlockCache.Val> cached, final int blockIdx)
       throws IOException {
     long blockOffset = blockOffsets[blockIdx];
     int compressedLen = (int) (blockOffsets[blockIdx + 1] - blockOffset);
     int decompressedLen =
         blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
 
-    Cache.Node<ByteBuffer, BlockCache.Val> node;
+    Cache.Node<Integer, BlockCache.Val> node;
     if ((node = cache.acquireNode()) != null) {
-      Cache.Node<ByteBuffer, BlockCache.Val> extant =
+      Cache.Node<Integer, BlockCache.Val> extant =
           accessMapped.compareAndExchange(blockIdx, cached, node);
       if (extant == cached) {
         // We won the race: fetch from backend and populate the node.
@@ -412,7 +412,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
           buf =
               node.getPayload()
                   .populate(
-                      heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
+                      heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen, cache);
         } catch (Throwable t) {
           node.getPayload().completeExceptionally(t);
           accessMapped.compareAndSet(blockIdx, node, null);
@@ -1069,7 +1069,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   static final class NodeRefStruct {
     private volatile boolean pinned = false;
     private final AtomicBoolean unpinning = new AtomicBoolean();
-    private Cache.Node<ByteBuffer, BlockCache.Val> currentNode;
+    private Cache.Node<Integer, BlockCache.Val> currentNode;
     // Positive = current block index; negative (~idx) = block index with no live pin.
     private int currentBlockIdx = -1;
     private BlockCache.PinRef readPermit;
@@ -1103,10 +1103,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
      */
     @SuppressWarnings("try")
     private int setCurrentNode(
-        Cache.Node<ByteBuffer, BlockCache.Val> node, int blockIdx, BlockCache cache) {
+        Cache.Node<Integer, BlockCache.Val> node, int blockIdx, BlockCache cache) {
       assert pinned; // should only be called from a pinned context
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
-      Cache.Node<ByteBuffer, BlockCache.Val> toUnpin = currentNode;
+      Cache.Node<Integer, BlockCache.Val> toUnpin = currentNode;
       if (toUnpin != null) {
         try (BlockCache.PinRef c = readPermit) {
           readPermit = null;
@@ -1155,7 +1155,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
      */
     @SuppressWarnings("try")
     private void unpinCurrentBlock(BlockCache blockCache) {
-      Cache.Node<ByteBuffer, BlockCache.Val> toUnpin = currentNode;
+      Cache.Node<Integer, BlockCache.Val> toUnpin = currentNode;
       if (toUnpin != null) {
         try (BlockCache.PinRef c = readPermit) {
           readPermit = null;
@@ -1186,7 +1186,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
 
     private void doUnpin(BlockCache blockCache) {
-      Cache.Node<ByteBuffer, BlockCache.Val> toUnpin = currentNode;
+      Cache.Node<Integer, BlockCache.Val> toUnpin = currentNode;
       if (toUnpin != null) {
         currentNode = null;
         currentBlockIdx = ~currentBlockIdx;

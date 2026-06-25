@@ -23,7 +23,6 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -32,10 +31,11 @@ import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.storage.CachedCompressedIndexInput.NodeRefStruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -59,11 +59,15 @@ public class BlockCache implements Closeable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
-  private static final int MAX_BLOCKS_PER_PARTITION = Integer.MAX_VALUE / COMPRESSION_BLOCK_SIZE;
+  private static final int MAX_BLOCKS_PER_PARTITION = Integer.highestOneBit(Integer.MAX_VALUE / COMPRESSION_BLOCK_SIZE);
+  private static final int POOL_SHIFT = Integer.numberOfTrailingZeros(MAX_BLOCKS_PER_PARTITION);
+  private static final int POOL_MASK = MAX_BLOCKS_PER_PARTITION - 1;
 
   // ---------------------------------------------------------------------------
   // Node
   // ---------------------------------------------------------------------------
+
+  private static final ByteBuffer EXCEPTION_SENTINEL = ByteBuffer.allocate(0);
 
   /**
    * A cache entry: wraps a decompressed block buffer and carries a reference count for safe
@@ -87,33 +91,39 @@ public class BlockCache implements Closeable {
    *       Cache#pin(Cache.Node)}, and falls back to loading.
    * </ol>
    */
-  public static final class Val extends Cache.TsVal<ByteBuffer> {
+  public static final class Val extends Cache.TsVal<Integer> {
 
     /**
      * Completion signal: fulfilled with {@code value} by {@link #populate} on the winning thread;
      * other threads joining this node wait here until the buffer is ready (or failed).
      */
-    private final CompletableFuture<ByteBuffer> future = new CompletableFuture<>();
+    private final CountDownLatch cdl;
 
-    final boolean tailNode;
+    private volatile ByteBuffer cached;
 
     private Val(ByteBuffer prepopulated) {
       super(null, Integer.MAX_VALUE >> 1);
-      future.complete(prepopulated);
-      this.tailNode = true;
+      cached = prepopulated;
+      this.cdl = null;
     }
 
-    Val(ByteBuffer buf, int initialRefCount) {
-      super(buf, initialRefCount);
-      this.tailNode = false;
+    Val(Integer cacheBlockOrd, int initialRefCount) {
+      super(cacheBlockOrd, initialRefCount);
+      this.cdl = new CountDownLatch(1);
     }
 
-    ByteBuffer populate(byte[] arr, int off, int len) {
-      ByteBuffer value = getValue();
-      assert value != null;
-      value.clear().put(arr, off, len).flip();
-      future.complete(value);
-      return value;
+    ByteBuffer populate(byte[] arr, int off, int len, BlockCache c) {
+      assert cdl != null;
+      int cacheBlockOrd = getValue();
+      ByteBuffer ret = c.slice(cacheBlockOrd);
+      // NOTE: for consistency between `populate()` and on-demand restore
+      // in `join()`, we call `clear()` here, _not_ `flip()`.
+      // It is the responsibility of the buffer lease recipient to duplicate
+      // and set proper limit and byte order.
+      ret = ret.put(arr, off, len).clear().asReadOnlyBuffer();
+      cached = ret;
+      cdl.countDown();
+      return ret;
     }
 
     /**
@@ -121,13 +131,32 @@ public class BlockCache implements Closeable {
      *
      * @throws CompletionException if population failed
      */
-    public ByteBuffer join() {
-      return future.join();
+    public ByteBuffer join(BlockCache c) {
+      if (cdl == null) {
+        // tail buffer, always populated, already read-only
+        return cached;
+      }
+      try {
+        cdl.await();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new ThreadInterruptedException(e);
+      }
+      ByteBuffer ret = cached;
+      if (ret == null) {
+        ret = c.slice(getValue()).asReadOnlyBuffer();
+        cached = ret;
+      } else if (ret == EXCEPTION_SENTINEL) {
+        throw new CompletionException("other thread exception in buffer population", null);
+      }
+      return ret;
     }
 
-    /** Marks this node as failed, unblocking any threads waiting in {@link #join()}. */
-    public boolean completeExceptionally(Throwable t) {
-      return future.completeExceptionally(t);
+    /** Marks this node as failed, unblocking any threads waiting in {@link #join}. */
+    public void completeExceptionally(Throwable t) {
+      assert cdl != null;
+      cached = EXCEPTION_SENTINEL;
+      cdl.countDown();
     }
 
     PBS outOfBandTryUnpinAll() {
@@ -184,7 +213,7 @@ public class BlockCache implements Closeable {
     }
 
     public PinRef register(NodeRefStruct nodeRefStruct, BlockCache cache) {
-      if (tailNode) return NOOP_PINREF; // tail nodes are never evicted; PBS/refLru is unnecessary
+      if (cdl == null) return NOOP_PINREF; // tail nodes are never evicted; PBS/refLru is unnecessary
       PBS ret = null;
       final PBS lock = lock();
       PBS[] deferredHolder = new PBS[1];
@@ -264,25 +293,27 @@ public class BlockCache implements Closeable {
   // Partition
   // ---------------------------------------------------------------------------
 
-  private static final class Partition extends Cache.DualQueueCache<ByteBuffer, Val> {
-    Partition(List<ByteBuffer> pool) {
+  private static final class Partition extends Cache.DualQueueCache<Integer, Val> {
+    Partition(List<Integer> pool) {
       super(pool, true);
     }
 
     @Override
-    protected BlockCache.Val createPayload(ByteBuffer value, int initialRefCount) {
-      return new BlockCache.Val(value, initialRefCount);
+    protected BlockCache.Val createPayload(Integer cacheBlockOrd, int initialRefCount) {
+      return new BlockCache.Val(cacheBlockOrd, initialRefCount);
     }
   }
 
   /** Creates a synthetic node not backed by a pool slot (e.g. an always-pinned tail block). */
-  Cache.Node<ByteBuffer, BlockCache.Val> createTailNode(ByteBuffer tailBuf) {
+  Cache.Node<Integer, BlockCache.Val> createTailNode(ByteBuffer tailBuf) {
     return new Cache.Node<>(new Val(tailBuf), null);
   }
 
   // ---------------------------------------------------------------------------
   // Construction
   // ---------------------------------------------------------------------------
+
+  private final ByteBuffer[] pool;
 
   private final Partition[] partitions;
 
@@ -299,8 +330,9 @@ public class BlockCache implements Closeable {
    * immediately after mapping so it does not outlive the JVM.
    */
   public BlockCache(long targetBytes, Path backingFile) throws IOException {
-    ByteBuffer[] pool = initPool(targetBytes, backingFile, true);
-    this.partitions = distribute(pool);
+    int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
+    this.pool = initPool(nBlocks, backingFile, true);
+    this.partitions = distribute(nBlocks);
     this.pinned = initPinned();
     log.info(
         "BlockCache initialized: nBlocks={}, targetBytes={}, nPartitions={}",
@@ -330,8 +362,9 @@ public class BlockCache implements Closeable {
   }
 
   private BlockCache(Path existingBackingFile, long targetBytes) throws IOException {
-    ByteBuffer[] pool = initPool(targetBytes, existingBackingFile, false);
-    this.partitions = distribute(pool);
+    int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
+    this.pool = initPool(nBlocks, existingBackingFile, false);
+    this.partitions = distribute(nBlocks);
     this.pinned = initPinned();
     log.info(
         "BlockCache initialized from existing file {}: nBlocks={}, targetBytes={}, nPartitions={}",
@@ -341,14 +374,17 @@ public class BlockCache implements Closeable {
         partitions.length);
   }
 
-  private static Partition[] distribute(ByteBuffer[] pool) {
-    int nBlocks = pool.length;
+  private static Partition[] distribute(int nBlocks) {
     int nPartitions = computeNPartitions(nBlocks);
     Partition[] parts = new Partition[nPartitions];
     int base = nBlocks / nPartitions;
     int remainder = nBlocks % nPartitions;
     int offset = 0;
-    List<ByteBuffer> poolList = Arrays.asList(pool);
+    Integer[] ords = new Integer[nBlocks];
+    for (int i = nBlocks - 1; i >= 0; i--) {
+      ords[i] = i;
+    }
+    List<Integer> poolList = Arrays.asList(ords);
 
     for (int i = 0; i < nPartitions; i++) {
       int count = base + (i < remainder ? 1 : 0);
@@ -379,7 +415,7 @@ public class BlockCache implements Closeable {
    * <p>{@link Cache#pin(Cache.Node)} is effectively a static method, so it doesn't matter which
    * queue we call it on. TODO: make it <i>actually</i> static, for clarity?
    */
-  boolean pin(Cache.Node<ByteBuffer, Val> node) {
+  boolean pin(Cache.Node<Integer, Val> node) {
     return partitions[0].pin(node);
   }
 
@@ -460,11 +496,11 @@ public class BlockCache implements Closeable {
    * Releases a pin, routing the node to a randomly chosen partition's LRU head. No node-to-
    * partition affinity is required: the ByteBuffer value is valid in any partition's pool.
    */
-  void unpin(Cache.Node<ByteBuffer, Val> node) {
+  void unpin(Cache.Node<Integer, Val> node) {
     unpin(node, true);
   }
 
-  void unpin(Cache.Node<ByteBuffer, Val> node, boolean recordAccess) {
+  void unpin(Cache.Node<Integer, Val> node, boolean recordAccess) {
     partitions[tlrIndex()].unpin(node, recordAccess);
   }
 
@@ -472,7 +508,7 @@ public class BlockCache implements Closeable {
    * Acquires a pinned node from a randomly chosen partition, falling back to other partitions if
    * the first is fully pinned. Returns {@code null} only if all partitions are exhausted.
    */
-  Cache.Node<ByteBuffer, Val> acquireNode() {
+  Cache.Node<Integer, Val> acquireNode() {
     return partitions[tlrIndex()].acquireNode();
   }
 
@@ -481,11 +517,11 @@ public class BlockCache implements Closeable {
    * a high-priority reuse candidate). Used when a node was acquired but ultimately not needed (e.g.
    * lost CAS race).
    */
-  boolean close(Cache.Node<ByteBuffer, Val> node) {
+  boolean close(Cache.Node<Integer, Val> node) {
     return close(node, false);
   }
 
-  boolean close(Cache.Node<ByteBuffer, Val> node, boolean unconditional) {
+  boolean close(Cache.Node<Integer, Val> node, boolean unconditional) {
     return partitions[tlrIndex()].close(node, unconditional);
   }
 
@@ -510,15 +546,14 @@ public class BlockCache implements Closeable {
    * outlive the JVM. If false, the file must already exist and is mmapped without truncation or
    * deletion.
    */
-  private static ByteBuffer[] initPool(long targetBytes, Path backingFile, boolean createAndDelete)
+  private static ByteBuffer[] initPool(final int nBlocks, Path backingFile, boolean createAndDelete)
       throws IOException {
-    final int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
-    final ByteBuffer[] pool = new ByteBuffer[nBlocks];
     final long blockSizeL = COMPRESSION_BLOCK_SIZE;
     // Round partition size down to a 2 MiB boundary (matches HeapCacheFbsModifier convention).
     final long partitionMaxBytes = ((MAX_BLOCKS_PER_PARTITION * blockSizeL) >> 21) << 21;
     final int effectiveMaxBlocksPerPartition = Math.toIntExact(partitionMaxBytes / blockSizeL);
     final int numPartitions = ((nBlocks - 1) / effectiveMaxBlocksPerPartition) + 1;
+    final ByteBuffer[] pool = new ByteBuffer[numPartitions];
 
     Set<StandardOpenOption> openOpts =
         EnumSet.of(StandardOpenOption.READ, StandardOpenOption.WRITE);
@@ -530,7 +565,6 @@ public class BlockCache implements Closeable {
         fc.truncate(nBlocks * blockSizeL);
       }
 
-      int blockIdx = 0;
       // Iterate partitions from high to low so that the remainder partition (which may be
       // smaller than effectiveMaxBlocksPerPartition) is handled first.
       for (int i = numPartitions - 1,
@@ -542,13 +576,7 @@ public class BlockCache implements Closeable {
                 FileChannel.MapMode.READ_WRITE,
                 (long) i * partitionMaxBytes,
                 partitionNumBlocks * blockSizeL);
-        partition.order(ByteOrder.LITTLE_ENDIAN);
-        for (int j = 0; j < partitionNumBlocks; j++) {
-          pool[blockIdx++] =
-              partition
-                  .slice(j * COMPRESSION_BLOCK_SIZE, COMPRESSION_BLOCK_SIZE)
-                  .order(ByteOrder.LITTLE_ENDIAN);
-        }
+        pool[i] = partition;
         partitionNumBlocks = effectiveMaxBlocksPerPartition;
       }
     } finally {
@@ -557,5 +585,9 @@ public class BlockCache implements Closeable {
       }
     }
     return pool;
+  }
+
+  private ByteBuffer slice(int cacheBlockOrd) {
+    return pool[cacheBlockOrd >> POOL_SHIFT].slice((cacheBlockOrd & POOL_MASK) * COMPRESSION_BLOCK_SIZE, COMPRESSION_BLOCK_SIZE);
   }
 }
