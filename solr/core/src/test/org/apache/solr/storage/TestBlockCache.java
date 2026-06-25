@@ -20,7 +20,6 @@ import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZ
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.util.Random;
 import java.util.concurrent.ExecutionException;
@@ -99,9 +98,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       byte[] rtx = new byte[COMPRESSION_BLOCK_SIZE];
       n3Buf.clear().get(rtx);
       assertArrayEquals(
-          "close() should recycle the buffer to tail for immediate reuse",
-          expect,
-          rtx);
+          "close() should recycle the buffer to tail for immediate reuse", expect, rtx);
 
       cache.unpin(n3);
     }
@@ -214,8 +211,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                       }
                       acquired.increment();
                       // Write sentinel via populate() before publishing.
-                      ByteBuffer.wrap(sentinelBuf)
-                          .putInt(0, slotIdx);
+                      ByteBuffer.wrap(sentinelBuf).putInt(0, slotIdx);
                       node.getPayload().populate(sentinelBuf, 0, Integer.BYTES, cache);
                       cache.unpin(node);
                       // Publish to slot; old occupant (if any) will be evicted via normal LRU.

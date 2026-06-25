@@ -1742,7 +1742,10 @@ public class GCSDirectory extends SizeAwareDirectory {
       buf =
           node.getPayload()
               .populate(
-                  heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen, cache);
+                  heapBuf.array(),
+                  heapBuf.arrayOffset() + heapBuf.position(),
+                  decompressedLen,
+                  cache);
     } catch (Throwable t) {
       node.getPayload().completeExceptionally(t);
       accessMapped.compareAndSet(blockIdx, node, null);

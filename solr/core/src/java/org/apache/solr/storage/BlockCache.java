@@ -59,7 +59,8 @@ public class BlockCache implements Closeable {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
-  private static final int MAX_BLOCKS_PER_PARTITION = Integer.highestOneBit(Integer.MAX_VALUE / COMPRESSION_BLOCK_SIZE);
+  private static final int MAX_BLOCKS_PER_PARTITION =
+      Integer.highestOneBit(Integer.MAX_VALUE / COMPRESSION_BLOCK_SIZE);
   private static final int POOL_SHIFT = Integer.numberOfTrailingZeros(MAX_BLOCKS_PER_PARTITION);
   private static final int POOL_MASK = MAX_BLOCKS_PER_PARTITION - 1;
 
@@ -131,6 +132,7 @@ public class BlockCache implements Closeable {
      *
      * @throws CompletionException if population failed
      */
+    @SuppressWarnings("ReferenceEquality")
     public ByteBuffer join(BlockCache c) {
       if (cdl == null) {
         // tail buffer, always populated, already read-only
@@ -213,7 +215,8 @@ public class BlockCache implements Closeable {
     }
 
     public PinRef register(NodeRefStruct nodeRefStruct, BlockCache cache) {
-      if (cdl == null) return NOOP_PINREF; // tail nodes are never evicted; PBS/refLru is unnecessary
+      if (cdl == null)
+        return NOOP_PINREF; // tail nodes are never evicted; PBS/refLru is unnecessary
       PBS ret = null;
       final PBS lock = lock();
       PBS[] deferredHolder = new PBS[1];
@@ -588,6 +591,7 @@ public class BlockCache implements Closeable {
   }
 
   private ByteBuffer slice(int cacheBlockOrd) {
-    return pool[cacheBlockOrd >> POOL_SHIFT].slice((cacheBlockOrd & POOL_MASK) * COMPRESSION_BLOCK_SIZE, COMPRESSION_BLOCK_SIZE);
+    return pool[cacheBlockOrd >> POOL_SHIFT].slice(
+        (cacheBlockOrd & POOL_MASK) * COMPRESSION_BLOCK_SIZE, COMPRESSION_BLOCK_SIZE);
   }
 }

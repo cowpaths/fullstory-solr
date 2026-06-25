@@ -84,8 +84,7 @@ public class AccessDirectory2 extends MMapDirectory {
 
   /** Stores the shared {@code accessMapped} array for {@code name}, pre-populated by the writer. */
   void storeNodes(
-      String name,
-      AtomicReferenceArray<Cache.Node<Integer, BlockCache.Val>> sharedAccessMapped) {
+      String name, AtomicReferenceArray<Cache.Node<Integer, BlockCache.Val>> sharedAccessMapped) {
     synchronized (pendingNodes) {
       pendingNodes.put(name, sharedAccessMapped);
     }
@@ -111,8 +110,7 @@ public class AccessDirectory2 extends MMapDirectory {
   @Override
   public void rename(String source, String dest) throws IOException {
     synchronized (pendingNodes) {
-      AtomicReferenceArray<Cache.Node<Integer, BlockCache.Val>> nodes =
-          pendingNodes.remove(source);
+      AtomicReferenceArray<Cache.Node<Integer, BlockCache.Val>> nodes = pendingNodes.remove(source);
       if (nodes != null) pendingNodes.put(dest, nodes);
     }
     if (source.endsWith(".tmp")) {
