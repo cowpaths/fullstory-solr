@@ -50,7 +50,7 @@ import org.apache.lucene.util.CollectionUtil;
  * lifecycle management specific to their storage backend.
  *
  * <p>Reads are served from {@link #accessMapped}: a per-file {@link AtomicReferenceArray} of {@link
- * BlockCache.Node} entries keyed by block index. On a cache miss, {@link #supply} is invoked to
+ * BlockCache.Val} entries keyed by block index. On a cache miss, {@link #supply} is invoked to
  * fetch and decompress the block, which is then inserted into the cache for subsequent hits.
  *
  * <p>Threading: each instance (root or slice) is accessed by at most one thread at a time via
@@ -78,7 +78,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // reads.
   private final ByteBufferGuard guard;
   // Shared per-file array; null'd on close.
-  protected AtomicReferenceArray<BlockCache.Node> accessMapped;
+  protected AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped;
 
   private final long offset; // absolute start offset of this slice within the file
   private final long sliceLength;
@@ -168,7 +168,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long length,
       long[] blockOffsets,
       ByteBufferGuard guard,
-      AtomicReferenceArray<BlockCache.Node> accessMapped) {
+      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped) {
     super(resourceDescription);
     this.cache = cache;
     this.currentNodeRef = new NodeRefStruct();
@@ -327,7 +327,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   private void initBlock(int blockIdx) throws IOException {
     if (blockIdx > lastBlockIdx) throw new EOFException();
-    BlockCache.Node cached = accessMapped.get(blockIdx);
+    Cache.Node<ByteBuffer, BlockCache.Val> cached = accessMapped.get(blockIdx);
     if (cached == null || !cache.pin(cached)) {
       cacheMiss(cached, blockIdx);
     } else {
@@ -335,12 +335,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  private void cacheHit(int blockIdx, BlockCache.Node cached, int type) throws IOException {
+  private void cacheHit(int blockIdx, Cache.Node<ByteBuffer, BlockCache.Val> cached, int type) throws IOException {
     ByteBuffer buf;
     long loadNanos;
     try {
       long start = System.nanoTime();
-      buf = cached.join();
+      buf = cached.getPayload().join();
       loadNanos = System.nanoTime() - start;
     } catch (CompletionException e) {
       cache.unpin(cached);
@@ -358,7 +358,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     return sequentialAccessCount << 1;
   }
 
-  private void setCurrentNode(BlockCache.Node node, int blockIdx, int type, long loadNanos) {
+  private void setCurrentNode(Cache.Node<ByteBuffer, BlockCache.Val> node, int blockIdx, int type, long loadNanos) {
     int seqAccessCount = currentNodeRef.setCurrentNode(node, blockIdx, cache);
     switch (seqAccessCount) {
       case -1:
@@ -389,15 +389,15 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  private void cacheMiss(final BlockCache.Node cached, final int blockIdx) throws IOException {
+  private void cacheMiss(final Cache.Node<ByteBuffer, BlockCache.Val> cached, final int blockIdx) throws IOException {
     long blockOffset = blockOffsets[blockIdx];
     int compressedLen = (int) (blockOffsets[blockIdx + 1] - blockOffset);
     int decompressedLen =
         blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
 
-    BlockCache.Node node;
+    Cache.Node<ByteBuffer, BlockCache.Val> node;
     if ((node = cache.acquireNode()) != null) {
-      BlockCache.Node extant = accessMapped.compareAndExchange(blockIdx, cached, node);
+      Cache.Node<ByteBuffer, BlockCache.Val> extant = accessMapped.compareAndExchange(blockIdx, cached, node);
       if (extant == cached) {
         // We won the race: fetch from backend and populate the node.
         if (blockIdx == 0) onFirstBlockMiss();
@@ -406,10 +406,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         try {
           ByteBuffer heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
           buf =
-              node.populate(
+              node.getPayload().populate(
                   heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
         } catch (Throwable t) {
-          node.completeExceptionally(t);
+          node.getPayload().completeExceptionally(t);
           accessMapped.compareAndSet(blockIdx, node, null);
           cache.unpin(node);
           cache.close(node);
@@ -1057,14 +1057,14 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   /**
    * Per-{@link CachedCompressedIndexInput}-instance struct tracking the currently pinned {@link
-   * BlockCache.Node} and sequential-access statistics. Each instance is accessed by at most one
+   * BlockCache.Val} and sequential-access statistics. Each instance is accessed by at most one
    * thread at a time via local-pin/local-unpin; out-of-band unpin (eviction) may occur from the
    * cache scavenger thread.
    */
   static final class NodeRefStruct {
     private volatile boolean pinned = false;
     private final AtomicBoolean unpinning = new AtomicBoolean();
-    private BlockCache.Node currentNode;
+    private Cache.Node<ByteBuffer, BlockCache.Val> currentNode;
     // Positive = current block index; negative (~idx) = block index with no live pin.
     private int currentBlockIdx = -1;
     private BlockCache.PinRef readPermit;
@@ -1097,10 +1097,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
      * update is safe.
      */
     @SuppressWarnings("try")
-    private int setCurrentNode(BlockCache.Node node, int blockIdx, BlockCache cache) {
+    private int setCurrentNode(Cache.Node<ByteBuffer, BlockCache.Val> node, int blockIdx, BlockCache cache) {
       assert pinned; // should only be called from a pinned context
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
-      BlockCache.Node toUnpin = currentNode;
+      Cache.Node<ByteBuffer, BlockCache.Val> toUnpin = currentNode;
       if (toUnpin != null) {
         try (BlockCache.PinRef c = readPermit) {
           readPermit = null;
@@ -1128,9 +1128,17 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       } finally {
         if (node != null) {
           assert pinned;
-          pinned = false;
-          readPermit = node.register(this, cache);
-          localPin();
+          cache.pin(node);
+          try {
+            pinned = false;
+            readPermit = node.getPayload().register(this, cache);
+            localPin();
+          } finally {
+            // NOTE: we global double-pin and unpin here in order to ensure that while we
+            // release the local pin, there's no chance that we'll be reclaimed and have
+            // our payload nulled out.
+            cache.unpin(node, false);
+          }
         }
       }
     }
@@ -1141,7 +1149,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
      */
     @SuppressWarnings("try")
     private void unpinCurrentBlock(BlockCache blockCache) {
-      BlockCache.Node toUnpin = currentNode;
+      Cache.Node<ByteBuffer, BlockCache.Val> toUnpin = currentNode;
       if (toUnpin != null) {
         try (BlockCache.PinRef c = readPermit) {
           readPermit = null;
@@ -1172,7 +1180,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
 
     private void doUnpin(BlockCache blockCache) {
-      BlockCache.Node toUnpin = currentNode;
+      Cache.Node<ByteBuffer, BlockCache.Val> toUnpin = currentNode;
       if (toUnpin != null) {
         currentNode = null;
         currentBlockIdx = ~currentBlockIdx;

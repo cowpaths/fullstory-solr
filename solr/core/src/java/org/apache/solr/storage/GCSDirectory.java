@@ -280,7 +280,7 @@ public class GCSDirectory extends SizeAwareDirectory {
   private final boolean useAsyncIO;
   private final DirectBufferPool bufferPool;
 
-  static final AtomicReferenceArray<BlockCache.Node> EMPTY_ACCESS_MAPPED =
+  static final AtomicReferenceArray<BlockCache.Val> EMPTY_ACCESS_MAPPED =
       new AtomicReferenceArray<>(0);
 
   /**
@@ -587,9 +587,9 @@ public class GCSDirectory extends SizeAwareDirectory {
     if (stale.refCount.get() != 0) {
       log.warn("unexpected non-zero refcount in removeCachedMappings");
     }
-    AtomicReferenceArray<BlockCache.Node> staleNodes = stale.accessMapped;
+    AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> staleNodes = stale.accessMapped;
     for (int i = 0; i < staleNodes.length(); i++) {
-      BlockCache.Node node = staleNodes.getAndSet(i, null);
+      Cache.Node<ByteBuffer, BlockCache.Val> node = staleNodes.getAndSet(i, null);
       if (node != null) cache.close(node);
     }
   }
@@ -1248,7 +1248,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private int tailLen;
     // Cache nodes pre-populated during dump(), one per GCS block (null if pool was exhausted).
     // Published into pendingNodes on close() so readers get cache hits instead of GCS fetches.
-    private final ArrayList<BlockCache.Node> cachedNodes = new ArrayList<>();
+    private final ArrayList<Cache.Node<ByteBuffer, BlockCache.Val>> cachedNodes = new ArrayList<>();
     private final LongArrayList blockOffsets = new LongArrayList();
 
     GCSIndexOutput(GCSDirectory dir, SegmentStruct registerUUID, IndexOutput localOut)
@@ -1308,10 +1308,10 @@ public class GCSDirectory extends SizeAwareDirectory {
       preBuffer.rewind();
       // Pre-warm the block cache with the uncompressed block while it's already in memory,
       // so readers get a cache hit instead of a GCS round-trip.
-      BlockCache.Node cacheNode = dir.cache.acquireNode();
+      Cache.Node<ByteBuffer, BlockCache.Val> cacheNode = dir.cache.acquireNode();
       if (cacheNode != null) {
         try {
-          cacheNode.populate(compressBuffer, 0, COMPRESSION_BLOCK_SIZE);
+          cacheNode.getPayload().populate(compressBuffer, 0, COMPRESSION_BLOCK_SIZE);
         } finally {
           // release writer's pin; node enters LRU, ready for readers
           dir.cache.unpin(cacheNode, false);
@@ -1405,7 +1405,7 @@ public class GCSDirectory extends SizeAwareDirectory {
               int blockCount = (int) (((filePos - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
               int gcsBlockCount = tailLen > 0 ? blockCount - 1 : blockCount;
               long[] blockOffsetsArr = new long[blockCount + 1];
-              AtomicReferenceArray<BlockCache.Node> accessMapped =
+              AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped =
                   new AtomicReferenceArray<>(blockCount);
               for (int i = 0; i < gcsBlockCount; i++) {
                 accessMapped.set(i, cachedNodes.get(i));
@@ -1481,7 +1481,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private final String segName;
     private final AtomicInteger refCount;
     private final long[] blockOffsets;
-    private final AtomicReferenceArray<BlockCache.Node> accessMapped;
+    private final AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped;
     private final boolean hasTail;
     private final CompletableFuture<ByteBuffer> origMapping = new CompletableFuture<>();
     private final ByteBufferGuard guard = new ByteBufferGuard("gcsLocalFile", UNMAP);
@@ -1491,7 +1491,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         UUID segUUID,
         String segName,
         long[] blockOffsets,
-        AtomicReferenceArray<BlockCache.Node> accessMapped,
+        AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped,
         int initialRefCount,
         boolean hasTail) {
       this.segUUID = segUUID;
@@ -1506,7 +1506,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private BlocksStruct copy() {
       int len = accessMapped.length();
-      AtomicReferenceArray<BlockCache.Node> newAccessMapped = new AtomicReferenceArray<>(len);
+      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> newAccessMapped = new AtomicReferenceArray<>(len);
       for (int i = hasTail ? len - 2 : len - 1; i >= 0; i--) {
         newAccessMapped.setPlain(i, accessMapped.getPlain(i)); // plain/best-effort
       }
@@ -1682,14 +1682,14 @@ public class GCSDirectory extends SizeAwareDirectory {
 
   private boolean ensureLoaded(
       String blob,
-      AtomicReferenceArray<BlockCache.Node> accessMapped,
+      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped,
       long[] blockOffsets,
       int idx,
       Semaphore control,
       int timeoutMillis) {
-    BlockCache.Node extant = accessMapped.get(idx);
+    Cache.Node<ByteBuffer, BlockCache.Val> extant = accessMapped.get(idx);
     if ((extant == null || !extant.pinnable()) && acquireReadaheadPermit(control, timeoutMillis)) {
-      BlockCache.Node toPopulate = cache.acquireNode();
+      Cache.Node<ByteBuffer, BlockCache.Val> toPopulate = cache.acquireNode();
       if (toPopulate == null) {
         releaseReadaheadPermit(control);
         return false;
@@ -1735,17 +1735,17 @@ public class GCSDirectory extends SizeAwareDirectory {
       int compressedLen,
       int blockIdx,
       int decompressedLen,
-      BlockCache.Node node,
-      AtomicReferenceArray<BlockCache.Node> accessMapped)
+      Cache.Node<ByteBuffer, BlockCache.Val> node,
+      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped)
       throws IOException {
     ByteBuffer buf;
     try {
       ByteBuffer heapBuf = supply(blob, pos, compressedLen, decompressedLen);
       buf =
-          node.populate(
+          node.getPayload().populate(
               heapBuf.array(), heapBuf.arrayOffset() + heapBuf.position(), decompressedLen);
     } catch (Throwable t) {
-      node.completeExceptionally(t);
+      node.getPayload().completeExceptionally(t);
       accessMapped.compareAndSet(blockIdx, node, null);
       cache.unpin(node);
       cache.close(node);
@@ -1919,7 +1919,7 @@ public class GCSDirectory extends SizeAwareDirectory {
             // Pre-pin the tail and complete origMapping (publication barrier for blockOffsets).
             if (hasTail) {
               ByteBuffer tailBuf = localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
-              BlockCache.Node tailNode = dir.cache.createTailNode(tailBuf);
+              Cache.Node<ByteBuffer, BlockCache.Val> tailNode = dir.cache.createTailNode(tailBuf);
               if (!bs.accessMapped.compareAndSet(lastBlockIdx, null, tailNode)) {
                 throw new IllegalStateException("tailNode already set");
               }
@@ -1941,7 +1941,7 @@ public class GCSDirectory extends SizeAwareDirectory {
               localFileRemapped.order(ByteOrder.LITTLE_ENDIAN);
               ByteBuffer tailBuf =
                   localFileRemapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN);
-              BlockCache.Node tailNode = dir.cache.createTailNode(tailBuf);
+              Cache.Node<ByteBuffer, BlockCache.Val> tailNode = dir.cache.createTailNode(tailBuf);
               if (!bs.accessMapped.compareAndSet(lastBlockIdx, null, tailNode)) {
                 throw new IllegalStateException("tailNode already set");
               }
@@ -1993,10 +1993,10 @@ public class GCSDirectory extends SizeAwareDirectory {
     private static final class AlwaysMappedParams {
       final long length;
       final BlocksStruct bs;
-      final AtomicReferenceArray<BlockCache.Node> accessMapped;
+      final AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped;
 
       AlwaysMappedParams(
-          long length, BlocksStruct bs, AtomicReferenceArray<BlockCache.Node> accessMapped) {
+          long length, BlocksStruct bs, AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped) {
         this.length = length;
         this.bs = bs;
         this.accessMapped = accessMapped;
@@ -2008,7 +2008,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       int tailLen = len & COMPRESSION_BLOCK_MASK_LOW;
       boolean hasTail = tailLen > 0;
       int blockCount = len == 0 ? 1 : (((len - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-      AtomicReferenceArray<BlockCache.Node> accessMapped = new AtomicReferenceArray<>(blockCount);
+      AtomicReferenceArray<Cache.Node<ByteBuffer, BlockCache.Val>> accessMapped = new AtomicReferenceArray<>(blockCount);
       int base = content.position();
       for (int i = 0; i < blockCount; i++) {
         int blockStart = base + i * COMPRESSION_BLOCK_SIZE;
