@@ -504,7 +504,14 @@ public class BlockCache implements Closeable {
   }
 
   void unpin(Cache.Node<Integer, Val> node, boolean recordAccess) {
-    partitions[tlrIndex()].unpin(node, recordAccess);
+    if (partitions[tlrIndex()].unpin(node, recordAccess)) {
+      // on last unpin, null out the cached ByteBuffer. recreating is cheap.
+      Val v = node.getPayload();
+      if (v != null) {
+        // benign race here. worst case we force another `slice()`
+        v.cached = null;
+      }
+    }
   }
 
   /**
