@@ -17,6 +17,7 @@
 package org.apache.solr.handler.admin;
 
 import java.io.IOException;
+import java.util.concurrent.TimeUnit;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
@@ -152,6 +153,13 @@ public class SegmentsInfoRequestHandlerTest extends SolrTestCaseJ4 {
         "Missing core info",
         req("qt", "/admin/segments", "coreInfo", "true"),
         "boolean(//lst[@name='info']/lst[@name='core'])");
+  }
+
+  @Test
+  public void testFormatTemporalBucket() {
+    assertEquals("oldest", SegmentsInfoRequestHandler.formatTemporalBucket(Long.MAX_VALUE));
+    assertEquals("-9d", SegmentsInfoRequestHandler.formatTemporalBucket(TimeUnit.DAYS.toMillis(-9)));
+    assertEquals("3d", SegmentsInfoRequestHandler.formatTemporalBucket(TimeUnit.DAYS.toMillis(3)));
   }
 
   @Test

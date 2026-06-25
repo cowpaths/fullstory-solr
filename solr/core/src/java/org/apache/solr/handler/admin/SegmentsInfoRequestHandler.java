@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.apache.lucene.codecs.PointsFormat;
 import org.apache.lucene.codecs.PointsReader;
@@ -50,6 +51,7 @@ import org.apache.lucene.index.SegmentInfo;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentReader;
+import org.apache.lucene.index.SegmentRoutingUtil;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
@@ -180,6 +182,7 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
     SimpleOrderedMap<Object> runningMerges = getMergeInformation(req, infos, mergeCandidates);
     List<LeafReaderContext> leafContexts = searcher.getIndexReader().leaves();
     IndexSchema schema = req.getSchema();
+    long now = System.currentTimeMillis();
     for (SegmentCommitInfo segmentCommitInfo : sortable) {
       segmentInfo =
           getSegmentInfo(segmentCommitInfo, withSizeInfo, withFieldInfo, leafContexts, schema);
@@ -192,6 +195,10 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
         if (segmentDateRange != null) {
           segmentInfo.add("temporalMinDate", new Date(segmentDateRange.minDate));
           segmentInfo.add("temporalMaxDate", new Date(segmentDateRange.maxDate));
+          long temporalBucket =
+              SegmentRoutingUtil.mapToBucket(segmentDateRange.maxDate, now);
+          segmentInfo.add("temporalBucket", temporalBucket);
+          segmentInfo.add("temporalBucketLabel", formatTemporalBucket(temporalBucket));
         }
       } catch (IOException e) {
         log.warn("Exception segment range info on segment {}", segmentCommitInfo.info.name, e);
@@ -595,6 +602,14 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
         compoundDir.close();
       }
     }
+  }
+
+  /** Human-readable label for a {@link SegmentRoutingUtil#mapToBucket} boundary (days from now). */
+  static String formatTemporalBucket(long bucketMs) {
+    if (bucketMs == Long.MAX_VALUE) {
+      return "oldest";
+    }
+    return TimeUnit.MILLISECONDS.toDays(bucketMs) + "d";
   }
 
   private static long getTemporalFieldDivisor(long maxValue) {
