@@ -27,9 +27,10 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
@@ -70,6 +71,16 @@ public class BlockCache implements Closeable {
 
   private static final ByteBuffer EXCEPTION_SENTINEL = ByteBuffer.allocate(0);
 
+  static final class RefVal<V> extends Cache.Val<V> {
+
+    private final V val;
+
+    RefVal(V nrs, int initialRefCount) {
+      super(initialRefCount);
+      this.val = nrs;
+    }
+  }
+
   /**
    * A cache entry: wraps a decompressed block buffer and carries a reference count for safe
    * concurrent eviction.
@@ -79,8 +90,8 @@ public class BlockCache implements Closeable {
    * <ol>
    *   <li>Returned by {@link BlockCache#acquireNode()} pinned (refCount=1), <em>not</em> in the LRU
    *       list.
-   *   <li>Caller populates {@link #getValue()} and publishes the node (e.g. via an {@code
-   *       AtomicReference} slot). The node is still pinned.
+   *   <li>Caller populates `getValue()` and publishes the node (e.g. via an {@code AtomicReference}
+   *       slot). The node is still pinned.
    *   <li>Subsequent callers call {@link Cache#pin(Cache.Node)}, which either re-pins
    *       (refCount&gt;0 → increment only) or first-pins (refCount=0 → remove from list +
    *       increment).
@@ -100,22 +111,25 @@ public class BlockCache implements Closeable {
      */
     private final CountDownLatch cdl;
 
+    private final int cacheBlockOrd;
+
     private volatile ByteBuffer cached;
 
     private Val(ByteBuffer prepopulated) {
-      super(null, Integer.MAX_VALUE >> 1);
-      cached = prepopulated;
+      super(Integer.MAX_VALUE >> 1);
+      this.cached = prepopulated;
+      this.cacheBlockOrd = -1;
       this.cdl = null;
     }
 
-    Val(Integer cacheBlockOrd, int initialRefCount) {
-      super(cacheBlockOrd, initialRefCount);
+    Val(int cacheBlockOrd, int initialRefCount) {
+      super(initialRefCount);
+      this.cacheBlockOrd = cacheBlockOrd;
       this.cdl = new CountDownLatch(1);
     }
 
     ByteBuffer populate(byte[] arr, int off, int len, BlockCache c) {
       assert cdl != null;
-      int cacheBlockOrd = getValue();
       ByteBuffer ret = c.slice(cacheBlockOrd);
       // NOTE: for consistency between `populate()` and on-demand restore
       // in `join()`, we call `clear()` here, _not_ `flip()`.
@@ -146,7 +160,7 @@ public class BlockCache implements Closeable {
       }
       ByteBuffer ret = cached;
       if (ret == null) {
-        ret = c.slice(getValue()).asReadOnlyBuffer();
+        ret = c.slice(cacheBlockOrd).asReadOnlyBuffer();
         cached = ret;
       } else if (ret == EXCEPTION_SENTINEL) {
         throw new CompletionException("other thread exception in buffer population", null);
@@ -225,13 +239,13 @@ public class BlockCache implements Closeable {
           ret = lock;
         } else {
           for (; ; ) {
-            Cache<Val, Cache.Val<Val>> p = cache.pinnedLru();
-            Cache.Node<Val, Cache.Val<Val>> permit =
+            Cache<Val, RefVal<Val>> p = cache.pinnedLru();
+            Cache.Node<Val, RefVal<Val>> permit =
                 p.acquireNode(
-                    (evicted) -> {
+                    (evicted, i) -> {
                       if (evicted != null) {
                         PBS pbs;
-                        while ((pbs = evicted.outOfBandTryUnpinAll()) == null) {
+                        while ((pbs = evicted.val.outOfBandTryUnpinAll()) == null) {
                           Thread.yield();
                         }
                         if (pbs != EVICTED) {
@@ -242,11 +256,11 @@ public class BlockCache implements Closeable {
                           deferredHolder[0] = pbs;
                         }
                       }
-                      return this;
+                      return new BlockCache.RefVal<>(this, i);
                     });
             if (permit == null) {
               Thread.yield();
-            } else if (permit.getValue() == this) {
+            } else if (permit.getPayload().val == this) {
               ret = new PBS(this, permit, p);
               // `p.unpin(permit, false)` is called in `ret.register()` below
               break;
@@ -271,9 +285,9 @@ public class BlockCache implements Closeable {
 
   static class PinRef implements Closeable {
     private final PBS parent;
-    private final Cache.Node<NodeRefStruct, Cache.Val<NodeRefStruct>> permit;
+    private final Cache.Node<NodeRefStruct, RefVal<NodeRefStruct>> permit;
 
-    private PinRef(PBS parent, Cache.Node<NodeRefStruct, Cache.Val<NodeRefStruct>> permit) {
+    private PinRef(PBS parent, Cache.Node<NodeRefStruct, RefVal<NodeRefStruct>> permit) {
       this.parent = parent;
       this.permit = permit;
     }
@@ -297,13 +311,13 @@ public class BlockCache implements Closeable {
   // ---------------------------------------------------------------------------
 
   private static final class Partition extends Cache.DualQueueCache<Integer, Val> {
-    Partition(List<Integer> pool) {
-      super(pool, true);
+    Partition(Iterable<BlockCache.Val> pool) {
+      super(pool);
     }
 
     @Override
-    protected BlockCache.Val createPayload(Integer cacheBlockOrd, int initialRefCount) {
-      return new BlockCache.Val(cacheBlockOrd, initialRefCount);
+    protected BlockCache.Val createPayload(BlockCache.Val oldValue, int initialRefCount) {
+      return new BlockCache.Val(oldValue.cacheBlockOrd, initialRefCount);
     }
   }
 
@@ -322,9 +336,9 @@ public class BlockCache implements Closeable {
 
   private static final int MAX_PINNED_BLOCKS = 4096;
 
-  private final Cache<Val, Cache.Val<Val>>[] pinned;
+  private final Cache<Val, RefVal<Val>>[] pinned;
 
-  private Cache<Val, Cache.Val<Val>> pinnedLru() {
+  private Cache<Val, RefVal<Val>> pinnedLru() {
     return pinned[ThreadLocalRandom.current().nextInt(pinned.length)];
   }
 
@@ -344,12 +358,30 @@ public class BlockCache implements Closeable {
         partitions.length);
   }
 
-  private Cache<Val, Cache.Val<Val>>[] initPinned() {
+  private Cache<Val, RefVal<Val>>[] initPinned() {
     @SuppressWarnings({"unchecked", "rawtypes"})
-    Cache<Val, Cache.Val<Val>>[] arr = new Cache[computeNPartitions(MAX_PINNED_BLOCKS)];
-    List<Val> dummy = Arrays.asList(new Val[(MAX_PINNED_BLOCKS / arr.length) + 1]);
+    Cache<Val, RefVal<Val>>[] arr = new Cache[computeNPartitions(MAX_PINNED_BLOCKS)];
+    int perPinnedPartition = (MAX_PINNED_BLOCKS / arr.length) + 1;
+    Iterable<RefVal<Val>> dummy =
+        () ->
+            new Iterator<RefVal<Val>>() {
+              int i = 0;
+
+              @Override
+              public boolean hasNext() {
+                return i < perPinnedPartition;
+              }
+
+              @Override
+              public RefVal<Val> next() {
+                if (i++ >= perPinnedPartition) {
+                  throw new NoSuchElementException();
+                }
+                return new RefVal<>(null, 0);
+              }
+            };
     for (int i = arr.length - 1; i >= 0; i--) {
-      arr[i] = new Cache<>(dummy, false);
+      arr[i] = new Cache<>(dummy);
     }
     return arr;
   }
@@ -383,15 +415,26 @@ public class BlockCache implements Closeable {
     int base = nBlocks / nPartitions;
     int remainder = nBlocks % nPartitions;
     int offset = 0;
-    Integer[] ords = new Integer[nBlocks];
-    for (int i = nBlocks - 1; i >= 0; i--) {
-      ords[i] = i;
-    }
-    List<Integer> poolList = Arrays.asList(ords);
-
     for (int i = 0; i < nPartitions; i++) {
       int count = base + (i < remainder ? 1 : 0);
-      parts[i] = new Partition(poolList.subList(offset, offset + count));
+      int from = offset;
+      int to = offset + count;
+      Iterable<Val> poolList =
+          () ->
+              new Iterator<Val>() {
+                int i = from;
+
+                @Override
+                public boolean hasNext() {
+                  return i < to;
+                }
+
+                @Override
+                public Val next() {
+                  return new Val(i++, 0);
+                }
+              };
+      parts[i] = new Partition(poolList);
       offset += count;
     }
     return parts;
@@ -427,15 +470,12 @@ public class BlockCache implements Closeable {
   private static class PBS {
 
     private final Val blockNode;
-    private final Cache.Node<Val, Cache.Val<Val>> permit;
-    private final Cache<Val, Cache.Val<Val>> blockLru;
-    private final Cache<NodeRefStruct, Cache.Val<NodeRefStruct>> refLru =
-        new Cache<>(List.of(), false);
+    private final Cache.Node<Val, RefVal<Val>> permit;
+    private final Cache<Val, RefVal<Val>> blockLru;
+    private final Cache<NodeRefStruct, RefVal<NodeRefStruct>> refLru = new Cache<>(List.of());
 
     private PBS(
-        Val blockNode,
-        Cache.Node<Val, Cache.Val<Val>> permit,
-        Cache<Val, Cache.Val<Val>> blockLru) {
+        Val blockNode, Cache.Node<Val, RefVal<Val>> permit, Cache<Val, RefVal<Val>> blockLru) {
       this.blockNode = blockNode;
       this.permit = permit;
       this.blockLru = blockLru;
@@ -445,20 +485,20 @@ public class BlockCache implements Closeable {
       try {
         for (boolean firstPass = true; ; firstPass = false) {
           int refCount = blockNode.refCount();
-          Cache.Node<NodeRefStruct, Cache.Val<NodeRefStruct>> permitF;
+          Cache.Node<NodeRefStruct, RefVal<NodeRefStruct>> permitF;
           if (refCount < REF_LIMIT) {
-            permitF = new Cache.Node<>(new Cache.Val<>(nrs, 1), null);
+            permitF = new Cache.Node<>(new RefVal<>(nrs, 1), null);
           } else {
-            Cache.Node<NodeRefStruct, Cache.Val<NodeRefStruct>> permit =
+            Cache.Node<NodeRefStruct, RefVal<NodeRefStruct>> permit =
                 refLru.acquireNode(
-                    (evicted) -> {
+                    (evicted, i) -> {
                       if (evicted != null) {
-                        evicted.outOfBandUnpin(cache);
+                        evicted.val.outOfBandUnpin(cache);
                       }
-                      return nrs;
+                      return new RefVal<>(nrs, i);
                     });
             if (permit == null) {
-              permitF = new Cache.Node<>(new Cache.Val<>(nrs, 1), null);
+              permitF = new Cache.Node<>(new RefVal<>(nrs, 1), null);
             } else if (firstPass && refCount > REF_LIMIT) {
               // too many permits issued ... discard one
               continue;
@@ -477,13 +517,13 @@ public class BlockCache implements Closeable {
     public void unpinAll(BlockCache cache) {
       // TODO: pretty sure we have an effective lock at this point and can just
       //  iterate entries instead of `acquireNode()` in a loop
-      Cache.Node<NodeRefStruct, Cache.Val<NodeRefStruct>> permit;
+      Cache.Node<NodeRefStruct, RefVal<NodeRefStruct>> permit;
       do {
         permit =
             refLru.acquireNode(
-                (evicted) -> {
+                (evicted, i) -> {
                   if (evicted != null) {
-                    evicted.outOfBandUnpin(cache);
+                    evicted.val.outOfBandUnpin(cache);
                   }
                   return null;
                 });
