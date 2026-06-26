@@ -243,7 +243,7 @@ public class BlockCache implements Closeable {
             Cache.Node<RefVal<Val>> permit =
                 p.acquireNode(
                     (evicted, i) -> {
-                      if (evicted != null) {
+                      if (evicted.val != null) {
                         PBS pbs;
                         while ((pbs = evicted.val.outOfBandTryUnpinAll()) == null) {
                           Thread.yield();
@@ -491,7 +491,7 @@ public class BlockCache implements Closeable {
             Cache.Node<RefVal<NodeRefStruct>> permit =
                 refLru.acquireNode(
                     (evicted, i) -> {
-                      if (evicted != null) {
+                      if (evicted.val != null) {
                         evicted.val.outOfBandUnpin(cache);
                       }
                       return new RefVal<>(nrs, i);
@@ -521,7 +521,7 @@ public class BlockCache implements Closeable {
         permit =
             refLru.acquireNode(
                 (evicted, i) -> {
-                  if (evicted != null) {
+                  if (evicted.val != null) {
                     evicted.val.outOfBandUnpin(cache);
                   }
                   return null;
