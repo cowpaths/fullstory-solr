@@ -71,7 +71,7 @@ public class BlockCache implements Closeable {
 
   private static final ByteBuffer EXCEPTION_SENTINEL = ByteBuffer.allocate(0);
 
-  static final class RefVal<V> extends Cache.Val<V> {
+  static final class RefVal<V> extends Cache.Val {
 
     private final V val;
 
@@ -103,7 +103,7 @@ public class BlockCache implements Closeable {
    *       Cache#pin(Cache.Node)}, and falls back to loading.
    * </ol>
    */
-  public static final class Val extends Cache.TsVal<Integer> {
+  public static final class Val extends Cache.TsVal {
 
     /**
      * Completion signal: fulfilled with {@code value} by {@link #populate} on the winning thread;

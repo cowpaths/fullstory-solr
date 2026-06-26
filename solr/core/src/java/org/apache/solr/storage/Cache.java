@@ -42,13 +42,13 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * @param <V> the value type carried by each node
  */
-class Cache<V, N extends Cache.Val<V>> {
+class Cache<V, N extends Cache.Val> {
 
   // ---------------------------------------------------------------------------
   // Node
   // ---------------------------------------------------------------------------
 
-  static class Val<V> {
+  static class Val {
     /**
      * Reference count.
      *
@@ -84,7 +84,7 @@ class Cache<V, N extends Cache.Val<V>> {
    *
    * <p>Head of the list = most recently used; tail = least recently used / eviction candidate.
    */
-  static final class Node<V, N extends Cache.Val<V>> {
+  static final class Node<V, N extends Cache.Val> {
 
     /**
      * The payload managed by this cache entry. {@code null} for sentinel nodes. Non-final only in
@@ -116,7 +116,7 @@ class Cache<V, N extends Cache.Val<V>> {
     }
 
     boolean pinnable() {
-      Val<V> p = this.payload;
+      Val p = this.payload;
       return p != null && p.refCount.get() >= 0;
     }
   }
@@ -199,7 +199,7 @@ class Cache<V, N extends Cache.Val<V>> {
    */
   @SuppressWarnings("unchecked")
   protected N createPayload(N oldValue, int initialRefCount) {
-    return (N) new Val<>(initialRefCount);
+    return (N) new Val(initialRefCount);
   }
 
   // ---------------------------------------------------------------------------
@@ -301,7 +301,7 @@ class Cache<V, N extends Cache.Val<V>> {
    * refcount is simply incremented with no list operation.
    */
   boolean pin(Node<V, N> node) {
-    Val<V> p = node.payload;
+    Val p = node.payload;
     if (p == null) {
       return false;
     }
@@ -334,7 +334,7 @@ class Cache<V, N extends Cache.Val<V>> {
    * inserted at the LRU head (most-recently-used position) and becomes evictable.
    */
   boolean unpin(Node<V, N> node, boolean recordAccess) {
-    Val<V> p = node.payload;
+    Val p = node.payload;
     assert p != null;
     int rc = p.refCount.get();
     for (; ; ) {
@@ -378,7 +378,7 @@ class Cache<V, N extends Cache.Val<V>> {
 
   protected Node<V, N> acquireTail(Node<V, N> lruTail, Node<V, N> lruHead) {
     for (Node<V, N> candidate; (candidate = lruTail.prev) != lruHead; ) {
-      Val<V> p = candidate.payload;
+      Val p = candidate.payload;
       if (p != null && p.refCount.compareAndSet(0, -1)) {
         return candidate;
       }
@@ -416,7 +416,7 @@ class Cache<V, N extends Cache.Val<V>> {
    */
   boolean close(Node<V, N> node, boolean unconditional) {
     N p = node.payload;
-    if (!unconditional && (p == null || !((Val<V>) p).refCount.compareAndSet(0, -1))) {
+    if (!unconditional && (p == null || !((Val) p).refCount.compareAndSet(0, -1))) {
       // pinned or already dead — best effort, bail
       return false;
     }
@@ -429,7 +429,7 @@ class Cache<V, N extends Cache.Val<V>> {
     return true;
   }
 
-  static class TsVal<V> extends Val<V> {
+  static class TsVal extends Val {
 
     /**
      * Nanosecond timestamp of the most recent {@link Cache#unpin}, or {@code 0} if never unpinned.
@@ -443,11 +443,11 @@ class Cache<V, N extends Cache.Val<V>> {
     }
   }
 
-  private static long lastUnpinNanos(TsVal<?> v) {
+  private static long lastUnpinNanos(TsVal v) {
     return v == null ? 0 : v.lastUnpinNanos;
   }
 
-  static class DualQueueCache<V, N extends TsVal<V>> extends Cache<V, N> {
+  static class DualQueueCache<V, N extends TsVal> extends Cache<V, N> {
 
     /** Running memoization of last seen non-zero cold queue timestamp */
     private volatile long coldTs;
@@ -466,8 +466,8 @@ class Cache<V, N extends Cache.Val<V>> {
 
     @Override
     protected final void insertAtHead(Node<V, N> head, Node<V, N> node, boolean recordAccess) {
-      long prev = ((TsVal<V>) node.payload).lastUnpinNanos;
-      ((TsVal<V>) node.payload).lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
+      long prev = ((TsVal) node.payload).lastUnpinNanos;
+      ((TsVal) node.payload).lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
       super.insertAtHead(toHot(prev) ? hotHead : head, node, recordAccess);
     }
 
@@ -476,7 +476,7 @@ class Cache<V, N extends Cache.Val<V>> {
       long coldCandidateTs;
       Node<V, N> candidate;
       long now = System.nanoTime();
-      Val<V> p;
+      Val p;
       do {
         Node<V, N> coldCandidate = lruTail.prev, hotCandidate = hotTail.prev;
         if (coldCandidate == lruHead) {
