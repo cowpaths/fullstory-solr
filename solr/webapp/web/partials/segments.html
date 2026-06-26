@@ -58,7 +58,7 @@ limitations under the License.
                                      </dt>
                                      <dd>
                                          <div class="live" ng-class="{'merge-candidate':segment.mergeCandidate}"
-                                              ng-style="{width: segment.aliveDocSize+'%'}">&nbsp;</div>
+                                              ng-style="segment.bucketBarColor ? {width: segment.aliveDocSize+'%', backgroundColor: segment.bucketBarColor} : {width: segment.aliveDocSize+'%'}">&nbsp;</div>
                                          <div class="tooltip">
                                              <div>Segment <b>{{segment.name}}</b>:</div>
                                              <div class="label">#docs:</div>

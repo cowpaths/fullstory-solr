@@ -17,6 +17,41 @@
 
 var MB_FACTOR = 1024*1024;
 
+/** Subtle greyish tints for temporal bucket groups (stable order by bucket boundary). */
+var TEMPORAL_BUCKET_BAR_COLORS = [
+    '#d6d9dc',
+    '#d3d8d3',
+    '#dad6d3',
+    '#d6d3da',
+    '#cfd6da',
+    '#d8d5cf',
+    '#d0d6d2',
+    '#d9d4d6'
+];
+
+var assignTemporalBucketBarColors = function(segments) {
+    var uniqueBuckets = [];
+    for (var i = 0; i < segments.length; i++) {
+        var bucket = segments[i].temporalBucket;
+        if (bucket != null && uniqueBuckets.indexOf(bucket) === -1) {
+            uniqueBuckets.push(bucket);
+        }
+    }
+    uniqueBuckets.sort(function(a, b) { return a - b; });
+
+    var colorByBucket = {};
+    for (var j = 0; j < uniqueBuckets.length; j++) {
+        colorByBucket[uniqueBuckets[j]] = TEMPORAL_BUCKET_BAR_COLORS[j % TEMPORAL_BUCKET_BAR_COLORS.length];
+    }
+
+    for (var k = 0; k < segments.length; k++) {
+        var seg = segments[k];
+        if (seg.temporalBucket != null) {
+            seg.bucketBarColor = colorByBucket[seg.temporalBucket];
+        }
+    }
+};
+
 solrAdminApp.controller('SegmentsController', function($scope, $routeParams, $interval, Segments, Constants) {
     $scope.resetMenu("segments", Constants.IS_CORE_PAGE);
 
@@ -64,6 +99,7 @@ solrAdminApp.controller('SegmentsController', function($scope, $routeParams, $in
                 $scope.documentCount += segment.size;
                 $scope.deletionCount += segment.delCount;
             }
+            assignTemporalBucketBarColors($scope.segments);
             $scope.deletionsPercentage = calculateDeletionsPercentage($scope.documentCount, $scope.deletionCount);
         });
     };
