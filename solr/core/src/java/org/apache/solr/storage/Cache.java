@@ -17,9 +17,10 @@
 
 package org.apache.solr.storage;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Generic concurrent LRU cache with pin/unpin support.
@@ -69,6 +70,16 @@ class Cache<V extends Cache.Val> {
     }
   }
 
+  private static final VarHandle NEXT;
+
+  static {
+    try {
+      NEXT = MethodHandles.lookup().findVarHandle(Node.class, "next", Node.class);
+    } catch (ReflectiveOperationException e) {
+      throw new Error(e);
+    }
+  }
+
   /**
    * A linked-list node carrying a reference count for safe concurrent eviction.
    *
@@ -92,10 +103,13 @@ class Cache<V extends Cache.Val> {
      */
     private V payload;
 
-    /** LRU list link toward the head (most-recently-used end). */
-    private final AtomicReference<Node<V>> next = new AtomicReference<>();
+    /** LRU list link toward the head (most-recently-used end). Guarded by atomic access */
+    private volatile Node<V> next;
 
-    /** LRU list link toward the tail (least-recently-used end). */
+    /**
+     * LRU list link toward the tail (least-recently-used end). Guarded by atomic access to {@link
+     * #next}
+     */
     private volatile Node<V> prev;
 
     Node(V payload, Node<V> prev) {
@@ -167,7 +181,7 @@ class Cache<V extends Cache.Val> {
   private Cache() {
     RESERVED = (Node<V>) RESERVED_PROTO;
     REMOVED = (Node<V>) REMOVED_PROTO;
-    lruHead.next.set(lruTail);
+    lruHead.next = lruTail;
     lruTail.prev = lruHead;
   }
 
@@ -182,10 +196,10 @@ class Cache<V extends Cache.Val> {
     Node<V> prev = lruHead;
     for (V value : initialValues) {
       Node<V> node = new Node<>(value, prev);
-      prev.next.set(node);
+      prev.next = node;
       prev = node;
     }
-    prev.next.set(lruTail);
+    prev.next = lruTail;
     lruTail.prev = prev;
   }
 
@@ -211,19 +225,20 @@ class Cache<V extends Cache.Val> {
    * held by another thread (RESERVED), then CAS-swaps it to {@code reservation} and returns the
    * prior value. Returns REMOVED immediately if the node has already been spliced out.
    */
+  @SuppressWarnings("unchecked")
   private Node<V> reserve(Node<V> ref, Node<V> reservation) {
-    Node<V> next = ref.next.get();
+    Node<V> next = ref.next;
     for (; ; ) {
       while (next == RESERVED_PROTO) {
         if (reservation == REMOVED_PROTO) {
           Thread.yield();
         }
-        next = ref.next.get();
+        next = ref.next;
       }
       if (next == REMOVED_PROTO) {
         return next;
       }
-      Node<V> extant = ref.next.compareAndExchange(next, reservation);
+      Node<V> extant = (Node<V>) NEXT.compareAndExchange(ref, next, reservation);
       if (extant == next) {
         return next;
       }
@@ -235,9 +250,9 @@ class Cache<V extends Cache.Val> {
     node.prev = listHead;
     Node<V> oldNext = reserve(listHead, RESERVED);
     assert oldNext != REMOVED_PROTO : "queue head sentinel should never be removed";
-    node.next.set(oldNext);
+    node.next = oldNext;
     oldNext.prev = node;
-    if (!listHead.next.compareAndSet(RESERVED, node)) {
+    if (!NEXT.compareAndSet(listHead, RESERVED, node)) {
       throw new IllegalStateException("unexpected concurrent modification of listHead.next");
     }
   }
@@ -250,13 +265,13 @@ class Cache<V extends Cache.Val> {
     Node<V> prev;
     for (; ; ) {
       prev = node.prev;
-      if (prev.next.compareAndSet(node, RESERVED)) {
+      if (NEXT.compareAndSet(prev, node, RESERVED)) {
         break;
       }
       Thread.yield();
     }
     next.prev = prev;
-    if (!prev.next.compareAndSet(RESERVED, next)) {
+    if (!NEXT.compareAndSet(prev, RESERVED, next)) {
       throw new IllegalStateException("unexpected concurrent modification during list removal");
     }
     return true;
@@ -271,15 +286,15 @@ class Cache<V extends Cache.Val> {
           continue; // pred was concurrently removed; retry
         }
         // release reservation; pred is no longer tail's predecessor
-        if (!pred.next.compareAndSet(RESERVED, oldNext)) {
+        if (!NEXT.compareAndSet(pred, RESERVED, oldNext)) {
           throw new IllegalStateException();
         }
         continue;
       }
       Node<V> node = new Node<>(createPayload(value, 0), pred);
-      node.next.set(lruTail);
+      node.next = lruTail;
       lruTail.prev = node;
-      if (!pred.next.compareAndSet(RESERVED, node)) {
+      if (!NEXT.compareAndSet(pred, RESERVED, node)) {
         throw new IllegalStateException("unexpected concurrent modification during tail insertion");
       }
       return;
@@ -460,7 +475,7 @@ class Cache<V extends Cache.Val> {
 
     DualQueueCache(Iterable<V> initialValues) {
       super(initialValues);
-      hotHead.next.set(hotTail);
+      hotHead.next = hotTail;
       hotTail.prev = hotHead;
     }
 
