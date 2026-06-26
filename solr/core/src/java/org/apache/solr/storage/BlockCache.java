@@ -239,8 +239,8 @@ public class BlockCache implements Closeable {
           ret = lock;
         } else {
           for (; ; ) {
-            Cache<Val, RefVal<Val>> p = cache.pinnedLru();
-            Cache.Node<Val, RefVal<Val>> permit =
+            Cache<RefVal<Val>> p = cache.pinnedLru();
+            Cache.Node<RefVal<Val>> permit =
                 p.acquireNode(
                     (evicted, i) -> {
                       if (evicted != null) {
@@ -285,9 +285,9 @@ public class BlockCache implements Closeable {
 
   static class PinRef implements Closeable {
     private final PBS parent;
-    private final Cache.Node<NodeRefStruct, RefVal<NodeRefStruct>> permit;
+    private final Cache.Node<RefVal<NodeRefStruct>> permit;
 
-    private PinRef(PBS parent, Cache.Node<NodeRefStruct, RefVal<NodeRefStruct>> permit) {
+    private PinRef(PBS parent, Cache.Node<RefVal<NodeRefStruct>> permit) {
       this.parent = parent;
       this.permit = permit;
     }
@@ -310,7 +310,7 @@ public class BlockCache implements Closeable {
   // Partition
   // ---------------------------------------------------------------------------
 
-  private static final class Partition extends Cache.DualQueueCache<Integer, Val> {
+  private static final class Partition extends Cache.DualQueueCache<Val> {
     Partition(Iterable<BlockCache.Val> pool) {
       super(pool);
     }
@@ -322,7 +322,7 @@ public class BlockCache implements Closeable {
   }
 
   /** Creates a synthetic node not backed by a pool slot (e.g. an always-pinned tail block). */
-  Cache.Node<Integer, BlockCache.Val> createTailNode(ByteBuffer tailBuf) {
+  Cache.Node<BlockCache.Val> createTailNode(ByteBuffer tailBuf) {
     return new Cache.Node<>(new Val(tailBuf), null);
   }
 
@@ -336,9 +336,9 @@ public class BlockCache implements Closeable {
 
   private static final int MAX_PINNED_BLOCKS = 4096;
 
-  private final Cache<Val, RefVal<Val>>[] pinned;
+  private final Cache<RefVal<Val>>[] pinned;
 
-  private Cache<Val, RefVal<Val>> pinnedLru() {
+  private Cache<RefVal<Val>> pinnedLru() {
     return pinned[ThreadLocalRandom.current().nextInt(pinned.length)];
   }
 
@@ -358,9 +358,9 @@ public class BlockCache implements Closeable {
         partitions.length);
   }
 
-  private Cache<Val, RefVal<Val>>[] initPinned() {
+  private Cache<RefVal<Val>>[] initPinned() {
     @SuppressWarnings({"unchecked", "rawtypes"})
-    Cache<Val, RefVal<Val>>[] arr = new Cache[computeNPartitions(MAX_PINNED_BLOCKS)];
+    Cache<RefVal<Val>>[] arr = new Cache[computeNPartitions(MAX_PINNED_BLOCKS)];
     int perPinnedPartition = (MAX_PINNED_BLOCKS / arr.length) + 1;
     Iterable<RefVal<Val>> dummy =
         () ->
@@ -461,7 +461,7 @@ public class BlockCache implements Closeable {
    * <p>{@link Cache#pin(Cache.Node)} is effectively a static method, so it doesn't matter which
    * queue we call it on. TODO: make it <i>actually</i> static, for clarity?
    */
-  boolean pin(Cache.Node<Integer, Val> node) {
+  boolean pin(Cache.Node<Val> node) {
     return partitions[0].pin(node);
   }
 
@@ -470,12 +470,11 @@ public class BlockCache implements Closeable {
   private static class PBS {
 
     private final Val blockNode;
-    private final Cache.Node<Val, RefVal<Val>> permit;
-    private final Cache<Val, RefVal<Val>> blockLru;
-    private final Cache<NodeRefStruct, RefVal<NodeRefStruct>> refLru = new Cache<>(List.of());
+    private final Cache.Node<RefVal<Val>> permit;
+    private final Cache<RefVal<Val>> blockLru;
+    private final Cache<RefVal<NodeRefStruct>> refLru = new Cache<>(List.of());
 
-    private PBS(
-        Val blockNode, Cache.Node<Val, RefVal<Val>> permit, Cache<Val, RefVal<Val>> blockLru) {
+    private PBS(Val blockNode, Cache.Node<RefVal<Val>> permit, Cache<RefVal<Val>> blockLru) {
       this.blockNode = blockNode;
       this.permit = permit;
       this.blockLru = blockLru;
@@ -485,11 +484,11 @@ public class BlockCache implements Closeable {
       try {
         for (boolean firstPass = true; ; firstPass = false) {
           int refCount = blockNode.refCount();
-          Cache.Node<NodeRefStruct, RefVal<NodeRefStruct>> permitF;
+          Cache.Node<RefVal<NodeRefStruct>> permitF;
           if (refCount < REF_LIMIT) {
             permitF = new Cache.Node<>(new RefVal<>(nrs, 1), null);
           } else {
-            Cache.Node<NodeRefStruct, RefVal<NodeRefStruct>> permit =
+            Cache.Node<RefVal<NodeRefStruct>> permit =
                 refLru.acquireNode(
                     (evicted, i) -> {
                       if (evicted != null) {
@@ -517,7 +516,7 @@ public class BlockCache implements Closeable {
     public void unpinAll(BlockCache cache) {
       // TODO: pretty sure we have an effective lock at this point and can just
       //  iterate entries instead of `acquireNode()` in a loop
-      Cache.Node<NodeRefStruct, RefVal<NodeRefStruct>> permit;
+      Cache.Node<RefVal<NodeRefStruct>> permit;
       do {
         permit =
             refLru.acquireNode(
@@ -539,11 +538,11 @@ public class BlockCache implements Closeable {
    * Releases a pin, routing the node to a randomly chosen partition's LRU head. No node-to-
    * partition affinity is required: the ByteBuffer value is valid in any partition's pool.
    */
-  void unpin(Cache.Node<Integer, Val> node) {
+  void unpin(Cache.Node<Val> node) {
     unpin(node, true);
   }
 
-  void unpin(Cache.Node<Integer, Val> node, boolean recordAccess) {
+  void unpin(Cache.Node<Val> node, boolean recordAccess) {
     if (partitions[tlrIndex()].unpin(node, recordAccess)) {
       // on last unpin, null out the cached ByteBuffer. recreating is cheap.
       Val v = node.getPayload();
@@ -558,7 +557,7 @@ public class BlockCache implements Closeable {
    * Acquires a pinned node from a randomly chosen partition, falling back to other partitions if
    * the first is fully pinned. Returns {@code null} only if all partitions are exhausted.
    */
-  Cache.Node<Integer, Val> acquireNode() {
+  Cache.Node<Val> acquireNode() {
     return partitions[tlrIndex()].acquireNode();
   }
 
@@ -567,11 +566,11 @@ public class BlockCache implements Closeable {
    * a high-priority reuse candidate). Used when a node was acquired but ultimately not needed (e.g.
    * lost CAS race).
    */
-  boolean close(Cache.Node<Integer, Val> node) {
+  boolean close(Cache.Node<Val> node) {
     return close(node, false);
   }
 
-  boolean close(Cache.Node<Integer, Val> node, boolean unconditional) {
+  boolean close(Cache.Node<Val> node, boolean unconditional) {
     return partitions[tlrIndex()].close(node, unconditional);
   }
 

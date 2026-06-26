@@ -42,7 +42,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * @param <V> the value type carried by each node
  */
-class Cache<V, N extends Cache.Val> {
+class Cache<V extends Cache.Val> {
 
   // ---------------------------------------------------------------------------
   // Node
@@ -84,21 +84,21 @@ class Cache<V, N extends Cache.Val> {
    *
    * <p>Head of the list = most recently used; tail = least recently used / eviction candidate.
    */
-  static final class Node<V, N extends Cache.Val> {
+  static final class Node<V extends Cache.Val> {
 
     /**
      * The payload managed by this cache entry. {@code null} for sentinel nodes. Non-final only in
      * order to enable nulling out (for GC eligibility) upon node reclaim.
      */
-    private N payload;
+    private V payload;
 
     /** LRU list link toward the head (most-recently-used end). */
-    private final AtomicReference<Node<V, N>> next = new AtomicReference<>();
+    private final AtomicReference<Node<V>> next = new AtomicReference<>();
 
     /** LRU list link toward the tail (least-recently-used end). */
-    private volatile Node<V, N> prev;
+    private volatile Node<V> prev;
 
-    Node(N payload, Node<V, N> prev) {
+    Node(V payload, Node<V> prev) {
       this.payload = payload; // visibility guaranteed by callers incref'ing refCount before access
       this.prev = prev;
     }
@@ -111,7 +111,7 @@ class Cache<V, N extends Cache.Val> {
     /**
      * Return the associated payload. If called on a pinned node, is guaranteed to return non-null
      */
-    N getPayload() {
+    V getPayload() {
       return payload;
     }
 
@@ -129,20 +129,20 @@ class Cache<V, N extends Cache.Val> {
   // Each Cache<V> instance casts these once to Node<V> final fields (see constructor below);
   // all subsequent uses are fully typed. The cast is safe because sentinels are only ever
   // identity-compared (==) and their value/refCount fields are never accessed.
-  private static final Node<?, ?> RESERVED_PROTO = new Node<>();
-  private static final Node<?, ?> REMOVED_PROTO = new Node<>();
+  private static final Node<?> RESERVED_PROTO = new Node<>();
+  private static final Node<?> REMOVED_PROTO = new Node<>();
 
   // Per-instance typed views of the sentinels.
   // RESERVED: this node's `next` link is currently being modified by exactly one thread.
   // REMOVED:  this node has been spliced out of the list.
-  private final Node<V, N> RESERVED;
-  private final Node<V, N> REMOVED;
+  private final Node<V> RESERVED;
+  private final Node<V> REMOVED;
 
   /** Cold queue: head sentinel (most-recently-used end). */
-  private final Node<V, N> lruHead = new Node<>();
+  private final Node<V> lruHead = new Node<>();
 
   /** Cold queue: tail sentinel (eviction end). */
-  private final Node<V, N> lruTail = new Node<>();
+  private final Node<V> lruTail = new Node<>();
 
   /**
    * Multiplier applied to the hot tail's age during eviction scoring. A hot node is evicted only
@@ -165,8 +165,8 @@ class Cache<V, N extends Cache.Val> {
 
   @SuppressWarnings("unchecked")
   private Cache() {
-    RESERVED = (Node<V, N>) RESERVED_PROTO;
-    REMOVED = (Node<V, N>) REMOVED_PROTO;
+    RESERVED = (Node<V>) RESERVED_PROTO;
+    REMOVED = (Node<V>) REMOVED_PROTO;
     lruHead.next.set(lruTail);
     lruTail.prev = lruHead;
   }
@@ -177,11 +177,11 @@ class Cache<V, N extends Cache.Val> {
    * constructor followed by {@link #insertAtTail} for each value, but faster because no CAS is
    * needed during single-threaded initialization.
    */
-  Cache(Iterable<N> initialValues) {
+  Cache(Iterable<V> initialValues) {
     this();
-    Node<V, N> prev = lruHead;
-    for (N value : initialValues) {
-      Node<V, N> node = new Node<>(value, prev);
+    Node<V> prev = lruHead;
+    for (V value : initialValues) {
+      Node<V> node = new Node<>(value, prev);
       prev.next.set(node);
       prev = node;
     }
@@ -198,8 +198,8 @@ class Cache<V, N extends Cache.Val> {
    * (e.g. {@link BlockCache.Val}), ensuring that all nodes in the list are of the expected type.
    */
   @SuppressWarnings("unchecked")
-  protected N createPayload(N oldValue, int initialRefCount) {
-    return (N) new Val(initialRefCount);
+  protected V createPayload(V oldValue, int initialRefCount) {
+    return (V) new Val(initialRefCount);
   }
 
   // ---------------------------------------------------------------------------
@@ -211,8 +211,8 @@ class Cache<V, N extends Cache.Val> {
    * held by another thread (RESERVED), then CAS-swaps it to {@code reservation} and returns the
    * prior value. Returns REMOVED immediately if the node has already been spliced out.
    */
-  private Node<V, N> reserve(Node<V, N> ref, Node<V, N> reservation) {
-    Node<V, N> next = ref.next.get();
+  private Node<V> reserve(Node<V> ref, Node<V> reservation) {
+    Node<V> next = ref.next.get();
     for (; ; ) {
       while (next == RESERVED_PROTO) {
         if (reservation == REMOVED_PROTO) {
@@ -223,7 +223,7 @@ class Cache<V, N extends Cache.Val> {
       if (next == REMOVED_PROTO) {
         return next;
       }
-      Node<V, N> extant = ref.next.compareAndExchange(next, reservation);
+      Node<V> extant = ref.next.compareAndExchange(next, reservation);
       if (extant == next) {
         return next;
       }
@@ -231,9 +231,9 @@ class Cache<V, N extends Cache.Val> {
     }
   }
 
-  protected void insertAtHead(Node<V, N> listHead, Node<V, N> node, boolean recordAccess) {
+  protected void insertAtHead(Node<V> listHead, Node<V> node, boolean recordAccess) {
     node.prev = listHead;
-    Node<V, N> oldNext = reserve(listHead, RESERVED);
+    Node<V> oldNext = reserve(listHead, RESERVED);
     assert oldNext != REMOVED_PROTO : "queue head sentinel should never be removed";
     node.next.set(oldNext);
     oldNext.prev = node;
@@ -242,12 +242,12 @@ class Cache<V, N extends Cache.Val> {
     }
   }
 
-  private boolean removeFromList(Node<V, N> node) {
-    Node<V, N> next = reserve(node, REMOVED);
+  private boolean removeFromList(Node<V> node) {
+    Node<V> next = reserve(node, REMOVED);
     if (next == REMOVED_PROTO) {
       return false;
     }
-    Node<V, N> prev;
+    Node<V> prev;
     for (; ; ) {
       prev = node.prev;
       if (prev.next.compareAndSet(node, RESERVED)) {
@@ -262,10 +262,10 @@ class Cache<V, N extends Cache.Val> {
     return true;
   }
 
-  private void insertAtTail(N value) {
+  private void insertAtTail(V value) {
     for (; ; ) {
-      Node<V, N> pred = lruTail.prev;
-      Node<V, N> oldNext = reserve(pred, RESERVED);
+      Node<V> pred = lruTail.prev;
+      Node<V> oldNext = reserve(pred, RESERVED);
       if (oldNext != lruTail) {
         if (oldNext == REMOVED_PROTO) {
           continue; // pred was concurrently removed; retry
@@ -276,7 +276,7 @@ class Cache<V, N extends Cache.Val> {
         }
         continue;
       }
-      Node<V, N> node = new Node<>(createPayload(value, 0), pred);
+      Node<V> node = new Node<>(createPayload(value, 0), pred);
       node.next.set(lruTail);
       lruTail.prev = node;
       if (!pred.next.compareAndSet(RESERVED, node)) {
@@ -300,7 +300,7 @@ class Cache<V, N extends Cache.Val> {
    * the LRU list (it is no longer evictable). If the node is already pinned (refCount&gt;0), the
    * refcount is simply incremented with no list operation.
    */
-  boolean pin(Node<V, N> node) {
+  boolean pin(Node<V> node) {
     Val p = node.payload;
     if (p == null) {
       return false;
@@ -333,7 +333,7 @@ class Cache<V, N extends Cache.Val> {
    * Releases a read pin. If this is the last pin (refCount transitions 1&rarr;0), the node is
    * inserted at the LRU head (most-recently-used position) and becomes evictable.
    */
-  boolean unpin(Node<V, N> node, boolean recordAccess) {
+  boolean unpin(Node<V> node, boolean recordAccess) {
     Val p = node.payload;
     assert p != null;
     int rc = p.refCount.get();
@@ -372,12 +372,12 @@ class Cache<V, N extends Cache.Val> {
    *
    * <p>Returns {@code null} if the list is empty (all nodes are pinned).
    */
-  final Node<V, N> acquireNode() {
+  final Node<V> acquireNode() {
     return acquireNode(null);
   }
 
-  protected Node<V, N> acquireTail(Node<V, N> lruTail, Node<V, N> lruHead) {
-    for (Node<V, N> candidate; (candidate = lruTail.prev) != lruHead; ) {
+  protected Node<V> acquireTail(Node<V> lruTail, Node<V> lruHead) {
+    for (Node<V> candidate; (candidate = lruTail.prev) != lruHead; ) {
       Val p = candidate.payload;
       if (p != null && p.refCount.compareAndSet(0, -1)) {
         return candidate;
@@ -390,17 +390,17 @@ class Cache<V, N extends Cache.Val> {
     N apply(N oldVal, int initialRefCount);
   }
 
-  final Node<V, N> acquireNode(ValFunc<N> valFunc) {
-    Node<V, N> candidate = acquireTail(lruTail, lruHead);
+  final Node<V> acquireNode(ValFunc<V> valFunc) {
+    Node<V> candidate = acquireTail(lruTail, lruHead);
     if (candidate == null) {
       return null;
     }
     if (!removeFromList(candidate)) {
       throw new IllegalStateException();
     }
-    N old = candidate.payload;
+    V old = candidate.payload;
     candidate.payload = null; // ensure eligible for GC
-    N newVal = valFunc == null ? createPayload(old, 1) : valFunc.apply(old, 1);
+    V newVal = valFunc == null ? createPayload(old, 1) : valFunc.apply(old, 1);
     return new Node<>(newVal, null);
   }
 
@@ -414,8 +414,8 @@ class Cache<V, N extends Cache.Val> {
    * <p>Only pass <code>unconditional=true</code> if caller is the only possible owner of a ref to
    * this node (e.g., if CAS has failed).
    */
-  boolean close(Node<V, N> node, boolean unconditional) {
-    N p = node.payload;
+  boolean close(Node<V> node, boolean unconditional) {
+    V p = node.payload;
     if (!unconditional && (p == null || !((Val) p).refCount.compareAndSet(0, -1))) {
       // pinned or already dead — best effort, bail
       return false;
@@ -447,38 +447,38 @@ class Cache<V, N extends Cache.Val> {
     return v == null ? 0 : v.lastUnpinNanos;
   }
 
-  static class DualQueueCache<V, N extends TsVal> extends Cache<V, N> {
+  static class DualQueueCache<V extends TsVal> extends Cache<V> {
 
     /** Running memoization of last seen non-zero cold queue timestamp */
     private volatile long coldTs;
 
     /** Hot queue: head sentinel. Nodes promoted from cold are inserted here. */
-    private final Node<V, N> hotHead = new Node<>();
+    private final Node<V> hotHead = new Node<>();
 
     /** Hot queue: tail sentinel. */
-    private final Node<V, N> hotTail = new Node<>();
+    private final Node<V> hotTail = new Node<>();
 
-    DualQueueCache(Iterable<N> initialValues) {
+    DualQueueCache(Iterable<V> initialValues) {
       super(initialValues);
       hotHead.next.set(hotTail);
       hotTail.prev = hotHead;
     }
 
     @Override
-    protected final void insertAtHead(Node<V, N> head, Node<V, N> node, boolean recordAccess) {
+    protected final void insertAtHead(Node<V> head, Node<V> node, boolean recordAccess) {
       long prev = ((TsVal) node.payload).lastUnpinNanos;
       ((TsVal) node.payload).lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
       super.insertAtHead(toHot(prev) ? hotHead : head, node, recordAccess);
     }
 
     @Override
-    protected Node<V, N> acquireTail(Node<V, N> lruTail, Node<V, N> lruHead) {
+    protected Node<V> acquireTail(Node<V> lruTail, Node<V> lruHead) {
       long coldCandidateTs;
-      Node<V, N> candidate;
+      Node<V> candidate;
       long now = System.nanoTime();
       Val p;
       do {
-        Node<V, N> coldCandidate = lruTail.prev, hotCandidate = hotTail.prev;
+        Node<V> coldCandidate = lruTail.prev, hotCandidate = hotTail.prev;
         if (coldCandidate == lruHead) {
           // cold queue is empty
           if (hotCandidate == hotHead) {
