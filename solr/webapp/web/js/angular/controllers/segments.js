@@ -17,16 +17,16 @@
 
 var MB_FACTOR = 1024*1024;
 
-/** Subtle greyish tints for temporal bucket groups (stable order by bucket boundary). */
+/** Greyish tints for temporal bucket groups (stable order by bucket boundary). */
 var TEMPORAL_BUCKET_BAR_COLORS = [
-    '#d6d9dc',
-    '#d3d8d3',
-    '#dad6d3',
-    '#d6d3da',
-    '#cfd6da',
-    '#d8d5cf',
-    '#d0d6d2',
-    '#d9d4d6'
+    '#c4cbd2',
+    '#c0cbc0',
+    '#cbc4bc',
+    '#c8c0c8',
+    '#bcc8d0',
+    '#ccc6bc',
+    '#bcc8c0',
+    '#ccc0c4'
 ];
 
 var assignTemporalBucketBarColors = function(segments) {
