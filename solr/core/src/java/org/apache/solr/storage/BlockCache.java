@@ -34,7 +34,6 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadLocalRandom;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.storage.CachedCompressedIndexInput.NodeRefStruct;
@@ -106,10 +105,11 @@ public class BlockCache implements Closeable {
   public static final class Val extends Cache.TsVal {
 
     /**
-     * Completion signal: fulfilled with {@code value} by {@link #populate} on the winning thread;
-     * other threads joining this node wait here until the buffer is ready (or failed).
+     * Completion signal: false = pending, true = done. Written under {@code synchronized(this)}
+     * with {@code notifyAll()}; fast-path readers check this volatile field before entering the
+     * monitor.
      */
-    private final CountDownLatch cdl;
+    private volatile boolean populated;
 
     private final int cacheBlockOrd;
 
@@ -119,17 +119,15 @@ public class BlockCache implements Closeable {
       super(Integer.MAX_VALUE >> 1);
       this.cached = prepopulated;
       this.cacheBlockOrd = -1;
-      this.cdl = null;
     }
 
     Val(int cacheBlockOrd, int initialRefCount) {
       super(initialRefCount);
       this.cacheBlockOrd = cacheBlockOrd;
-      this.cdl = new CountDownLatch(1);
     }
 
     ByteBuffer populate(byte[] arr, int off, int len, BlockCache c) {
-      assert cdl != null;
+      assert cacheBlockOrd >= 0;
       ByteBuffer ret = c.slice(cacheBlockOrd);
       // NOTE: for consistency between `populate()` and on-demand restore
       // in `join()`, we call `clear()` here, _not_ `flip()`.
@@ -137,7 +135,11 @@ public class BlockCache implements Closeable {
       // and set proper limit and byte order.
       ret = ret.put(arr, off, len).clear().asReadOnlyBuffer();
       cached = ret;
-      cdl.countDown();
+      assert !populated;
+      synchronized (this) {
+        populated = true;
+        notifyAll();
+      }
       return ret;
     }
 
@@ -148,15 +150,21 @@ public class BlockCache implements Closeable {
      */
     @SuppressWarnings("ReferenceEquality")
     public ByteBuffer join(BlockCache c) {
-      if (cdl == null) {
+      if (cacheBlockOrd == -1) {
         // tail buffer, always populated, already read-only
         return cached;
       }
-      try {
-        cdl.await();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw new ThreadInterruptedException(e);
+      if (!populated) {
+        synchronized (this) {
+          while (!populated) {
+            try {
+              wait();
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+              throw new ThreadInterruptedException(e);
+            }
+          }
+        }
       }
       ByteBuffer ret = cached;
       if (ret == null) {
@@ -170,9 +178,13 @@ public class BlockCache implements Closeable {
 
     /** Marks this node as failed, unblocking any threads waiting in {@link #join}. */
     public void completeExceptionally(Throwable t) {
-      assert cdl != null;
+      assert cacheBlockOrd >= 0;
       cached = EXCEPTION_SENTINEL;
-      cdl.countDown();
+      assert !populated;
+      synchronized (this) {
+        populated = true;
+        notifyAll();
+      }
     }
 
     PBS outOfBandTryUnpinAll() {
@@ -239,7 +251,7 @@ public class BlockCache implements Closeable {
     }
 
     public PinRef register(NodeRefStruct nodeRefStruct, BlockCache cache) {
-      if (cdl == null)
+      if (cacheBlockOrd == -1)
         return NOOP_PINREF; // tail nodes are never evicted; PBS/refLru is unnecessary
       PBS ret = null;
       final PBS lock = lock();
