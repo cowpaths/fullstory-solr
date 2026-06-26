@@ -185,7 +185,7 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
     List<LeafReaderContext> leafContexts = searcher.getIndexReader().leaves();
     IndexSchema schema = req.getSchema();
 
-    //better debugging for segment temporal buckets
+    // better debugging for segment temporal buckets
     long now = SegmentRoutingUtil.getNow();
     Map<String, Integer> temporalBucketCounters = new HashMap<>();
     for (SegmentCommitInfo segmentCommitInfo : sortable) {
@@ -200,8 +200,7 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
         if (segmentDateRange != null) {
           segmentInfo.add("temporalMinDate", new Date(segmentDateRange.minDate));
           segmentInfo.add("temporalMaxDate", new Date(segmentDateRange.maxDate));
-          long temporalBucket =
-                  SegmentRoutingUtil.mapToBucket(segmentDateRange.maxDate, now);
+          long temporalBucket = SegmentRoutingUtil.mapToBucket(segmentDateRange.maxDate, now);
           segmentInfo.add("temporalBucket", temporalBucket);
           String bucketLabel = formatTemporalBucket(temporalBucket);
           int count = temporalBucketCounters.merge(bucketLabel, 1, Integer::sum);
@@ -531,7 +530,6 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
 
       List<String> temporalFields = resolveTemporalFields();
 
-
       PointsFormat pointsFormat = si.getCodec().pointsFormat();
       try (PointsReader pointsReader =
           pointsFormat.fieldsReader(
@@ -546,12 +544,12 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
           if (fieldInfo.getPointDimensionCount() == 0) {
             if (log.isWarnEnabled()) {
               log.warn(
-                      "Segment {}: temporal field '{}' is not indexed as a point field (found: {}). "
-                              + "Skipping this field. This may occur with legacy segments "
-                              + "or after schema changes.",
-                      si.name,
-                      temporalField,
-                      fieldInfo);
+                  "Segment {}: temporal field '{}' is not indexed as a point field (found: {}). "
+                      + "Skipping this field. This may occur with legacy segments "
+                      + "or after schema changes.",
+                  si.name,
+                  temporalField,
+                  fieldInfo);
             }
             continue;
           }
@@ -621,9 +619,9 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
       return List.of("EventStart");
     }
     return Arrays.stream(spec.split(", *"))
-            .map(String::trim)
-            .filter(s -> !s.isEmpty())
-            .collect(Collectors.toList());
+        .map(String::trim)
+        .filter(s -> !s.isEmpty())
+        .collect(Collectors.toList());
   }
 
   /** Human-readable label for a {@link SegmentRoutingUtil#mapToBucket} boundary (days from now). */
@@ -637,9 +635,9 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
   private static List<Long> getBucketBoundaries() {
     long[] DEFAULT_BOUNDARIES = new long[] {-9, 3, 9, 32, 94, 184};
     List<Long> boundaries =
-            Arrays.stream(DEFAULT_BOUNDARIES)
-                    .mapToObj(TimeUnit.DAYS::toMillis)
-                    .collect(Collectors.toCollection(ArrayList::new));
+        Arrays.stream(DEFAULT_BOUNDARIES)
+            .mapToObj(TimeUnit.DAYS::toMillis)
+            .collect(Collectors.toCollection(ArrayList::new));
     boundaries.add(Long.MAX_VALUE);
     return boundaries;
   }
