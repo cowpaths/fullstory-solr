@@ -205,10 +205,13 @@ public class BlockCache implements Closeable {
     private volatile PBS state;
 
     private static final VarHandle STATE;
+    private static final VarHandle CACHED;
 
     static {
       try {
-        STATE = MethodHandles.lookup().findVarHandle(Val.class, "state", PBS.class);
+        MethodHandles.Lookup lookup = MethodHandles.lookup();
+        STATE = lookup.findVarHandle(Val.class, "state", PBS.class);
+        CACHED = lookup.findVarHandle(Val.class, "cached", ByteBuffer.class);
       } catch (ReflectiveOperationException e) {
         throw new Error(e);
       }
@@ -564,13 +567,18 @@ public class BlockCache implements Closeable {
     unpin(node, true);
   }
 
+  @SuppressWarnings("ReferenceEquality")
   void unpin(Cache.Node<Val> node, boolean recordAccess) {
     if (partitions[tlrIndex()].unpin(node, recordAccess)) {
       // on last unpin, null out the cached ByteBuffer. recreating is cheap.
       Val v = node.getPayload();
       if (v != null) {
-        // benign race here. worst case we force another `slice()`
-        v.cached = null;
+        ByteBuffer cur = v.cached;
+        if (cur != null && cur != EXCEPTION_SENTINEL) {
+          // CAS ensures we never clobber EXCEPTION_SENTINEL; if it loses, cached is already
+          // null or sentinel, both fine. Worst case of a benign loss: another slice() call.
+          Val.CACHED.compareAndSet(v, cur, null);
+        }
       }
     }
   }
