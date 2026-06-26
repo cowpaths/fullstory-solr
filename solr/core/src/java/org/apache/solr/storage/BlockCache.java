@@ -22,6 +22,7 @@ import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZ
 import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
@@ -35,7 +36,6 @@ import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicReference;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.storage.CachedCompressedIndexInput.NodeRefStruct;
 import org.slf4j.Logger;
@@ -176,8 +176,8 @@ public class BlockCache implements Closeable {
     }
 
     PBS outOfBandTryUnpinAll() {
-      PBS extant = state.get();
-      if (extant == UPDATING_SENTINEL || !state.compareAndSet(extant, null)) {
+      PBS extant = state;
+      if (extant == UPDATING_SENTINEL || !STATE.compareAndSet(this, extant, null)) {
         return null; // sentinel held or concurrent CAS loss; caller should retry
       }
       return extant == null ? EVICTED : extant; // EVICTED = already clean, no NRS to unpin
@@ -190,25 +190,35 @@ public class BlockCache implements Closeable {
      */
     private static final PBS EVICTED = new PBS(null, null, null);
 
-    private final AtomicReference<PBS> state = new AtomicReference<>();
+    private volatile PBS state;
+
+    private static final VarHandle STATE;
+
+    static {
+      try {
+        STATE = MethodHandles.lookup().findVarHandle(Val.class, "state", PBS.class);
+      } catch (ReflectiveOperationException e) {
+        throw new Error(e);
+      }
+    }
 
     PBS lock() {
-      for (PBS extant = state.get(); ; ) {
+      for (PBS extant = state; ; ) {
         if (extant == UPDATING_SENTINEL) {
           Thread.yield();
-          extant = state.get();
+          extant = state;
         } else {
-          PBS witness = state.compareAndExchange(extant, UPDATING_SENTINEL);
+          PBS witness = (PBS) STATE.compareAndExchange(this, extant, UPDATING_SENTINEL);
           if (witness == extant) {
             if (extant == null) {
               // keep UPDATING_SENTINEL in place while we init
               return extant;
             } else if (extant.pin()) {
-              if (!state.compareAndSet(UPDATING_SENTINEL, extant)) {
+              if (!STATE.compareAndSet(this, UPDATING_SENTINEL, extant)) {
                 throw new IllegalStateException();
               }
               return extant;
-            } else if (!state.compareAndSet(UPDATING_SENTINEL, extant)) {
+            } else if (!STATE.compareAndSet(this, UPDATING_SENTINEL, extant)) {
               // PBS are only permanently removed from `pinnedBlockLru` via eviction,
               // and eviction happens _before_ `state` gets nulled out, it's possible
               // that we'll occasionally be unable to acquire a pin; just try again
@@ -223,7 +233,7 @@ public class BlockCache implements Closeable {
     }
 
     void unlock(PBS set) {
-      if (!state.compareAndSet(UPDATING_SENTINEL, set)) {
+      if (!STATE.compareAndSet(this, UPDATING_SENTINEL, set)) {
         throw new IllegalStateException();
       }
     }
