@@ -17,17 +17,51 @@
 
 var MB_FACTOR = 1024*1024;
 
-/** Greyish tints for temporal bucket groups (stable order by bucket boundary). */
-var TEMPORAL_BUCKET_BAR_COLORS = [
-    '#c4cbd2',
-    '#c0cbc0',
-    '#cbc4bc',
-    '#c8c0c8',
-    '#bcc8d0',
-    '#ccc6bc',
-    '#bcc8c0',
-    '#ccc0c4'
-];
+/** Grey-base bar tint: newest bucket green -> yellow -> orange -> red (oldest). */
+var hslToHex = function(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    s = Math.max(0, Math.min(100, s)) / 100;
+    l = Math.max(0, Math.min(100, l)) / 100;
+
+    var c = (1 - Math.abs(2 * l - 1)) * s;
+    var x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    var m = l - c / 2;
+    var r = 0;
+    var g = 0;
+    var b = 0;
+
+    if (h < 60) {
+        r = c; g = x;
+    } else if (h < 120) {
+        r = x; g = c;
+    } else if (h < 180) {
+        g = c; b = x;
+    } else if (h < 240) {
+        g = x; b = c;
+    } else if (h < 300) {
+        r = x; b = c;
+    } else {
+        r = c; b = x;
+    }
+
+    var toHex = function(v) {
+        var n = Math.round((v + m) * 255);
+        var hex = n.toString(16);
+        return hex.length === 1 ? '0' + hex : hex;
+    };
+
+    return '#' + toHex(r) + toHex(g) + toHex(b);
+};
+
+var temporalBucketBarColor = function(bucketIndex, bucketCount) {
+    if (bucketCount <= 1) {
+        return hslToHex(120, 24, 76);
+    }
+    // 0 = newest (green), 1 = oldest (red)
+    var t = bucketIndex / (bucketCount - 1);
+    var hue = 120 * (1 - t);
+    return hslToHex(hue, 30, 74);
+};
 
 var assignTemporalBucketBarColors = function(segments) {
     var uniqueBuckets = [];
@@ -41,7 +75,7 @@ var assignTemporalBucketBarColors = function(segments) {
 
     var colorByBucket = {};
     for (var j = 0; j < uniqueBuckets.length; j++) {
-        colorByBucket[uniqueBuckets[j]] = TEMPORAL_BUCKET_BAR_COLORS[j % TEMPORAL_BUCKET_BAR_COLORS.length];
+        colorByBucket[uniqueBuckets[j]] = temporalBucketBarColor(j, uniqueBuckets.length);
     }
 
     for (var k = 0; k < segments.length; k++) {
