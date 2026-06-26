@@ -20,7 +20,6 @@ package org.apache.solr.storage;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Generic concurrent LRU cache with pin/unpin support.
@@ -59,22 +58,25 @@ class Cache<V extends Cache.Val> {
      *   <li>-1 — permanently dead (evicted); node must not be used
      * </ul>
      */
-    private final AtomicInteger refCount;
+    private volatile int refCount;
 
     Val(int initialRefCount) {
-      this.refCount = new AtomicInteger(initialRefCount);
+      this.refCount = initialRefCount;
     }
 
     int refCount() {
-      return refCount.get();
+      return refCount;
     }
   }
 
   private static final VarHandle NEXT;
+  private static final VarHandle REF_COUNT;
 
   static {
     try {
-      NEXT = MethodHandles.lookup().findVarHandle(Node.class, "next", Node.class);
+      MethodHandles.Lookup lookup = MethodHandles.lookup();
+      NEXT = lookup.findVarHandle(Node.class, "next", Node.class);
+      REF_COUNT = lookup.findVarHandle(Val.class, "refCount", int.class);
     } catch (ReflectiveOperationException e) {
       throw new Error(e);
     }
@@ -131,7 +133,7 @@ class Cache<V extends Cache.Val> {
 
     boolean pinnable() {
       Val p = this.payload;
-      return p != null && p.refCount.get() >= 0;
+      return p != null && p.refCount >= 0;
     }
   }
 
@@ -320,17 +322,17 @@ class Cache<V extends Cache.Val> {
     if (p == null) {
       return false;
     }
-    int rc = p.refCount.get();
+    int rc = p.refCount;
     for (; ; ) {
       switch (rc) {
         case -1:
           return false;
         case UNPIN_SENTINEL:
-          rc = p.refCount.get();
+          rc = p.refCount;
           continue;
       }
       assert rc >= 0;
-      int witness = p.refCount.compareAndExchange(rc, rc + 1);
+      int witness = (int) REF_COUNT.compareAndExchange(p, rc, rc + 1);
       if (witness == rc) {
         break;
       } else {
@@ -351,13 +353,13 @@ class Cache<V extends Cache.Val> {
   boolean unpin(Node<V> node, boolean recordAccess) {
     Val p = node.payload;
     assert p != null;
-    int rc = p.refCount.get();
+    int rc = p.refCount;
     for (; ; ) {
       if (rc == 1) {
-        int witness = p.refCount.compareAndExchange(1, UNPIN_SENTINEL);
+        int witness = (int) REF_COUNT.compareAndExchange(p, 1, UNPIN_SENTINEL);
         if (witness == 1) {
           insertAtHead(lruHead, node, recordAccess);
-          if (!p.refCount.compareAndSet(UNPIN_SENTINEL, 0)) {
+          if (!REF_COUNT.compareAndSet(p, UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
           return true;
@@ -366,7 +368,7 @@ class Cache<V extends Cache.Val> {
         }
       } else {
         assert rc > 1;
-        int witness = p.refCount.compareAndExchange(rc, rc - 1);
+        int witness = (int) REF_COUNT.compareAndExchange(p, rc, rc - 1);
         if (witness == rc) {
           return false;
         } else {
@@ -394,7 +396,7 @@ class Cache<V extends Cache.Val> {
   protected Node<V> acquireTail(Node<V> lruTail, Node<V> lruHead) {
     for (Node<V> candidate; (candidate = lruTail.prev) != lruHead; ) {
       Val p = candidate.payload;
-      if (p != null && p.refCount.compareAndSet(0, -1)) {
+      if (p != null && REF_COUNT.compareAndSet(p, 0, -1)) {
         return candidate;
       }
     }
@@ -431,7 +433,7 @@ class Cache<V extends Cache.Val> {
    */
   boolean close(Node<V> node, boolean unconditional) {
     V p = node.payload;
-    if (!unconditional && (p == null || !((Val) p).refCount.compareAndSet(0, -1))) {
+    if (!unconditional && (p == null || !REF_COUNT.compareAndSet(p, 0, -1))) {
       // pinned or already dead — best effort, bail
       return false;
     }
@@ -516,7 +518,7 @@ class Cache<V extends Cache.Val> {
                   ? hotCandidate
                   : coldCandidate;
         }
-      } while ((p = candidate.payload) == null || !p.refCount.compareAndSet(0, -1));
+      } while ((p = candidate.payload) == null || !REF_COUNT.compareAndSet(p, 0, -1));
       if (coldCandidateTs != 0) {
         this.coldTs = coldCandidateTs;
       }
