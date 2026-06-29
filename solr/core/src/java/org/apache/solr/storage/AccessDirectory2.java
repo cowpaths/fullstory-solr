@@ -456,6 +456,13 @@ public class AccessDirectory2 extends MMapDirectory {
     }
 
     boolean preloadSerial(Iterator<IntCursor> blockIdxIter) {
+      // Duplicate compressed[] so the background task has independent position state: the block-0
+      // preload of the same file (best-effort, no completion guarantee) may still be in flight on
+      // another ioExec thread when this followup task runs.
+      ByteBuffer[] snap = new ByteBuffer[compressed.length];
+      for (int i = 0; i < compressed.length; i++) {
+        snap[i] = compressed[i].duplicate();
+      }
       return BlockPreloader.ensureLoadedSerial(
           accessMapped,
           blockOffsets,
@@ -466,7 +473,7 @@ public class AccessDirectory2 extends MMapDirectory {
           readAheadPermits,
           0,
           (blockOffset, compressedLen, decompressedLen) ->
-              supplyFromBuffers(compressed, compressedGuard, blockOffset, compressedLen, decompressedLen));
+              supplyFromBuffers(snap, compressedGuard, blockOffset, compressedLen, decompressedLen));
     }
 
     /**
