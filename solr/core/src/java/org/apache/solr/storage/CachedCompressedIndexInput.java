@@ -57,7 +57,7 @@ import org.apache.lucene.util.CollectionUtil;
  * {@link NodeRefStruct} local-pin/unpin. The {@link #accessMapped} array is shared across all
  * slices and clones; concurrent access is mediated by compare-and-exchange.
  */
-abstract class CachedCompressedIndexInput<D> extends IndexInput implements RandomAccessInput {
+abstract class CachedCompressedIndexInput extends IndexInput implements RandomAccessInput {
 
   // Shared empty view sentinels for aligned bulk reads (readLongs/readInts/readFloats).
   private static final LongBuffer EMPTY_LONGBUFFER = LongBuffer.allocate(0);
@@ -151,7 +151,7 @@ abstract class CachedCompressedIndexInput<D> extends IndexInput implements Rando
    * initiated or the block is already present; {@code false} to signal that read-ahead should stop
    * (e.g., thread-pool or semaphore saturation). Default: no-op, always returns {@code false}.
    */
-  protected boolean ensureBlockLoaded(int blockIdx, D dir) {
+  protected boolean ensureBlockLoaded(int blockIdx) {
     return false;
   }
 
@@ -237,9 +237,9 @@ abstract class CachedCompressedIndexInput<D> extends IndexInput implements Rando
    * the subclass slice constructor, after all subclass fields are initialized, to avoid
    * virtual-dispatch-before-initialization bugs.
    */
-  protected final void maybePreloadSlice(D dir) {
+  protected final void maybePreloadSlice() {
     if (sliceFirstBlockIdx == sliceLastBlockIdx && sliceLength != 0) {
-      ensureBlockLoaded(sliceFirstBlockIdx, dir);
+      ensureBlockLoaded(sliceFirstBlockIdx);
     }
   }
 
@@ -391,7 +391,7 @@ abstract class CachedCompressedIndexInput<D> extends IndexInput implements Rando
                     blockIdx + Math.min(MAX_READ_AHEAD, readAheadCount(seqAccessCount))))
             > readAheadTo) {
       for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
-        if (!ensureBlockLoaded(i, this)) {
+        if (!ensureBlockLoaded(i)) {
           newReadAheadTo = i - 1;
           break;
         }

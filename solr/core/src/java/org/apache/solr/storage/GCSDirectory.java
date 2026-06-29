@@ -1670,7 +1670,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     return ByteBuffer.wrap(decompressed, 0, decompressedLen);
   }
 
-  static final class GCSIndexInput extends CachedCompressedIndexInput<GCSDirectory> {
+  static final class GCSIndexInput extends CachedCompressedIndexInput {
 
     private final GCSDirectory dir;
 
@@ -1928,7 +1928,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.blobName = parent.blobName;
       this.segUUID = parent.segUUID;
       this.blocksStruct = null; // slice does not own the mapping
-      maybePreloadSlice(dir);
+      maybePreloadSlice();
     }
 
     // -------------------------------------------------------------------------
@@ -2006,7 +2006,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     // -------------------------------------------------------------------------
 
     @Override
-    protected boolean ensureBlockLoaded(int blockIdx, GCSDirectory dir) {
+    protected boolean ensureBlockLoaded(int blockIdx) {
       return dir.ensureLoaded(blobName, accessMapped, blockOffsets, blockIdx, 0);
     }
 

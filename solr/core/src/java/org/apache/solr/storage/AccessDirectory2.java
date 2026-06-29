@@ -23,7 +23,7 @@ import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZ
 import static org.apache.solr.storage.CompressingDirectory.DirectIOIndexOutput.HEADER_SIZE;
 import static org.apache.solr.storage.CompressingDirectory.readLengthFromHeader;
 
-import java.io.EOFException;
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
@@ -36,16 +36,13 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicReferenceArray;
-import java.util.stream.Stream;
 import java.util.zip.CRC32;
 import org.apache.lucene.index.IndexFileNames;
-import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.internal.hppc.IntArrayList;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.internal.hppc.IntCursor;
@@ -93,6 +90,7 @@ public class AccessDirectory2 extends MMapDirectory {
   private final HashMap<String, AtomicReferenceArray<Cache.Node<BlockCache.Val>>> pendingNodes =
       new HashMap<>();
 
+  @SuppressWarnings("try")
   public AccessDirectory2(
       Path path, LockFactory lockFactory, Path compressedPath, BlockCache cache, ExecutorService ioExec)
       throws IOException {
@@ -120,7 +118,7 @@ public class AccessDirectory2 extends MMapDirectory {
       toClose.add(input);
       if (file.startsWith("segments_")) {
         segmentsFiles.add(file);
-        input.ensureBlockLoaded(0, this); // async hint; segments_N is small — likely done before we need it
+        input.ensureBlockLoaded(0); // async hint; segments_N is small — likely done before we need it
         continue;
       }
       String segName = IndexFileNames.parseSegmentName(file);
@@ -164,13 +162,13 @@ public class AccessDirectory2 extends MMapDirectory {
         tasks.add(
             (fp) -> {
               for (Map.Entry<String, AD2IndexInput> in : inputs) {
-                in.getValue().ensureBlockLoaded(0, this);
+                in.getValue().ensureBlockLoaded(0);
               }
               fp.add(() -> {
                 IntArrayList blockIndexes =
                     BlockPreloader.parseCfeBlockIndexes(cfeInputFinal);
                 for (IntCursor c : blockIndexes) {
-                  if (!cfsInputFinal.ensureBlockLoaded(c.value, this)) {
+                  if (!cfsInputFinal.ensureBlockLoaded(c.value)) {
                     break;
                   }
                 }
@@ -180,67 +178,28 @@ public class AccessDirectory2 extends MMapDirectory {
         // Non-CFS segment: preload block 0 of each file.
         tasks.add((fp) -> {
           for (Map.Entry<String, AD2IndexInput> in : inputs) {
-            in.getValue().ensureBlockLoaded(0, this);
+            in.getValue().ensureBlockLoaded(0);
           }
         });
       }
     }
 
     if (!tasks.isEmpty()) {
-      List<IndexInput> toCloseFinal = toClose;
       Runnable onComplete =
           () -> {
-            try {
+            try (Closeable c = () -> IOUtils.close(toClose)) {
               Thread.sleep(5000);
             } catch (InterruptedException e) {
               Thread.currentThread().interrupt();
               throw new ThreadInterruptedException(e);
-            } finally {
-              try {
-                IOUtils.close(toCloseFinal);
-              } catch (IOException ex) {
-                throw new UncheckedIOException(ex);
-              }
+            } catch (IOException ex) {
+              throw new UncheckedIOException(ex);
             }
           };
       BlockPreloader.readAheadSegs(tasks.iterator(), ioExec, new ArrayList<>(), onComplete);
     } else {
       IOUtils.close(toClose);
     }
-  }
-
-  private boolean ensureLoaded(
-      Path filePath,
-      AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped,
-      long[] blockOffsets,
-      int idx,
-      int decompressedLen,
-      int timeoutMillis) {
-    return BlockPreloader.ensureLoaded(
-        accessMapped,
-        blockOffsets,
-        idx,
-        decompressedLen,
-        cache,
-        ioExec,
-        readAheadPermits,
-        timeoutMillis,
-        (blockOffset, compressedLen, dl) -> supplyBlock(filePath, blockOffset, compressedLen, dl));
-  }
-
-  private static ByteBuffer supplyBlock(
-      Path filePath, long blockOffset, int compressedLen, int decompressedLen) throws IOException {
-    byte[] buf = new byte[compressedLen];
-    try (FileChannel ch = FileChannel.open(filePath, StandardOpenOption.READ)) {
-      ByteBuffer wrapped = ByteBuffer.wrap(buf);
-      while (wrapped.hasRemaining()) {
-        int n = ch.read(wrapped, blockOffset + wrapped.position());
-        if (n < 0) throw new EOFException("unexpected EOF in " + filePath);
-      }
-    }
-    byte[] decompressed = new byte[decompressedLen + 7];
-    CompressingDirectory.decompress(buf, 0, decompressedLen, decompressed, 0);
-    return ByteBuffer.wrap(decompressed, 0, decompressedLen);
   }
 
   /** Stores the shared {@code accessMapped} array for {@code name}, pre-populated by the writer. */
@@ -323,8 +282,10 @@ public class AccessDirectory2 extends MMapDirectory {
     }
   }
 
-  static final class AD2IndexInput extends CachedCompressedIndexInput<AccessDirectory2> {
+  static final class AD2IndexInput extends CachedCompressedIndexInput {
 
+    private final ExecutorService ioExec;
+    private final BlockPreloader.Permits readAheadPermits;
     private final ByteBufferGuard compressedGuard;
     private final ByteBuffer[] compressed;
     private final boolean isRoot;
@@ -339,11 +300,7 @@ public class AccessDirectory2 extends MMapDirectory {
         AtomicReferenceArray<Cache.Node<BlockCache.Val>> sharedAccessMapped,
         HashMap<String, AtomicReferenceArray<Cache.Node<BlockCache.Val>>> pendingNodes)
         throws IOException {
-      this(
-          "lazy:" + source,
-          dir,
-          source,
-          parseRootParams(source, sharedAccessMapped, pendingNodes));
+      this("lazy:" + source, dir, parseRootParams(source, sharedAccessMapped, pendingNodes));
     }
 
     private static final class RootParams {
@@ -442,7 +399,7 @@ public class AccessDirectory2 extends MMapDirectory {
       }
     }
 
-    private AD2IndexInput(String description, AccessDirectory2 dir, Path sourcePath, RootParams p) {
+    private AD2IndexInput(String description, AccessDirectory2 dir, RootParams p) {
       super(
           description,
           dir.cache,
@@ -450,6 +407,8 @@ public class AccessDirectory2 extends MMapDirectory {
           p.blockOffsets,
           new ByteBufferGuard("ad2-decompressed", unmapHack()),
           p.accessMapped);
+      this.ioExec = dir.ioExec;
+      this.readAheadPermits = dir.readAheadPermits;
       this.compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
       this.compressed = p.compressed;
       this.isRoot = true;
@@ -462,6 +421,8 @@ public class AccessDirectory2 extends MMapDirectory {
     private AD2IndexInput(
         String description, AD2IndexInput parent, long sliceOffset, long sliceLen) {
       super(description, parent, sliceOffset, sliceLen);
+      this.ioExec = parent.ioExec;
+      this.readAheadPermits = parent.readAheadPermits;
       this.compressedGuard = parent.compressedGuard;
       ByteBuffer[] parentCompressed = parent.compressed;
       ByteBuffer[] dup = new ByteBuffer[parentCompressed.length];
@@ -479,11 +440,37 @@ public class AccessDirectory2 extends MMapDirectory {
     @Override
     protected ByteBuffer supply(
         int blockIdx, long blockOffset, int compressedLen, int decompressedLen) throws IOException {
+      return supplyFromBuffers(compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
+    }
+
+    @Override
+    protected boolean ensureBlockLoaded(int blockIdx) {
+      // Snapshot compressed[] so the background thread has independent position state.
+      ByteBuffer[] snap = new ByteBuffer[compressed.length];
+      for (int i = 0; i < compressed.length; i++) snap[i] = compressed[i].duplicate();
+      return BlockPreloader.ensureLoaded(
+          accessMapped,
+          blockOffsets,
+          blockIdx,
+          decompressedLenFor(blockIdx),
+          cache,
+          ioExec,
+          readAheadPermits,
+          0,
+          (blockOffset, compressedLen, decompressedLen) ->
+              supplyFromBuffers(snap, compressedGuard, blockOffset, compressedLen, decompressedLen));
+    }
+
+    private static ByteBuffer supplyFromBuffers(
+        ByteBuffer[] bufs,
+        ByteBufferGuard compressedGuard,
+        long blockOffset,
+        int compressedLen,
+        int decompressedLen) throws IOException {
       final byte[] preBuffer = new byte[compressedLen];
       final byte[] decompressBuffer = new byte[decompressedLen + 7]; // +7 for decompressor headroom
       ByteBuffer bb =
-          compressed[(int) (blockOffset >> MAX_MAP_SHIFT)].position(
-              (int) (blockOffset & MAX_MAP_MASK));
+          bufs[(int) (blockOffset >> MAX_MAP_SHIFT)].position((int) (blockOffset & MAX_MAP_MASK));
       int readOffset = 0;
       int left = bb.remaining();
       int toRead = compressedLen;
@@ -493,19 +480,13 @@ public class AccessDirectory2 extends MMapDirectory {
         readOffset += left;
         blockOffset += left;
         bb =
-            compressed[(int) (blockOffset >> MAX_MAP_SHIFT)].position(
+            bufs[(int) (blockOffset >> MAX_MAP_SHIFT)].position(
                 (int) (blockOffset & MAX_MAP_MASK));
         left = bb.remaining();
       }
       compressedGuard.getBytes(bb, preBuffer, readOffset, toRead);
       CompressingDirectory.decompress(preBuffer, 0, decompressedLen, decompressBuffer, 0);
       return ByteBuffer.wrap(decompressBuffer, 0, decompressedLen);
-    }
-
-    @Override
-    protected boolean ensureBlockLoaded(int blockIdx, AccessDirectory2 dir) {
-      return dir.ensureLoaded(
-          sourcePath, accessMapped, blockOffsets, blockIdx, decompressedLenFor(blockIdx), 0);
     }
 
     @Override
