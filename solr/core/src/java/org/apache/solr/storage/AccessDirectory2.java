@@ -37,6 +37,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
@@ -161,25 +162,21 @@ public class AccessDirectory2 extends MMapDirectory {
         final AD2IndexInput cfeInputFinal = cfeInput;
         tasks.add(
             (fp) -> {
-              for (Map.Entry<String, AD2IndexInput> in : inputs) {
-                in.getValue().ensureBlockLoaded(0);
-              }
+              Iterator<AD2IndexInput> inputIter =
+                  inputs.stream().map(Map.Entry::getValue).iterator();
+              AD2IndexInput.preloadSerial(inputIter, ioExec, readAheadPermits);
               fp.add(() -> {
                 IntArrayList blockIndexes =
                     BlockPreloader.parseCfeBlockIndexes(cfeInputFinal);
-                for (IntCursor c : blockIndexes) {
-                  if (!cfsInputFinal.ensureBlockLoaded(c.value)) {
-                    break;
-                  }
-                }
+                cfsInputFinal.preloadSerial(blockIndexes.iterator());
               });
             });
       } else {
         // Non-CFS segment: preload block 0 of each file.
         tasks.add((fp) -> {
-          for (Map.Entry<String, AD2IndexInput> in : inputs) {
-            in.getValue().ensureBlockLoaded(0);
-          }
+          Iterator<AD2IndexInput> inputIter =
+              inputs.stream().map(Map.Entry::getValue).iterator();
+          AD2IndexInput.preloadSerial(inputIter, ioExec, readAheadPermits);
         });
       }
     }
@@ -445,9 +442,6 @@ public class AccessDirectory2 extends MMapDirectory {
 
     @Override
     protected boolean ensureBlockLoaded(int blockIdx) {
-      // Snapshot compressed[] so the background thread has independent position state.
-      ByteBuffer[] snap = new ByteBuffer[compressed.length];
-      for (int i = 0; i < compressed.length; i++) snap[i] = compressed[i].duplicate();
       return BlockPreloader.ensureLoaded(
           accessMapped,
           blockOffsets,
@@ -458,7 +452,73 @@ public class AccessDirectory2 extends MMapDirectory {
           readAheadPermits,
           0,
           (blockOffset, compressedLen, decompressedLen) ->
-              supplyFromBuffers(snap, compressedGuard, blockOffset, compressedLen, decompressedLen));
+              supplyFromBuffers(compressed, compressedGuard, blockOffset, compressedLen, decompressedLen));
+    }
+
+    boolean preloadSerial(Iterator<IntCursor> blockIdxIter) {
+      return BlockPreloader.ensureLoadedSerial(
+          accessMapped,
+          blockOffsets,
+          blockIdxIter,
+          this::decompressedLenFor,
+          cache,
+          ioExec,
+          readAheadPermits,
+          0,
+          (blockOffset, compressedLen, decompressedLen) ->
+              supplyFromBuffers(compressed, compressedGuard, blockOffset, compressedLen, decompressedLen));
+    }
+
+    /**
+     * Acquires one permit and submits one {@code ioExec} task that loads block 0 of each input in
+     * {@code inputs} serially. Appropriate when preloading the first block of several files that
+     * belong to the same segment, so that all of those reads share a single permit and run
+     * sequentially on spinning-disk-friendly I/O.
+     */
+    static boolean preloadSerial(
+        Iterator<AD2IndexInput> inputs, ExecutorService ioExec, BlockPreloader.Permits permits) {
+      // TODO: pre-inspect block 0 of at least some inputs (check extant.pinnable()) before
+      // acquiring a permit, to avoid paying the permit cost when all blocks are already cached.
+      if (!permits.tryAcquire(0)) return false;
+      try {
+        ioExec.submit(
+            () -> {
+              try {
+                while (inputs.hasNext()) {
+                  AD2IndexInput in = inputs.next();
+                  int idx = 0;
+                  Cache.Node<BlockCache.Val> extant = in.accessMapped.get(idx);
+                  if (extant != null && extant.pinnable()) continue;
+                  Cache.Node<BlockCache.Val> toPopulate = in.cache.acquireNode();
+                  if (toPopulate == null) return null; // cache full — stop
+                  long blockOffset = in.blockOffsets[idx];
+                  int compressedLen = (int) (in.blockOffsets[idx + 1] - blockOffset);
+                  if (in.accessMapped.compareAndSet(idx, extant, toPopulate)) {
+                    BlockPreloader.populateBuf(
+                        blockOffset,
+                        compressedLen,
+                        idx,
+                        in.decompressedLenFor(idx),
+                        toPopulate,
+                        in.accessMapped,
+                        in.cache,
+                        (bo, cl, dl) ->
+                            supplyFromBuffers(in.compressed, in.compressedGuard, bo, cl, dl));
+                    in.cache.unpin(toPopulate, false);
+                  } else {
+                    in.cache.close(toPopulate, true);
+                  }
+                }
+              } finally {
+                permits.release();
+              }
+              return null;
+            });
+      } catch (Throwable t) {
+        permits.release();
+        throw t;
+      }
+      return true;
     }
 
     private static ByteBuffer supplyFromBuffers(

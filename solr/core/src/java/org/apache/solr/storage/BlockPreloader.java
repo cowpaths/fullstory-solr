@@ -29,7 +29,9 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import org.apache.lucene.codecs.CodecUtil;
+import java.util.function.IntUnaryOperator;
 import org.apache.lucene.internal.hppc.IntArrayList;
+import org.apache.lucene.internal.hppc.IntCursor;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
@@ -40,7 +42,7 @@ import org.slf4j.LoggerFactory;
 /**
  * Shared preload/readahead utilities for {@link BlockCache}-backed index directories.
  *
- * <p>Provides the core {@link #ensureLoaded} / {@link #populateBuf} / {@link #parseCfeBlockIndexes}
+ * <p>Provides the core {@link #ensureLoaded} / {@link #ensureLoadedSerial} / {@link #populateBuf} / {@link #parseCfeBlockIndexes}
  * operations, plus the segment-chaining skeleton {@link #readAheadSegs} / {@link
  * #finishReadAheadSeg}, used by both {@link GCSDirectory} and {@link AccessDirectory2}.
  * Backend-specific concerns (supplier, permit acquisition, per-segment work) are abstracted via
@@ -158,6 +160,68 @@ class BlockPreloader {
         permits.release();
         throw t;
       }
+    }
+    return true;
+  }
+
+  /**
+   * Like {@link #ensureLoaded}, but loads a sequence of blocks serially within a single {@code
+   * ioExec} task (one permit covers all blocks). Appropriate for spinning-disk backends where
+   * sequential I/O is preferred over parallel I/O. Returns {@code true} if the task was submitted
+   * (or all blocks were already loaded); {@code false} if the permit could not be acquired.
+   *
+   * <p>{@code decompressedLen} is a function from block index to decompressed byte count; callers
+   * should return {@link CompressingDirectory#COMPRESSION_BLOCK_SIZE} for all blocks except the
+   * last, where it is the remaining byte count.
+   */
+  static boolean ensureLoadedSerial(
+      AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped,
+      long[] blockOffsets,
+      Iterator<IntCursor> blockIdxIter,
+      IntUnaryOperator decompressedLen,
+      BlockCache cache,
+      ExecutorService ioExec,
+      Permits permits,
+      int timeoutMillis,
+      BlockSupplier supplier) {
+    // TODO: pre-inspect at least some of the blocks (analogous to the extant.pinnable() check in
+    // ensureLoaded) to avoid acquiring a permit when all requested blocks are already cached.
+    if (!permits.tryAcquire(timeoutMillis)) return false;
+    try {
+      ioExec.submit(
+          () -> {
+            try {
+              while (blockIdxIter.hasNext()) {
+                int idx = blockIdxIter.next().value;
+                Cache.Node<BlockCache.Val> extant = accessMapped.get(idx);
+                if (extant != null && extant.pinnable()) continue;
+                Cache.Node<BlockCache.Val> toPopulate = cache.acquireNode();
+                if (toPopulate == null) return null; // cache full — stop
+                long blockOffset = blockOffsets[idx];
+                int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
+                if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
+                  populateBuf(
+                      blockOffset,
+                      compressedLen,
+                      idx,
+                      decompressedLen.applyAsInt(idx),
+                      toPopulate,
+                      accessMapped,
+                      cache,
+                      supplier);
+                  cache.unpin(toPopulate, false);
+                } else {
+                  cache.close(toPopulate, true);
+                }
+              }
+            } finally {
+              permits.release();
+            }
+            return null;
+          });
+    } catch (Throwable t) {
+      permits.release();
+      throw t;
     }
     return true;
   }
