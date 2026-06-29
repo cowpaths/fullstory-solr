@@ -70,7 +70,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.stream.Collectors;
 import java.util.zip.CRC32;
-import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.internal.hppc.IntArrayList;
@@ -456,13 +455,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                   throw new ThreadInterruptedException(e);
                 }
               };
-          maybeReadAheadSeg(
-              iter.next(),
-              readAheadControl,
-              iter,
-              new ArrayList<>(sorted.size()),
-              onComplete,
-              2000);
+          maybeReadAheadSeg(iter.next(), iter, new ArrayList<>(sorted.size()), onComplete, 2000);
         }
       }
     } else {
@@ -488,9 +481,6 @@ public class GCSDirectory extends SizeAwareDirectory {
       segOrds.put(infos.info(i).info.name, i);
     }
   }
-
-  private final Semaphore readAheadControl =
-      new Semaphore(CachedCompressedIndexInput.MAX_READ_AHEAD << 1, true);
 
   private static final int REGISTER_CONCURRENCY = 8;
 
@@ -1521,108 +1511,75 @@ public class GCSDirectory extends SizeAwareDirectory {
 
   private void maybeReadAheadSeg(
       UUID segUUID,
-      Semaphore control,
       Iterator<UUID> nextSegs,
       List<Runnable> followup,
       Runnable onComplete,
       int timeoutMillis) {
-    BatchValue batchValue;
-    for (; ; ) {
-      batchValue = batched.get(segUUID);
+    List<BlockPreloader.SegmentPreloadTask> tasks = new ArrayList<>();
+    for (UUID uuid = segUUID; uuid != null; uuid = nextSegs.hasNext() ? nextSegs.next() : null) {
+      BatchValue batchValue = batched.get(uuid);
       if (batchValue != null && !batchValue.valid()) {
-        break;
-      } else if (nextSegs.hasNext()) {
-        segUUID = nextSegs.next();
-      } else {
-        finishSegReadahead(followup, onComplete);
-        return;
-      }
-    }
-    UUID segUUIDF = segUUID;
-    String segName = batchValue.segName;
-    Map<UUID, String> blobs = batchValue.blobUUIDs;
-    // TODO: potential for lock contention here, esp. w/ SynchronousQueue
-    ioExec.submit(
-        () -> {
-          String cfeName;
-          if (blobs.size() == 1
-              && Files.exists(directory.resolve(cfeName = segName.concat(".cfe")))) {
-            UUID blob = blobs.keySet().iterator().next();
-            BlocksStruct blocks = pendingNodes.get(blob);
-            if (blocks != null) {
-              IntArrayList blockIndexes = parseCfeBlockIndexes(cfeName);
-              String blobS = blob.toString();
-              if (followup == null) {
-                for (IntCursor i : blockIndexes) {
-                  ensureLoaded(
-                      blobS,
-                      blocks.accessMapped,
-                      blocks.blockOffsets,
-                      i.value,
-                      control,
-                      timeoutMillis);
+        UUID segUUIDF = uuid;
+        String segName = batchValue.segName;
+        Map<UUID, String> blobs = batchValue.blobUUIDs;
+        tasks.add(
+            (fp) -> {
+              String cfeName;
+              if (blobs.size() == 1
+                  && Files.exists(directory.resolve(cfeName = segName.concat(".cfe")))) {
+                // preload the first block of each logical sub-file within the CFS compound
+                UUID blob = blobs.keySet().iterator().next();
+                BlocksStruct blocks = pendingNodes.get(blob);
+                if (blocks != null) {
+                  IntArrayList blockIndexes = parseCfeBlockIndexes(cfeName);
+                  String blobS = blob.toString();
+                  if (fp == null) {
+                    for (IntCursor i : blockIndexes) {
+                      ensureLoaded(
+                          blobS, blocks.accessMapped, blocks.blockOffsets, i.value, timeoutMillis);
+                    }
+                  } else {
+                    Iterator<IntCursor> iter = blockIndexes.iterator();
+                    for (int i = 0; i < 4 && iter.hasNext(); i++) {
+                      ensureLoaded(
+                          blobS,
+                          blocks.accessMapped,
+                          blocks.blockOffsets,
+                          iter.next().value,
+                          timeoutMillis);
+                    }
+                    if (iter.hasNext()) {
+                      fp.add(
+                          () -> {
+                            do {
+                              ensureLoaded(
+                                  blobS,
+                                  blocks.accessMapped,
+                                  blocks.blockOffsets,
+                                  iter.next().value,
+                                  timeoutMillis);
+                            } while (iter.hasNext());
+                          });
+                    }
+                  }
                 }
               } else {
-                Iterator<IntCursor> iter = blockIndexes.iterator();
-                for (int i = 0; i < 4 && iter.hasNext(); i++) {
-                  ensureLoaded(
-                      blobS,
-                      blocks.accessMapped,
-                      blocks.blockOffsets,
-                      iter.next().value,
-                      control,
-                      timeoutMillis);
-                }
-                if (iter.hasNext()) {
-                  followup.add(
-                      () -> {
-                        do {
-                          ensureLoaded(
-                              blobS,
-                              blocks.accessMapped,
-                              blocks.blockOffsets,
-                              iter.next().value,
-                              control,
-                              timeoutMillis);
-                        } while (iter.hasNext());
-                      });
+                if (fp == null) {
+                  preloadNonCfs(segUUIDF, blobs, timeoutMillis);
+                } else {
+                  fp.add(() -> preloadNonCfs(segUUIDF, blobs, timeoutMillis));
                 }
               }
-            }
-            // preload the first block of each logical file
-          } else {
-            if (followup == null) {
-              preloadNonCfs(segUUIDF, blobs, control, timeoutMillis);
-            } else {
-              followup.add(() -> preloadNonCfs(segUUIDF, blobs, control, timeoutMillis));
-            }
-          }
-          if (nextSegs.hasNext()) {
-            maybeReadAheadSeg(
-                nextSegs.next(), control, nextSegs, followup, onComplete, timeoutMillis);
-          } else {
-            finishSegReadahead(followup, onComplete);
-          }
-        });
-  }
-
-  private static void finishSegReadahead(List<Runnable> followup, Runnable onComplete) {
-    try {
-      if (followup != null) {
-        for (Runnable r : followup) {
-          r.run();
-        }
+            });
       }
-    } finally {
-      if (onComplete != null) {
-        onComplete.run();
-      }
+    }
+    if (!tasks.isEmpty()) {
+      BlockPreloader.readAheadSegs(tasks.iterator(), ioExec, followup, onComplete);
     }
   }
 
   @SuppressWarnings("try")
-  private void preloadNonCfs(
-      UUID segUUID, Map<UUID, String> blobs, Semaphore control, int timeoutMillis) {
+  private void preloadNonCfs(UUID segUUID, Map<UUID, String> blobs, int timeoutMillis) {
     for (Map.Entry<UUID, String> blob : blobs.entrySet()) {
       UUID blobId = blob.getKey();
       BlocksStruct blocks = pendingNodes.get(blobId);
@@ -1640,8 +1597,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         }
       }
       if (blocks != null) {
-        ensureLoaded(
-            blobId.toString(), blocks.accessMapped, blocks.blockOffsets, 0, control, timeoutMillis);
+        ensureLoaded(blobId.toString(), blocks.accessMapped, blocks.blockOffsets, 0, timeoutMillis);
       }
     }
   }
@@ -1652,30 +1608,7 @@ public class GCSDirectory extends SizeAwareDirectory {
    * >> COMPRESSION_BLOCK_SHIFT}.
    */
   private IntArrayList parseCfeBlockIndexes(String cfeName) {
-    IntArrayList blockIndexes = new IntArrayList(16);
-    try (IndexInput cfeIn = openInput(cfeName, IOContext.READONCE)) {
-      // Skip index header without depending on the codec name (version-agnostic).
-      if (CodecUtil.readBEInt(cfeIn) != CodecUtil.CODEC_MAGIC) return blockIndexes;
-      cfeIn.readString(); // codec name — discard
-      CodecUtil.readBEInt(cfeIn); // version — discard
-      cfeIn.skipBytes(16); // segment ID (StringHelper.ID_LENGTH)
-      cfeIn.skipBytes(cfeIn.readByte() & 0xFF); // suffix bytes (empty for Lucene90, but generic)
-      int n = cfeIn.readVInt();
-      int last = -1;
-      for (int i = 0; i < n; i++) {
-        cfeIn.readString(); // sub-file name — discard
-        long offset = cfeIn.readLong(); // byte offset of this sub-file within the .cfs data
-        cfeIn.readLong(); // length — discard
-        int offsetBlock = (int) (offset >> COMPRESSION_BLOCK_SHIFT);
-        if (offsetBlock > last) {
-          blockIndexes.add(offsetBlock);
-          last = offsetBlock;
-        }
-      }
-    } catch (IOException e) {
-      log.debug("readAheadSeg: failed to parse {}", cfeName, e);
-    }
-    return blockIndexes;
+    return BlockPreloader.parseCfeBlockIndexes(this, cfeName);
   }
 
   private boolean ensureLoaded(
@@ -1683,77 +1616,18 @@ public class GCSDirectory extends SizeAwareDirectory {
       AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped,
       long[] blockOffsets,
       int idx,
-      Semaphore control,
       int timeoutMillis) {
-    Cache.Node<BlockCache.Val> extant = accessMapped.get(idx);
-    if ((extant == null || !extant.pinnable()) && acquireReadaheadPermit(control, timeoutMillis)) {
-      Cache.Node<BlockCache.Val> toPopulate = cache.acquireNode();
-      if (toPopulate == null) {
-        releaseReadaheadPermit(control);
-        return false;
-      }
-      try {
-        ioExec.submit(
-            () -> {
-              try {
-                if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-                  long blockOffset = blockOffsets[idx];
-                  int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
-                  populateBuf(
-                      blob,
-                      blockOffset,
-                      compressedLen,
-                      idx,
-                      COMPRESSION_BLOCK_SIZE,
-                      toPopulate,
-                      accessMapped);
-                  // NOTE: don't unpin in `finally` block! `populateBuf` already unpins the
-                  // node upon Exception
-                  cache.unpin(toPopulate, false);
-                } else {
-                  cache.close(toPopulate, true);
-                }
-              } finally {
-                releaseReadaheadPermit(control);
-              }
-              return null;
-            });
-      } catch (Throwable t) {
-        // TODO: ensure this won't double-release with submitted task
-        releaseReadaheadPermit(control);
-        throw t;
-      }
-    }
-    return true;
-  }
-
-  private ByteBuffer populateBuf(
-      String blob,
-      long pos,
-      int compressedLen,
-      int blockIdx,
-      int decompressedLen,
-      Cache.Node<BlockCache.Val> node,
-      AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped)
-      throws IOException {
-    ByteBuffer buf;
-    try {
-      ByteBuffer heapBuf = supply(blob, pos, compressedLen, decompressedLen);
-      buf =
-          node.getPayload()
-              .populate(
-                  heapBuf.array(),
-                  heapBuf.arrayOffset() + heapBuf.position(),
-                  decompressedLen,
-                  cache);
-    } catch (Throwable t) {
-      node.getPayload().completeExceptionally(t);
-      accessMapped.compareAndSet(blockIdx, node, null);
-      cache.unpin(node);
-      cache.close(node);
-      throw unwrapException(t);
-    }
-    return buf;
+    return BlockPreloader.ensureLoaded(
+        accessMapped,
+        blockOffsets,
+        idx,
+        COMPRESSION_BLOCK_SIZE,
+        cache,
+        ioExec,
+        readAheadPermits,
+        timeoutMillis,
+        (blockOffset, compressedLen, decompressedLen) ->
+            supply(blob, blockOffset, compressedLen, decompressedLen));
   }
 
   /**
@@ -1796,7 +1670,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     return ByteBuffer.wrap(decompressed, 0, decompressedLen);
   }
 
-  static final class GCSIndexInput extends CachedCompressedIndexInput {
+  static final class GCSIndexInput extends CachedCompressedIndexInput<GCSDirectory> {
 
     private final GCSDirectory dir;
 
@@ -2054,7 +1928,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.blobName = parent.blobName;
       this.segUUID = parent.segUUID;
       this.blocksStruct = null; // slice does not own the mapping
-      maybePreloadSlice();
+      maybePreloadSlice(dir);
     }
 
     // -------------------------------------------------------------------------
@@ -2132,45 +2006,48 @@ public class GCSDirectory extends SizeAwareDirectory {
     // -------------------------------------------------------------------------
 
     @Override
-    protected boolean ensureBlockLoaded(int blockIdx) {
-      return dir.ensureLoaded(
-          blobName, accessMapped, blockOffsets, blockIdx, dir.readAheadControl, 0);
+    protected boolean ensureBlockLoaded(int blockIdx, GCSDirectory dir) {
+      return dir.ensureLoaded(blobName, accessMapped, blockOffsets, blockIdx, 0);
     }
 
     @Override
     protected void onFirstBlockMiss() {
-      dir.maybeReadAheadSeg(
-          segUUID, dir.readAheadControl, Collections.emptyIterator(), null, null, 0);
+      dir.maybeReadAheadSeg(segUUID, Collections.emptyIterator(), null, null, 0);
     }
   }
 
   private static final int READ_CHANNEL_HEADROOM =
       GCSDirectoryFactory.DEFAULT_MAX_OPEN_CHANNELS >> 1;
   private final AtomicInteger readaheadPermit = new AtomicInteger(0);
+  private final BlockPreloader.Permits readAheadPermits =
+      new BlockPreloader.Permits() {
+        private final Semaphore sem =
+            new Semaphore(CachedCompressedIndexInput.MAX_READ_AHEAD << 1, true);
 
-  private boolean acquireReadaheadPermit(Semaphore localControl, int timeoutMillis) {
-    try {
-      if (!localControl.tryAcquire(timeoutMillis, TimeUnit.MILLISECONDS)) {
-        return false;
-      } else {
-        if (readaheadPermit.getAndIncrement() >= READ_CHANNEL_HEADROOM) {
-          localControl.release();
-          readaheadPermit.decrementAndGet();
-          return false;
-        } else {
-          return true;
+        @Override
+        public boolean tryAcquire(int timeoutMillis) {
+          try {
+            if (!sem.tryAcquire(timeoutMillis, TimeUnit.MILLISECONDS)) {
+              return false;
+            } else if (readaheadPermit.getAndIncrement() >= READ_CHANNEL_HEADROOM) {
+              sem.release();
+              readaheadPermit.decrementAndGet();
+              return false;
+            } else {
+              return true;
+            }
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ThreadInterruptedException(e);
+          }
         }
-      }
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      throw new ThreadInterruptedException(e);
-    }
-  }
 
-  private void releaseReadaheadPermit(Semaphore localControl) {
-    localControl.release();
-    readaheadPermit.decrementAndGet();
-  }
+        @Override
+        public void release() {
+          sem.release();
+          readaheadPermit.decrementAndGet();
+        }
+      };
 
   void onDirectoryRemove() throws IOException {
     Map<UUID, Closeable> toRemove = new HashMap<>();

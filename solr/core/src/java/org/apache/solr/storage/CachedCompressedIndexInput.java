@@ -57,14 +57,14 @@ import org.apache.lucene.util.CollectionUtil;
  * {@link NodeRefStruct} local-pin/unpin. The {@link #accessMapped} array is shared across all
  * slices and clones; concurrent access is mediated by compare-and-exchange.
  */
-abstract class CachedCompressedIndexInput extends IndexInput implements RandomAccessInput {
+abstract class CachedCompressedIndexInput<D> extends IndexInput implements RandomAccessInput {
 
   // Shared empty view sentinels for aligned bulk reads (readLongs/readInts/readFloats).
   private static final LongBuffer EMPTY_LONGBUFFER = LongBuffer.allocate(0);
   private static final IntBuffer EMPTY_INTBUFFER = IntBuffer.allocate(0);
   private static final FloatBuffer EMPTY_FLOATBUFFER = FloatBuffer.allocate(0);
 
-  private final BlockCache cache;
+  protected final BlockCache cache;
   // Total logical (decompressed) length of the underlying file.
   private final long length;
   // blockOffsets[i] = compressed byte offset of block i within the backend storage;
@@ -138,11 +138,20 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // ---------------------------------------------------------------------------
 
   /**
+   * Returns the decompressed byte length for block {@code blockIdx}: {@link
+   * CompressingDirectory#COMPRESSION_BLOCK_SIZE} for all blocks except the last, where it is the
+   * remaining tail length.
+   */
+  protected final int decompressedLenFor(int blockIdx) {
+    return blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
+  }
+
+  /**
    * Attempt to pre-load block {@code blockIdx} asynchronously. Returns {@code true} if loading was
    * initiated or the block is already present; {@code false} to signal that read-ahead should stop
    * (e.g., thread-pool or semaphore saturation). Default: no-op, always returns {@code false}.
    */
-  protected boolean ensureBlockLoaded(int blockIdx) {
+  protected boolean ensureBlockLoaded(int blockIdx, D dir) {
     return false;
   }
 
@@ -228,9 +237,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * the subclass slice constructor, after all subclass fields are initialized, to avoid
    * virtual-dispatch-before-initialization bugs.
    */
-  protected final void maybePreloadSlice() {
+  protected final void maybePreloadSlice(D dir) {
     if (sliceFirstBlockIdx == sliceLastBlockIdx && sliceLength != 0) {
-      ensureBlockLoaded(sliceFirstBlockIdx);
+      ensureBlockLoaded(sliceFirstBlockIdx, dir);
     }
   }
 
@@ -382,7 +391,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
                     blockIdx + Math.min(MAX_READ_AHEAD, readAheadCount(seqAccessCount))))
             > readAheadTo) {
       for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
-        if (!ensureBlockLoaded(i)) {
+        if (!ensureBlockLoaded(i, this)) {
           newReadAheadTo = i - 1;
           break;
         }
