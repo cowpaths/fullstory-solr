@@ -110,7 +110,10 @@ public class AccessDirectory2 extends MMapDirectory {
     Map<String, List<Map.Entry<String, AD2IndexInput>>> segToInputs = new HashMap<>();
     List<String> segmentsFiles = new ArrayList<>();
 
-    String[] files = listAll();
+    String[] files = compressedPath.toFile().list();
+    if (files == null) {
+      files = new String[0];
+    }
     List<IndexInput> toClose = new ArrayList<>(files.length);
     for (String file : files) {
       if (file.endsWith(".tmp")) continue;
