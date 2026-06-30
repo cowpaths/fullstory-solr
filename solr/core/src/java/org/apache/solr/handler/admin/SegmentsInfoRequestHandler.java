@@ -88,6 +88,7 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
   public static final String RAW_SIZE_SAMPLING_PERCENT_PARAM = "rawSizeSamplingPercent";
 
   private static final List<String> FI_LEGEND;
+  private static final long[] DEFAULT_BOUNDARIES = new long[] {-9, 3, 9, 32, 94, 184};
 
   static {
     FI_LEGEND =
@@ -508,6 +509,9 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
   /**
    * Extract date range (min/max timestamps) from a single segment by reading point values.
    *
+   * <p>There's very similar code in TemporalMergePolicy in fs-solr plugin. However, this has no
+   * dependency on such plugin module so we cannot reuse that code here.
+   *
    * @param segmentInfo the segment to read from
    * @return the date range, or null if the temporal field is not present or has no values
    * @throws IOException if there's an error reading the segment
@@ -609,14 +613,14 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
   }
 
   /**
-   * Temporal field names for segment date-range display. Defaults to {@code EventStart}; overridden
-   * by {@code lucene.temporalField.name} when set (comma-separated list, first match wins per
-   * segment).
+   * Temporal field names for segment date-range display. Defaults to {@code
+   * EventStart,SessionStart,UserLastIndexedEventStart,UserTipLastEventStart}; overridden by {@code
+   * lucene.temporalField.name} when set (comma-separated list, first match wins per segment).
    */
   static List<String> resolveTemporalFields() {
     String spec = System.getProperty("lucene.temporalField.name");
     if (spec == null || spec.isBlank()) {
-      return List.of("EventStart");
+      spec = "EventStart,SessionStart,UserLastIndexedEventStart,UserTipLastEventStart";
     }
     return Arrays.stream(spec.split(", *"))
         .map(String::trim)
@@ -633,7 +637,6 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
   }
 
   private static List<Long> getBucketBoundaries() {
-    long[] DEFAULT_BOUNDARIES = new long[] {-9, 3, 9, 32, 94, 184};
     List<Long> boundaries =
         Arrays.stream(DEFAULT_BOUNDARIES)
             .mapToObj(TimeUnit.DAYS::toMillis)
