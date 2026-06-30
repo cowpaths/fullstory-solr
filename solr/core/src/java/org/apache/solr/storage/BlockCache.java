@@ -110,6 +110,7 @@ public class BlockCache implements Closeable {
      * monitor.
      */
     private volatile boolean populated;
+    private volatile boolean waiting;
 
     private final int cacheBlockOrd;
 
@@ -136,9 +137,11 @@ public class BlockCache implements Closeable {
       ret = ret.put(arr, off, len).clear().asReadOnlyBuffer();
       cached = ret;
       assert !populated;
-      synchronized (this) {
-        populated = true;
-        notifyAll();
+      populated = true;
+      if (waiting) {
+        synchronized (this) {
+          notifyAll();
+        }
       }
       return ret;
     }
@@ -155,6 +158,7 @@ public class BlockCache implements Closeable {
         return cached;
       }
       if (!populated) {
+        waiting = true;
         synchronized (this) {
           while (!populated) {
             try {
@@ -181,9 +185,11 @@ public class BlockCache implements Closeable {
       assert cacheBlockOrd >= 0;
       cached = EXCEPTION_SENTINEL;
       assert !populated;
-      synchronized (this) {
-        populated = true;
-        notifyAll();
+      populated = true;
+      if (waiting) {
+        synchronized (this) {
+          notifyAll();
+        }
       }
     }
 
