@@ -506,7 +506,11 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
             if (nodeLevelState.blockCache != null) {
               dir =
                   new AccessDirectory2(
-                      access, lockFactory, persistentPath, nodeLevelState.blockCache, nodeLevelState.ioExec);
+                      access,
+                      lockFactory,
+                      persistentPath,
+                      nodeLevelState.blockCache,
+                      nodeLevelState.ioExec);
             } else {
               dir = new AccessDirectory(access, lockFactory, persistentPath, nodeLevelState);
             }

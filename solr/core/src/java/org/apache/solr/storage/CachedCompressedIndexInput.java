@@ -36,7 +36,6 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import org.apache.lucene.store.ByteBufferGuard;
@@ -372,8 +371,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private void setCurrentNode(
       Cache.Node<BlockCache.Val> node, int blockIdx, int type, long loadNanos) {
     int seqAccessCount = currentNodeRef.setCurrentNode(node, blockIdx, cache);
-//    System.out.println("XXX type="+ type + ", " + seqAccessCount + ", " + blockIdx+"/"+
-//        accessMapped.length()+", "+ TimeUnit.NANOSECONDS.toMillis(loadNanos) + "ms, " + this);
+    //    System.out.println("XXX type="+ type + ", " + seqAccessCount + ", " + blockIdx+"/"+
+    //        accessMapped.length()+", "+ TimeUnit.NANOSECONDS.toMillis(loadNanos) + "ms, " + this);
     switch (seqAccessCount) {
       case -1:
         // gone backward, no read-ahead
@@ -426,13 +425,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         ByteBuffer buf;
         try {
           byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
-          buf =
-              node.getPayload()
-                  .populate(
-                      heapBuf,
-                      0,
-                      decompressedLen,
-                      cache);
+          buf = node.getPayload().populate(heapBuf, 0, decompressedLen, cache);
         } catch (Throwable t) {
           node.getPayload().completeExceptionally(t);
           accessMapped.compareAndSet(blockIdx, node, null);
@@ -458,7 +451,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
     // Serve uncached (cache full or node race lost with no cached result).
     // long start = System.nanoTime();
-    ByteBuffer heapBuf = ByteBuffer.wrap(supply(blockIdx, blockOffset, compressedLen, decompressedLen), 0, decompressedLen);
+    ByteBuffer heapBuf =
+        ByteBuffer.wrap(
+            supply(blockIdx, blockOffset, compressedLen, decompressedLen), 0, decompressedLen);
     setCurrentNode(null, blockIdx, 3, 0 /* System.nanoTime() - start */);
     postBuffer = heapBuf;
     postBufferBaseline = heapBuf.position();

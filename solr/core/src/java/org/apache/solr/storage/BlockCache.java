@@ -110,6 +110,7 @@ public class BlockCache implements Closeable {
      * monitor.
      */
     private volatile boolean populated;
+
     private volatile boolean waiting;
 
     private final int cacheBlockOrd;

@@ -1936,8 +1936,8 @@ public class GCSDirectory extends SizeAwareDirectory {
     // -------------------------------------------------------------------------
 
     @Override
-    protected byte[] supply(
-        int blockIdx, long blockOffset, int compressedLen, int decompressedLen) throws IOException {
+    protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
+        throws IOException {
       return dir.supply(blobName, blockOffset, compressedLen, decompressedLen);
     }
 

@@ -36,8 +36,8 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -47,11 +47,9 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.zip.CRC32;
 import org.apache.lucene.index.IndexFileNames;
-import org.apache.lucene.internal.hppc.IntArrayList;
 import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.internal.hppc.IntArrayList;
 import org.apache.lucene.internal.hppc.IntCursor;
-import org.apache.lucene.util.IOUtils;
-import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.IOContext;
@@ -60,6 +58,8 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.MappedByteBufferIndexInputProvider;
+import org.apache.lucene.util.IOUtils;
+import org.apache.lucene.util.ThreadInterruptedException;
 
 /**
  * An {@link MMapDirectory} that serves reads from a {@link BlockCache}-backed decompression layer
@@ -99,15 +99,18 @@ public class AccessDirectory2 extends MMapDirectory {
 
   @SuppressWarnings("try")
   public AccessDirectory2(
-      Path path, LockFactory lockFactory, Path compressedPath, BlockCache cache, ExecutorService ioExec)
+      Path path,
+      LockFactory lockFactory,
+      Path compressedPath,
+      BlockCache cache,
+      ExecutorService ioExec)
       throws IOException {
     super(path, lockFactory);
     this.compressedPath = compressedPath;
     this.cache = cache;
     this.ioExec = ioExec;
     this.readAheadPermits =
-        BlockPreloader.ofSemaphore(
-            new Semaphore(CachedCompressedIndexInput.MAX_READ_AHEAD, true));
+        BlockPreloader.ofSemaphore(new Semaphore(CachedCompressedIndexInput.MAX_READ_AHEAD, true));
 
     // Scan existing compressed files:
     //  - segments_N: open immediately and async-preload block 0 as a hint (will be read soon)
@@ -121,34 +124,36 @@ public class AccessDirectory2 extends MMapDirectory {
       files = new String[0];
     }
     BlockingQueue<AD2IndexInput> initQueue = new ArrayBlockingQueue<>(files.length / 3);
-    Iterator<AD2IndexInput> initIter = new Iterator<AD2IndexInput>() {
-      AD2IndexInput next;
-      @Override
-      public boolean hasNext() {
-        if (next == null) {
-          try {
-            return (next = initQueue.take()) != INIT_DONE_SENTINEL;
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new ThreadInterruptedException(e);
-          }
-        } else {
-          return next != INIT_DONE_SENTINEL;
-        }
-      }
+    Iterator<AD2IndexInput> initIter =
+        new Iterator<AD2IndexInput>() {
+          AD2IndexInput next;
 
-      @Override
-      public AD2IndexInput next() {
-        AD2IndexInput ret = next;
-        if (ret == null) {
-          throw new IllegalStateException();
-        } else if (ret == INIT_DONE_SENTINEL) {
-          throw new NoSuchElementException();
-        }
-        next = null;
-        return ret;
-      }
-    };
+          @Override
+          public boolean hasNext() {
+            if (next == null) {
+              try {
+                return (next = initQueue.take()) != INIT_DONE_SENTINEL;
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new ThreadInterruptedException(e);
+              }
+            } else {
+              return next != INIT_DONE_SENTINEL;
+            }
+          }
+
+          @Override
+          public AD2IndexInput next() {
+            AD2IndexInput ret = next;
+            if (ret == null) {
+              throw new IllegalStateException();
+            } else if (ret == INIT_DONE_SENTINEL) {
+              throw new NoSuchElementException();
+            }
+            next = null;
+            return ret;
+          }
+        };
     List<IndexInput> toClose = new ArrayList<>(files.length);
     try {
       AD2IndexInput.preloadSerial(initIter, ioExec, readAheadPermits, INIT_PRELOAD_TIMEOUT_MILLIS);
@@ -165,7 +170,9 @@ public class AccessDirectory2 extends MMapDirectory {
           continue;
         }
         String segName = IndexFileNames.parseSegmentName(file);
-        segToInputs.computeIfAbsent(segName, k -> new ArrayList<>()).add(new AbstractMap.SimpleImmutableEntry<>(file, input));
+        segToInputs
+            .computeIfAbsent(segName, k -> new ArrayList<>())
+            .add(new AbstractMap.SimpleImmutableEntry<>(file, input));
       }
     } finally {
       initQueue.add(INIT_DONE_SENTINEL);
@@ -209,20 +216,24 @@ public class AccessDirectory2 extends MMapDirectory {
             (fp) -> {
               Iterator<AD2IndexInput> inputIter =
                   inputs.stream().map(Map.Entry::getValue).iterator();
-              AD2IndexInput.preloadSerial(inputIter, ioExec, readAheadPermits, INIT_PRELOAD_TIMEOUT_MILLIS);
-              fp.add(() -> {
-                IntArrayList blockIndexes =
-                    BlockPreloader.parseCfeBlockIndexes(cfeInputFinal);
-                cfsInputFinal.preloadSerial(blockIndexes.iterator(), INIT_PRELOAD_TIMEOUT_MILLIS);
-              });
+              AD2IndexInput.preloadSerial(
+                  inputIter, ioExec, readAheadPermits, INIT_PRELOAD_TIMEOUT_MILLIS);
+              fp.add(
+                  () -> {
+                    IntArrayList blockIndexes = BlockPreloader.parseCfeBlockIndexes(cfeInputFinal);
+                    cfsInputFinal.preloadSerial(
+                        blockIndexes.iterator(), INIT_PRELOAD_TIMEOUT_MILLIS);
+                  });
             });
       } else {
         // Non-CFS segment: preload block 0 of each file.
-        tasks.add((fp) -> {
-          Iterator<AD2IndexInput> inputIter =
-              inputs.stream().map(Map.Entry::getValue).iterator();
-          AD2IndexInput.preloadSerial(inputIter, ioExec, readAheadPermits, INIT_PRELOAD_TIMEOUT_MILLIS);
-        });
+        tasks.add(
+            (fp) -> {
+              Iterator<AD2IndexInput> inputIter =
+                  inputs.stream().map(Map.Entry::getValue).iterator();
+              AD2IndexInput.preloadSerial(
+                  inputIter, ioExec, readAheadPermits, INIT_PRELOAD_TIMEOUT_MILLIS);
+            });
       }
     }
 
@@ -311,8 +322,7 @@ public class AccessDirectory2 extends MMapDirectory {
     synchronized (pendingNodes) {
       sharedAccessMapped = pendingNodes.get(name); // get, not remove: shared across all root opens
     }
-    return new AD2IndexInput(
-        compressedPath.resolve(name), this, sharedAccessMapped, pendingNodes);
+    return new AD2IndexInput(compressedPath.resolve(name), this, sharedAccessMapped, pendingNodes);
   }
 
   private static ByteBufferGuard.BufferCleaner unmapHack() {
@@ -489,9 +499,10 @@ public class AccessDirectory2 extends MMapDirectory {
     // -------------------------------------------------------------------------
 
     @Override
-    protected byte[] supply(
-        int blockIdx, long blockOffset, int compressedLen, int decompressedLen) throws IOException {
-      return supplyFromBuffers(compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
+    protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
+        throws IOException {
+      return supplyFromBuffers(
+          compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
     }
 
     @Override
@@ -505,16 +516,17 @@ public class AccessDirectory2 extends MMapDirectory {
           ioExec,
           readAheadPermits,
           0,
-          (blockOffset, compressedLen, decompressedLen) ->
-          {
-            // Duplicate compressed[] so the ioExec read-ahead task has independent position state from
-            // the reader thread, which may concurrently call supply() → supplyFromBuffers(compressed,…).
-            // ByteBuffer.position() mutates the buffer, so sharing without duplication is a data race.
+          (blockOffset, compressedLen, decompressedLen) -> {
+            // Duplicate compressed[] so the ioExec read-ahead task has independent position state
+            // from the reader thread, which may concurrently call supply() →
+            // supplyFromBuffers(compressed,…). ByteBuffer.position() mutates the buffer, so sharing
+            // without duplication is a data race.
             ByteBuffer[] snap = new ByteBuffer[compressed.length];
             for (int i = 0; i < compressed.length; i++) {
               snap[i] = compressed[i].duplicate();
             }
-            return supplyFromBuffers(snap, compressedGuard, blockOffset, compressedLen, decompressedLen);
+            return supplyFromBuffers(
+                snap, compressedGuard, blockOffset, compressedLen, decompressedLen);
           });
     }
 
@@ -536,17 +548,21 @@ public class AccessDirectory2 extends MMapDirectory {
           readAheadPermits,
           timeoutMillis,
           (blockOffset, compressedLen, decompressedLen) ->
-              supplyFromBuffers(snap, compressedGuard, blockOffset, compressedLen, decompressedLen));
+              supplyFromBuffers(
+                  snap, compressedGuard, blockOffset, compressedLen, decompressedLen));
     }
 
     /**
-     * Acquires one permit and submits one {@code ioExec} task that loads block 0 and the last
-     * block of each input in {@code inputs} serially. Appropriate when preloading the boundary
-     * blocks of several files that belong to the same segment, so that all of those reads share a
-     * single permit and run sequentially on spinning-disk-friendly I/O.
+     * Acquires one permit and submits one {@code ioExec} task that loads block 0 and the last block
+     * of each input in {@code inputs} serially. Appropriate when preloading the boundary blocks of
+     * several files that belong to the same segment, so that all of those reads share a single
+     * permit and run sequentially on spinning-disk-friendly I/O.
      */
     static boolean preloadSerial(
-        Iterator<AD2IndexInput> inputs, ExecutorService ioExec, BlockPreloader.Permits permits, int timeoutMillis) {
+        Iterator<AD2IndexInput> inputs,
+        ExecutorService ioExec,
+        BlockPreloader.Permits permits,
+        int timeoutMillis) {
       // TODO: pre-inspect block 0 of at least some inputs (check extant.pinnable()) before
       // acquiring a permit, to avoid paying the permit cost when all blocks are already cached.
       if (!permits.tryAcquire(timeoutMillis)) return false;
@@ -610,7 +626,8 @@ public class AccessDirectory2 extends MMapDirectory {
         ByteBufferGuard compressedGuard,
         long blockOffset,
         int compressedLen,
-        int decompressedLen) throws IOException {
+        int decompressedLen)
+        throws IOException {
       final byte[] preBuffer = new byte[compressedLen];
       final byte[] decompressBuffer = new byte[decompressedLen + 7]; // +7 for decompressor headroom
       ByteBuffer bb =
@@ -624,8 +641,7 @@ public class AccessDirectory2 extends MMapDirectory {
         readOffset += left;
         blockOffset += left;
         bb =
-            bufs[(int) (blockOffset >> MAX_MAP_SHIFT)].position(
-                (int) (blockOffset & MAX_MAP_MASK));
+            bufs[(int) (blockOffset >> MAX_MAP_SHIFT)].position((int) (blockOffset & MAX_MAP_MASK));
         left = bb.remaining();
       }
       compressedGuard.getBytes(bb, preBuffer, readOffset, toRead);

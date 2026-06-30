@@ -28,8 +28,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReferenceArray;
-import org.apache.lucene.codecs.CodecUtil;
 import java.util.function.IntUnaryOperator;
+import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.internal.hppc.IntArrayList;
 import org.apache.lucene.internal.hppc.IntCursor;
 import org.apache.lucene.store.Directory;
@@ -42,11 +42,11 @@ import org.slf4j.LoggerFactory;
 /**
  * Shared preload/readahead utilities for {@link BlockCache}-backed index directories.
  *
- * <p>Provides the core {@link #ensureLoaded} / {@link #ensureLoadedSerial} / {@link #populateBuf} / {@link #parseCfeBlockIndexes}
- * operations, plus the segment-chaining skeleton {@link #readAheadSegs} / {@link
- * #finishReadAheadSeg}, used by both {@link GCSDirectory} and {@link AccessDirectory2}.
- * Backend-specific concerns (supplier, permit acquisition, per-segment work) are abstracted via
- * {@link BlockSupplier}, {@link Permits}, and {@link SegmentPreloadTask}.
+ * <p>Provides the core {@link #ensureLoaded} / {@link #ensureLoadedSerial} / {@link #populateBuf} /
+ * {@link #parseCfeBlockIndexes} operations, plus the segment-chaining skeleton {@link
+ * #readAheadSegs} / {@link #finishReadAheadSeg}, used by both {@link GCSDirectory} and {@link
+ * AccessDirectory2}. Backend-specific concerns (supplier, permit acquisition, per-segment work) are
+ * abstracted via {@link BlockSupplier}, {@link Permits}, and {@link SegmentPreloadTask}.
  */
 class BlockPreloader {
 
@@ -248,13 +248,7 @@ class BlockPreloader {
     ByteBuffer buf;
     try {
       byte[] heapBuf = supplier.supply(blockOffset, compressedLen, decompressedLen);
-      buf =
-          node.getPayload()
-              .populate(
-                  heapBuf,
-                  0,
-                  decompressedLen,
-                  cache);
+      buf = node.getPayload().populate(heapBuf, 0, decompressedLen, cache);
     } catch (Throwable t) {
       node.getPayload().completeExceptionally(t);
       accessMapped.compareAndSet(blockIdx, node, null);
