@@ -620,6 +620,8 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
   static List<String> resolveTemporalFields() {
     String spec = System.getProperty("lucene.temporalField.name");
     if (spec == null || spec.isBlank()) {
+      // specific to Fullstory usage. We still want to group segments by temporal buckets even if
+      // "lucene.temporalField.name" is not defined (ie no bucket flushing)
       spec = "EventStart,SessionStart,UserLastIndexedEventStart,UserTipLastEventStart";
     }
     return Arrays.stream(spec.split(", *"))
