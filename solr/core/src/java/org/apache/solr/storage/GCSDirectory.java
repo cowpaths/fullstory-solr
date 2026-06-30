@@ -830,11 +830,13 @@ public class GCSDirectory extends SizeAwareDirectory {
                     try {
                       blobCoordinator.registerBatch(segUUID, blobs);
                     } catch (IOException e) {
-                      log.error(
-                          "async registerBatch failed for segUUID {}; {} blobs may be orphaned",
-                          segUUID,
-                          blobs.size(),
-                          e);
+                      if (log.isErrorEnabled()) {
+                        log.error(
+                            "async registerBatch failed for segUUID {}; {} blobs may be orphaned",
+                            segUUID,
+                            blobs.size(),
+                            e);
+                      }
                     }
                   });
             } catch (InterruptedException e) {
