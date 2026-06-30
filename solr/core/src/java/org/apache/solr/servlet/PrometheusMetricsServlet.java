@@ -636,11 +636,23 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
     MAJOR_MERGE(
         "INDEX.merge.major", "merges_major", "cumulative number of major merges across cores"),
     MAJOR_MERGE_DURATION_P50(
-            "INDEX.merge.major", "merges_major_duration_p50", "p50 latency of major merges across cores", "median_ms", PrometheusMetricType.GAUGE),
+        "INDEX.merge.major",
+        "merges_major_duration_p50",
+        "p50 latency of major merges across cores",
+        "median_ms",
+        PrometheusMetricType.GAUGE),
     MAJOR_MERGE_DURATION_P95(
-            "INDEX.merge.major", "merges_major_duration_p95", "p95 latency of major merges across cores", "p95_ms", PrometheusMetricType.GAUGE),
+        "INDEX.merge.major",
+        "merges_major_duration_p95",
+        "p95 latency of major merges across cores",
+        "p95_ms",
+        PrometheusMetricType.GAUGE),
     MAJOR_MERGE_DURATION_P99(
-            "INDEX.merge.major", "merges_major_duration_p99", "p99 latency of major merges across cores", "p99_ms", PrometheusMetricType.GAUGE),
+        "INDEX.merge.major",
+        "merges_major_duration_p99",
+        "p99 latency of major merges across cores",
+        "p99_ms",
+        PrometheusMetricType.GAUGE),
     MAJOR_MERGE_RUNNING_DOCS(
         "INDEX.merge.major.running.docs",
         "merges_major_current_docs",
@@ -650,11 +662,23 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
     MINOR_MERGE(
         "INDEX.merge.minor", "merges_minor", "cumulative number of minor merges across cores"),
     MINOR_MERGE_DURATION_P50(
-            "INDEX.merge.minor", "merges_minor_duration_p50", "p50 latency of minor merges across cores", "median_ms", PrometheusMetricType.GAUGE),
+        "INDEX.merge.minor",
+        "merges_minor_duration_p50",
+        "p50 latency of minor merges across cores",
+        "median_ms",
+        PrometheusMetricType.GAUGE),
     MINOR_MERGE_DURATION_P95(
-            "INDEX.merge.minor", "merges_minor_duration_p95", "p95 latency of minor merges across cores", "p95_ms", PrometheusMetricType.GAUGE),
+        "INDEX.merge.minor",
+        "merges_minor_duration_p95",
+        "p95 latency of minor merges across cores",
+        "p95_ms",
+        PrometheusMetricType.GAUGE),
     MINOR_MERGE_DURATION_P99(
-            "INDEX.merge.minor", "merges_minor_duration_p99", "p99 latency of minor merges across cores", "p99_ms", PrometheusMetricType.GAUGE),
+        "INDEX.merge.minor",
+        "merges_minor_duration_p99",
+        "p99 latency of minor merges across cores",
+        "p99_ms",
+        PrometheusMetricType.GAUGE),
 
     MINOR_MERGE_RUNNING_DOCS(
         "INDEX.merge.minor.running.docs",
