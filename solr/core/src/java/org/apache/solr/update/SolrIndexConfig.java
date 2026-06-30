@@ -53,9 +53,9 @@ import org.slf4j.LoggerFactory;
  * section of solrconfig.xml
  *
  * <p>Optional {@code <preferredMergePolicyFactory class="...">...</preferredMergePolicyFactory>}
- * selects the merge policy factory when this Solr version understands it; if absent or without a
- * {@code class}, {@code <mergePolicyFactory>} is used. Configsets can ship both so older nodes
- * ignore the unknown preferred element and keep using {@code mergePolicyFactory}.
+ * selects the merge policy factory when this Solr version understands it; if absent, {@code
+ * <mergePolicyFactory>} is used. Configsets can ship both so older nodes ignore the unknown
+ * preferred element and keep using {@code mergePolicyFactory}.
  */
 public class SolrIndexConfig implements MapSerializable {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
