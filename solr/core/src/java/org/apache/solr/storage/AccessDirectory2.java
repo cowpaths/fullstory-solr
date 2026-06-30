@@ -39,6 +39,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicReferenceArray;
@@ -91,6 +94,9 @@ public class AccessDirectory2 extends MMapDirectory {
   private final HashMap<String, AtomicReferenceArray<Cache.Node<BlockCache.Val>>> pendingNodes =
       new HashMap<>();
 
+  private static final AD2IndexInput INIT_DONE_SENTINEL = new AD2IndexInput();
+  private static final int INIT_PRELOAD_TIMEOUT_MILLIS = 1000;
+
   @SuppressWarnings("try")
   public AccessDirectory2(
       Path path, LockFactory lockFactory, Path compressedPath, BlockCache cache, ExecutorService ioExec)
@@ -114,19 +120,55 @@ public class AccessDirectory2 extends MMapDirectory {
     if (files == null) {
       files = new String[0];
     }
-    List<IndexInput> toClose = new ArrayList<>(files.length);
-    for (String file : files) {
-      if (file.endsWith(".tmp")) continue;
-      IOContext ctx = file.endsWith(".cfe") ? IOContext.DEFAULT : IOContext.READONCE;
-      AD2IndexInput input = (AD2IndexInput) openInput(file, ctx);
-      toClose.add(input);
-      if (file.startsWith("segments_")) {
-        segmentsFiles.add(file);
-        input.ensureBlockLoaded(0); // async hint; segments_N is small — likely done before we need it
-        continue;
+    BlockingQueue<AD2IndexInput> initQueue = new ArrayBlockingQueue<>(files.length / 3);
+    Iterator<AD2IndexInput> initIter = new Iterator<AD2IndexInput>() {
+      AD2IndexInput next;
+      @Override
+      public boolean hasNext() {
+        if (next == null) {
+          try {
+            return (next = initQueue.take()) != INIT_DONE_SENTINEL;
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ThreadInterruptedException(e);
+          }
+        } else {
+          return next != INIT_DONE_SENTINEL;
+        }
       }
-      String segName = IndexFileNames.parseSegmentName(file);
-      segToInputs.computeIfAbsent(segName, k -> new ArrayList<>()).add(new AbstractMap.SimpleImmutableEntry<>(file, input));
+
+      @Override
+      public AD2IndexInput next() {
+        AD2IndexInput ret = next;
+        if (ret == null) {
+          throw new IllegalStateException();
+        } else if (ret == INIT_DONE_SENTINEL) {
+          throw new NoSuchElementException();
+        }
+        next = null;
+        return ret;
+      }
+    };
+    List<IndexInput> toClose = new ArrayList<>(files.length);
+    try {
+      AD2IndexInput.preloadSerial(initIter, ioExec, readAheadPermits, INIT_PRELOAD_TIMEOUT_MILLIS);
+      for (String file : files) {
+        if (file.endsWith(".tmp")) continue;
+        AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
+        toClose.add(input);
+        if (file.startsWith("segments_")) {
+          segmentsFiles.add(file);
+          initQueue.add(input); // async hint; segments_N is small — likely done before we need it
+          continue;
+        } else if (file.endsWith(".si")) {
+          initQueue.add(input);
+          continue;
+        }
+        String segName = IndexFileNames.parseSegmentName(file);
+        segToInputs.computeIfAbsent(segName, k -> new ArrayList<>()).add(new AbstractMap.SimpleImmutableEntry<>(file, input));
+      }
+    } finally {
+      initQueue.add(INIT_DONE_SENTINEL);
     }
 
     // Build one SegmentPreloadTask per segment group.
@@ -167,11 +209,11 @@ public class AccessDirectory2 extends MMapDirectory {
             (fp) -> {
               Iterator<AD2IndexInput> inputIter =
                   inputs.stream().map(Map.Entry::getValue).iterator();
-              AD2IndexInput.preloadSerial(inputIter, ioExec, readAheadPermits);
+              AD2IndexInput.preloadSerial(inputIter, ioExec, readAheadPermits, INIT_PRELOAD_TIMEOUT_MILLIS);
               fp.add(() -> {
                 IntArrayList blockIndexes =
                     BlockPreloader.parseCfeBlockIndexes(cfeInputFinal);
-                cfsInputFinal.preloadSerial(blockIndexes.iterator());
+                cfsInputFinal.preloadSerial(blockIndexes.iterator(), INIT_PRELOAD_TIMEOUT_MILLIS);
               });
             });
       } else {
@@ -179,7 +221,7 @@ public class AccessDirectory2 extends MMapDirectory {
         tasks.add((fp) -> {
           Iterator<AD2IndexInput> inputIter =
               inputs.stream().map(Map.Entry::getValue).iterator();
-          AD2IndexInput.preloadSerial(inputIter, ioExec, readAheadPermits);
+          AD2IndexInput.preloadSerial(inputIter, ioExec, readAheadPermits, INIT_PRELOAD_TIMEOUT_MILLIS);
         });
       }
     }
@@ -301,6 +343,15 @@ public class AccessDirectory2 extends MMapDirectory {
         HashMap<String, AtomicReferenceArray<Cache.Node<BlockCache.Val>>> pendingNodes)
         throws IOException {
       this("lazy:" + source, dir, parseRootParams(source, sharedAccessMapped, pendingNodes));
+    }
+
+    private AD2IndexInput() {
+      super("done_sentinel", null, 0, new long[0], null, null);
+      this.ioExec = null;
+      this.readAheadPermits = null;
+      this.compressedGuard = null;
+      this.compressed = null;
+      this.isRoot = false;
     }
 
     private static final class RootParams {
@@ -458,7 +509,7 @@ public class AccessDirectory2 extends MMapDirectory {
               supplyFromBuffers(compressed, compressedGuard, blockOffset, compressedLen, decompressedLen));
     }
 
-    boolean preloadSerial(Iterator<IntCursor> blockIdxIter) {
+    boolean preloadSerial(Iterator<IntCursor> blockIdxIter, int timeoutMillis) {
       // Duplicate compressed[] so the background task has independent position state: the block-0
       // preload of the same file (best-effort, no completion guarantee) may still be in flight on
       // another ioExec thread when this followup task runs.
@@ -474,49 +525,34 @@ public class AccessDirectory2 extends MMapDirectory {
           cache,
           ioExec,
           readAheadPermits,
-          0,
+          timeoutMillis,
           (blockOffset, compressedLen, decompressedLen) ->
               supplyFromBuffers(snap, compressedGuard, blockOffset, compressedLen, decompressedLen));
     }
 
     /**
-     * Acquires one permit and submits one {@code ioExec} task that loads block 0 of each input in
-     * {@code inputs} serially. Appropriate when preloading the first block of several files that
-     * belong to the same segment, so that all of those reads share a single permit and run
-     * sequentially on spinning-disk-friendly I/O.
+     * Acquires one permit and submits one {@code ioExec} task that loads block 0 and the last
+     * block of each input in {@code inputs} serially. Appropriate when preloading the boundary
+     * blocks of several files that belong to the same segment, so that all of those reads share a
+     * single permit and run sequentially on spinning-disk-friendly I/O.
      */
     static boolean preloadSerial(
-        Iterator<AD2IndexInput> inputs, ExecutorService ioExec, BlockPreloader.Permits permits) {
+        Iterator<AD2IndexInput> inputs, ExecutorService ioExec, BlockPreloader.Permits permits, int timeoutMillis) {
       // TODO: pre-inspect block 0 of at least some inputs (check extant.pinnable()) before
       // acquiring a permit, to avoid paying the permit cost when all blocks are already cached.
-      if (!permits.tryAcquire(0)) return false;
+      if (!permits.tryAcquire(timeoutMillis)) return false;
       try {
         ioExec.submit(
             () -> {
               try {
                 while (inputs.hasNext()) {
                   AD2IndexInput in = inputs.next();
-                  int idx = 0;
-                  Cache.Node<BlockCache.Val> extant = in.accessMapped.get(idx);
-                  if (extant != null && extant.pinnable()) continue;
-                  Cache.Node<BlockCache.Val> toPopulate = in.cache.acquireNode();
-                  if (toPopulate == null) return null; // cache full — stop
-                  long blockOffset = in.blockOffsets[idx];
-                  int compressedLen = (int) (in.blockOffsets[idx + 1] - blockOffset);
-                  if (in.accessMapped.compareAndSet(idx, extant, toPopulate)) {
-                    BlockPreloader.populateBuf(
-                        blockOffset,
-                        compressedLen,
-                        idx,
-                        in.decompressedLenFor(idx),
-                        toPopulate,
-                        in.accessMapped,
-                        in.cache,
-                        (bo, cl, dl) ->
-                            supplyFromBuffers(in.compressed, in.compressedGuard, bo, cl, dl));
-                    in.cache.unpin(toPopulate, false);
-                  } else {
-                    in.cache.close(toPopulate, true);
+                  if (!loadBlock(in, 0)) {
+                    return null; // cache full — stop
+                  }
+                  int lastIdx = in.blockOffsets.length - 2;
+                  if (lastIdx > 0 && !loadBlock(in, lastIdx)) {
+                    return null;
                   }
                 }
               } finally {
@@ -527,6 +563,35 @@ public class AccessDirectory2 extends MMapDirectory {
       } catch (Throwable t) {
         permits.release();
         throw t;
+      }
+      return true;
+    }
+
+    /**
+     * Loads block {@code idx} of {@code in} into the cache if not already present. Returns {@code
+     * false} if the cache is full (caller should stop issuing further loads); {@code true}
+     * otherwise.
+     */
+    private static boolean loadBlock(AD2IndexInput in, int idx) throws IOException {
+      Cache.Node<BlockCache.Val> extant = in.accessMapped.get(idx);
+      if (extant != null && extant.pinnable()) return true;
+      Cache.Node<BlockCache.Val> toPopulate = in.cache.acquireNode();
+      if (toPopulate == null) return false;
+      long blockOffset = in.blockOffsets[idx];
+      int compressedLen = (int) (in.blockOffsets[idx + 1] - blockOffset);
+      if (in.accessMapped.compareAndSet(idx, extant, toPopulate)) {
+        BlockPreloader.populateBuf(
+            blockOffset,
+            compressedLen,
+            idx,
+            in.decompressedLenFor(idx),
+            toPopulate,
+            in.accessMapped,
+            in.cache,
+            (bo, cl, dl) -> supplyFromBuffers(in.compressed, in.compressedGuard, bo, cl, dl));
+        in.cache.unpin(toPopulate, false);
+      } else {
+        in.cache.close(toPopulate, true);
       }
       return true;
     }
