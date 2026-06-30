@@ -24,6 +24,8 @@ import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZ
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -1082,8 +1084,23 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * cache scavenger thread.
    */
   static final class NodeRefStruct {
-    private volatile boolean pinned = false;
+    // Plain (non-volatile) field; accessed via PINNED VarHandle with release/acquire/opaque
+    // semantics to avoid the full StoreLoad fence that volatile would impose on every read call.
+    @SuppressWarnings("unused")
+    private boolean pinned = false;
+
     private final AtomicBoolean unpinning = new AtomicBoolean();
+
+    private static final VarHandle PINNED;
+
+    static {
+      try {
+        PINNED = MethodHandles.lookup().findVarHandle(NodeRefStruct.class, "pinned", boolean.class);
+      } catch (ReflectiveOperationException e) {
+        throw new Error(e);
+      }
+    }
+
     private Cache.Node<BlockCache.Val> currentNode;
     // Positive = current block index; negative (~idx) = block index with no live pin.
     private int currentBlockIdx = -1;
@@ -1097,18 +1114,22 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
 
     private void localPin() {
-      pinned = true;
+      // setRelease: establishes happens-before with outOfBandUnpin's getAcquire of pinned,
+      // without requiring a full StoreLoad fence (lock addl) on x86.
+      PINNED.setRelease(this, true);
       while (unpinning.get()) {
         // very rare, we're being out-of-band-unpinned
         // spin-wait for the unpin op to complete or abort
-        pinned = false;
+        PINNED.setRelease(this, false);
         Thread.yield();
-        pinned = true;
+        PINNED.setRelease(this, true);
       }
     }
 
     private void localUnpin() {
-      pinned = false;
+      // setRelease: ensures eventual visibility to outOfBandUnpin's getAcquire without a
+      // StoreLoad fence. Thread.yield() has no fence semantics, so setOpaque is not sufficient.
+      PINNED.setRelease(this, false);
     }
 
     /**
@@ -1118,7 +1139,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
      */
     @SuppressWarnings("try")
     private int setCurrentNode(Cache.Node<BlockCache.Val> node, int blockIdx, BlockCache cache) {
-      assert pinned; // should only be called from a pinned context
+      assert (boolean) PINNED.getAcquire(this); // should only be called from a pinned context
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
       Cache.Node<BlockCache.Val> toUnpin = currentNode;
       if (toUnpin != null) {
@@ -1147,10 +1168,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         }
       } finally {
         if (node != null) {
-          assert pinned;
+          assert (boolean) PINNED.getAcquire(this);
           cache.pin(node);
           try {
-            pinned = false;
+            PINNED.setRelease(this, false);
             readPermit = node.getPayload().register(this, cache);
             localPin();
           } finally {
@@ -1215,7 +1236,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     void outOfBandUnpin(BlockCache blockCache) {
       for (; ; ) {
         if (unpinning.compareAndSet(false, true)) {
-          if (!pinned) {
+          if (!(boolean) PINNED.getAcquire(this)) {
             // scavenger has evicted our pinned-LRU slot; signal that re-acquire is needed
             // NOTE: null out `readPermit`, but do not close it
             readPermit = null;
