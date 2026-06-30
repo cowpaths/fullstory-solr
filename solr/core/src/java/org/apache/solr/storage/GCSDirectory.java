@@ -1509,6 +1509,11 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
   }
 
+  private BlockPreloader.BlockSupplier supplier(String blob) {
+    return (blockOffset, compressedLen, decompressedLen) ->
+        supply(blob, blockOffset, compressedLen, decompressedLen);
+  }
+
   private void maybeReadAheadSeg(
       UUID segUUID,
       Iterator<UUID> nextSegs,
@@ -1532,7 +1537,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                 BlocksStruct blocks = pendingNodes.get(blob);
                 if (blocks != null) {
                   IntArrayList blockIndexes = parseCfeBlockIndexes(cfeName);
-                  String blobS = blob.toString();
+                  BlockPreloader.BlockSupplier blobS = supplier(blob.toString());
                   if (fp == null) {
                     for (IntCursor i : blockIndexes) {
                       ensureLoaded(
@@ -1597,7 +1602,12 @@ public class GCSDirectory extends SizeAwareDirectory {
         }
       }
       if (blocks != null) {
-        ensureLoaded(blobId.toString(), blocks.accessMapped, blocks.blockOffsets, 0, timeoutMillis);
+        ensureLoaded(
+            supplier(blobId.toString()),
+            blocks.accessMapped,
+            blocks.blockOffsets,
+            0,
+            timeoutMillis);
       }
     }
   }
@@ -1612,7 +1622,7 @@ public class GCSDirectory extends SizeAwareDirectory {
   }
 
   private boolean ensureLoaded(
-      String blob,
+      BlockPreloader.BlockSupplier blockSupplier,
       AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped,
       long[] blockOffsets,
       int idx,
@@ -1626,8 +1636,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         ioExec,
         readAheadPermits,
         timeoutMillis,
-        (blockOffset, compressedLen, decompressedLen) ->
-            supply(blob, blockOffset, compressedLen, decompressedLen));
+        blockSupplier);
   }
 
   /**
@@ -1682,6 +1691,8 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     /** Null for always-mapped inputs and for slices. */
     private final String blobName;
+
+    private final BlockPreloader.BlockSupplier blockSupplier;
 
     /**
      * Non-null only in the root input (not slices). For always-mapped roots: a minimal struct
@@ -1850,6 +1861,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.blobName = p.blobUUID.toString();
       this.segUUID = p.segUUID;
       this.blocksStruct = p.bs;
+      this.blockSupplier = dir.supplier(blobName);
     }
 
     // -------------------------------------------------------------------------
@@ -1914,6 +1926,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.blobName = null;
       this.segUUID = null;
       this.blocksStruct = p.bs;
+      this.blockSupplier = null;
     }
 
     // -------------------------------------------------------------------------
@@ -1928,6 +1941,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.blobName = parent.blobName;
       this.segUUID = parent.segUUID;
       this.blocksStruct = null; // slice does not own the mapping
+      this.blockSupplier = parent.blockSupplier;
       maybePreloadSlice();
     }
 
@@ -2007,7 +2021,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     protected boolean ensureBlockLoaded(int blockIdx) {
-      return dir.ensureLoaded(blobName, accessMapped, blockOffsets, blockIdx, 0);
+      return dir.ensureLoaded(blockSupplier, accessMapped, blockOffsets, blockIdx, 0);
     }
 
     @Override

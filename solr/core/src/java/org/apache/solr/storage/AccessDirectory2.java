@@ -342,6 +342,8 @@ public class AccessDirectory2 extends MMapDirectory {
     private final ByteBuffer[] compressed;
     private final boolean isRoot;
 
+    private final BlockPreloader.BlockSupplier blockSupplier;
+
     // -------------------------------------------------------------------------
     // Root constructor (via this() delegation)
     // -------------------------------------------------------------------------
@@ -362,6 +364,7 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressedGuard = null;
       this.compressed = null;
       this.isRoot = false;
+      this.blockSupplier = null;
     }
 
     private static final class RootParams {
@@ -473,6 +476,10 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
       this.compressed = p.compressed;
       this.isRoot = true;
+      blockSupplier =
+          (blockOffset, compressedLen, decompressedLen) ->
+              supplyFromBuffers(
+                  compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
     }
 
     // -------------------------------------------------------------------------
@@ -487,6 +494,7 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressedGuard = parent.compressedGuard;
       this.compressed = parent.compressed;
       this.isRoot = false;
+      blockSupplier = parent.blockSupplier;
       maybePreloadSlice();
     }
 
@@ -512,9 +520,7 @@ public class AccessDirectory2 extends MMapDirectory {
           ioExec,
           readAheadPermits,
           0,
-          (blockOffset, compressedLen, decompressedLen) ->
-              supplyFromBuffers(
-                  compressed, compressedGuard, blockOffset, compressedLen, decompressedLen));
+          blockSupplier);
     }
 
     boolean preloadSerial(Iterator<IntCursor> blockIdxIter, int timeoutMillis) {
@@ -527,9 +533,7 @@ public class AccessDirectory2 extends MMapDirectory {
           ioExec,
           readAheadPermits,
           timeoutMillis,
-          (blockOffset, compressedLen, decompressedLen) ->
-              supplyFromBuffers(
-                  compressed, compressedGuard, blockOffset, compressedLen, decompressedLen));
+          blockSupplier);
     }
 
     /**
@@ -593,7 +597,7 @@ public class AccessDirectory2 extends MMapDirectory {
             toPopulate,
             in.accessMapped,
             in.cache,
-            (bo, cl, dl) -> supplyFromBuffers(in.compressed, in.compressedGuard, bo, cl, dl));
+            in.blockSupplier);
         in.cache.unpin(toPopulate, false);
       } else {
         in.cache.close(toPopulate, true);
