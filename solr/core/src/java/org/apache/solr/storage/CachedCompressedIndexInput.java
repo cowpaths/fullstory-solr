@@ -88,7 +88,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private final int sliceLastBlockIdx;
 
   private long seekPos = -1;
-  private long filePointer = 0;
   private ByteBuffer postBuffer = ByteBuffer.allocate(0);
   private int postBufferBaseline;
   private final NodeRefStruct currentNodeRef;
@@ -223,7 +222,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     this.accessMapped = parent.accessMapped;
     this.offset = parent.offset + sliceOffset;
     this.seekPos = this.offset;
-    this.filePointer = this.offset;
     this.sliceLength = sliceLen;
     this.postBuffer = ByteBuffer.allocate(0);
     this.sliceFirstBlockIdx = Math.toIntExact(this.offset >> COMPRESSION_BLOCK_SHIFT);
@@ -274,13 +272,17 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public final long getFilePointer() {
-    return filePointer - offset;
+    if (seekPos != -1) return seekPos - offset;
+    int blockIdx = currentNodeRef.currentBlockIdx;
+    if (blockIdx < 0) blockIdx = ~blockIdx;
+    return ((long) blockIdx << COMPRESSION_BLOCK_SHIFT)
+        + (postBuffer.position() - postBufferBaseline)
+        - offset;
   }
 
   @Override
   public final void seek(long pos) throws IOException {
     seekPos = pos + offset;
-    filePointer = pos + offset;
   }
 
   @Override
@@ -318,7 +320,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     if (pos != -1) {
       seekPos = -1;
     } else if (currentNodeRef.currentBlockIdx < 0) {
-      pos = filePointer;
+      int blockIdx = ~currentNodeRef.currentBlockIdx;
+      pos =
+          ((long) blockIdx << COMPRESSION_BLOCK_SHIFT)
+              + (postBuffer.position() - postBufferBaseline);
     } else {
       return;
     }
@@ -326,7 +331,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   }
 
   private void actualSeek(final long pos) throws IOException {
-    filePointer = pos;
     int blockIdx = (int) (pos >> COMPRESSION_BLOCK_SHIFT);
     if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
     postBuffer.position(postBufferBaseline + (int) (pos & COMPRESSION_BLOCK_MASK_LOW));
@@ -592,7 +596,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     localPin();
     try {
       if (!postBuffer.hasRemaining()) initBlockSeq();
-      filePointer++;
       return guard.getByte(postBuffer);
     } finally {
       currentNodeRef.localUnpin();
@@ -603,7 +606,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   public void readBytes(byte[] dst, int offset, int len) throws IOException {
     localPin();
     try {
-      filePointer += len;
       int left = postBuffer.remaining();
       while (left < len) {
         guard.getBytes(postBuffer, dst, offset, left);
@@ -626,7 +628,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   /** Read next byte within a localPin() context; refills block if at boundary. */
   private byte _readByte(final int remaining) throws IOException {
     if (remaining == 0) initBlockSeq();
-    filePointer++;
     return guard.getByte(postBuffer);
   }
 
@@ -636,7 +637,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     try {
       final int remaining = postBuffer.remaining();
       if (remaining >= Short.BYTES) {
-        filePointer += Short.BYTES;
         return guard.getShort(postBuffer);
       }
       final byte b1 = _readByte(remaining);
@@ -697,23 +697,18 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       if ((b & 0xF0) == 0) return i;
     } else {
       b = guard.getByte(postBuffer);
-      filePointer++;
       if (b >= 0) return b;
       int i = b & 0x7F;
       b = guard.getByte(postBuffer);
-      filePointer++;
       i |= (b & 0x7F) << 7;
       if (b >= 0) return i;
       b = guard.getByte(postBuffer);
-      filePointer++;
       i |= (b & 0x7F) << 14;
       if (b >= 0) return i;
       b = guard.getByte(postBuffer);
-      filePointer++;
       i |= (b & 0x7F) << 21;
       if (b >= 0) return i;
       b = guard.getByte(postBuffer);
-      filePointer++;
       i |= (b & 0x0F) << 28;
       if ((b & 0xF0) == 0) return i;
     }
@@ -778,46 +773,36 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       b = _readByte(--remaining);
     } else {
       b = guard.getByte(postBuffer);
-      filePointer++;
       if (b >= 0) return b;
       i = b & 0x7FL;
       b = guard.getByte(postBuffer);
-      filePointer++;
       i |= (b & 0x7FL) << 7;
       if (b >= 0) return i;
       b = guard.getByte(postBuffer);
-      filePointer++;
       i |= (b & 0x7FL) << 14;
       if (b >= 0) return i;
       b = guard.getByte(postBuffer);
-      filePointer++;
       i |= (b & 0x7FL) << 21;
       if (b >= 0) return i;
       b = guard.getByte(postBuffer);
-      filePointer++;
       i |= (b & 0x7FL) << 28;
       if (b >= 0) return i;
       b = guard.getByte(postBuffer);
-      filePointer++;
       i |= (b & 0x7FL) << 35;
       if (b >= 0) return i;
       b = guard.getByte(postBuffer);
-      filePointer++;
       i |= (b & 0x7FL) << 42;
       if (b >= 0) return i;
       b = guard.getByte(postBuffer);
-      filePointer++;
       i |= (b & 0x7FL) << 49;
       if (b >= 0) return i;
       b = guard.getByte(postBuffer);
-      filePointer++;
       i |= (b & 0x7FL) << 56;
       if (b >= 0) return i;
       if (!allowNegative) {
         throw new IOException("Invalid vLong detected (negative values disallowed)");
       }
       b = guard.getByte(postBuffer);
-      filePointer++;
     }
     i |= (b & 0x7FL) << 63;
     if (b == 0 || b == 1) return i;
@@ -838,7 +823,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     final int length = _readVInt(postBuffer.remaining());
     final byte[] bytes = new byte[length];
     final int left = postBuffer.remaining();
-    filePointer += length;
     if (left < length) {
       slowReadBytes(bytes, 0, length, left);
     } else {
@@ -910,7 +894,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   private int _readInt(final int remaining) throws IOException {
     if (remaining >= Integer.BYTES || refillAtBoundary(remaining)) {
-      filePointer += Integer.BYTES;
       return guard.getInt(postBuffer);
     }
     // Cross-block: use _readByte to avoid per-byte localPin/localUnpin overhead.
@@ -932,7 +915,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   private long _readLong(final int remaining) throws IOException {
     if (remaining >= Long.BYTES || refillAtBoundary(remaining)) {
-      filePointer += Long.BYTES;
       return guard.getLong(postBuffer);
     }
     final byte b0 = _readByte(remaining);
@@ -970,7 +952,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       } else {
         final int position = postBuffer.position();
         guard.getLongs(longViews[position & 0x07].position(position >>> 3), dst, offset, length);
-        filePointer += bytesRequested;
         postBuffer.position(position + (int) bytesRequested);
       }
     } finally {
@@ -995,7 +976,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       } else {
         final int position = postBuffer.position();
         guard.getInts(intViews[position & 0x03].position(position >>> 2), dst, offset, length);
-        filePointer += bytesRequested;
         postBuffer.position(position + (int) bytesRequested);
       }
     } finally {
@@ -1020,7 +1000,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       } else {
         final int position = postBuffer.position();
         guard.getFloats(floatViews[position & 0x03].position(position >>> 2), dst, offset, length);
-        filePointer += bytesRequested;
         postBuffer.position(position + (int) bytesRequested);
       }
     } finally {
