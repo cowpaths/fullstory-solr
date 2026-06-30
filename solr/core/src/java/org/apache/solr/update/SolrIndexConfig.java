@@ -92,9 +92,9 @@ public class SolrIndexConfig implements MapSerializable {
   public final String lockType;
 
   /**
-   * Effective merge-policy factory: {@code <preferredMergePolicyFactory>} when present,
-   * otherwise {@code <mergePolicyFactory>}. Older Solr versions ignore the preferred element
-   * and use only {@code mergePolicyFactory}.
+   * Effective merge-policy factory: {@code <preferredMergePolicyFactory>} when present, otherwise
+   * {@code <mergePolicyFactory>}. Older Solr versions ignore the preferred element and use only
+   * {@code mergePolicyFactory}.
    */
   public final PluginInfo mergePolicyFactoryInfo;
 
