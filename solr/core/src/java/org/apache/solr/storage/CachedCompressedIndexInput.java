@@ -383,6 +383,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         }
         return;
     }
+    if (type == 0) {
+      if (blockIdx > readAheadTo) {
+        readAheadTo = blockIdx;
+      }
+      return;
+    }
     int newReadAheadTo;
     if (seqAccessCount > 0
         && (newReadAheadTo =
