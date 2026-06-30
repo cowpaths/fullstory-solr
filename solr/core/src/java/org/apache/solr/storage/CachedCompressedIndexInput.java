@@ -36,6 +36,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import org.apache.lucene.store.ByteBufferGuard;
@@ -112,7 +113,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * @param compressedLen the number of compressed bytes to read from the backend
    * @param decompressedLen the expected decompressed block size
    */
-  protected abstract ByteBuffer supply(
+  protected abstract byte[] supply(
       int blockIdx, long blockOffset, int compressedLen, int decompressedLen) throws IOException;
 
   /**
@@ -349,9 +350,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     ByteBuffer buf;
     long loadNanos;
     try {
-      long start = System.nanoTime();
+      // long start = System.nanoTime();
       buf = cached.getPayload().join(cache);
-      loadNanos = System.nanoTime() - start;
+      loadNanos = 0; // /System.nanoTime() - start;
     } catch (CompletionException e) {
       cache.unpin(cached);
       throw unwrapException(e.getCause());
@@ -371,6 +372,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private void setCurrentNode(
       Cache.Node<BlockCache.Val> node, int blockIdx, int type, long loadNanos) {
     int seqAccessCount = currentNodeRef.setCurrentNode(node, blockIdx, cache);
+//    System.out.println("XXX type="+ type + ", " + seqAccessCount + ", " + blockIdx+"/"+
+//        accessMapped.length()+", "+ TimeUnit.NANOSECONDS.toMillis(loadNanos) + "ms, " + this);
     switch (seqAccessCount) {
       case -1:
         // gone backward, no read-ahead
@@ -419,15 +422,15 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       if (extant == cached) {
         // We won the race: fetch from backend and populate the node.
         if (blockIdx == 0) onFirstBlockMiss();
-        long start = System.nanoTime();
+        // long start = System.nanoTime();
         ByteBuffer buf;
         try {
-          ByteBuffer heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
+          byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
           buf =
               node.getPayload()
                   .populate(
-                      heapBuf.array(),
-                      heapBuf.arrayOffset() + heapBuf.position(),
+                      heapBuf,
+                      0,
                       decompressedLen,
                       cache);
         } catch (Throwable t) {
@@ -437,7 +440,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
           cache.close(node);
           throw unwrapException(t);
         }
-        setCurrentNode(node, blockIdx, 2, System.nanoTime() - start);
+        setCurrentNode(node, blockIdx, 2, 0 /* System.nanoTime() - start */);
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
         postBufferBaseline = 0;
         longViews = null;
@@ -454,9 +457,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       }
     }
     // Serve uncached (cache full or node race lost with no cached result).
-    long start = System.nanoTime();
-    ByteBuffer heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
-    setCurrentNode(null, blockIdx, 3, System.nanoTime() - start);
+    // long start = System.nanoTime();
+    ByteBuffer heapBuf = ByteBuffer.wrap(supply(blockIdx, blockOffset, compressedLen, decompressedLen), 0, decompressedLen);
+    setCurrentNode(null, blockIdx, 3, 0 /* System.nanoTime() - start */);
     postBuffer = heapBuf;
     postBufferBaseline = heapBuf.position();
     heapBuf.order(ByteOrder.LITTLE_ENDIAN);

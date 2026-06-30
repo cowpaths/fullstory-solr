@@ -489,7 +489,7 @@ public class AccessDirectory2 extends MMapDirectory {
     // -------------------------------------------------------------------------
 
     @Override
-    protected ByteBuffer supply(
+    protected byte[] supply(
         int blockIdx, long blockOffset, int compressedLen, int decompressedLen) throws IOException {
       return supplyFromBuffers(compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
     }
@@ -506,7 +506,16 @@ public class AccessDirectory2 extends MMapDirectory {
           readAheadPermits,
           0,
           (blockOffset, compressedLen, decompressedLen) ->
-              supplyFromBuffers(compressed, compressedGuard, blockOffset, compressedLen, decompressedLen));
+          {
+            // Duplicate compressed[] so the ioExec read-ahead task has independent position state from
+            // the reader thread, which may concurrently call supply() → supplyFromBuffers(compressed,…).
+            // ByteBuffer.position() mutates the buffer, so sharing without duplication is a data race.
+            ByteBuffer[] snap = new ByteBuffer[compressed.length];
+            for (int i = 0; i < compressed.length; i++) {
+              snap[i] = compressed[i].duplicate();
+            }
+            return supplyFromBuffers(snap, compressedGuard, blockOffset, compressedLen, decompressedLen);
+          });
     }
 
     boolean preloadSerial(Iterator<IntCursor> blockIdxIter, int timeoutMillis) {
@@ -596,7 +605,7 @@ public class AccessDirectory2 extends MMapDirectory {
       return true;
     }
 
-    private static ByteBuffer supplyFromBuffers(
+    private static byte[] supplyFromBuffers(
         ByteBuffer[] bufs,
         ByteBufferGuard compressedGuard,
         long blockOffset,
@@ -621,7 +630,7 @@ public class AccessDirectory2 extends MMapDirectory {
       }
       compressedGuard.getBytes(bb, preBuffer, readOffset, toRead);
       CompressingDirectory.decompress(preBuffer, 0, decompressedLen, decompressBuffer, 0);
-      return ByteBuffer.wrap(decompressBuffer, 0, decompressedLen);
+      return decompressBuffer;
     }
 
     @Override

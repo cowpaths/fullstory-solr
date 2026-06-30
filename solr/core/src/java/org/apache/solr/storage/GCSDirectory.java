@@ -1638,7 +1638,7 @@ public class GCSDirectory extends SizeAwareDirectory {
    * consumed. This prevents unbounded pre-parsing of surplus {@code ReadObjectResponse} messages
    * into the zero-copy lifecycle manager's unclosed-streams map.
    */
-  private ByteBuffer supply(String blobName, long pos, int compressedLen, int decompressedLen)
+  private byte[] supply(String blobName, long pos, int compressedLen, int decompressedLen)
       throws IOException {
     byte[] compressed = new byte[compressedLen];
     ByteBuffer compBuf = ByteBuffer.wrap(compressed);
@@ -1667,7 +1667,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
     byte[] decompressed = new byte[decompressedLen + 7];
     CompressingDirectory.decompress(compressed, 0, decompressedLen, decompressed, 0);
-    return ByteBuffer.wrap(decompressed, 0, decompressedLen);
+    return decompressed;
   }
 
   static final class GCSIndexInput extends CachedCompressedIndexInput {
@@ -1936,7 +1936,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     // -------------------------------------------------------------------------
 
     @Override
-    protected ByteBuffer supply(
+    protected byte[] supply(
         int blockIdx, long blockOffset, int compressedLen, int decompressedLen) throws IOException {
       return dir.supply(blobName, blockOffset, compressedLen, decompressedLen);
     }

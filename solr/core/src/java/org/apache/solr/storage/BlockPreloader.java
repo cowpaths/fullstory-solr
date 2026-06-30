@@ -64,7 +64,7 @@ class BlockPreloader {
      * @param decompressedLen expected decompressed size in bytes
      * @return ByteBuffer with exactly {@code decompressedLen} decompressed bytes remaining
      */
-    ByteBuffer supply(long blockOffset, int compressedLen, int decompressedLen) throws IOException;
+    byte[] supply(long blockOffset, int compressedLen, int decompressedLen) throws IOException;
   }
 
   /**
@@ -247,12 +247,12 @@ class BlockPreloader {
       throws IOException {
     ByteBuffer buf;
     try {
-      ByteBuffer heapBuf = supplier.supply(blockOffset, compressedLen, decompressedLen);
+      byte[] heapBuf = supplier.supply(blockOffset, compressedLen, decompressedLen);
       buf =
           node.getPayload()
               .populate(
-                  heapBuf.array(),
-                  heapBuf.arrayOffset() + heapBuf.position(),
+                  heapBuf,
+                  0,
                   decompressedLen,
                   cache);
     } catch (Throwable t) {
