@@ -485,13 +485,9 @@ public class AccessDirectory2 extends MMapDirectory {
       this.ioExec = parent.ioExec;
       this.readAheadPermits = parent.readAheadPermits;
       this.compressedGuard = parent.compressedGuard;
-      ByteBuffer[] parentCompressed = parent.compressed;
-      ByteBuffer[] dup = new ByteBuffer[parentCompressed.length];
-      for (int i = parentCompressed.length - 1; i >= 0; i--) {
-        dup[i] = parentCompressed[i].duplicate();
-      }
-      this.compressed = dup;
+      this.compressed = parent.compressed;
       this.isRoot = false;
+      maybePreloadSlice();
     }
 
     // -------------------------------------------------------------------------
@@ -516,28 +512,12 @@ public class AccessDirectory2 extends MMapDirectory {
           ioExec,
           readAheadPermits,
           0,
-          (blockOffset, compressedLen, decompressedLen) -> {
-            // Duplicate compressed[] so the ioExec read-ahead task has independent position state
-            // from the reader thread, which may concurrently call supply() →
-            // supplyFromBuffers(compressed,…). ByteBuffer.position() mutates the buffer, so sharing
-            // without duplication is a data race.
-            ByteBuffer[] snap = new ByteBuffer[compressed.length];
-            for (int i = 0; i < compressed.length; i++) {
-              snap[i] = compressed[i].duplicate();
-            }
-            return supplyFromBuffers(
-                snap, compressedGuard, blockOffset, compressedLen, decompressedLen);
-          });
+          (blockOffset, compressedLen, decompressedLen) ->
+              supplyFromBuffers(
+                  compressed, compressedGuard, blockOffset, compressedLen, decompressedLen));
     }
 
     boolean preloadSerial(Iterator<IntCursor> blockIdxIter, int timeoutMillis) {
-      // Duplicate compressed[] so the background task has independent position state: the block-0
-      // preload of the same file (best-effort, no completion guarantee) may still be in flight on
-      // another ioExec thread when this followup task runs.
-      ByteBuffer[] snap = new ByteBuffer[compressed.length];
-      for (int i = 0; i < compressed.length; i++) {
-        snap[i] = compressed[i].duplicate();
-      }
       return BlockPreloader.ensureLoadedSerial(
           accessMapped,
           blockOffsets,
@@ -549,7 +529,7 @@ public class AccessDirectory2 extends MMapDirectory {
           timeoutMillis,
           (blockOffset, compressedLen, decompressedLen) ->
               supplyFromBuffers(
-                  snap, compressedGuard, blockOffset, compressedLen, decompressedLen));
+                  compressed, compressedGuard, blockOffset, compressedLen, decompressedLen));
     }
 
     /**
@@ -631,7 +611,9 @@ public class AccessDirectory2 extends MMapDirectory {
       final byte[] preBuffer = new byte[compressedLen];
       final byte[] decompressBuffer = new byte[decompressedLen + 7]; // +7 for decompressor headroom
       ByteBuffer bb =
-          bufs[(int) (blockOffset >> MAX_MAP_SHIFT)].position((int) (blockOffset & MAX_MAP_MASK));
+          bufs[(int) (blockOffset >> MAX_MAP_SHIFT)]
+              .duplicate()
+              .position((int) (blockOffset & MAX_MAP_MASK));
       int readOffset = 0;
       int left = bb.remaining();
       int toRead = compressedLen;
@@ -641,7 +623,9 @@ public class AccessDirectory2 extends MMapDirectory {
         readOffset += left;
         blockOffset += left;
         bb =
-            bufs[(int) (blockOffset >> MAX_MAP_SHIFT)].position((int) (blockOffset & MAX_MAP_MASK));
+            bufs[(int) (blockOffset >> MAX_MAP_SHIFT)]
+                .duplicate()
+                .position((int) (blockOffset & MAX_MAP_MASK));
         left = bb.remaining();
       }
       compressedGuard.getBytes(bb, preBuffer, readOffset, toRead);
