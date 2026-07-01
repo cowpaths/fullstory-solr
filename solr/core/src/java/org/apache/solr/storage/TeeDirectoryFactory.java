@@ -48,6 +48,7 @@ import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.util.RamUsageEstimator;
+import org.apache.solr.common.MapWriter;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.NamedList;
@@ -98,6 +99,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
     // AccessDirectory2 mode (blockCache != null)
     // ---------------------------------------------------------------------------
     final BlockCache blockCache;
+    final LongAdder prepopulated;
 
     // ---------------------------------------------------------------------------
     // AccessDirectory mode (blockCache == null)
@@ -127,6 +129,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
 
       if (blockCache != null) {
         // AccessDirectory2 mode: no lazy-activation machinery needed.
+        prepopulated = new LongAdder();
         activationQueue = null;
         priorityActivate = null;
         rawCt = null;
@@ -141,6 +144,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
         activationTask = null;
       } else {
         // AccessDirectory mode: full lazy-activation machinery.
+        prepopulated = null;
         activationQueue = new LinkedBlockingQueue<>();
         priorityActivate = new ConcurrentHashMap<>();
         rawCt = new LongAdder();
@@ -224,7 +228,16 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
       solrMetricsContext = parentContext.getChildContext(this);
       final MetricsMap mm;
       if (blockCache != null) {
-        mm = new MetricsMap(blockCache::writeMetrics);
+        mm =
+            new MetricsMap(
+                ew ->
+                    ew.put(
+                        "blockCache",
+                        (MapWriter)
+                            bew -> {
+                              blockCache.writeMetrics(bew);
+                              bew.put("prepopulated", prepopulated.sum());
+                            }));
       } else {
         mm =
             new MetricsMap(
@@ -506,7 +519,8 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
                       lockFactory,
                       persistentPath,
                       nodeLevelState.blockCache,
-                      nodeLevelState.ioExec);
+                      nodeLevelState.ioExec,
+                      nodeLevelState.prepopulated);
             } else {
               dir = new AccessDirectory(access, lockFactory, persistentPath, nodeLevelState);
             }

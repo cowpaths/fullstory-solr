@@ -45,6 +45,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.zip.CRC32;
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.SegmentInfos;
@@ -84,6 +85,7 @@ public class AccessDirectory2 extends MMapDirectory {
   private final BlockCache cache;
   private final ExecutorService ioExec;
   private final BlockPreloader.Permits readAheadPermits;
+  private final LongAdder prepopulated;
 
   /**
    * Shared {@code accessMapped} arrays pre-populated by {@link WriteThroughOutput} at write-close
@@ -103,12 +105,14 @@ public class AccessDirectory2 extends MMapDirectory {
       LockFactory lockFactory,
       Path compressedPath,
       BlockCache cache,
-      ExecutorService ioExec)
+      ExecutorService ioExec,
+      LongAdder prepopulated)
       throws IOException {
     super(path, lockFactory);
     this.compressedPath = compressedPath;
     this.cache = cache;
     this.ioExec = ioExec;
+    this.prepopulated = prepopulated;
     this.readAheadPermits =
         BlockPreloader.ofSemaphore(new Semaphore(CachedCompressedIndexInput.MAX_READ_AHEAD, true));
 
@@ -713,6 +717,7 @@ public class AccessDirectory2 extends MMapDirectory {
       Cache.Node<BlockCache.Val> node = dir.cache.acquireNode();
       if (node != null) {
         node.getPayload().populate(blockBuf, 0, len, dir.cache);
+        dir.prepopulated.increment();
       }
       nodeSlots.add(node); // null = cache exhausted; cold on first read
       blockBufPos = 0;
