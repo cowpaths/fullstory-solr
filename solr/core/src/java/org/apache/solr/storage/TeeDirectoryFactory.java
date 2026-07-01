@@ -235,8 +235,9 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
                         "blockCache",
                         (MapWriter)
                             bew -> {
-                              blockCache.writeMetrics(bew);
-                              bew.put("prepopulated", prepopulated.sum());
+                              long prep = prepopulated.sum();
+                              blockCache.writeMetrics(bew, prep);
+                              bew.put("prepopulated", prep);
                             }));
       } else {
         mm =

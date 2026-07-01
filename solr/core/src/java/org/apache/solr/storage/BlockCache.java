@@ -378,6 +378,7 @@ public class BlockCache implements Closeable {
   private final LongAdder poolExhausted = new LongAdder();
   private final LongAdder pinnedCount = new LongAdder();
   private final LongAdder closedCount = new LongAdder();
+  private final LongAdder hits = new LongAdder();
 
   private Cache<RefVal<Val>> pinnedLru() {
     return pinned[ThreadLocalRandom.current().nextInt(pinned.length)];
@@ -507,6 +508,7 @@ public class BlockCache implements Closeable {
   boolean pin(Cache.Node<Val> node) {
     int rc = partitions[0].pin(node);
     if (rc > 0) pinnedCount.increment();
+    if (rc >= 0) hits.increment();
     return rc >= 0;
   }
 
@@ -619,14 +621,19 @@ public class BlockCache implements Closeable {
     return node;
   }
 
-  public void writeMetrics(MapWriter.EntryWriter ew) throws IOException {
+  public void writeMetrics(MapWriter.EntryWriter ew, long prepopulated) throws IOException {
     long pinnedBytes = pinnedCount.sum() * COMPRESSION_BLOCK_SIZE;
+    long h = hits.sum();
+    long acq = acquisitions.sum();
+    long misses = acq - prepopulated;
     ew.put("totalBytes", totalBytes);
     ew.put("closedCount", closedCount.sum());
-    ew.put("acquisitions", acquisitions.sum());
+    ew.put("acquisitions", acq);
     ew.put("poolExhausted", poolExhausted.sum());
     ew.put("pinnedBytes", pinnedBytes);
     ew.put("unpinnedBytes", totalBytes - pinnedBytes);
+    ew.put("hits", h);
+    ew.put("hitRate", h + misses == 0 ? 1.0 : (double) h / (h + misses));
     ew.put(
         "usage",
         RamUsageEstimator.humanReadableUnits(pinnedBytes)
