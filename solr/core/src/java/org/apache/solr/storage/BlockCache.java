@@ -35,7 +35,10 @@ import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.LongAdder;
+import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
+import org.apache.solr.common.MapWriter;
 import org.apache.solr.storage.CachedCompressedIndexInput.NodeRefStruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -370,6 +373,12 @@ public class BlockCache implements Closeable {
 
   private final Cache<RefVal<Val>>[] pinned;
 
+  private final long totalBytes;
+  private final LongAdder acquisitions = new LongAdder();
+  private final LongAdder poolExhausted = new LongAdder();
+  private final LongAdder pinnedCount = new LongAdder();
+  private final LongAdder closedCount = new LongAdder();
+
   private Cache<RefVal<Val>> pinnedLru() {
     return pinned[ThreadLocalRandom.current().nextInt(pinned.length)];
   }
@@ -383,6 +392,7 @@ public class BlockCache implements Closeable {
     this.pool = initPool(nBlocks, backingFile, true);
     this.partitions = distribute(nBlocks);
     this.pinned = initPinned();
+    this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     log.info(
         "BlockCache initialized: nBlocks={}, targetBytes={}, nPartitions={}",
         pool.length,
@@ -433,6 +443,7 @@ public class BlockCache implements Closeable {
     this.pool = initPool(nBlocks, existingBackingFile, false);
     this.partitions = distribute(nBlocks);
     this.pinned = initPinned();
+    this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     log.info(
         "BlockCache initialized from existing file {}: nBlocks={}, targetBytes={}, nPartitions={}",
         existingBackingFile,
@@ -494,7 +505,9 @@ public class BlockCache implements Closeable {
    * queue we call it on. TODO: make it <i>actually</i> static, for clarity?
    */
   boolean pin(Cache.Node<Val> node) {
-    return partitions[0].pin(node);
+    int rc = partitions[0].pin(node);
+    if (rc > 0) pinnedCount.increment();
+    return rc >= 0;
   }
 
   private static final int REF_LIMIT = 20;
@@ -562,7 +575,7 @@ public class BlockCache implements Closeable {
     }
 
     boolean pin() {
-      return blockLru.pin(permit);
+      return blockLru.pin(permit) >= 0;
     }
   }
 
@@ -577,6 +590,7 @@ public class BlockCache implements Closeable {
   @SuppressWarnings("ReferenceEquality")
   void unpin(Cache.Node<Val> node, boolean recordAccess) {
     if (partitions[tlrIndex()].unpin(node, recordAccess)) {
+      pinnedCount.decrement();
       // on last unpin, null out the cached ByteBuffer. recreating is cheap.
       Val v = node.getPayload();
       if (v != null) {
@@ -595,7 +609,29 @@ public class BlockCache implements Closeable {
    * the first is fully pinned. Returns {@code null} only if all partitions are exhausted.
    */
   Cache.Node<Val> acquireNode() {
-    return partitions[tlrIndex()].acquireNode();
+    Cache.Node<Val> node = partitions[tlrIndex()].acquireNode();
+    if (node != null) {
+      acquisitions.increment();
+      pinnedCount.increment();
+    } else {
+      poolExhausted.increment();
+    }
+    return node;
+  }
+
+  public void writeMetrics(MapWriter.EntryWriter ew) throws IOException {
+    long pinnedBytes = pinnedCount.sum() * COMPRESSION_BLOCK_SIZE;
+    ew.put("totalBytes", totalBytes);
+    ew.put("closedCount", closedCount.sum());
+    ew.put("acquisitions", acquisitions.sum());
+    ew.put("poolExhausted", poolExhausted.sum());
+    ew.put("pinnedBytes", pinnedBytes);
+    ew.put("unpinnedBytes", totalBytes - pinnedBytes);
+    ew.put(
+        "usage",
+        RamUsageEstimator.humanReadableUnits(pinnedBytes)
+            + " / "
+            + RamUsageEstimator.humanReadableUnits(totalBytes));
   }
 
   /**
@@ -608,7 +644,13 @@ public class BlockCache implements Closeable {
   }
 
   boolean close(Cache.Node<Val> node, boolean unconditional) {
-    return partitions[tlrIndex()].close(node, unconditional);
+    if (unconditional) pinnedCount.decrement();
+    if (partitions[tlrIndex()].close(node, unconditional)) {
+      closedCount.increment();
+      return true;
+    } else {
+      return false;
+    }
   }
 
   private int tlrIndex() {

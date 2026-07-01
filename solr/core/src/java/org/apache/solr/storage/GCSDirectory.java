@@ -2083,6 +2083,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     // -------------------------------------------------------------------------
 
     @Override
+    @SuppressWarnings("ReferenceEquality")
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
       int sliceLastBlockIdx;

@@ -224,11 +224,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
       solrMetricsContext = parentContext.getChildContext(this);
       final MetricsMap mm;
       if (blockCache != null) {
-        mm =
-            new MetricsMap(
-                (writer) -> {
-                  // placeholder — BlockCache does not yet expose internal counters
-                });
+        mm = new MetricsMap(blockCache::writeMetrics);
       } else {
         mm =
             new MetricsMap(

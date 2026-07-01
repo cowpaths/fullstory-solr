@@ -317,16 +317,20 @@ class Cache<V extends Cache.Val> {
    * the LRU list (it is no longer evictable). If the node is already pinned (refCount&gt;0), the
    * refcount is simply incremented with no list operation.
    */
-  boolean pin(Node<V> node) {
+  /**
+   * Returns 1 if this was a first pin (refCount 0&rarr;1, node removed from evictable list), 0 if
+   * the node was already pinned (refCount incremented only), -1 if the node is permanently dead.
+   */
+  int pin(Node<V> node) {
     Val p = node.payload;
     if (p == null) {
-      return false;
+      return -1;
     }
     int rc = p.refCount;
     for (; ; ) {
       switch (rc) {
         case -1:
-          return false;
+          return -1;
         case UNPIN_SENTINEL:
           rc = p.refCount;
           continue;
@@ -342,8 +346,9 @@ class Cache<V extends Cache.Val> {
     if (rc == 0) {
       // First pin: remove from the evictable list.
       removeFromList(node);
+      return 1;
     }
-    return true;
+    return 0;
   }
 
   /**
