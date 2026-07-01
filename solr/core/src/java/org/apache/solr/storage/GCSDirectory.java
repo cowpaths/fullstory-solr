@@ -1692,6 +1692,8 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
   }
 
+  private static final int MAX_CHUNK_SIZE = 2 << 20; // 2M
+
   /**
    * Opens a single {@link ReadChannel} covering {@code [blockOffset, blockOffsets[sliceLastBlockIdx
    * + 1])}, reads and returns the decompressed bytes for {@code blockIdx} synchronously, then
@@ -1708,14 +1710,14 @@ public class GCSDirectory extends SizeAwareDirectory {
       int decompressedLen,
       AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped,
       long[] blockOffsets,
-      int sliceLastBlockIdx,
+      int toIdx,
       IntUnaryOperator decompressedLenFor,
       ExecutorService ioExec)
       throws IOException {
     if (!rangePreloadSem.tryAcquire()) {
       return supply(blobName, blockOffset, compressedLen, decompressedLen);
     }
-    long endOffset = blockOffsets[sliceLastBlockIdx + 1];
+    long endOffset = blockOffsets[toIdx + 1];
     try {
       channelSemaphore.acquire();
     } catch (InterruptedException e) {
@@ -1726,7 +1728,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     boolean handedOff = false;
     ReadChannel ch = storage.reader(BlobId.of(bucket, blobName));
     try {
-      ch.setChunkSize((int) (endOffset - blockOffset));
+      ch.setChunkSize((int) Math.min(endOffset - blockOffset, MAX_CHUNK_SIZE));
       ch.seek(blockOffset);
       ch.limit(endOffset);
 
@@ -1739,8 +1741,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       // Hand off the open channel to a background task for remaining blocks.
       ioExec.submit(
           () -> {
-            try {
-              for (int i = blockIdx + 1; i <= sliceLastBlockIdx; i++) {
+            try (ch) {
+              for (int i = blockIdx + 1; i <= toIdx; i++) {
                 long bo = blockOffsets[i];
                 int cl = (int) (blockOffsets[i + 1] - bo);
                 // Always read sequentially from the channel; decide afterward whether to cache.
@@ -1768,11 +1770,6 @@ public class GCSDirectory extends SizeAwareDirectory {
             } catch (IOException e) {
               log.warn("range preload failed for blob {}", blobName, e);
             } finally {
-              try {
-                ch.close();
-              } catch (Exception e) {
-                log.warn("error closing range preload channel for blob {}", blobName, e);
-              }
               channelSemaphore.release();
               rangePreloadSem.release();
             }
@@ -2088,23 +2085,38 @@ public class GCSDirectory extends SizeAwareDirectory {
     @Override
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
+      int sliceLastBlockIdx;
       if (logicalRoot == Boolean.FALSE
           && !rangePreloadTriggered
-          && blockIdx < sliceLastBlockIdx()) {
+          && blockIdx < (sliceLastBlockIdx = sliceLastBlockIdx())) {
         rangePreloadTriggered = true;
-        return dir.supplyAndHandoff(
-            blobName,
-            blockIdx,
-            blockOffset,
-            compressedLen,
-            decompressedLen,
-            accessMapped,
-            blockOffsets,
-            sliceLastBlockIdx(),
-            this::decompressedLenFor,
-            dir.ioExec);
+        int toIdx = lastUnpinnableIdx(blockIdx, sliceLastBlockIdx);
+        if (toIdx != -1) {
+          return dir.supplyAndHandoff(
+              blobName,
+              blockIdx,
+              blockOffset,
+              compressedLen,
+              decompressedLen,
+              accessMapped,
+              blockOffsets,
+              toIdx,
+              this::decompressedLenFor,
+              dir.ioExec);
+        }
       }
       return dir.supply(blobName, blockOffset, compressedLen, decompressedLen);
+    }
+
+    private int lastUnpinnableIdx(int blockIdx, int sliceLastBlockIdx) {
+      int ret = -1;
+      for (int i = blockIdx + 1; i <= sliceLastBlockIdx; i++) {
+        Cache.Node<BlockCache.Val> extant = accessMapped.get(i);
+        if (extant == null || !extant.pinnable()) {
+          ret = i;
+        }
+      }
+      return ret;
     }
 
     @Override
