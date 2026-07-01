@@ -156,6 +156,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     return false;
   }
 
+  protected final int sliceLastBlockIdx() {
+    return sliceLastBlockIdx;
+  }
+
   /**
    * Called when block 0 is first fetched from the backend (a cache-miss win on block 0). Intended
    * for segment-level read-ahead triggers. Default: no-op.

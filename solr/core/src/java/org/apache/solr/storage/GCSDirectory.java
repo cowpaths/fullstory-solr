@@ -68,6 +68,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.function.IntUnaryOperator;
 import java.util.stream.Collectors;
 import java.util.zip.CRC32;
 import org.apache.lucene.index.IndexFileNames;
@@ -1681,6 +1682,117 @@ public class GCSDirectory extends SizeAwareDirectory {
     return decompressed;
   }
 
+  private static void fullyRead(ReadChannel ch, ByteBuffer buf, String blobName, long pos)
+      throws IOException {
+    while (buf.hasRemaining()) {
+      int n = ch.read(buf);
+      if (n == -1) {
+        throw new EOFException("unexpected EOF in GCS blob " + blobName + " at position " + pos);
+      }
+    }
+  }
+
+  /**
+   * Opens a single {@link ReadChannel} covering {@code [blockOffset, blockOffsets[sliceLastBlockIdx
+   * + 1])}, reads and returns the decompressed bytes for {@code blockIdx} synchronously, then
+   * submits a background task to populate remaining missing blocks in the slice from the same open
+   * channel. The background task closes the channel and releases {@code channelSemaphore} and
+   * {@code rangePreloadSem} when it finishes. If no range preload permit is available, falls back
+   * to {@link #supply}.
+   */
+  byte[] supplyAndHandoff(
+      String blobName,
+      int blockIdx,
+      long blockOffset,
+      int compressedLen,
+      int decompressedLen,
+      AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped,
+      long[] blockOffsets,
+      int sliceLastBlockIdx,
+      IntUnaryOperator decompressedLenFor,
+      ExecutorService ioExec)
+      throws IOException {
+    if (!rangePreloadSem.tryAcquire()) {
+      return supply(blobName, blockOffset, compressedLen, decompressedLen);
+    }
+    long endOffset = blockOffsets[sliceLastBlockIdx + 1];
+    try {
+      channelSemaphore.acquire();
+    } catch (InterruptedException e) {
+      rangePreloadSem.release();
+      Thread.currentThread().interrupt();
+      throw new IOException("interrupted waiting for GCS channel slot", e);
+    }
+    boolean handedOff = false;
+    ReadChannel ch = storage.reader(BlobId.of(bucket, blobName));
+    try {
+      ch.setChunkSize((int) (endOffset - blockOffset));
+      ch.seek(blockOffset);
+      ch.limit(endOffset);
+
+      // Read and return the triggering block synchronously.
+      byte[] compressed = new byte[compressedLen];
+      fullyRead(ch, ByteBuffer.wrap(compressed), blobName, blockOffset);
+      byte[] decompressed = new byte[decompressedLen + 7];
+      CompressingDirectory.decompress(compressed, 0, decompressedLen, decompressed, 0);
+
+      // Hand off the open channel to a background task for remaining blocks.
+      ioExec.submit(
+          () -> {
+            try {
+              for (int i = blockIdx + 1; i <= sliceLastBlockIdx; i++) {
+                long bo = blockOffsets[i];
+                int cl = (int) (blockOffsets[i + 1] - bo);
+                // Always read sequentially from the channel; decide afterward whether to cache.
+                byte[] comp = new byte[cl];
+                fullyRead(ch, ByteBuffer.wrap(comp), blobName, bo);
+                Cache.Node<BlockCache.Val> extant = accessMapped.get(i);
+                if (extant != null && extant.pinnable()) {
+                  continue; // already cached — bytes discarded
+                }
+                Cache.Node<BlockCache.Val> toPopulate = cache.acquireNode();
+                if (toPopulate == null) {
+                  return null; // cache full — stop
+                }
+                int dl = decompressedLenFor.applyAsInt(i);
+                byte[] decomp = new byte[dl + 7];
+                CompressingDirectory.decompress(comp, 0, dl, decomp, 0);
+                if (accessMapped.compareAndSet(i, extant, toPopulate)) {
+                  BlockPreloader.populateBuf(
+                      bo, cl, i, dl, toPopulate, accessMapped, cache, (a, b, c) -> decomp);
+                  cache.unpin(toPopulate, false);
+                } else {
+                  cache.close(toPopulate, true);
+                }
+              }
+            } catch (IOException e) {
+              log.warn("range preload failed for blob {}", blobName, e);
+            } finally {
+              try {
+                ch.close();
+              } catch (Exception e) {
+                log.warn("error closing range preload channel for blob {}", blobName, e);
+              }
+              channelSemaphore.release();
+              rangePreloadSem.release();
+            }
+            return null;
+          });
+      handedOff = true;
+      return decompressed;
+    } finally {
+      if (!handedOff) {
+        try {
+          ch.close();
+        } catch (Exception e) {
+          log.warn("error closing range preload channel for blob {}", blobName, e);
+        }
+        channelSemaphore.release();
+        rangePreloadSem.release();
+      }
+    }
+  }
+
   static final class GCSIndexInput extends CachedCompressedIndexInput {
 
     private final GCSDirectory dir;
@@ -1695,6 +1807,20 @@ public class GCSDirectory extends SizeAwareDirectory {
     private final String blobName;
 
     private final BlockPreloader.BlockSupplier blockSupplier;
+
+    /**
+     * Encodes nesting depth for range-preload eligibility:
+     *
+     * <ul>
+     *   <li>{@code null} — this is a CFS outer file (container); no preload.
+     *   <li>{@code true} — this is a logical-file root (CFS sub-file or non-CFS root); no preload.
+     *   <li>{@code false} — this is a sub-slice of a logical file; eligible for range preload.
+     * </ul>
+     */
+    private final Boolean logicalRoot;
+
+    /** Set on first {@link #supply} call that triggers a range preload; prevents re-triggering. */
+    private boolean rangePreloadTriggered;
 
     /**
      * Non-null only in the root input (not slices). For always-mapped roots: a minimal struct
@@ -1715,12 +1841,14 @@ public class GCSDirectory extends SizeAwareDirectory {
       final UUID blobUUID, segUUID;
       final long length;
       final BlocksStruct bs;
+      final Boolean logicalRoot;
 
-      RootParams(UUID blobUUID, UUID segUUID, long length, BlocksStruct bs) {
+      RootParams(UUID blobUUID, UUID segUUID, long length, BlocksStruct bs, Boolean logicalRoot) {
         this.blobUUID = blobUUID;
         this.segUUID = segUUID;
         this.length = length;
         this.bs = bs;
+        this.logicalRoot = logicalRoot;
       }
     }
 
@@ -1847,7 +1975,9 @@ public class GCSDirectory extends SizeAwareDirectory {
           }
       }
 
-      return new RootParams(blobUUID, segUUID, length, bs);
+      Boolean logicalRoot =
+          offsetFile.getFileName().toString().endsWith(".cfs") ? null : Boolean.TRUE;
+      return new RootParams(blobUUID, segUUID, length, bs, logicalRoot);
     }
 
     private GCSIndexInput(String resourceDescription, GCSDirectory dir, RootParams p) {
@@ -1864,6 +1994,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.segUUID = p.segUUID;
       this.blocksStruct = p.bs;
       this.blockSupplier = dir.supplier(blobName);
+      this.logicalRoot = p.logicalRoot;
     }
 
     // -------------------------------------------------------------------------
@@ -1929,6 +2060,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.segUUID = null;
       this.blocksStruct = p.bs;
       this.blockSupplier = null;
+      this.logicalRoot = null; // always-mapped: no GCS fetching, no preload
     }
 
     // -------------------------------------------------------------------------
@@ -1944,6 +2076,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       this.segUUID = parent.segUUID;
       this.blocksStruct = null; // slice does not own the mapping
       this.blockSupplier = parent.blockSupplier;
+      // null (CFS outer) → true (logical file); t/f (any logical file) → false (sub-slice)
+      this.logicalRoot = parent.logicalRoot == null ? Boolean.TRUE : Boolean.FALSE;
       maybePreloadSlice();
     }
 
@@ -1954,6 +2088,22 @@ public class GCSDirectory extends SizeAwareDirectory {
     @Override
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
+      if (logicalRoot == Boolean.FALSE
+          && !rangePreloadTriggered
+          && blockIdx < sliceLastBlockIdx()) {
+        rangePreloadTriggered = true;
+        return dir.supplyAndHandoff(
+            blobName,
+            blockIdx,
+            blockOffset,
+            compressedLen,
+            decompressedLen,
+            accessMapped,
+            blockOffsets,
+            sliceLastBlockIdx(),
+            this::decompressedLenFor,
+            dir.ioExec);
+      }
       return dir.supply(blobName, blockOffset, compressedLen, decompressedLen);
     }
 
@@ -2034,6 +2184,8 @@ public class GCSDirectory extends SizeAwareDirectory {
 
   private static final int READ_CHANNEL_HEADROOM =
       GCSDirectoryFactory.DEFAULT_MAX_OPEN_CHANNELS >> 1;
+  private static final int MAX_RANGE_PRELOADS = 4;
+  private final Semaphore rangePreloadSem = new Semaphore(MAX_RANGE_PRELOADS);
   private final AtomicInteger readaheadPermit = new AtomicInteger(0);
   private final BlockPreloader.Permits readAheadPermits =
       new BlockPreloader.Permits() {
