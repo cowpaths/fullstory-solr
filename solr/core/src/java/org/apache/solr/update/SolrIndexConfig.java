@@ -177,13 +177,19 @@ public class SolrIndexConfig implements MapSerializable {
     mergeSchedulerInfo = getPluginInfo(get("mergeScheduler"), def.mergeSchedulerInfo);
     PluginInfo mergePolicyFactory =
         getPluginInfo(get("mergePolicyFactory"), def.mergePolicyFactoryInfo);
-    PluginInfo preferredMergePolicyFactory =
-        getPluginInfo(get("preferredMergePolicyFactory"), null);
+
+    //check if preferredMergePolicyFactory is set and use it if sysprop solr.usePreferredMergePolicyFactory is true
+    PluginInfo preferredMergePolicyFactory = null;
+    if (Boolean.getBoolean("solr.usePreferredMergePolicyFactory")) {
+      preferredMergePolicyFactory =
+              getPluginInfo(get("preferredMergePolicyFactory"), null);
+    }
+
     if (preferredMergePolicyFactory != null) {
       mergePolicyFactoryInfo = preferredMergePolicyFactory;
       log.info(
-          "Using <preferredMergePolicyFactory> ({}) instead of <mergePolicyFactory>",
-          preferredMergePolicyFactory);
+              "Using <preferredMergePolicyFactory> ({}) instead of <mergePolicyFactory>",
+              preferredMergePolicyFactory);
     } else {
       mergePolicyFactoryInfo = mergePolicyFactory;
     }
