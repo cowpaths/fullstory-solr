@@ -20,7 +20,6 @@ package org.apache.solr.storage;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Generic concurrent LRU cache with pin/unpin support.
@@ -249,7 +248,7 @@ class Cache<V extends Cache.Val> {
     }
   }
 
-  protected void insertAtHead(Node<V> listHead, Node<V> node, boolean recordAccess) {
+  protected boolean insertAtHead(Node<V> listHead, Node<V> node, boolean recordAccess) {
     node.prev = listHead;
     Node<V> oldNext = reserve(listHead, RESERVED);
     assert oldNext != REMOVED_PROTO : "queue head sentinel should never be removed";
@@ -258,6 +257,7 @@ class Cache<V extends Cache.Val> {
     if (!NEXT.compareAndSet(listHead, RESERVED, node)) {
       throw new IllegalStateException("unexpected concurrent modification of listHead.next");
     }
+    return false;
   }
 
   private boolean removeFromList(Node<V> node) {
@@ -355,8 +355,12 @@ class Cache<V extends Cache.Val> {
   /**
    * Releases a read pin. If this is the last pin (refCount transitions 1&rarr;0), the node is
    * inserted at the LRU head (most-recently-used position) and becomes evictable.
+   *
+   * <p>Returns 1 if last unpin and the node was routed to the hot queue, 0 if last unpin and routed
+   * to the cold queue (or base class with no hot/cold distinction), -1 if not the last unpin
+   * (refCount decremented only).
    */
-  boolean unpin(Node<V> node, boolean recordAccess) {
+  int unpin(Node<V> node, boolean recordAccess) {
     Val p = node.payload;
     assert p != null;
     int rc = p.refCount;
@@ -364,11 +368,11 @@ class Cache<V extends Cache.Val> {
       if (rc == 1) {
         int witness = (int) REF_COUNT.compareAndExchange(p, 1, UNPIN_SENTINEL);
         if (witness == 1) {
-          insertAtHead(lruHead, node, recordAccess);
+          boolean toHot = insertAtHead(lruHead, node, recordAccess);
           if (!REF_COUNT.compareAndSet(p, UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
-          return true;
+          return toHot ? 1 : 0;
         } else {
           rc = witness;
         }
@@ -376,7 +380,7 @@ class Cache<V extends Cache.Val> {
         assert rc > 1;
         int witness = (int) REF_COUNT.compareAndExchange(p, rc, rc - 1);
         if (witness == rc) {
-          return false;
+          return -1;
         } else {
           rc = witness;
         }
@@ -461,8 +465,26 @@ class Cache<V extends Cache.Val> {
      */
     private long lastUnpinNanos;
 
+    /**
+     * True if this node was most recently routed to the hot queue by {@link
+     * DualQueueCache#insertAtHead}. Copied through {@code createPayload} on eviction so that {@link
+     * BlockCache} can maintain per-queue counters without any list traversal. Volatile for
+     * cross-thread visibility between the unpinning thread (writer) and the evicting/pinning thread
+     * (reader).
+     */
+    private volatile boolean fromHot;
+
+    boolean fromHot() {
+      return fromHot;
+    }
+
     TsVal(int initialRefCount) {
       super(initialRefCount);
+    }
+
+    TsVal(TsVal oldValue, int initialRefCount) {
+      super(initialRefCount);
+      this.fromHot = oldValue.fromHot;
     }
   }
 
@@ -481,22 +503,6 @@ class Cache<V extends Cache.Val> {
     /** Hot queue: tail sentinel. */
     private final Node<V> hotTail = new Node<>();
 
-    /**
-     * Cumulative count of nodes evicted from the hot queue via {@link #acquireTail}. Cold
-     * acquisitions are derivable as {@code totalAcquisitions - hotAcquisitions}.
-     */
-    final LongAdder hotAcquisitions = new LongAdder();
-
-    /**
-     * Approximate gauge of the current number of unpinned nodes in the hot queue. Incremented on
-     * insertion to the hot queue; decremented on hot eviction via {@link #acquireTail}. First-pins
-     * (refCount 0→1 via {@link Cache#pin}) that re-activate a hot node are not decremented here, so
-     * this gauge slightly overestimates when hot nodes are actively re-pinned from the LRU. The
-     * error is bounded and self-correcting: such nodes eventually return to a queue and are
-     * re-counted on their next unpin.
-     */
-    final LongAdder hotUnpinned = new LongAdder();
-
     DualQueueCache(Iterable<V> initialValues) {
       super(initialValues);
       hotHead.next = hotTail;
@@ -504,15 +510,14 @@ class Cache<V extends Cache.Val> {
     }
 
     @Override
-    protected final void insertAtHead(Node<V> head, Node<V> node, boolean recordAccess) {
-      long prev = ((TsVal) node.payload).lastUnpinNanos;
-      ((TsVal) node.payload).lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
-      if (toHot(prev)) {
-        super.insertAtHead(hotHead, node, recordAccess);
-        hotUnpinned.increment();
-      } else {
-        super.insertAtHead(head, node, recordAccess);
-      }
+    protected final boolean insertAtHead(Node<V> head, Node<V> node, boolean recordAccess) {
+      TsVal tvp = node.payload;
+      long prev = tvp.lastUnpinNanos;
+      tvp.lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
+      boolean toHot = toHot(prev);
+      tvp.fromHot = toHot;
+      super.insertAtHead(toHot ? hotHead : head, node, recordAccess);
+      return toHot;
     }
 
     @Override
@@ -551,10 +556,7 @@ class Cache<V extends Cache.Val> {
       if (coldCandidateTs != 0) {
         this.coldTs = coldCandidateTs;
       }
-      if (fromHot) {
-        hotAcquisitions.increment();
-        hotUnpinned.decrement();
-      }
+      ((TsVal) candidate.payload).fromHot = fromHot;
       return candidate;
     }
 

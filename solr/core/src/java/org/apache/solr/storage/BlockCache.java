@@ -131,6 +131,11 @@ public class BlockCache implements Closeable {
       this.cacheBlockOrd = cacheBlockOrd;
     }
 
+    Val(BlockCache.Val oldValue, int initialRefCount) {
+      super(oldValue, initialRefCount);
+      this.cacheBlockOrd = oldValue.cacheBlockOrd;
+    }
+
     ByteBuffer populate(byte[] arr, int off, int len, BlockCache c) {
       assert cacheBlockOrd >= 0;
       ByteBuffer ret = c.slice(cacheBlockOrd);
@@ -352,7 +357,7 @@ public class BlockCache implements Closeable {
 
     @Override
     protected BlockCache.Val createPayload(BlockCache.Val oldValue, int initialRefCount) {
-      return new BlockCache.Val(oldValue.cacheBlockOrd, initialRefCount);
+      return new BlockCache.Val(oldValue, initialRefCount);
     }
   }
 
@@ -379,6 +384,8 @@ public class BlockCache implements Closeable {
   private final LongAdder pinnedCount = new LongAdder();
   private final LongAdder closedCount = new LongAdder();
   private final LongAdder hits = new LongAdder();
+  private final LongAdder hotAcquisitions = new LongAdder();
+  private final LongAdder hotUnpinned = new LongAdder();
 
   private Cache<RefVal<Val>> pinnedLru() {
     return pinned[ThreadLocalRandom.current().nextInt(pinned.length)];
@@ -507,7 +514,10 @@ public class BlockCache implements Closeable {
    */
   boolean pin(Cache.Node<Val> node) {
     int rc = partitions[0].pin(node);
-    if (rc > 0) pinnedCount.increment();
+    if (rc > 0) {
+      pinnedCount.increment();
+      if (node.getPayload().fromHot()) hotUnpinned.decrement();
+    }
     if (rc >= 0) hits.increment();
     return rc >= 0;
   }
@@ -589,20 +599,24 @@ public class BlockCache implements Closeable {
     unpin(node, true);
   }
 
-  @SuppressWarnings("ReferenceEquality")
+  @SuppressWarnings({"ReferenceEquality", "fallthrough"})
   void unpin(Cache.Node<Val> node, boolean recordAccess) {
-    if (partitions[tlrIndex()].unpin(node, recordAccess)) {
-      pinnedCount.decrement();
-      // on last unpin, null out the cached ByteBuffer. recreating is cheap.
-      Val v = node.getPayload();
-      if (v != null) {
-        ByteBuffer cur = v.cached;
-        if (cur != null && cur != EXCEPTION_SENTINEL) {
-          // CAS ensures we never clobber EXCEPTION_SENTINEL; if it loses, cached is already
-          // null or sentinel, both fine. Worst case of a benign loss: another slice() call.
-          Val.CACHED.compareAndSet(v, cur, null);
+    switch (partitions[tlrIndex()].unpin(node, recordAccess)) {
+      case 1:
+        hotUnpinned.increment();
+        // fallthrough
+      case 0:
+        pinnedCount.decrement();
+        // on last unpin, null out the cached ByteBuffer. recreating is cheap.
+        Val v = node.getPayload();
+        if (v != null) {
+          ByteBuffer cur = v.cached;
+          if (cur != null && cur != EXCEPTION_SENTINEL) {
+            // CAS ensures we never clobber EXCEPTION_SENTINEL; if it loses, cached is already
+            // null or sentinel, both fine. Worst case of a benign loss: another slice() call.
+            Val.CACHED.compareAndSet(v, cur, null);
+          }
         }
-      }
     }
   }
 
@@ -615,6 +629,10 @@ public class BlockCache implements Closeable {
     if (node != null) {
       acquisitions.increment();
       pinnedCount.increment();
+      if (node.getPayload().fromHot()) {
+        hotAcquisitions.increment();
+        hotUnpinned.decrement();
+      }
     } else {
       poolExhausted.increment();
     }
@@ -626,27 +644,22 @@ public class BlockCache implements Closeable {
     long h = hits.sum();
     long acq = acquisitions.sum();
     long misses = acq - prepopulated;
-    long hotAcq = 0, hotUnp = 0;
-    for (Partition p : partitions) {
-      hotAcq += p.hotAcquisitions.sum();
-      hotUnp += p.hotUnpinned.sum();
-    }
-    hotUnp *= COMPRESSION_BLOCK_SIZE;
+    long hotUnpinnedBytes = hotUnpinned.sum() * COMPRESSION_BLOCK_SIZE;
     ew.put("totalBytes", totalBytes);
     ew.put("closedCount", closedCount.sum());
     ew.put("acquisitions", acq);
-    ew.put("hotAcquisitions", hotAcq);
+    ew.put("hotAcquisitions", hotAcquisitions.sum());
     ew.put("poolExhausted", poolExhausted.sum());
     ew.put("pinnedBytes", pinnedBytes);
     ew.put("unpinnedBytes", totalBytes - pinnedBytes);
-    ew.put("hotUnpinnedBytes", hotUnp);
+    ew.put("hotUnpinnedBytes", hotUnpinnedBytes);
     ew.put("hits", h);
     ew.put("hitRate", h + misses == 0 ? 1.0 : (double) h / (h + misses));
     ew.put(
         "usage",
         RamUsageEstimator.humanReadableUnits(pinnedBytes)
             + " / "
-            + RamUsageEstimator.humanReadableUnits(hotUnp)
+            + RamUsageEstimator.humanReadableUnits(hotUnpinnedBytes)
             + " / "
             + RamUsageEstimator.humanReadableUnits(totalBytes));
   }
