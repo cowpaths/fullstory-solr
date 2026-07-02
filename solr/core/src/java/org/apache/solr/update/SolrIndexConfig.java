@@ -53,9 +53,10 @@ import org.slf4j.LoggerFactory;
  * section of solrconfig.xml
  *
  * <p>Optional {@code <preferredMergePolicyFactory class="...">...</preferredMergePolicyFactory>}
- * selects the merge policy factory when this Solr version understands it; if absent or without a
- * {@code class}, {@code <mergePolicyFactory>} is used. Configsets can ship both so older nodes
- * ignore the unknown preferred element and keep using {@code mergePolicyFactory}.
+ * selects the merge policy factory when this Solr version understands it and sysprop
+ * solr.usePreferredMergePolicyFactory is true ; otherwise {@code <mergePolicyFactory>} is used.
+ * Configsets can ship both so older nodes ignore the unknown preferred element and keep using
+ * {@code mergePolicyFactory}.
  */
 public class SolrIndexConfig implements MapSerializable {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
@@ -92,9 +93,9 @@ public class SolrIndexConfig implements MapSerializable {
   public final String lockType;
 
   /**
-   * Effective merge-policy factory: {@code <preferredMergePolicyFactory>} when present, otherwise
-   * {@code <mergePolicyFactory>}. Older Solr versions ignore the preferred element and use only
-   * {@code mergePolicyFactory}.
+   * Effective merge-policy factory: {@code <preferredMergePolicyFactory>} when present and sysprop
+   * solr.usePreferredMergePolicyFactory is true, otherwise {@code <mergePolicyFactory>}. Older Solr
+   * versions ignore the preferred element and use only {@code mergePolicyFactory}.
    */
   public final PluginInfo mergePolicyFactoryInfo;
 
@@ -178,18 +179,18 @@ public class SolrIndexConfig implements MapSerializable {
     PluginInfo mergePolicyFactory =
         getPluginInfo(get("mergePolicyFactory"), def.mergePolicyFactoryInfo);
 
-    //check if preferredMergePolicyFactory is set and use it if sysprop solr.usePreferredMergePolicyFactory is true
+    // check if preferredMergePolicyFactory is set and use it if sysprop
+    // solr.usePreferredMergePolicyFactory is true
     PluginInfo preferredMergePolicyFactory = null;
     if (Boolean.getBoolean("solr.usePreferredMergePolicyFactory")) {
-      preferredMergePolicyFactory =
-              getPluginInfo(get("preferredMergePolicyFactory"), null);
+      preferredMergePolicyFactory = getPluginInfo(get("preferredMergePolicyFactory"), null);
     }
 
     if (preferredMergePolicyFactory != null) {
       mergePolicyFactoryInfo = preferredMergePolicyFactory;
       log.info(
-              "Using <preferredMergePolicyFactory> ({}) instead of <mergePolicyFactory>",
-              preferredMergePolicyFactory);
+          "Using <preferredMergePolicyFactory> ({}) instead of <mergePolicyFactory>",
+          preferredMergePolicyFactory);
     } else {
       mergePolicyFactoryInfo = mergePolicyFactory;
     }
