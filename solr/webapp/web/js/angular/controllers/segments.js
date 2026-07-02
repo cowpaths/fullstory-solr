@@ -17,6 +17,49 @@
 
 var MB_FACTOR = 1024*1024;
 
+/** Blue-grey (future) then green (newest) -> red (oldest); extra buckets reuse the last color. */
+var BUCKET_BAR_COLORS = [
+    '#a9c3d1', // -9d / far future
+    '#a9d1a9', // 3d / newest typical bucket
+    '#c3d1a9',
+    '#d1d1a9',
+    '#d1c3a9',
+    '#d1b6a9',
+    '#d1a9a9'
+];
+
+var buildColorByBucket = function(bucketBoundaries) {
+    var colorByBucket = {};
+    if (!bucketBoundaries) {
+        return colorByBucket;
+    }
+    var lastIdx = BUCKET_BAR_COLORS.length - 1;
+    for (var i = 0; i < bucketBoundaries.length; i++) {
+        colorByBucket[String(bucketBoundaries[i])] = BUCKET_BAR_COLORS[Math.min(i, lastIdx)];
+    }
+    return colorByBucket;
+};
+
+var colorByBucketCache = { key: null, map: null };
+
+var getColorByBucket = function(bucketBoundaries) {
+    var key = bucketBoundaries ? bucketBoundaries.join('\0') : '';
+    if (colorByBucketCache.key !== key) {
+        colorByBucketCache.key = key;
+        colorByBucketCache.map = buildColorByBucket(bucketBoundaries);
+    }
+    return colorByBucketCache.map;
+};
+
+var assignBucketBarColors = function(segments, colorByBucket) {
+    for (var i = 0; i < segments.length; i++) {
+        var bucket = segments[i].temporalBucket;
+        if (bucket != null) {
+            segments[i].bucketBarColor = colorByBucket[String(bucket)];
+        }
+    }
+};
+
 solrAdminApp.controller('SegmentsController', function($scope, $routeParams, $interval, Segments, Constants) {
     $scope.resetMenu("segments", Constants.IS_CORE_PAGE);
 
@@ -64,6 +107,8 @@ solrAdminApp.controller('SegmentsController', function($scope, $routeParams, $in
                 $scope.documentCount += segment.size;
                 $scope.deletionCount += segment.delCount;
             }
+            var colorByBucket = getColorByBucket(data.bucketBoundaries);
+            assignBucketBarColors($scope.segments, colorByBucket);
             $scope.deletionsPercentage = calculateDeletionsPercentage($scope.documentCount, $scope.deletionCount);
         });
     };
