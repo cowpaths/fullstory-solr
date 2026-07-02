@@ -626,17 +626,27 @@ public class BlockCache implements Closeable {
     long h = hits.sum();
     long acq = acquisitions.sum();
     long misses = acq - prepopulated;
+    long hotAcq = 0, hotUnp = 0;
+    for (Partition p : partitions) {
+      hotAcq += p.hotAcquisitions.sum();
+      hotUnp += p.hotUnpinned.sum();
+    }
+    hotUnp *= COMPRESSION_BLOCK_SIZE;
     ew.put("totalBytes", totalBytes);
     ew.put("closedCount", closedCount.sum());
     ew.put("acquisitions", acq);
+    ew.put("hotAcquisitions", hotAcq);
     ew.put("poolExhausted", poolExhausted.sum());
     ew.put("pinnedBytes", pinnedBytes);
     ew.put("unpinnedBytes", totalBytes - pinnedBytes);
+    ew.put("hotUnpinnedBytes", hotUnp);
     ew.put("hits", h);
     ew.put("hitRate", h + misses == 0 ? 1.0 : (double) h / (h + misses));
     ew.put(
         "usage",
         RamUsageEstimator.humanReadableUnits(pinnedBytes)
+            + " / "
+            + RamUsageEstimator.humanReadableUnits(hotUnp)
             + " / "
             + RamUsageEstimator.humanReadableUnits(totalBytes));
   }

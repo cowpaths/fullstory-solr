@@ -20,6 +20,7 @@ package org.apache.solr.storage;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Generic concurrent LRU cache with pin/unpin support.
@@ -480,6 +481,22 @@ class Cache<V extends Cache.Val> {
     /** Hot queue: tail sentinel. */
     private final Node<V> hotTail = new Node<>();
 
+    /**
+     * Cumulative count of nodes evicted from the hot queue via {@link #acquireTail}. Cold
+     * acquisitions are derivable as {@code totalAcquisitions - hotAcquisitions}.
+     */
+    final LongAdder hotAcquisitions = new LongAdder();
+
+    /**
+     * Approximate gauge of the current number of unpinned nodes in the hot queue. Incremented on
+     * insertion to the hot queue; decremented on hot eviction via {@link #acquireTail}. First-pins
+     * (refCount 0→1 via {@link Cache#pin}) that re-activate a hot node are not decremented here, so
+     * this gauge slightly overestimates when hot nodes are actively re-pinned from the LRU. The
+     * error is bounded and self-correcting: such nodes eventually return to a queue and are
+     * re-counted on their next unpin.
+     */
+    final LongAdder hotUnpinned = new LongAdder();
+
     DualQueueCache(Iterable<V> initialValues) {
       super(initialValues);
       hotHead.next = hotTail;
@@ -490,13 +507,19 @@ class Cache<V extends Cache.Val> {
     protected final void insertAtHead(Node<V> head, Node<V> node, boolean recordAccess) {
       long prev = ((TsVal) node.payload).lastUnpinNanos;
       ((TsVal) node.payload).lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
-      super.insertAtHead(toHot(prev) ? hotHead : head, node, recordAccess);
+      if (toHot(prev)) {
+        super.insertAtHead(hotHead, node, recordAccess);
+        hotUnpinned.increment();
+      } else {
+        super.insertAtHead(head, node, recordAccess);
+      }
     }
 
     @Override
     protected Node<V> acquireTail(Node<V> lruTail, Node<V> lruHead) {
       long coldCandidateTs;
       Node<V> candidate;
+      boolean fromHot;
       long now = System.nanoTime();
       Val p;
       do {
@@ -508,24 +531,29 @@ class Cache<V extends Cache.Val> {
             return null;
           }
           candidate = hotCandidate;
+          fromHot = true;
           coldCandidateTs = 0;
         } else if (hotCandidate == hotHead) {
           candidate = coldCandidate;
+          fromHot = false;
           coldCandidateTs = lastUnpinNanos(coldCandidate.payload);
         } else {
           // Evict from hot only when cold is at least HOT_EVICTION_MULTIPLIER times as stale,
           // giving hot nodes proportional protection. age() maps lastUnpinNanos=0 to a large
           // sentinel so never-used cold nodes are always preferred over any real hot node.
           coldCandidateTs = lastUnpinNanos(coldCandidate.payload);
-          candidate =
+          fromHot =
               age(now, coldCandidateTs)
-                      < age(now, lastUnpinNanos(hotCandidate.payload)) >> HOT_EVICTION_SHIFT
-                  ? hotCandidate
-                  : coldCandidate;
+                  < age(now, lastUnpinNanos(hotCandidate.payload)) >> HOT_EVICTION_SHIFT;
+          candidate = fromHot ? hotCandidate : coldCandidate;
         }
       } while ((p = candidate.payload) == null || !REF_COUNT.compareAndSet(p, 0, -1));
       if (coldCandidateTs != 0) {
         this.coldTs = coldCandidateTs;
+      }
+      if (fromHot) {
+        hotAcquisitions.increment();
+        hotUnpinned.decrement();
       }
       return candidate;
     }
