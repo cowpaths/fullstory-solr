@@ -83,7 +83,8 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         new NodeMetricsApiCaller(),
         new AggregateMetricsApiCaller(),
         new CoresMetricsApiCaller(),
-        new CollectionCacheMetricsApiCaller());
+        new CollectionCacheMetricsApiCaller(),
+        new BlockCacheMetricsApiCaller());
   }
 
   private final Map<String, PrometheusMetricType> cacheMetricTypes =
@@ -1325,6 +1326,106 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
 
           results.add(metric);
         }
+      }
+    }
+  }
+
+  static class BlockCacheMetricsApiCaller extends MetricsByPrefixApiCaller {
+
+    BlockCacheMetricsApiCaller() {
+      super("solr.node", "DIRECTORY.teeDirectory");
+    }
+
+    @Override
+    protected void handle(ResultContext resultContext, JsonNode metricsNode) throws IOException {
+      JsonNode bc = metricsNode.path("solr.node").path("DIRECTORY.teeDirectory").path("blockCache");
+      if (bc.isMissingNode()) {
+        return;
+      }
+      List<PrometheusMetric> results = resultContext.resultMetrics;
+      add(
+          results,
+          bc,
+          "totalBytes",
+          "block_cache_total_bytes",
+          PrometheusMetricType.GAUGE,
+          "total bytes allocated to the block cache");
+      add(
+          results,
+          bc,
+          "pinnedBytes",
+          "block_cache_pinned_bytes",
+          PrometheusMetricType.GAUGE,
+          "bytes currently pinned (in active use) in the block cache");
+      add(
+          results,
+          bc,
+          "unpinnedBytes",
+          "block_cache_unpinned_bytes",
+          PrometheusMetricType.GAUGE,
+          "bytes currently unpinned (evictable) in the block cache");
+      add(
+          results,
+          bc,
+          "hotUnpinnedBytes",
+          "block_cache_hot_unpinned_bytes",
+          PrometheusMetricType.GAUGE,
+          "bytes currently in the hot (protected) eviction queue of the block cache");
+      add(
+          results,
+          bc,
+          "acquisitions",
+          "block_cache_acquisitions",
+          PrometheusMetricType.COUNTER,
+          "cumulative block cache node acquisitions (pool evictions)");
+      add(
+          results,
+          bc,
+          "hotAcquisitions",
+          "block_cache_hot_acquisitions",
+          PrometheusMetricType.COUNTER,
+          "cumulative block cache acquisitions whose evicted node came from the hot queue");
+      add(
+          results,
+          bc,
+          "prepopulated",
+          "block_cache_prepopulated",
+          PrometheusMetricType.COUNTER,
+          "cumulative blocks pre-populated by IndexOutput writes");
+      add(
+          results,
+          bc,
+          "hits",
+          "block_cache_hits",
+          PrometheusMetricType.COUNTER,
+          "cumulative block cache pin hits (block found in cache)");
+      add(
+          results,
+          bc,
+          "poolExhausted",
+          "block_cache_pool_exhausted",
+          PrometheusMetricType.COUNTER,
+          "cumulative times the block cache pool was fully pinned (acquire returned null)");
+      add(
+          results,
+          bc,
+          "closedCount",
+          "block_cache_closed_count",
+          PrometheusMetricType.COUNTER,
+          "cumulative block cache nodes recycled via close");
+    }
+
+    private static void add(
+        List<PrometheusMetric> results,
+        JsonNode bc,
+        String jsonKey,
+        String metricName,
+        PrometheusMetricType type,
+        String desc)
+        throws IOException {
+      Number v = getNumber(bc, jsonKey);
+      if (!INVALID_NUMBER.equals(v)) {
+        results.add(new PrometheusMetric(metricName, type, desc, v));
       }
     }
   }
