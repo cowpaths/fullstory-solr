@@ -716,7 +716,11 @@ public class AccessDirectory2 extends MMapDirectory {
     private void captureBlock(int len) {
       Cache.Node<BlockCache.Val> node = dir.cache.acquireNode();
       if (node != null) {
-        node.getPayload().populate(blockBuf, 0, len, dir.cache);
+        try {
+          node.getPayload().populate(blockBuf, 0, len, dir.cache);
+        } finally {
+          dir.cache.unpin(node, false);
+        }
         dir.prepopulated.increment();
       }
       nodeSlots.add(node); // null = cache exhausted; cold on first read
@@ -743,11 +747,6 @@ public class AccessDirectory2 extends MMapDirectory {
             new AtomicReferenceArray<>(nodeSlots.size());
         for (int i = 0; i < nodeSlots.size(); i++) {
           sharedAccessMapped.set(i, nodeSlots.get(i));
-        }
-        // Unpin all nodes so they are evictable (inserted at LRU head) before publishing.
-        for (int i = 0; i < sharedAccessMapped.length(); i++) {
-          Cache.Node<BlockCache.Val> node = sharedAccessMapped.get(i);
-          if (node != null) dir.cache.unpin(node);
         }
         dir.storeNodes(name, sharedAccessMapped);
       }
