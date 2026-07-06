@@ -674,9 +674,19 @@ public class BlockCache implements Closeable {
   }
 
   boolean close(Cache.Node<Val> node, boolean unconditional) {
-    if (unconditional) pinnedCount.decrement();
+    Val v;
+    if (unconditional) {
+      v = null;
+      pinnedCount.decrement();
+    } else {
+      // Read fromHot() before close() nulls out the payload. Only relevant for the
+      // non-unconditional path where the node is in the evictable list (refCount=0);
+      // unconditional nodes are pinned and not in any queue.
+      v = node.getPayload();
+    }
     if (partitions[tlrIndex()].close(node, unconditional)) {
       closedCount.increment();
+      if (v != null && v.fromHot()) hotUnpinned.decrement();
       return true;
     } else {
       return false;
