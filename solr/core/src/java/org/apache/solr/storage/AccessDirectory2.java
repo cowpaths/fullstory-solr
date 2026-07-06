@@ -46,11 +46,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.StampedLock;
 import java.util.zip.CRC32;
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.internal.hppc.IntArrayList;
 import org.apache.lucene.internal.hppc.IntCursor;
+import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.IOContext;
@@ -348,6 +350,13 @@ public class AccessDirectory2 extends MMapDirectory {
 
     private final BlockPreloader.BlockSupplier blockSupplier;
 
+    // Guards compressed ByteBuffer lifetime. Root holds write lock on close; supply calls hold
+    // read lock. StampedLock.tryReadLock() returns 0 while a write lock is waiting, so in-flight
+    // supply calls drain before invalidateAndUnmap runs, and new tasks see 0 and throw rather than
+    // touching freed memory. Null for clones and sentinel (they share root's lock via
+    // blockSupplier).
+    private final StampedLock supplyLock;
+
     // -------------------------------------------------------------------------
     // Root constructor (via this() delegation)
     // -------------------------------------------------------------------------
@@ -369,6 +378,7 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressed = null;
       this.isRoot = false;
       this.blockSupplier = null;
+      this.supplyLock = null;
     }
 
     private static final class RootParams {
@@ -480,10 +490,18 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
       this.compressed = p.compressed;
       this.isRoot = true;
+      this.supplyLock = new StampedLock();
       blockSupplier =
-          (blockOffset, compressedLen, decompressedLen) ->
-              supplyFromBuffers(
+          (blockOffset, compressedLen, decompressedLen) -> {
+            long stamp = supplyLock.tryReadLock();
+            if (stamp == 0) throw new AlreadyClosedException("compressed buffers closed: " + this);
+            try {
+              return supplyFromBuffers(
                   compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
+            } finally {
+              supplyLock.unlockRead(stamp);
+            }
+          };
     }
 
     // -------------------------------------------------------------------------
@@ -498,6 +516,7 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressedGuard = parent.compressedGuard;
       this.compressed = parent.compressed;
       this.isRoot = false;
+      this.supplyLock = null; // lock is captured in the blockSupplier lambda; not needed here
       blockSupplier = parent.blockSupplier;
       maybePreloadSlice();
     }
@@ -649,7 +668,16 @@ public class AccessDirectory2 extends MMapDirectory {
     @Override
     protected ByteBuffer doClose() throws IOException {
       if (!isRoot) return null;
-      compressedGuard.invalidateAndUnmap(compressed);
+      // Acquire exclusive lock to drain any in-flight supplyFromBuffers calls before unmapping.
+      // StampedLock.tryReadLock() returns 0 while this write lock is pending, so new tasks
+      // arriving after this point will throw AlreadyClosedException instead of touching freed
+      // memory.
+      long stamp = supplyLock.writeLock();
+      try {
+        compressedGuard.invalidateAndUnmap(compressed);
+      } finally {
+        supplyLock.unlockWrite(stamp);
+      }
       return null;
     }
   }
