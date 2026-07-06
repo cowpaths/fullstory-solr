@@ -44,6 +44,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.StampedLock;
@@ -90,13 +91,42 @@ public class AccessDirectory2 extends MMapDirectory {
   private final LongAdder prepopulated;
 
   /**
+   * Ref-counted wrapper around a shared {@code accessMapped} array. The map itself holds a +1 ref;
+   * each root {@link AD2IndexInput} open holds a +1 ref. Nodes are released only when the count
+   * reaches zero, so readers that opened a file before {@link #deleteFile} was called continue to
+   * get cache hits until they close.
+   */
+  private static final class NodesEntry {
+    private final AtomicReferenceArray<Cache.Node<BlockCache.Val>> nodes;
+    private final AtomicInteger refCount = new AtomicInteger(1); // +1 for pendingNodes map itself
+
+    NodesEntry(AtomicReferenceArray<Cache.Node<BlockCache.Val>> nodes) {
+      this.nodes = nodes;
+    }
+
+    void acquire() {
+      if (refCount.getAndIncrement() == 0) {
+        throw new AlreadyClosedException("attempt to open ref after file deletion");
+      }
+    }
+
+    void release(BlockCache cache) {
+      if (refCount.decrementAndGet() == 0) {
+        for (int i = nodes.length() - 1; i >= 0; i--) {
+          Cache.Node<BlockCache.Val> node = nodes.getAndSet(i, null);
+          if (node != null) cache.close(node);
+        }
+      }
+    }
+  }
+
+  /**
    * Shared {@code accessMapped} arrays pre-populated by {@link WriteThroughOutput} at write-close
    * time. All root {@link AD2IndexInput} instances opened for the same file share the same array,
-   * so they all see the same cached blocks. Entries are removed (and nodes released) in {@link
-   * #deleteFile} or {@link #rename}.
+   * so they all see the same cached blocks. Entries are removed in {@link #deleteFile} or {@link
+   * #rename}; nodes are released when the last open root input closes.
    */
-  private final HashMap<String, AtomicReferenceArray<Cache.Node<BlockCache.Val>>> pendingNodes =
-      new HashMap<>();
+  private final HashMap<String, NodesEntry> pendingNodes = new HashMap<>();
 
   private static final AD2IndexInput INIT_DONE_SENTINEL = new AD2IndexInput();
   private static final int INIT_PRELOAD_TIMEOUT_MILLIS = 1000;
@@ -265,21 +295,18 @@ public class AccessDirectory2 extends MMapDirectory {
   void storeNodes(
       String name, AtomicReferenceArray<Cache.Node<BlockCache.Val>> sharedAccessMapped) {
     synchronized (pendingNodes) {
-      pendingNodes.put(name, sharedAccessMapped);
+      pendingNodes.put(name, new NodesEntry(sharedAccessMapped));
     }
   }
 
   @Override
   public void deleteFile(String name) throws IOException {
-    AtomicReferenceArray<Cache.Node<BlockCache.Val>> stale;
+    NodesEntry stale;
     synchronized (pendingNodes) {
       stale = pendingNodes.remove(name);
     }
     if (stale != null) {
-      for (int i = 0; i < stale.length(); i++) {
-        Cache.Node<BlockCache.Val> node = stale.getAndSet(i, null);
-        if (node != null) cache.close(node); // best-effort; no-op if pinned by active reader
-      }
+      stale.release(cache);
     }
     if (name.endsWith(".tmp")) {
       super.deleteFile(name);
@@ -289,8 +316,8 @@ public class AccessDirectory2 extends MMapDirectory {
   @Override
   public void rename(String source, String dest) throws IOException {
     synchronized (pendingNodes) {
-      AtomicReferenceArray<Cache.Node<BlockCache.Val>> nodes = pendingNodes.remove(source);
-      if (nodes != null) pendingNodes.put(dest, nodes);
+      NodesEntry entry = pendingNodes.remove(source);
+      if (entry != null) pendingNodes.put(dest, entry);
     }
     if (source.endsWith(".tmp")) {
       super.rename(source, dest);
@@ -324,11 +351,14 @@ public class AccessDirectory2 extends MMapDirectory {
     if (name.endsWith(".tmp")) {
       return super.openInput(name, context);
     }
-    AtomicReferenceArray<Cache.Node<BlockCache.Val>> sharedAccessMapped;
+    NodesEntry sharedEntry;
     synchronized (pendingNodes) {
-      sharedAccessMapped = pendingNodes.get(name); // get, not remove: shared across all root opens
+      sharedEntry = pendingNodes.get(name);
+      if (sharedEntry != null) {
+        sharedEntry.acquire(); // +1 for this root reader
+      }
     }
-    return new AD2IndexInput(compressedPath.resolve(name), this, sharedAccessMapped, pendingNodes);
+    return new AD2IndexInput(compressedPath.resolve(name), this, sharedEntry, pendingNodes);
   }
 
   private static ByteBufferGuard.BufferCleaner unmapHack() {
@@ -350,6 +380,9 @@ public class AccessDirectory2 extends MMapDirectory {
 
     private final BlockPreloader.BlockSupplier blockSupplier;
 
+    // non-null for root inputs with tracked nodes; null otherwise
+    private final NodesEntry nodesEntry;
+
     // Guards compressed ByteBuffer lifetime. Root holds write lock on close; supply calls hold
     // read lock. StampedLock.tryReadLock() returns 0 while a write lock is waiting, so in-flight
     // supply calls drain before invalidateAndUnmap runs, and new tasks see 0 and throw rather than
@@ -364,10 +397,10 @@ public class AccessDirectory2 extends MMapDirectory {
     AD2IndexInput(
         Path source,
         AccessDirectory2 dir,
-        AtomicReferenceArray<Cache.Node<BlockCache.Val>> sharedAccessMapped,
-        HashMap<String, AtomicReferenceArray<Cache.Node<BlockCache.Val>>> pendingNodes)
+        NodesEntry sharedEntry,
+        HashMap<String, NodesEntry> pendingNodes)
         throws IOException {
-      this("lazy:" + source, dir, parseRootParams(source, sharedAccessMapped, pendingNodes));
+      this("lazy:" + source, dir, parseRootParams(source, sharedEntry, pendingNodes));
     }
 
     private AD2IndexInput() {
@@ -378,6 +411,7 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressed = null;
       this.isRoot = false;
       this.blockSupplier = null;
+      this.nodesEntry = null;
       this.supplyLock = null;
     }
 
@@ -386,23 +420,24 @@ public class AccessDirectory2 extends MMapDirectory {
       final long[] blockOffsets;
       final ByteBuffer[] compressed;
       final AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped;
+      final NodesEntry entry; // null for empty files
 
       RootParams(
           long length,
           long[] blockOffsets,
           ByteBuffer[] compressed,
-          AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped) {
+          AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped,
+          NodesEntry entry) {
         this.length = length;
         this.blockOffsets = blockOffsets;
         this.compressed = compressed;
         this.accessMapped = accessMapped;
+        this.entry = entry;
       }
     }
 
     private static RootParams parseRootParams(
-        Path source,
-        AtomicReferenceArray<Cache.Node<BlockCache.Val>> sharedAccessMapped,
-        HashMap<String, AtomicReferenceArray<Cache.Node<BlockCache.Val>>> pendingNodes)
+        Path source, NodesEntry sharedEntry, HashMap<String, NodesEntry> pendingNodes)
         throws IOException {
       try (FileChannel channel = FileChannel.open(source, StandardOpenOption.READ)) {
         long compressedFileSize = channel.size();
@@ -419,7 +454,7 @@ public class AccessDirectory2 extends MMapDirectory {
 
         long size = channel.size();
         if (size == 0) {
-          return new RootParams(0, null, compressed, new AtomicReferenceArray<>(0));
+          return new RootParams(0, null, compressed, new AtomicReferenceArray<>(0), null);
         }
 
         ByteBuffer initial = compressed[0];
@@ -457,23 +492,32 @@ public class AccessDirectory2 extends MMapDirectory {
         }
         blockOffsets[blockCount] = blockDeltaFooterOffset;
 
-        AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped;
-        if (sharedAccessMapped != null) {
-          if (sharedAccessMapped.length() != blockCount) {
+        NodesEntry entry;
+        if (sharedEntry != null) {
+          // refCount already incremented by openInput before the constructor call
+          if (sharedEntry.nodes.length() != blockCount) {
             throw new IllegalArgumentException("block count mismatch");
           }
-          accessMapped = sharedAccessMapped;
+          entry = sharedEntry;
         } else {
+          // sharedEntry==null: either no pendingNodes entry, or a race — putIfAbsent decides winner
           AtomicReferenceArray<Cache.Node<BlockCache.Val>> localAccessMapped =
               new AtomicReferenceArray<>(blockCount);
-          AtomicReferenceArray<Cache.Node<BlockCache.Val>> existing;
+          NodesEntry newEntry = new NodesEntry(localAccessMapped); // refCount=1 (for map)
+          NodesEntry existing;
           synchronized (pendingNodes) {
-            existing = pendingNodes.putIfAbsent(source.getFileName().toString(), localAccessMapped);
+            existing = pendingNodes.putIfAbsent(source.getFileName().toString(), newEntry);
           }
-          accessMapped = existing == null ? localAccessMapped : existing;
+          if (existing == null) {
+            newEntry.acquire(); // +1 for this reader
+            entry = newEntry;
+          } else {
+            existing.acquire(); // +1 for this reader
+            entry = existing;
+          }
         }
 
-        return new RootParams(length, blockOffsets, compressed, accessMapped);
+        return new RootParams(length, blockOffsets, compressed, entry.nodes, entry);
       }
     }
 
@@ -490,6 +534,7 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
       this.compressed = p.compressed;
       this.isRoot = true;
+      this.nodesEntry = p.entry;
       this.supplyLock = new StampedLock();
       blockSupplier =
           (blockOffset, compressedLen, decompressedLen) -> {
@@ -516,6 +561,7 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressedGuard = parent.compressedGuard;
       this.compressed = parent.compressed;
       this.isRoot = false;
+      this.nodesEntry = null;
       this.supplyLock = null; // lock is captured in the blockSupplier lambda; not needed here
       blockSupplier = parent.blockSupplier;
       maybePreloadSlice();
@@ -668,6 +714,9 @@ public class AccessDirectory2 extends MMapDirectory {
     @Override
     protected ByteBuffer doClose() throws IOException {
       if (!isRoot) return null;
+      if (nodesEntry != null) {
+        nodesEntry.release(cache);
+      }
       // Acquire exclusive lock to drain any in-flight supplyFromBuffers calls before unmapping.
       // StampedLock.tryReadLock() returns 0 while this write lock is pending, so new tasks
       // arriving after this point will throw AlreadyClosedException instead of touching freed
