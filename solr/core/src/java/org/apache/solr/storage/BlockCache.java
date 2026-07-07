@@ -398,6 +398,10 @@ public class BlockCache implements Closeable {
   // Asynchronous (readahead) decompressions: supply() called from BlockPreloader on the ioExec
   // thread pool, ahead of any reader request.
   private final LongAdder blocksDecompressedReadahead = new LongAdder();
+  // acquireNode() returned a node but the CAS to claim the accessMapped slot was lost to another
+  // thread; the node was returned unused. No decompression occurred. Temporary diagnostic counter
+  // to verify: misses == blocksDecompressedDemand + blocksDecompressedReadahead + casRaceLoss.
+  private final LongAdder casRaceLoss = new LongAdder();
 
   private Cache<RefVal<Val>> pinnedLru() {
     return pinned[ThreadLocalRandom.current().nextInt(pinned.length)];
@@ -669,6 +673,7 @@ public class BlockCache implements Closeable {
     ew.put("hotUnpinnedBytes", hotUnpinnedBytes);
     ew.put("blocksDecompressedDemand", blocksDecompressedDemand.sum());
     ew.put("blocksDecompressedReadahead", blocksDecompressedReadahead.sum());
+    ew.put("casRaceLoss", casRaceLoss.sum());
     ew.put("hits", h);
     ew.put("hitRate", h + misses == 0 ? 1.0 : (double) h / (h + misses));
     ew.put(
@@ -693,6 +698,13 @@ public class BlockCache implements Closeable {
    */
   void recordDecompressionReadahead() {
     blocksDecompressedReadahead.increment();
+  }
+
+  /**
+   * Records one CAS race loss: acquireNode() succeeded but compareAndSet lost to another thread.
+   */
+  void recordCasRaceLoss() {
+    casRaceLoss.increment();
   }
 
   /**

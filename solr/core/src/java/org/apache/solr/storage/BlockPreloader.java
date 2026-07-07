@@ -149,6 +149,7 @@ class BlockPreloader {
                   // NOTE: don't unpin in `finally`! populateBuf already unpins on the error path.
                   cache.unpin(toPopulate, false);
                 } else {
+                  cache.recordCasRaceLoss();
                   cache.close(toPopulate, true);
                 }
               } finally {
@@ -211,6 +212,7 @@ class BlockPreloader {
                       supplier);
                   cache.unpin(toPopulate, false);
                 } else {
+                  cache.recordCasRaceLoss();
                   cache.close(toPopulate, true);
                 }
               }

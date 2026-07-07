@@ -1417,16 +1417,23 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
           results,
           bc,
           "blocksDecompressedDemand",
-          "block_cache_blocks_decompressed_demand_total",
+          "block_cache_blocks_decompressed_demand",
           PrometheusMetricType.COUNTER,
           "cumulative blocks decompressed on the read path (reader stalled waiting for fetch from backend storage)");
       add(
           results,
           bc,
           "blocksDecompressedReadahead",
-          "block_cache_blocks_decompressed_readahead_total",
+          "block_cache_blocks_decompressed_readahead",
           PrometheusMetricType.COUNTER,
           "cumulative blocks decompressed speculatively by readahead (BlockPreloader, async)");
+      add(
+          results,
+          bc,
+          "casRaceLoss",
+          "block_cache_cas_race_loss",
+          PrometheusMetricType.COUNTER,
+          "cumulative acquireNode() calls that lost the CAS race (node acquired but not used; no decompression)");
       add(
           results,
           bc,

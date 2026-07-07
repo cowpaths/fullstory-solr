@@ -455,6 +455,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         // Another thread won the race; wait for its result.
         cache.close(node, true);
         if (cache.pin(extant)) {
+          cache.recordCasRaceLoss();
           cacheHit(blockIdx, extant, 1);
           return;
         }
