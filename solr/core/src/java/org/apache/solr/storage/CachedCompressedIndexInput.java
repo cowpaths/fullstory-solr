@@ -32,19 +32,27 @@ import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.AbstractMap;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
 import org.apache.lucene.util.BitUtil;
 import org.apache.lucene.util.CollectionUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Abstract base for {@link IndexInput} implementations backed by a {@link BlockCache} of
@@ -60,6 +68,8 @@ import org.apache.lucene.util.CollectionUtil;
  * slices and clones; concurrent access is mediated by compare-and-exchange.
  */
 abstract class CachedCompressedIndexInput extends IndexInput implements RandomAccessInput {
+
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   // Shared empty view sentinels for aligned bulk reads (readLongs/readInts/readFloats).
   private static final LongBuffer EMPTY_LONGBUFFER = LongBuffer.allocate(0);
@@ -418,6 +428,33 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
+  private static final AtomicInteger IDS = new AtomicInteger();
+  private static final ConcurrentHashMap<List<StackTraceElement>, Map.Entry<Integer, AtomicLong>>
+      CALL_STACKS = new ConcurrentHashMap<>();
+
+  private static String stackTraceId() {
+    Exception ex = new Exception();
+    List<StackTraceElement> callStack = Arrays.asList(ex.getStackTrace());
+    boolean[] added = new boolean[1];
+    Map.Entry<Integer, AtomicLong> e =
+        CALL_STACKS.computeIfAbsent(
+            callStack,
+            (k) -> {
+              added[0] = true;
+              return new AbstractMap.SimpleImmutableEntry<>(
+                  IDS.getAndIncrement(), new AtomicLong());
+            });
+    if (added[0] && log.isInfoEnabled()) {
+      log.info("XXX callStack {}", e.getKey(), ex);
+    }
+    return "callStack="
+        + e.getKey()
+        + "/"
+        + CALL_STACKS.size()
+        + " : count="
+        + e.getValue().incrementAndGet();
+  }
+
   private void cacheMiss(final Cache.Node<BlockCache.Val> cached, final int blockIdx)
       throws IOException {
     long blockOffset = blockOffsets[blockIdx];
@@ -433,6 +470,16 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         if (blockIdx == 0) onFirstBlockMiss();
         // long start = System.nanoTime();
         cache.recordDecompressionDemand();
+        if (log.isInfoEnabled()) {
+          log.info(
+              "demand {} of {}/{}/{} {} [{}]",
+              blockIdx,
+              sliceFirstBlockIdx,
+              sliceLastBlockIdx,
+              lastBlockIdx,
+              this,
+              stackTraceId());
+        }
         ByteBuffer buf;
         try {
           byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
@@ -464,6 +511,16 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     // Serve uncached (cache full or node race lost with no cached result).
     // long start = System.nanoTime();
     cache.recordDecompressionDemand();
+    if (log.isInfoEnabled()) {
+      log.info(
+          "demand HEAP {} of {}/{}/{} {} [{}]",
+          blockIdx,
+          sliceFirstBlockIdx,
+          sliceLastBlockIdx,
+          lastBlockIdx,
+          this,
+          stackTraceId());
+    }
     ByteBuffer heapBuf =
         ByteBuffer.wrap(
             supply(blockIdx, blockOffset, compressedLen, decompressedLen), 0, decompressedLen);
