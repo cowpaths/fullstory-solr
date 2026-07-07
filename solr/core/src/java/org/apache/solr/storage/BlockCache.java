@@ -383,6 +383,12 @@ public class BlockCache implements Closeable {
   private final LongAdder poolExhausted = new LongAdder();
   private final LongAdder pinnedCount = new LongAdder();
   private final LongAdder closedCount = new LongAdder();
+  // close(node, false) skipped because the node was already dead (payload null or refCount=-1,
+  // meaning it was already evicted by acquireTail before we could explicitly close it).
+  private final LongAdder closeSkippedDead = new LongAdder();
+  // close(node, false) skipped because the node was pinned (refCount>0 or in UNPIN_SENTINEL
+  // transition). The node will be recycled naturally once all readers unpin it.
+  private final LongAdder closeSkippedPinned = new LongAdder();
   private final LongAdder hits = new LongAdder();
   private final LongAdder hotAcquisitions = new LongAdder();
   private final LongAdder hotUnpinned = new LongAdder();
@@ -647,6 +653,8 @@ public class BlockCache implements Closeable {
     long hotUnpinnedBytes = hotUnpinned.sum() * COMPRESSION_BLOCK_SIZE;
     ew.put("totalBytes", totalBytes);
     ew.put("closedCount", closedCount.sum());
+    ew.put("closeSkippedDead", closeSkippedDead.sum());
+    ew.put("closeSkippedPinned", closeSkippedPinned.sum());
     ew.put("acquisitions", acq);
     ew.put("hotAcquisitions", hotAcquisitions.sum());
     ew.put("poolExhausted", poolExhausted.sum());
@@ -689,6 +697,14 @@ public class BlockCache implements Closeable {
       if (v != null && v.fromHot()) hotUnpinned.decrement();
       return true;
     } else {
+      // Categorize the skip to help diagnose phantom-block accumulation.
+      // NOTE: racy read of node.getPayload() / refCount; accurate enough for diagnostics.
+      Val vv = node.getPayload();
+      if (vv == null || vv.refCount() < 0) {
+        closeSkippedDead.increment();
+      } else {
+        closeSkippedPinned.increment();
+      }
       return false;
     }
   }

@@ -1413,6 +1413,20 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
           "block_cache_closed_count",
           PrometheusMetricType.COUNTER,
           "cumulative block cache nodes recycled via close");
+      add(
+          results,
+          bc,
+          "closeSkippedDead",
+          "block_cache_close_skipped_dead",
+          PrometheusMetricType.COUNTER,
+          "cumulative block cache close() calls skipped because node was already evicted (dead)");
+      add(
+          results,
+          bc,
+          "closeSkippedPinned",
+          "block_cache_close_skipped_pinned",
+          PrometheusMetricType.COUNTER,
+          "cumulative block cache close() calls skipped because node was still pinned by a reader (potential phantom-block accumulation)");
     }
 
     private static void add(
