@@ -403,6 +403,8 @@ public class BlockCache implements Closeable {
   // to verify: misses == blocksDecompressedDemand + blocksDecompressedReadahead + casRaceLoss.
   private final LongAdder casRaceLoss = new LongAdder();
 
+  private final LongAdder failedPin = new LongAdder();
+
   private Cache<RefVal<Val>> pinnedLru() {
     return pinned[ThreadLocalRandom.current().nextInt(pinned.length)];
   }
@@ -674,6 +676,7 @@ public class BlockCache implements Closeable {
     ew.put("blocksDecompressedDemand", blocksDecompressedDemand.sum());
     ew.put("blocksDecompressedReadahead", blocksDecompressedReadahead.sum());
     ew.put("casRaceLoss", casRaceLoss.sum());
+    ew.put("failedPin", failedPin.sum());
     ew.put("hits", h);
     ew.put("hitRate", h + misses == 0 ? 1.0 : (double) h / (h + misses));
     ew.put(
@@ -705,6 +708,10 @@ public class BlockCache implements Closeable {
    */
   void recordCasRaceLoss() {
     casRaceLoss.increment();
+  }
+
+  void recordFailedPin() {
+    failedPin.increment();
   }
 
   /**

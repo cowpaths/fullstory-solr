@@ -26,9 +26,12 @@ import static org.apache.solr.storage.CompressingDirectory.readLengthFromHeader;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.AbstractMap;
@@ -64,6 +67,8 @@ import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.MappedByteBufferIndexInputProvider;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.ThreadInterruptedException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * An {@link MMapDirectory} that serves reads from a {@link BlockCache}-backed decompression layer
@@ -72,6 +77,8 @@ import org.apache.lucene.util.ThreadInterruptedException;
  * and evicted by the LRU when the pool is exhausted.
  */
 public class AccessDirectory2 extends MMapDirectory {
+
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   /**
    * Determines chunk size for mmapping files. {@code 1} yields 1 GiB chunks, but this may be set
@@ -294,8 +301,12 @@ public class AccessDirectory2 extends MMapDirectory {
   /** Stores the shared {@code accessMapped} array for {@code name}, pre-populated by the writer. */
   void storeNodes(
       String name, AtomicReferenceArray<Cache.Node<BlockCache.Val>> sharedAccessMapped) {
+    NodesEntry extant;
     synchronized (pendingNodes) {
-      pendingNodes.put(name, new NodesEntry(sharedAccessMapped));
+      extant = pendingNodes.putIfAbsent(name, new NodesEntry(sharedAccessMapped));
+    }
+    if (extant != null) {
+      log.warn("unexpected extant `accessMapped` entry");
     }
   }
 
@@ -316,8 +327,14 @@ public class AccessDirectory2 extends MMapDirectory {
   @Override
   public void rename(String source, String dest) throws IOException {
     synchronized (pendingNodes) {
-      NodesEntry entry = pendingNodes.remove(source);
-      if (entry != null) pendingNodes.put(dest, entry);
+      NodesEntry entry = pendingNodes.get(source);
+      if (entry == null) {
+        throw new NoSuchFileException(source);
+      } else if (pendingNodes.putIfAbsent(dest, entry) != null) {
+        throw new FileAlreadyExistsException(dest);
+      } else if (!pendingNodes.remove(source, entry)) {
+        throw new IOException("source entry unexpectedly changed: " + source);
+      }
     }
     if (source.endsWith(".tmp")) {
       super.rename(source, dest);

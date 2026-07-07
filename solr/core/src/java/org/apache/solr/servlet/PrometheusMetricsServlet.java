@@ -1437,6 +1437,13 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
       add(
           results,
           bc,
+          "failedPin",
+          "block_cache_failed_pin",
+          PrometheusMetricType.COUNTER,
+          "cumulative cache.pin() failures on a non-null accessMapped entry (node evicted between read and pin)");
+      add(
+          results,
+          bc,
           "closeSkippedDead",
           "block_cache_close_skipped_dead",
           PrometheusMetricType.COUNTER,

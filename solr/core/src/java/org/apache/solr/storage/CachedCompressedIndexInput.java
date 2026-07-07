@@ -357,7 +357,11 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private void initBlock(int blockIdx) throws IOException {
     if (blockIdx > lastBlockIdx) throw new EOFException();
     Cache.Node<BlockCache.Val> cached = accessMapped.get(blockIdx);
-    if (cached == null || !cache.pin(cached)) {
+    boolean uninitialized;
+    if ((uninitialized = cached == null) || !cache.pin(cached)) {
+      if (!uninitialized) {
+        cache.recordFailedPin();
+      }
       cacheMiss(cached, blockIdx);
     } else {
       cacheHit(blockIdx, cached, 0);
