@@ -392,6 +392,12 @@ public class BlockCache implements Closeable {
   private final LongAdder hits = new LongAdder();
   private final LongAdder hotAcquisitions = new LongAdder();
   private final LongAdder hotUnpinned = new LongAdder();
+  // Synchronous (demand) decompressions: supply() called on the read path in cacheMiss(), meaning
+  // the reader had to wait for the block to be fetched and decompressed.
+  private final LongAdder blocksDecompressedDemand = new LongAdder();
+  // Asynchronous (readahead) decompressions: supply() called from BlockPreloader on the ioExec
+  // thread pool, ahead of any reader request.
+  private final LongAdder blocksDecompressedReadahead = new LongAdder();
 
   private Cache<RefVal<Val>> pinnedLru() {
     return pinned[ThreadLocalRandom.current().nextInt(pinned.length)];
@@ -661,6 +667,8 @@ public class BlockCache implements Closeable {
     ew.put("pinnedBytes", pinnedBytes);
     ew.put("unpinnedBytes", totalBytes - pinnedBytes);
     ew.put("hotUnpinnedBytes", hotUnpinnedBytes);
+    ew.put("blocksDecompressedDemand", blocksDecompressedDemand.sum());
+    ew.put("blocksDecompressedReadahead", blocksDecompressedReadahead.sum());
     ew.put("hits", h);
     ew.put("hitRate", h + misses == 0 ? 1.0 : (double) h / (h + misses));
     ew.put(
@@ -670,6 +678,21 @@ public class BlockCache implements Closeable {
             + RamUsageEstimator.humanReadableUnits(hotUnpinnedBytes)
             + " / "
             + RamUsageEstimator.humanReadableUnits(totalBytes));
+  }
+
+  /**
+   * Records one synchronous (demand) block decompression: the reader stalled waiting for the fetch.
+   */
+  void recordDecompressionDemand() {
+    blocksDecompressedDemand.increment();
+  }
+
+  /**
+   * Records one asynchronous (readahead) block decompression: fetched speculatively by
+   * BlockPreloader.
+   */
+  void recordDecompressionReadahead() {
+    blocksDecompressedReadahead.increment();
   }
 
   /**

@@ -432,6 +432,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         // We won the race: fetch from backend and populate the node.
         if (blockIdx == 0) onFirstBlockMiss();
         // long start = System.nanoTime();
+        cache.recordDecompressionDemand();
         ByteBuffer buf;
         try {
           byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
@@ -461,6 +462,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
     // Serve uncached (cache full or node race lost with no cached result).
     // long start = System.nanoTime();
+    cache.recordDecompressionDemand();
     ByteBuffer heapBuf =
         ByteBuffer.wrap(
             supply(blockIdx, blockOffset, compressedLen, decompressedLen), 0, decompressedLen);

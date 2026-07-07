@@ -245,6 +245,7 @@ class BlockPreloader {
       BlockCache cache,
       BlockSupplier supplier)
       throws IOException {
+    cache.recordDecompressionReadahead();
     ByteBuffer buf;
     try {
       byte[] heapBuf = supplier.supply(blockOffset, compressedLen, decompressedLen);
