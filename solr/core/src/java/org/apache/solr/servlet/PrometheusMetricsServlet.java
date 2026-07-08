@@ -1333,12 +1333,12 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
   static class BlockCacheMetricsApiCaller extends MetricsByPrefixApiCaller {
 
     BlockCacheMetricsApiCaller() {
-      super("solr.node", "DIRECTORY.teeDirectory");
+      super("solr.node", "DIRECTORY.blockCache");
     }
 
     @Override
     protected void handle(ResultContext resultContext, JsonNode metricsNode) throws IOException {
-      JsonNode bc = metricsNode.path("solr.node").path("DIRECTORY.teeDirectory").path("blockCache");
+      JsonNode bc = metricsNode.path("solr.node").path("DIRECTORY.blockCache");
       if (bc.isMissingNode()) {
         return;
       }

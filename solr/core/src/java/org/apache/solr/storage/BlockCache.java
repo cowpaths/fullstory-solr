@@ -44,6 +44,10 @@ import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
 import org.apache.solr.common.util.EnvUtils;
+import org.apache.solr.core.SolrInfoBean;
+import org.apache.solr.metrics.MetricsMap;
+import org.apache.solr.metrics.SolrMetricProducer;
+import org.apache.solr.metrics.SolrMetricsContext;
 import org.apache.solr.storage.CachedCompressedIndexInput.NodeRefStruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -63,7 +67,7 @@ import org.slf4j.LoggerFactory;
  * via {@link ThreadLocalRandom}, distributing list-operation contention across partitions without
  * requiring any node-to-partition affinity.
  */
-public class BlockCache implements Closeable {
+public class BlockCache implements Closeable, SolrMetricProducer {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -410,6 +414,9 @@ public class BlockCache implements Closeable {
   private final LongAdder casRaceLoss = new LongAdder();
 
   private final LongAdder failedPin = new LongAdder();
+  private final LongAdder prepopulated = new LongAdder();
+
+  private volatile SolrMetricsContext solrMetricsContext;
 
   final Timer t = new Timer(new ExponentiallyDecayingReservoir());
 
@@ -666,11 +673,12 @@ public class BlockCache implements Closeable {
     return node;
   }
 
-  public void writeMetrics(MapWriter.EntryWriter ew, long prepopulated) throws IOException {
+  public void writeMetrics(MapWriter.EntryWriter ew) throws IOException {
+    long prep = prepopulated.sum();
     long pinnedBytes = pinnedCount.sum() * COMPRESSION_BLOCK_SIZE;
     long h = hits.sum();
     long acq = acquisitions.sum();
-    long misses = acq - prepopulated;
+    long misses = acq - prep;
     long hotUnpinnedBytes = hotUnpinned.sum() * COMPRESSION_BLOCK_SIZE;
     Snapshot s = t.getSnapshot();
     ew.put("totalBytes", totalBytes);
@@ -683,6 +691,7 @@ public class BlockCache implements Closeable {
     ew.put("pinnedBytes", pinnedBytes);
     ew.put("unpinnedBytes", totalBytes - pinnedBytes);
     ew.put("hotUnpinnedBytes", hotUnpinnedBytes);
+    ew.put("prepopulated", prep);
     ew.put("blocksDecompressedDemand", blocksDecompressedDemand.sum());
     ew.put("blocksDecompressedReadahead", blocksDecompressedReadahead.sum());
     ew.put("casRaceLoss", casRaceLoss.sum());
@@ -749,6 +758,26 @@ public class BlockCache implements Closeable {
   }
 
   /**
+   * Records one block written through to the cache by an IndexOutput (write-time prepopulation).
+   */
+  public void recordPrepopulated() {
+    prepopulated.increment();
+  }
+
+  @Override
+  public synchronized void initializeMetrics(SolrMetricsContext parentContext, String scope) {
+    if (solrMetricsContext != null) return;
+    solrMetricsContext = parentContext.getChildContext(this);
+    MetricsMap mm = new MetricsMap(this::writeMetrics);
+    solrMetricsContext.gauge(mm, true, scope, SolrInfoBean.Category.DIRECTORY.toString());
+  }
+
+  @Override
+  public SolrMetricsContext getSolrMetricsContext() {
+    return solrMetricsContext;
+  }
+
+  /**
    * Recycles a node back to the pool at the eviction-tail of a randomly chosen partition (making it
    * a high-priority reuse candidate). Used when a node was acquired but ultimately not needed (e.g.
    * lost CAS race).
@@ -789,8 +818,38 @@ public class BlockCache implements Closeable {
     return ThreadLocalRandom.current().nextInt(partitions.length);
   }
 
+  /**
+   * Builds a node-level {@link BlockCache} from system properties:
+   *
+   * <ul>
+   *   <li>{@code solr.blockCache.path} — path to an existing file to use as the backing store; if
+   *       the file already exists its current size determines the capacity; otherwise created
+   *       fresh. If absent, a temporary file is created and immediately deleted (does not outlive
+   *       the JVM).
+   *   <li>{@code solr.blockCache.kilobytes} — capacity in KiB when no path is given (default 1
+   *       GiB).
+   * </ul>
+   *
+   * <p>Must be set as JVM system properties before startup.
+   */
+  public static BlockCache buildFromProperties() throws IOException {
+    String pathProp = System.getProperty("solr.blockCache.path", "");
+    long kilobytes = Long.getLong("solr.blockCache.kilobytes", 1L << 20);
+    if (!pathProp.isEmpty()) {
+      Path backingFile = Path.of(pathProp);
+      return Files.exists(backingFile)
+          ? new BlockCache(backingFile)
+          : new BlockCache(kilobytes * 1024L, backingFile);
+    }
+    Path tmpFile =
+        Path.of(System.getProperty("java.io.tmpdir"))
+            .resolve("solr-block-cache-" + java.util.UUID.randomUUID() + ".tmp");
+    return new BlockCache(kilobytes * 1024L, tmpFile);
+  }
+
   @Override
-  public void close() {
+  public void close() throws IOException {
+    SolrMetricProducer.super.close();
     // MappedByteBuffers are not explicitly unmapped here; the JVM will release them on exit.
     // TODO: add explicit unmap via ByteBufferGuard / unmapHack if needed.
   }

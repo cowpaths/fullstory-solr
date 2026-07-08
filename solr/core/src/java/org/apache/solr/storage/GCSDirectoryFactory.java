@@ -64,13 +64,14 @@ import org.slf4j.LoggerFactory;
  * (with an explicit service account key) or an in-memory mock (see {@code LocalGCSDirectoryFactory}
  * for tests).
  *
- * <p>Configuration parameters (via {@code solrconfig.xml} or system properties):
+ * <p>Configuration parameters:
  *
  * <ul>
  *   <li>{@code solr.gcsDirectory.bucket} — GCS bucket name (system property)
- *   <li>{@code blockCacheKilobytes} / {@code solr.gcsDirectory.blockCacheKilobytes} — decompressed
- *       block cache size in KiB (default: 1 GiB)
- *   <li>{@code useAsyncIO} — whether to use double-buffered async GCS writes (default: true)
+ *   <li>{@code solr.blockCache.kilobytes} / {@code solr.blockCache.path} — see {@link
+ *       BlockCache#buildFromProperties()}
+ *   <li>{@code useAsyncIO} — whether to use double-buffered async GCS writes (solrconfig.xml,
+ *       default: true)
  * </ul>
  */
 public class GCSDirectoryFactory extends StandardDirectoryFactory {
@@ -88,18 +89,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
 
   /** Write buffer size for double-buffered GCS uploads. 256 KB matches GCS chunk alignment. */
   static final int GCS_WRITE_BUFFER_SIZE = 256 * 1024;
-
-  /** Block cache size in KiB; node-level, must be set via sysprop before JVM startup. */
-  private static final long BLOCK_CACHE_KILOBYTES =
-      Long.getLong("solr.gcsDirectory.blockCacheKilobytes", 1L << 20);
-
-  /**
-   * Path to an existing file to use as the block cache backing store. Mutually exclusive with
-   * {@code solr.gcsDirectory.blockCacheKilobytes}; the file's current size determines cache
-   * capacity.
-   */
-  private static final String BLOCK_CACHE_PATH =
-      EnvUtils.getProperty("solr.gcsDirectory.blockCachePath", "");
 
   /**
    * Default cap on concurrently open GCS {@link com.google.cloud.ReadChannel}s across all files.
@@ -121,6 +110,9 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
 
   /** Non-null only when this instance owns (and must close) the node-level state. */
   private NodeLevelGCSDirectoryState ownNodeLevelState;
+
+  /** Non-null only when this instance owns (and must close) the node-level BlockCache. */
+  private BlockCache ownBlockCache;
 
   private WeakReference<CoreContainer> cc;
   private boolean useAsyncIO;
@@ -329,8 +321,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         log.warn(
             "interrupted while enqueuing REGISTER_POISON; some register/delete tasks may be lost");
       }
-      try (AutoCloseable c1 = storage;
-          Closeable c2 = blockCache) {
+      try (AutoCloseable c1 = storage) {
         ExecutorUtil.shutdownAndAwaitTermination(ioExec);
       } catch (IOException e) {
         throw e;
@@ -355,14 +346,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     }
     useAsyncIO = params.getBool("useAsyncIO", true);
 
-    boolean hasPath = !BLOCK_CACHE_PATH.isEmpty();
-    boolean hasSizeExplicit = System.getProperty("solr.gcsDirectory.blockCacheKilobytes") != null;
-    if (hasPath && hasSizeExplicit) {
-      throw new IllegalArgumentException(
-          "solr.gcsDirectory.blockCachePath and solr.gcsDirectory.blockCacheKilobytes "
-              + "are mutually exclusive.");
-    }
-
     if (this.cc != null) {
       CoreContainer cc = this.cc.get();
       this.cc = null;
@@ -370,6 +353,18 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       final String metadataBucket = BUCKET + "-meta";
       final ZkController zkController = cc.getZkController();
       final Path coreRootDirectory = cc.getCoreRootDirectory();
+      BlockCache blockCache =
+          cc.getObjectCache()
+              .computeIfAbsent(
+                  "nodeBlockCache",
+                  BlockCache.class,
+                  k -> {
+                    try {
+                      return BlockCache.buildFromProperties();
+                    } catch (IOException e) {
+                      throw new UncheckedIOException(e);
+                    }
+                  });
       nodeLevelState =
           cc.getObjectCache()
               .computeIfAbsent(
@@ -379,20 +374,19 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
                     final Storage storage = initStorage(params); // TODO: race here.
                     try {
                       return new NodeLevelGCSDirectoryState(
-                          buildBlockCache(),
-                          storage,
-                          metadataBucket,
-                          zkController,
-                          coreRootDirectory);
+                          blockCache, storage, metadataBucket, zkController, coreRootDirectory);
                     } catch (IOException e) {
                       throw new UncheckedIOException(e);
                     }
                   });
+      blockCache.initializeMetrics(cc.getMetricsHandler().getSolrMetricsContext(), "blockCache");
     } else {
       try {
+        BlockCache cache = BlockCache.buildFromProperties();
         nodeLevelState =
             new NodeLevelGCSDirectoryState(
-                buildBlockCache(), initStorage(params), BUCKET + "-meta", null, null);
+                cache, initStorage(params), BUCKET + "-meta", null, null);
+        ownBlockCache = cache;
       } catch (IOException e) {
         throw new UncheckedIOException(e);
       }
@@ -400,17 +394,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     }
 
     super.init(args);
-  }
-
-  private static BlockCache buildBlockCache() throws IOException {
-    if (!BLOCK_CACHE_PATH.isEmpty()) {
-      return new BlockCache(Path.of(BLOCK_CACHE_PATH));
-    } else {
-      Path backingFile =
-          Path.of(EnvUtils.getProperty("java.io.tmpdir"))
-              .resolve("solr-gcs-block-cache-" + UUID.randomUUID() + ".tmp");
-      return new BlockCache(BLOCK_CACHE_KILOBYTES * 1024L, backingFile);
-    }
   }
 
   /**
@@ -474,7 +457,8 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
   @Override
   @SuppressWarnings("try")
   public void close() throws IOException {
-    try (NodeLevelGCSDirectoryState close = ownNodeLevelState) {
+    try (BlockCache bc = ownBlockCache;
+        NodeLevelGCSDirectoryState close = ownNodeLevelState) {
       super.close();
     }
   }

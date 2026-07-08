@@ -48,7 +48,6 @@ import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.util.RamUsageEstimator;
-import org.apache.solr.common.MapWriter;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.NamedList;
@@ -69,15 +68,20 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private NodeLevelTeeDirectoryState nodeLevelState;
   private NodeLevelTeeDirectoryState ownNodeLevelState;
+
+  /** Non-null only when this instance owns (and must close) the node-level BlockCache. */
+  private BlockCache ownBlockCache;
+
   private WeakReference<CoreContainer> cc;
 
   private boolean isDataNode = true;
   private String accessDir;
-  private boolean useBlockCache;
   private boolean useAsyncIO;
   private boolean useDirectIO;
 
-  private static final long DEFAULT_BLOCK_CACHE_KILOBYTES = 1L << 20; // 1 GiB
+  /** Whether to enable AccessDirectory2 (BlockCache) mode; must be set via sysprop. */
+  private static final boolean USE_BLOCK_CACHE =
+      Boolean.getBoolean("solr.teeDirectory.useBlockCache");
 
   @Override
   public void initCoreContainer(CoreContainer cc) {
@@ -99,7 +103,6 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
     // AccessDirectory2 mode (blockCache != null)
     // ---------------------------------------------------------------------------
     final BlockCache blockCache;
-    final LongAdder prepopulated;
 
     // ---------------------------------------------------------------------------
     // AccessDirectory mode (blockCache == null)
@@ -129,7 +132,6 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
 
       if (blockCache != null) {
         // AccessDirectory2 mode: no lazy-activation machinery needed.
-        prepopulated = new LongAdder();
         activationQueue = null;
         priorityActivate = null;
         rawCt = null;
@@ -144,7 +146,6 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
         activationTask = null;
       } else {
         // AccessDirectory mode: full lazy-activation machinery.
-        prepopulated = null;
         activationQueue = new LinkedBlockingQueue<>();
         priorityActivate = new ConcurrentHashMap<>();
         rawCt = new LongAdder();
@@ -226,59 +227,47 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
     @Override
     public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
       solrMetricsContext = parentContext.getChildContext(this);
-      final MetricsMap mm;
       if (blockCache != null) {
-        mm =
-            new MetricsMap(
-                ew ->
-                    ew.put(
-                        "blockCache",
-                        (MapWriter)
-                            bew -> {
-                              long prep = prepopulated.sum();
-                              blockCache.writeMetrics(bew, prep);
-                              bew.put("prepopulated", prep);
-                            }));
-      } else {
-        mm =
-            new MetricsMap(
-                (writer) -> {
-                  writer.put("rawCt", rawCt.sum());
-                  writer.put("loadedCt", loadedCt.sum());
-                  writer.put("populatedCt", populatedCt.sum());
-                  writer.put("lazyCt", lazyCt.sum());
-                  writer.put("cumulativeLazyMapSize", lazyMapSize.sum());
-                  final long diskUsage = lazyMapDiskUsage.sum();
-                  writer.put("lazyDiskUsage", RamUsageEstimator.humanReadableUnits(diskUsage));
-                  writer.put("lazyDiskBytesUsed", diskUsage);
-                  final long blockBytesLoaded = lazyLoadedBlockBytes.sum();
-                  writer.put(
-                      "lazyLoadedBlockUsage",
-                      RamUsageEstimator.humanReadableUnits(blockBytesLoaded));
-                  writer.put("lazyLoadedBlockBytes", blockBytesLoaded);
-                  BiConsumer<CharSequence, Object> c = writer.getBiConsumer();
-                  MetricUtils.convertMetric(
-                      "priorityActivate",
-                      priorityActivateMeter,
-                      MetricUtils.ALL_PROPERTIES,
-                      false,
-                      false,
-                      false,
-                      false,
-                      ":",
-                      c::accept);
-                  MetricUtils.convertMetric(
-                      "activate",
-                      activateMeter,
-                      MetricUtils.ALL_PROPERTIES,
-                      false,
-                      false,
-                      false,
-                      false,
-                      ":",
-                      c::accept);
-                });
+        blockCache.initializeMetrics(parentContext, "blockCache");
+        return;
       }
+      final MetricsMap mm =
+          new MetricsMap(
+              (writer) -> {
+                writer.put("rawCt", rawCt.sum());
+                writer.put("loadedCt", loadedCt.sum());
+                writer.put("populatedCt", populatedCt.sum());
+                writer.put("lazyCt", lazyCt.sum());
+                writer.put("cumulativeLazyMapSize", lazyMapSize.sum());
+                final long diskUsage = lazyMapDiskUsage.sum();
+                writer.put("lazyDiskUsage", RamUsageEstimator.humanReadableUnits(diskUsage));
+                writer.put("lazyDiskBytesUsed", diskUsage);
+                final long blockBytesLoaded = lazyLoadedBlockBytes.sum();
+                writer.put(
+                    "lazyLoadedBlockUsage", RamUsageEstimator.humanReadableUnits(blockBytesLoaded));
+                writer.put("lazyLoadedBlockBytes", blockBytesLoaded);
+                BiConsumer<CharSequence, Object> c = writer.getBiConsumer();
+                MetricUtils.convertMetric(
+                    "priorityActivate",
+                    priorityActivateMeter,
+                    MetricUtils.ALL_PROPERTIES,
+                    false,
+                    false,
+                    false,
+                    false,
+                    ":",
+                    c::accept);
+                MetricUtils.convertMetric(
+                    "activate",
+                    activateMeter,
+                    MetricUtils.ALL_PROPERTIES,
+                    false,
+                    false,
+                    false,
+                    false,
+                    ":",
+                    c::accept);
+              });
       solrMetricsContext.gauge(mm, true, scope, SolrInfoBean.Category.DIRECTORY.toString());
     }
 
@@ -291,8 +280,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
     @SuppressWarnings("try")
     public void close() throws IOException {
       try (Closeable c1 = SolrMetricProducer.super::close;
-          Closeable c2 = blockCache;
-          Closeable c3 = () -> ExecutorUtil.shutdownAndAwaitTermination(ioExec)) {
+          Closeable c2 = () -> ExecutorUtil.shutdownAndAwaitTermination(ioExec)) {
         try {
           lengthVerificationTask.cancel(true);
         } finally {
@@ -395,48 +383,41 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
   @Override
   public void init(NamedList<?> args) {
     SolrParams params = args.toSolrParams();
-    useBlockCache =
-        params.getBool("useBlockCache", Boolean.getBoolean("solr.teeDirectory.useBlockCache"));
-    final long blockCacheBytes =
-        params.getLong(
-                "blockCacheKilobytes",
-                Long.getLong(
-                    "solr.teeDirectory.blockCacheKilobytes", DEFAULT_BLOCK_CACHE_KILOBYTES))
-            * 1024L;
-    final String blockCachePath =
-        params.get("blockCachePath", System.getProperty("solr.teeDirectory.blockCachePath", ""));
-    final Path blockCacheBackingFile =
-        useBlockCache
-            ? (!blockCachePath.isEmpty()
-                ? Path.of(blockCachePath)
-                : Path.of(System.getProperty("java.io.tmpdir"))
-                    .resolve("solr-block-cache-" + java.util.UUID.randomUUID() + ".tmp"))
-            : null;
-
     if (this.cc != null) {
       CoreContainer cc = this.cc.get();
       this.cc = null;
       assert cc != null;
+      BlockCache blockCache =
+          USE_BLOCK_CACHE
+              ? cc.getObjectCache()
+                  .computeIfAbsent(
+                      "nodeBlockCache",
+                      BlockCache.class,
+                      k -> {
+                        try {
+                          return BlockCache.buildFromProperties();
+                        } catch (IOException e) {
+                          throw new UncheckedIOException(e);
+                        }
+                      })
+              : null;
       nodeLevelState =
           cc.getObjectCache()
               .computeIfAbsent(
                   "nodeLevelTeeDirectoryState",
                   NodeLevelTeeDirectoryState.class,
                   (k) -> {
-                    try {
-                      BlockCache cache = buildBlockCache(blockCacheBackingFile, blockCacheBytes);
-                      NodeLevelTeeDirectoryState ret = new NodeLevelTeeDirectoryState(4096, cache);
-                      ret.initializeMetrics(
-                          cc.getMetricsHandler().getSolrMetricsContext(), "teeDirectory");
-                      return ret;
-                    } catch (IOException e) {
-                      throw new UncheckedIOException(e);
-                    }
+                    NodeLevelTeeDirectoryState ret =
+                        new NodeLevelTeeDirectoryState(4096, blockCache);
+                    ret.initializeMetrics(
+                        cc.getMetricsHandler().getSolrMetricsContext(), "teeDirectory");
+                    return ret;
                   });
     } else {
       try {
-        BlockCache cache = buildBlockCache(blockCacheBackingFile, blockCacheBytes);
+        BlockCache cache = USE_BLOCK_CACHE ? BlockCache.buildFromProperties() : null;
         nodeLevelState = new NodeLevelTeeDirectoryState(64, cache);
+        ownBlockCache = cache;
       } catch (IOException e) {
         throw new UncheckedIOException(e);
       }
@@ -490,16 +471,6 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
     return accessDir.concat(ret);
   }
 
-  private static BlockCache buildBlockCache(Path backingFile, long bytes) throws IOException {
-    if (backingFile == null) {
-      return null;
-    }
-    if (Files.exists(backingFile)) {
-      return new BlockCache(backingFile);
-    }
-    return new BlockCache(bytes, backingFile);
-  }
-
   @Override
   public Directory create(String path, LockFactory lockFactory, DirContext dirContext)
       throws IOException {
@@ -520,8 +491,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
                       lockFactory,
                       persistentPath,
                       nodeLevelState.blockCache,
-                      nodeLevelState.ioExec,
-                      nodeLevelState.prepopulated);
+                      nodeLevelState.ioExec);
             } else {
               dir = new AccessDirectory(access, lockFactory, persistentPath, nodeLevelState);
             }
@@ -557,7 +527,8 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
   @Override
   @SuppressWarnings("try")
   public void close() throws IOException {
-    try (NodeLevelTeeDirectoryState close = ownNodeLevelState) {
+    try (BlockCache bc = ownBlockCache;
+        NodeLevelTeeDirectoryState close = ownNodeLevelState) {
       super.close();
     }
   }

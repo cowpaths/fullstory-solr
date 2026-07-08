@@ -83,7 +83,7 @@ allprojects {
       testOptions += [
           [propName: 'lucene.fixedbitset.maxwordsshift', value: "17", description: "May set lower to exercise FixedBitSet partitioning"],
           [propName: 'solr.teeDirectory.useBlockCache', value: "true", description: "use cache-based paradigm for access (AccessDirectory2)"],
-          [propName: 'solr.teeDirectory.blockCacheKilobytes', value: "256", description: "size in KiB of blockcache (for access dir)"],
+          [propName: 'solr.blockCache.kilobytes', value: "1024", description: "size in KiB of blockcache (shared by TeeDirectory and GCSDirectory)"],
           [propName: 'solr.compressionBlockKilobytes', value: "1", description: "Compression block size in KiB (1, 2, 4, 8, 16, 32, 64, 256)."],
           [propName: 'solr.gcsDirectory.project', value: "fs-playpen", description: "GCS project for GCSDirectoryFactory tests against real/hosted buckets."],
           [propName: 'solr.gcsDirectory.bucket', value: "dev-gcs-directory-test", description: "GCS bucket name for LocalGCSDirectoryFactory tests."],
