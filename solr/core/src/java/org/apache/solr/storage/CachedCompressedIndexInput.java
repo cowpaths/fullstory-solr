@@ -42,6 +42,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -1219,7 +1220,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
           cache.pin(node);
           try {
             PINNED.setRelease(this, false);
+            long start = System.nanoTime();
             readPermit = node.getPayload().register(this, cache);
+            cache.t.update(System.nanoTime() - start, TimeUnit.NANOSECONDS);
             localPin();
           } finally {
             // NOTE: we global double-pin and unpin here in order to ensure that while we

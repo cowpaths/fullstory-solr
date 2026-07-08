@@ -19,6 +19,9 @@ package org.apache.solr.storage;
 
 import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZE;
 
+import com.codahale.metrics.ExponentiallyDecayingReservoir;
+import com.codahale.metrics.Snapshot;
+import com.codahale.metrics.Timer;
 import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
@@ -31,6 +34,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
@@ -39,6 +43,7 @@ import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.storage.CachedCompressedIndexInput.NodeRefStruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -374,7 +379,8 @@ public class BlockCache implements Closeable {
 
   private final Partition[] partitions;
 
-  private static final int MAX_PINNED_BLOCKS = 4096;
+  private static final int MAX_PINNED_BLOCKS =
+      EnvUtils.getPropertyAsInteger("solr.blockcache.maxPinnedBlocks", 4096);
 
   private final Cache<RefVal<Val>>[] pinned;
 
@@ -404,6 +410,8 @@ public class BlockCache implements Closeable {
   private final LongAdder casRaceLoss = new LongAdder();
 
   private final LongAdder failedPin = new LongAdder();
+
+  final Timer t = new Timer(new ExponentiallyDecayingReservoir());
 
   private Cache<RefVal<Val>> pinnedLru() {
     return pinned[ThreadLocalRandom.current().nextInt(pinned.length)];
@@ -540,7 +548,8 @@ public class BlockCache implements Closeable {
     return rc >= 0;
   }
 
-  private static final int REF_LIMIT = 20;
+  private static final int REF_LIMIT =
+      EnvUtils.getPropertyAsInteger("solr.blockcache.refLimit", 20);
 
   private static class PBS {
 
@@ -663,6 +672,7 @@ public class BlockCache implements Closeable {
     long acq = acquisitions.sum();
     long misses = acq - prepopulated;
     long hotUnpinnedBytes = hotUnpinned.sum() * COMPRESSION_BLOCK_SIZE;
+    Snapshot s = t.getSnapshot();
     ew.put("totalBytes", totalBytes);
     ew.put("closedCount", closedCount.sum());
     ew.put("closeSkippedDead", closeSkippedDead.sum());
@@ -686,6 +696,30 @@ public class BlockCache implements Closeable {
             + RamUsageEstimator.humanReadableUnits(hotUnpinnedBytes)
             + " / "
             + RamUsageEstimator.humanReadableUnits(totalBytes));
+
+    ew.put(
+        "readPermitTimer",
+        Map.of(
+            "count",
+            t.getCount(),
+            "1m",
+            t.getOneMinuteRate(),
+            "5m",
+            t.getFiveMinuteRate(),
+            "15m",
+            t.getFifteenMinuteRate(),
+            "mean",
+            s.getMean(),
+            "p50",
+            s.getMedian(),
+            "p75",
+            s.get75thPercentile(),
+            "p95",
+            s.get95thPercentile(),
+            "p99",
+            s.get99thPercentile(),
+            "max",
+            s.getMax()));
   }
 
   /**
