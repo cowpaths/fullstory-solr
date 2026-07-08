@@ -375,6 +375,7 @@ public class AccessDirectory2 extends MMapDirectory {
         sharedEntry.acquire(); // +1 for this root reader
       }
     }
+    // TODO: if `context.mergeInfo != null` we should preload the entire contents
     return new AD2IndexInput(compressedPath.resolve(name), this, sharedEntry, pendingNodes);
   }
 

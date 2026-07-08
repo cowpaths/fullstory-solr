@@ -919,6 +919,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         }
       }
     }
+    // TODO: if `context.mergeInfo != null` we should preload the entire contents
     return new GCSIndexInput("gcs:" + name, this, offsetFile, header);
   }
 
