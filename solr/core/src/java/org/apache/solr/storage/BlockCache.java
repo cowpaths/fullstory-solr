@@ -19,9 +19,6 @@ package org.apache.solr.storage;
 
 import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZE;
 
-import com.codahale.metrics.ExponentiallyDecayingReservoir;
-import com.codahale.metrics.Snapshot;
-import com.codahale.metrics.Timer;
 import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
@@ -33,9 +30,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.EnumSet;
 import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ThreadLocalRandom;
@@ -43,12 +37,10 @@ import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
-import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.core.SolrInfoBean;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricProducer;
 import org.apache.solr.metrics.SolrMetricsContext;
-import org.apache.solr.storage.CachedCompressedIndexInput.NodeRefStruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -211,147 +203,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       }
     }
 
-    PBS outOfBandTryUnpinAll() {
-      PBS extant = state;
-      if (extant == UPDATING_SENTINEL || !STATE.compareAndSet(this, extant, null)) {
-        return null; // sentinel held or concurrent CAS loss; caller should retry
-      }
-      return extant == null ? EVICTED : extant; // EVICTED = already clean, no NRS to unpin
-    }
-
-    private static final PBS UPDATING_SENTINEL = new PBS(null, null, null);
-
-    /**
-     * Sentinel returned by {@link #outOfBandTryUnpinAll} when the block had no PBS (already clean).
-     */
-    private static final PBS EVICTED = new PBS(null, null, null);
-
-    private volatile PBS state;
-
-    private static final VarHandle STATE;
     private static final VarHandle CACHED;
 
     static {
       try {
-        MethodHandles.Lookup lookup = MethodHandles.lookup();
-        STATE = lookup.findVarHandle(Val.class, "state", PBS.class);
-        CACHED = lookup.findVarHandle(Val.class, "cached", ByteBuffer.class);
+        CACHED = MethodHandles.lookup().findVarHandle(Val.class, "cached", ByteBuffer.class);
       } catch (ReflectiveOperationException e) {
         throw new Error(e);
       }
-    }
-
-    PBS lock() {
-      for (PBS extant = state; ; ) {
-        if (extant == UPDATING_SENTINEL) {
-          Thread.yield();
-          extant = state;
-        } else {
-          PBS witness = (PBS) STATE.compareAndExchange(this, extant, UPDATING_SENTINEL);
-          if (witness == extant) {
-            if (extant == null) {
-              // keep UPDATING_SENTINEL in place while we init
-              return extant;
-            } else if (extant.pin()) {
-              if (!STATE.compareAndSet(this, UPDATING_SENTINEL, extant)) {
-                throw new IllegalStateException();
-              }
-              return extant;
-            } else if (!STATE.compareAndSet(this, UPDATING_SENTINEL, extant)) {
-              // PBS are only permanently removed from `pinnedBlockLru` via eviction,
-              // and eviction happens _before_ `state` gets nulled out, it's possible
-              // that we'll occasionally be unable to acquire a pin; just try again
-              // after releasing our `UPDATING_SENTINEL` claim (put back `extant`)
-              throw new IllegalStateException();
-            }
-          } else {
-            extant = witness;
-          }
-        }
-      }
-    }
-
-    void unlock(PBS set) {
-      if (!STATE.compareAndSet(this, UPDATING_SENTINEL, set)) {
-        throw new IllegalStateException();
-      }
-    }
-
-    public PinRef register(NodeRefStruct nodeRefStruct, BlockCache cache) {
-      if (cacheBlockOrd == -1)
-        return NOOP_PINREF; // tail nodes are never evicted; PBS/refLru is unnecessary
-      PBS ret = null;
-      final PBS lock = lock();
-      PBS[] deferredHolder = new PBS[1];
-      try {
-        if (lock != null) {
-          ret = lock;
-        } else {
-          for (; ; ) {
-            Cache<RefVal<Val>> p = cache.pinnedLru();
-            Cache.Node<RefVal<Val>> permit =
-                p.acquireNode(
-                    (evicted, i) -> {
-                      if (evicted.val != null) {
-                        PBS pbs;
-                        while ((pbs = evicted.val.outOfBandTryUnpinAll()) == null) {
-                          Thread.yield();
-                        }
-                        if (pbs != EVICTED) {
-                          // Defer unpinAll to after our sentinel is released. Calling it now (while
-                          // holding the sentinel) causes livelock: an NRS thread in PINNED state
-                          // that needs to register with *our* block would spin on outOfBandUnpin
-                          // while we spin waiting for it to reach IDLE — classic hold-and-wait.
-                          deferredHolder[0] = pbs;
-                        }
-                      }
-                      return new BlockCache.RefVal<>(this, i);
-                    });
-            if (permit == null) {
-              Thread.yield();
-            } else if (permit.getPayload().val == this) {
-              ret = new PBS(this, permit, p);
-              // `p.unpin(permit, false)` is called in `ret.register()` below
-              break;
-            } else {
-              throw new IllegalStateException();
-            }
-          }
-        }
-        return ret.register(nodeRefStruct, cache);
-      } finally {
-        if (lock == null) {
-          unlock(ret);
-        }
-        if (deferredHolder[0] != null) {
-          deferredHolder[0].unpinAll(cache);
-        }
-      }
-    }
-  }
-
-  static final PinRef NOOP_PINREF = new PinRef(null, null);
-
-  static class PinRef implements Closeable {
-    private final PBS parent;
-    private final Cache.Node<RefVal<NodeRefStruct>> permit;
-
-    private PinRef(PBS parent, Cache.Node<RefVal<NodeRefStruct>> permit) {
-      this.parent = parent;
-      this.permit = permit;
-    }
-
-    public PinRef copy(NodeRefStruct nrs, BlockCache cache) {
-      if (parent.pin()) {
-        return parent.register(nrs, cache); // unpins parent
-      } else {
-        return null;
-      }
-    }
-
-    @Override
-    public void close() {
-      if (parent != null) parent.refLru.pin(permit);
     }
   }
 
@@ -383,11 +242,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private final Partition[] partitions;
 
-  private static final int MAX_PINNED_BLOCKS =
-      EnvUtils.getPropertyAsInteger("solr.blockcache.maxPinnedBlocks", 4096);
-
-  private final Cache<RefVal<Val>>[] pinned;
-
   private final long totalBytes;
   private final LongAdder acquisitions = new LongAdder();
   private final LongAdder poolExhausted = new LongAdder();
@@ -418,12 +272,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private volatile SolrMetricsContext solrMetricsContext;
 
-  final Timer t = new Timer(new ExponentiallyDecayingReservoir());
-
-  private Cache<RefVal<Val>> pinnedLru() {
-    return pinned[ThreadLocalRandom.current().nextInt(pinned.length)];
-  }
-
   /**
    * Creates a new block cache backed by a freshly-created temp file. The file is deleted
    * immediately after mapping so it does not outlive the JVM.
@@ -432,41 +280,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
     this.pool = initPool(nBlocks, backingFile, true);
     this.partitions = distribute(nBlocks);
-    this.pinned = initPinned();
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     log.info(
         "BlockCache initialized: nBlocks={}, targetBytes={}, nPartitions={}",
         pool.length,
         targetBytes,
         partitions.length);
-  }
-
-  private Cache<RefVal<Val>>[] initPinned() {
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    Cache<RefVal<Val>>[] arr = new Cache[computeNPartitions(MAX_PINNED_BLOCKS)];
-    int perPinnedPartition = (MAX_PINNED_BLOCKS / arr.length) + 1;
-    Iterable<RefVal<Val>> dummy =
-        () ->
-            new Iterator<RefVal<Val>>() {
-              int i = 0;
-
-              @Override
-              public boolean hasNext() {
-                return i < perPinnedPartition;
-              }
-
-              @Override
-              public RefVal<Val> next() {
-                if (i++ >= perPinnedPartition) {
-                  throw new NoSuchElementException();
-                }
-                return new RefVal<>(null, 0);
-              }
-            };
-    for (int i = arr.length - 1; i >= 0; i--) {
-      arr[i] = new Cache<>(dummy);
-    }
-    return arr;
   }
 
   /**
@@ -483,7 +302,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
     this.pool = initPool(nBlocks, existingBackingFile, false);
     this.partitions = distribute(nBlocks);
-    this.pinned = initPinned();
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     log.info(
         "BlockCache initialized from existing file {}: nBlocks={}, targetBytes={}, nPartitions={}",
@@ -555,76 +373,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     return rc >= 0;
   }
 
-  private static final int REF_LIMIT =
-      EnvUtils.getPropertyAsInteger("solr.blockcache.refLimit", 20);
-
-  private static class PBS {
-
-    private final Val blockNode;
-    private final Cache.Node<RefVal<Val>> permit;
-    private final Cache<RefVal<Val>> blockLru;
-    private final Cache<RefVal<NodeRefStruct>> refLru = new Cache<>(List.of());
-
-    private PBS(Val blockNode, Cache.Node<RefVal<Val>> permit, Cache<RefVal<Val>> blockLru) {
-      this.blockNode = blockNode;
-      this.permit = permit;
-      this.blockLru = blockLru;
-    }
-
-    public PinRef register(NodeRefStruct nrs, BlockCache cache) {
-      try {
-        for (boolean firstPass = true; ; firstPass = false) {
-          int refCount = blockNode.refCount();
-          Cache.Node<RefVal<NodeRefStruct>> permitF;
-          if (refCount < REF_LIMIT) {
-            permitF = new Cache.Node<>(new RefVal<>(nrs, 1), null);
-          } else {
-            Cache.Node<RefVal<NodeRefStruct>> permit =
-                refLru.acquireNode(
-                    (evicted, i) -> {
-                      if (evicted.val != null) {
-                        evicted.val.outOfBandUnpin(cache);
-                      }
-                      return new RefVal<>(nrs, i);
-                    });
-            if (permit == null) {
-              permitF = new Cache.Node<>(new RefVal<>(nrs, 1), null);
-            } else if (firstPass && refCount > REF_LIMIT) {
-              // too many permits issued ... discard one
-              continue;
-            } else {
-              permitF = permit;
-            }
-          }
-          refLru.unpin(permitF, false);
-          return new PinRef(this, permitF);
-        }
-      } finally {
-        blockLru.unpin(permit, false);
-      }
-    }
-
-    public void unpinAll(BlockCache cache) {
-      // TODO: pretty sure we have an effective lock at this point and can just
-      //  iterate entries instead of `acquireNode()` in a loop
-      Cache.Node<RefVal<NodeRefStruct>> permit;
-      do {
-        permit =
-            refLru.acquireNode(
-                (evicted, i) -> {
-                  if (evicted.val != null) {
-                    evicted.val.outOfBandUnpin(cache);
-                  }
-                  return null;
-                });
-      } while (permit != null);
-    }
-
-    boolean pin() {
-      return blockLru.pin(permit) >= 0;
-    }
-  }
-
   /**
    * Releases a pin, routing the node to a randomly chosen partition's LRU head. No node-to-
    * partition affinity is required: the ByteBuffer value is valid in any partition's pool.
@@ -680,7 +428,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     long acq = acquisitions.sum();
     long misses = acq - prep;
     long hotUnpinnedBytes = hotUnpinned.sum() * COMPRESSION_BLOCK_SIZE;
-    Snapshot s = t.getSnapshot();
     ew.put("totalBytes", totalBytes);
     ew.put("closedCount", closedCount.sum());
     ew.put("closeSkippedDead", closeSkippedDead.sum());
@@ -705,30 +452,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
             + RamUsageEstimator.humanReadableUnits(hotUnpinnedBytes)
             + " / "
             + RamUsageEstimator.humanReadableUnits(totalBytes));
-
-    ew.put(
-        "readPermitTimer",
-        Map.of(
-            "count",
-            t.getCount(),
-            "1m",
-            t.getOneMinuteRate(),
-            "5m",
-            t.getFiveMinuteRate(),
-            "15m",
-            t.getFifteenMinuteRate(),
-            "mean",
-            s.getMean(),
-            "p50",
-            s.getMedian(),
-            "p75",
-            s.get75thPercentile(),
-            "p95",
-            s.get95thPercentile(),
-            "p99",
-            s.get99thPercentile(),
-            "max",
-            s.getMax()));
   }
 
   /**

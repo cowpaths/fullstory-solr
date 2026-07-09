@@ -25,7 +25,6 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -42,8 +41,6 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReferenceArray;
@@ -329,20 +326,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // Block navigation
   // ---------------------------------------------------------------------------
 
-  private void localPin() throws IOException {
+  private void initPositional() throws IOException {
     long pos = seekPos;
-    currentNodeRef.localPin();
     if (pos != -1) {
       seekPos = -1;
-    } else if (currentNodeRef.currentBlockIdx < 0) {
-      int blockIdx = ~currentNodeRef.currentBlockIdx;
-      pos =
-          ((long) blockIdx << COMPRESSION_BLOCK_SHIFT)
-              + (postBuffer.position() - postBufferBaseline);
-    } else {
-      return;
+      actualSeek(pos);
     }
-    actualSeek(pos);
   }
 
   private void actualSeek(final long pos) throws IOException {
@@ -611,49 +600,29 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public byte readByte(final long pos) throws IOException {
-    currentNodeRef.localPin();
-    try {
-      return _readByte(pos);
-    } finally {
-      currentNodeRef.localUnpin();
-    }
+    return _readByte(pos);
   }
 
   @Override
   public short readShort(final long pos) throws IOException {
-    currentNodeRef.localPin();
-    try {
-      final long absolutePos = pos + offset;
-      final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-      final int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
-      if (postBuffer.limit() - localPos >= Short.BYTES) {
-        return guard.getShort(postBuffer, localPos);
-      }
-      return (short) (((_readByte(pos + 1) & 0xFF) << 8) | (_readByte(pos) & 0xFF));
-    } finally {
-      currentNodeRef.localUnpin();
+    final long absolutePos = pos + offset;
+    final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
+    if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
+    final int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
+    if (postBuffer.limit() - localPos >= Short.BYTES) {
+      return guard.getShort(postBuffer, localPos);
     }
+    return (short) (((_readByte(pos + 1) & 0xFF) << 8) | (_readByte(pos) & 0xFF));
   }
 
   @Override
   public int readInt(final long pos) throws IOException {
-    currentNodeRef.localPin();
-    try {
-      return _readInt(pos);
-    } finally {
-      currentNodeRef.localUnpin();
-    }
+    return _readInt(pos);
   }
 
   @Override
   public long readLong(final long pos) throws IOException {
-    currentNodeRef.localPin();
-    try {
-      return _readLong(pos);
-    } finally {
-      currentNodeRef.localUnpin();
-    }
+    return _readLong(pos);
   }
 
   // ---------------------------------------------------------------------------
@@ -662,31 +631,23 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public byte readByte() throws IOException {
-    localPin();
-    try {
-      if (!postBuffer.hasRemaining()) initBlockSeq();
-      return guard.getByte(postBuffer);
-    } finally {
-      currentNodeRef.localUnpin();
-    }
+    initPositional();
+    if (!postBuffer.hasRemaining()) initBlockSeq();
+    return guard.getByte(postBuffer);
   }
 
   @Override
   public void readBytes(byte[] dst, int offset, int len) throws IOException {
-    localPin();
-    try {
-      int left = postBuffer.remaining();
-      while (left < len) {
-        guard.getBytes(postBuffer, dst, offset, left);
-        len -= left;
-        offset += left;
-        initBlockSeq();
-        left = postBuffer.remaining();
-      }
-      guard.getBytes(postBuffer, dst, offset, len);
-    } finally {
-      currentNodeRef.localUnpin();
+    initPositional();
+    int left = postBuffer.remaining();
+    while (left < len) {
+      guard.getBytes(postBuffer, dst, offset, left);
+      len -= left;
+      offset += left;
+      initBlockSeq();
+      left = postBuffer.remaining();
     }
+    guard.getBytes(postBuffer, dst, offset, len);
   }
 
   // ---------------------------------------------------------------------------
@@ -702,48 +663,32 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public short readShort() throws IOException {
-    localPin();
-    try {
-      final int remaining = postBuffer.remaining();
-      if (remaining >= Short.BYTES) {
-        return guard.getShort(postBuffer);
-      }
-      final byte b1 = _readByte(remaining);
-      final byte b2 = _readByte(remaining - 1);
-      return (short) (((b2 & 0xFF) << 8) | (b1 & 0xFF));
-    } finally {
-      currentNodeRef.localUnpin();
+    initPositional();
+    final int remaining = postBuffer.remaining();
+    if (remaining >= Short.BYTES) {
+      return guard.getShort(postBuffer);
     }
+    final byte b1 = _readByte(remaining);
+    final byte b2 = _readByte(remaining - 1);
+    return (short) (((b2 & 0xFF) << 8) | (b1 & 0xFF));
   }
 
   @Override
   public int readInt() throws IOException {
-    localPin();
-    try {
-      return _readInt(postBuffer.remaining());
-    } finally {
-      currentNodeRef.localUnpin();
-    }
+    initPositional();
+    return _readInt(postBuffer.remaining());
   }
 
   @Override
   public long readLong() throws IOException {
-    localPin();
-    try {
-      return _readLong(postBuffer.remaining());
-    } finally {
-      currentNodeRef.localUnpin();
-    }
+    initPositional();
+    return _readLong(postBuffer.remaining());
   }
 
   @Override
   public int readVInt() throws IOException {
-    localPin();
-    try {
-      return _readVInt(postBuffer.remaining());
-    } finally {
-      currentNodeRef.localUnpin();
-    }
+    initPositional();
+    return _readVInt(postBuffer.remaining());
   }
 
   private int _readVInt(int remaining) throws IOException {
@@ -786,22 +731,14 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public long readVLong() throws IOException {
-    localPin();
-    try {
-      return _readVLong(false);
-    } finally {
-      currentNodeRef.localUnpin();
-    }
+    initPositional();
+    return _readVLong(false);
   }
 
   @Override
   public long readZLong() throws IOException {
-    localPin();
-    try {
-      return BitUtil.zigZagDecode(_readVLong(true));
-    } finally {
-      currentNodeRef.localUnpin();
-    }
+    initPositional();
+    return BitUtil.zigZagDecode(_readVLong(true));
   }
 
   private long _readVLong(final boolean allowNegative) throws IOException {
@@ -880,12 +817,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public String readString() throws IOException {
-    localPin();
-    try {
-      return _readString();
-    } finally {
-      currentNodeRef.localUnpin();
-    }
+    initPositional();
+    return _readString();
   }
 
   private String _readString() throws IOException {
@@ -914,46 +847,38 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public Map<String, String> readMapOfStrings() throws IOException {
-    localPin();
-    try {
-      final int count = _readVInt(postBuffer.remaining());
-      switch (count) {
-        case 0:
-          return Collections.emptyMap();
-        case 1:
-          return Collections.singletonMap(_readString(), _readString());
-        default:
-          final Map<String, String> map =
-              count > 10 ? CollectionUtil.newHashMap(count) : new TreeMap<>();
-          for (int i = count; i > 0; i--) {
-            map.put(_readString(), _readString());
-          }
-          return Collections.unmodifiableMap(map);
-      }
-    } finally {
-      currentNodeRef.localUnpin();
+    initPositional();
+    final int count = _readVInt(postBuffer.remaining());
+    switch (count) {
+      case 0:
+        return Collections.emptyMap();
+      case 1:
+        return Collections.singletonMap(_readString(), _readString());
+      default:
+        final Map<String, String> map =
+            count > 10 ? CollectionUtil.newHashMap(count) : new TreeMap<>();
+        for (int i = count; i > 0; i--) {
+          map.put(_readString(), _readString());
+        }
+        return Collections.unmodifiableMap(map);
     }
   }
 
   @Override
   public Set<String> readSetOfStrings() throws IOException {
-    localPin();
-    try {
-      final int count = _readVInt(postBuffer.remaining());
-      switch (count) {
-        case 0:
-          return Collections.emptySet();
-        case 1:
-          return Collections.singleton(_readString());
-        default:
-          final Set<String> set = count > 10 ? CollectionUtil.newHashSet(count) : new TreeSet<>();
-          for (int i = count; i > 0; i--) {
-            set.add(_readString());
-          }
-          return Collections.unmodifiableSet(set);
-      }
-    } finally {
-      currentNodeRef.localUnpin();
+    initPositional();
+    final int count = _readVInt(postBuffer.remaining());
+    switch (count) {
+      case 0:
+        return Collections.emptySet();
+      case 1:
+        return Collections.singleton(_readString());
+      default:
+        final Set<String> set = count > 10 ? CollectionUtil.newHashSet(count) : new TreeSet<>();
+        for (int i = count; i > 0; i--) {
+          set.add(_readString());
+        }
+        return Collections.unmodifiableSet(set);
     }
   }
 
@@ -1006,73 +931,61 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public void readLongs(final long[] dst, final int offset, final int length) throws IOException {
-    localPin();
-    try {
-      if (longViews == null) {
-        longViews = initLongViews();
+    initPositional();
+    if (longViews == null) {
+      longViews = initLongViews();
+    }
+    final int remaining = postBuffer.remaining();
+    final long bytesRequested = (long) length << 3;
+    if (remaining < bytesRequested) {
+      dst[offset] = _readLong(remaining);
+      for (int i = 1; i < length; i++) {
+        dst[offset + i] = _readLong(postBuffer.remaining());
       }
-      final int remaining = postBuffer.remaining();
-      final long bytesRequested = (long) length << 3;
-      if (remaining < bytesRequested) {
-        dst[offset] = _readLong(remaining);
-        for (int i = 1; i < length; i++) {
-          dst[offset + i] = _readLong(postBuffer.remaining());
-        }
-      } else {
-        final int position = postBuffer.position();
-        guard.getLongs(longViews[position & 0x07].position(position >>> 3), dst, offset, length);
-        postBuffer.position(position + (int) bytesRequested);
-      }
-    } finally {
-      currentNodeRef.localUnpin();
+    } else {
+      final int position = postBuffer.position();
+      guard.getLongs(longViews[position & 0x07].position(position >>> 3), dst, offset, length);
+      postBuffer.position(position + (int) bytesRequested);
     }
   }
 
   @Override
   public void readInts(final int[] dst, final int offset, final int length) throws IOException {
-    localPin();
-    try {
-      if (intViews == null) {
-        intViews = initIntViews();
+    initPositional();
+    if (intViews == null) {
+      intViews = initIntViews();
+    }
+    final int remaining = postBuffer.remaining();
+    final long bytesRequested = (long) length << 2;
+    if (remaining < bytesRequested) {
+      dst[offset] = _readInt(remaining);
+      for (int i = 1; i < length; i++) {
+        dst[offset + i] = _readInt(postBuffer.remaining());
       }
-      final int remaining = postBuffer.remaining();
-      final long bytesRequested = (long) length << 2;
-      if (remaining < bytesRequested) {
-        dst[offset] = _readInt(remaining);
-        for (int i = 1; i < length; i++) {
-          dst[offset + i] = _readInt(postBuffer.remaining());
-        }
-      } else {
-        final int position = postBuffer.position();
-        guard.getInts(intViews[position & 0x03].position(position >>> 2), dst, offset, length);
-        postBuffer.position(position + (int) bytesRequested);
-      }
-    } finally {
-      currentNodeRef.localUnpin();
+    } else {
+      final int position = postBuffer.position();
+      guard.getInts(intViews[position & 0x03].position(position >>> 2), dst, offset, length);
+      postBuffer.position(position + (int) bytesRequested);
     }
   }
 
   @Override
   public void readFloats(final float[] dst, final int offset, final int length) throws IOException {
-    localPin();
-    try {
-      if (floatViews == null) {
-        floatViews = initFloatViews();
+    initPositional();
+    if (floatViews == null) {
+      floatViews = initFloatViews();
+    }
+    final int remaining = postBuffer.remaining();
+    final long bytesRequested = (long) length << 2;
+    if (remaining < bytesRequested) {
+      dst[offset] = Float.intBitsToFloat(_readInt(remaining));
+      for (int i = 1; i < length; i++) {
+        dst[offset + i] = Float.intBitsToFloat(_readInt(postBuffer.remaining()));
       }
-      final int remaining = postBuffer.remaining();
-      final long bytesRequested = (long) length << 2;
-      if (remaining < bytesRequested) {
-        dst[offset] = Float.intBitsToFloat(_readInt(remaining));
-        for (int i = 1; i < length; i++) {
-          dst[offset + i] = Float.intBitsToFloat(_readInt(postBuffer.remaining()));
-        }
-      } else {
-        final int position = postBuffer.position();
-        guard.getFloats(floatViews[position & 0x03].position(position >>> 2), dst, offset, length);
-        postBuffer.position(position + (int) bytesRequested);
-      }
-    } finally {
-      currentNodeRef.localUnpin();
+    } else {
+      final int position = postBuffer.position();
+      guard.getFloats(floatViews[position & 0x03].position(position >>> 2), dst, offset, length);
+      postBuffer.position(position + (int) bytesRequested);
     }
   }
 
@@ -1127,32 +1040,13 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   /**
    * Per-{@link CachedCompressedIndexInput}-instance struct tracking the currently pinned {@link
-   * BlockCache.Val} and sequential-access statistics. Each instance is accessed by at most one
-   * thread at a time via local-pin/local-unpin; out-of-band unpin (eviction) may occur from the
-   * cache scavenger thread.
+   * BlockCache.Val} and sequential-access statistics.
    */
   static final class NodeRefStruct {
-    // Plain (non-volatile) field; accessed via PINNED VarHandle with release/acquire/opaque
-    // semantics to avoid the full StoreLoad fence that volatile would impose on every read call.
-    @SuppressWarnings("unused")
-    private boolean pinned = false;
-
-    private final AtomicBoolean unpinning = new AtomicBoolean();
-
-    private static final VarHandle PINNED;
-
-    static {
-      try {
-        PINNED = MethodHandles.lookup().findVarHandle(NodeRefStruct.class, "pinned", boolean.class);
-      } catch (ReflectiveOperationException e) {
-        throw new Error(e);
-      }
-    }
 
     private Cache.Node<BlockCache.Val> currentNode;
     // Positive = current block index; negative (~idx) = block index with no live pin.
     private int currentBlockIdx = -1;
-    private BlockCache.PinRef readPermit;
     private int sequentialAccessCount = 0;
 
     private NodeRefStruct() {}
@@ -1161,142 +1055,42 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       // Reserved for future clone-inheritance optimisations.
     }
 
-    private void localPin() {
-      // setRelease: establishes happens-before with outOfBandUnpin's getAcquire of pinned,
-      // without requiring a full StoreLoad fence (lock addl) on x86.
-      PINNED.setRelease(this, true);
-      while (unpinning.get()) {
-        // very rare, we're being out-of-band-unpinned
-        // spin-wait for the unpin op to complete or abort
-        PINNED.setRelease(this, false);
-        Thread.yield();
-        PINNED.setRelease(this, true);
-      }
-    }
-
-    private void localUnpin() {
-      // setRelease: ensures eventual visibility to outOfBandUnpin's getAcquire without a
-      // StoreLoad fence. Thread.yield() has no fence semantics, so setOpaque is not sufficient.
-      PINNED.setRelease(this, false);
-    }
-
-    /**
-     * Updates the current cached block. Always called from within a {@code localPin()} context (via
-     * {@link CachedCompressedIndexInput#initBlock(int)}), so state is already PINNED and direct
-     * update is safe.
-     */
-    @SuppressWarnings("try")
+    /** Updates the current cached block. */
     private int setCurrentNode(Cache.Node<BlockCache.Val> node, int blockIdx, BlockCache cache) {
-      assert (boolean) PINNED.getAcquire(this); // should only be called from a pinned context
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
       Cache.Node<BlockCache.Val> toUnpin = currentNode;
       if (toUnpin != null) {
-        try (BlockCache.PinRef c = readPermit) {
-          readPermit = null;
-        }
         cache.unpin(toUnpin);
       }
       currentNode = node;
       currentBlockIdx = blockIdx;
-      try {
-        if (blockIdx == extant + 1) {
-          // sequential access.
-          sequentialAccessCount++;
-          return node == null ? 0 : sequentialAccessCount;
-        } else if (blockIdx < extant) {
-          // gone backward, full reset
-          sequentialAccessCount = 0;
-          return -1;
-        } else if (blockIdx == extant) {
-          // same idx — re-acquire after eviction
-          return node == null ? 0 : sequentialAccessCount;
-        } else {
-          // skipped ahead, reset
-          return sequentialAccessCount = 0;
-        }
-      } finally {
-        if (node != null) {
-          assert (boolean) PINNED.getAcquire(this);
-          cache.pin(node);
-          try {
-            PINNED.setRelease(this, false);
-            long start = System.nanoTime();
-            readPermit = node.getPayload().register(this, cache);
-            cache.t.update(System.nanoTime() - start, TimeUnit.NANOSECONDS);
-            localPin();
-          } finally {
-            // NOTE: we global double-pin and unpin here in order to ensure that while we
-            // release the local pin, there's no chance that we'll be reclaimed and have
-            // our payload nulled out.
-            cache.unpin(node, false);
-          }
-        }
+      if (node != null) {
+        cache.pin(node);
       }
-    }
-
-    /**
-     * Unpins the current block. Always called from within a {@code localPin()} context, so state is
-     * already PINNED and direct update is safe.
-     */
-    @SuppressWarnings("try")
-    private void unpinCurrentBlock(BlockCache blockCache) {
-      Cache.Node<BlockCache.Val> toUnpin = currentNode;
-      if (toUnpin != null) {
-        try (BlockCache.PinRef c = readPermit) {
-          readPermit = null;
-        }
-        currentNode = null;
-        currentBlockIdx = ~currentBlockIdx;
-        blockCache.unpin(toUnpin);
-      }
-    }
-
-    /**
-     * Unpins the current block from outside a {@code localPin()} context (i.e. from {@link
-     * CachedCompressedIndexInput#close()}). Handles the race with {@link #outOfBandUnpin}.
-     */
-    @SuppressWarnings("try")
-    private void closeFor(BlockCache blockCache) {
-      if (unpinning.compareAndSet(false, true)) {
-        try (BlockCache.PinRef c = readPermit) {
-          readPermit = null;
-        }
-        doUnpin(blockCache);
+      if (blockIdx == extant + 1) {
+        // sequential access.
+        sequentialAccessCount++;
+        return node == null ? 0 : sequentialAccessCount;
+      } else if (blockIdx < extant) {
+        // gone backward, full reset
+        sequentialAccessCount = 0;
+        return -1;
+      } else if (blockIdx == extant) {
+        // same idx — re-acquire after eviction
+        return node == null ? 0 : sequentialAccessCount;
       } else {
-        // another thread is unpinning; spin until it's done.
-        do {
-          Thread.yield();
-        } while (unpinning.get());
+        // skipped ahead, reset
+        return sequentialAccessCount = 0;
       }
     }
 
-    private void doUnpin(BlockCache blockCache) {
+    /** Unpins the current block on {@link CachedCompressedIndexInput#close()}. */
+    private void closeFor(BlockCache blockCache) {
       Cache.Node<BlockCache.Val> toUnpin = currentNode;
       if (toUnpin != null) {
         currentNode = null;
         currentBlockIdx = ~currentBlockIdx;
         blockCache.unpin(toUnpin);
-      }
-      if (!unpinning.compareAndSet(true, false)) {
-        throw new IllegalStateException();
-      }
-    }
-
-    /** This is the only method that may be called from a different thread! */
-    void outOfBandUnpin(BlockCache blockCache) {
-      for (; ; ) {
-        if (unpinning.compareAndSet(false, true)) {
-          if (!(boolean) PINNED.getAcquire(this)) {
-            // scavenger has evicted our pinned-LRU slot; signal that re-acquire is needed
-            // NOTE: null out `readPermit`, but do not close it
-            readPermit = null;
-            doUnpin(blockCache);
-            return;
-          } else if (!unpinning.compareAndSet(true, false)) {
-            throw new IllegalStateException();
-          }
-        }
-        Thread.yield();
       }
     }
   }
