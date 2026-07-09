@@ -23,6 +23,8 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
@@ -30,17 +32,24 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.EnumSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
+import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
+import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.common.util.SolrNamedThreadFactory;
 import org.apache.solr.core.SolrInfoBean;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricProducer;
 import org.apache.solr.metrics.SolrMetricsContext;
+import org.apache.solr.storage.CachedCompressedIndexInput.NodeRefStruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -74,14 +83,90 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private static final ByteBuffer EXCEPTION_SENTINEL = ByteBuffer.allocate(0);
 
-  static final class RefVal<V> extends Cache.Val {
+  private static final class UnpinRef extends WeakReference<IndexInput> {
+    private final NodeRefStruct nrs;
+    private final Cache.Node<Permit> remove;
 
-    private final V val;
-
-    RefVal(V nrs, int initialRefCount) {
-      super(initialRefCount);
-      this.val = nrs;
+    public UnpinRef(
+        IndexInput referent,
+        NodeRefStruct nrs,
+        ReferenceQueue<? super IndexInput> q,
+        Cache.Node<Permit> remove) {
+      super(referent, q);
+      this.nrs = nrs;
+      this.remove = remove;
     }
+
+    public void closeFor(BlockCache blockCache) {
+      if (Cache.pin(remove) == 1) {
+        // we removed
+        nrs.closeFor(blockCache);
+      }
+    }
+  }
+
+  static final class Permit extends Cache.Val {
+
+    private final UnpinRef ref;
+
+    Permit(
+        IndexInput referent,
+        NodeRefStruct nrs,
+        ReferenceQueue<? super IndexInput> q,
+        Cache.Node<Permit> node) {
+      super(1);
+      this.ref = new UnpinRef(referent, nrs, q, node);
+    }
+
+    void closeFor(BlockCache blockCache) {
+      ref.closeFor(blockCache);
+    }
+  }
+
+  private final Cache<Permit>[] holdRefs;
+
+  private final ReferenceQueue<? super IndexInput> collected = new ReferenceQueue<>();
+
+  private final ExecutorService drainExec =
+      ExecutorUtil.newMDCAwareSingleThreadExecutor(new SolrNamedThreadFactory("blockCacheDrainer"));
+
+  private final Future<?> drainTask;
+
+  private void drain() {
+    try {
+      while (true) {
+        UnpinRef ref = (UnpinRef) collected.remove();
+        ref.closeFor(this);
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  private static Cache<Permit>[] initHoldRefs(int length) {
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    Cache<Permit>[] ret = new Cache[length];
+    for (int i = length - 1; i >= 0; i--) {
+      ret[i] = new Cache<>(List.of());
+    }
+    return ret;
+  }
+
+  /**
+   * Registers a {@link WeakReference} to the specified {@link IndexInput}. The {@link
+   * WeakReference} carries a strong reference to the associated specified {@link NodeRefStruct},
+   * which is used to unpin any pinned cache nodes upon GC of the {@link IndexInput}.
+   *
+   * <p>Callers may use the returned {@link Permit} to explicitly unpin any node referenced by the
+   * specified {@link NodeRefStruct} and remove the strong ref to the {@link WeakReference}, thereby
+   * pruning pointless references.
+   */
+  Permit register(IndexInput in, NodeRefStruct nrs) {
+    Cache.Node<Permit> n = new Cache.Node<>();
+    Permit ret = new Permit(in, nrs, collected, n);
+    n.setPayload(ret);
+    holdRefs[tlrIndex()].unpin(n, false);
+    return ret;
   }
 
   /**
@@ -240,6 +325,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private final ByteBuffer[] pool;
 
+  private final int nPartitions;
   private final Partition[] partitions;
 
   private final long totalBytes;
@@ -280,7 +366,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
     this.pool = initPool(nBlocks, backingFile, true);
     this.partitions = distribute(nBlocks);
+    this.nPartitions = partitions.length;
+    this.holdRefs = initHoldRefs(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
+    this.drainTask = drainExec.submit(this::drain);
     log.info(
         "BlockCache initialized: nBlocks={}, targetBytes={}, nPartitions={}",
         pool.length,
@@ -302,7 +391,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
     this.pool = initPool(nBlocks, existingBackingFile, false);
     this.partitions = distribute(nBlocks);
+    this.nPartitions = partitions.length;
+    this.holdRefs = initHoldRefs(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
+    this.drainTask = drainExec.submit(this::drain);
     log.info(
         "BlockCache initialized from existing file {}: nBlocks={}, targetBytes={}, nPartitions={}",
         existingBackingFile,
@@ -537,7 +629,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   private int tlrIndex() {
-    return ThreadLocalRandom.current().nextInt(partitions.length);
+    return ThreadLocalRandom.current().nextInt(nPartitions);
   }
 
   /**
@@ -570,10 +662,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   @Override
+  @SuppressWarnings("try")
   public void close() throws IOException {
-    SolrMetricProducer.super.close();
+    try (Closeable c = SolrMetricProducer.super::close) {
+      drainTask.cancel(true);
+      ExecutorUtil.shutdownAndAwaitTermination(drainExec);
+    }
     // MappedByteBuffers are not explicitly unmapped here; the JVM will release them on exit.
-    // TODO: add explicit unmap via ByteBufferGuard / unmapHack if needed.
   }
 
   // ---------------------------------------------------------------------------

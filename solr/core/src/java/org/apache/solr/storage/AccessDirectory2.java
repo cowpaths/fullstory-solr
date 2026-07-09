@@ -418,7 +418,7 @@ public class AccessDirectory2 extends MMapDirectory {
     }
 
     private AD2IndexInput() {
-      super("done_sentinel", null, 0, new long[0], null, null);
+      super("done_sentinel");
       this.ioExec = null;
       this.readAheadPermits = null;
       this.compressedGuard = null;

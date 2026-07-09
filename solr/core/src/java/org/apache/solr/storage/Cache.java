@@ -131,6 +131,10 @@ class Cache<V extends Cache.Val> {
       return payload;
     }
 
+    void setPayload(V payload) {
+      this.payload = payload;
+    }
+
     boolean pinnable() {
       Val p = this.payload;
       return p != null && p.refCount >= 0;

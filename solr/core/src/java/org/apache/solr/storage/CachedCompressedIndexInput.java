@@ -98,7 +98,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private long seekPos = -1;
   private ByteBuffer postBuffer = ByteBuffer.allocate(0);
   private int postBufferBaseline;
-  private final NodeRefStruct currentNodeRef;
+  private final NodeRefStruct currentNodeRef = new NodeRefStruct();
+  private final BlockCache.Permit cleanup;
 
   private LongBuffer[] longViews;
   private IntBuffer[] intViews;
@@ -178,6 +179,23 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // Root constructor
   // ---------------------------------------------------------------------------
 
+  /** dummy/sentinel ctor */
+  protected CachedCompressedIndexInput(String resourceDescription) {
+    super(resourceDescription);
+    this.cache = null;
+    this.cleanup = null;
+    this.length = -1;
+    this.blockOffsets = null;
+    this.guard = null;
+    this.blockCount = -1;
+    this.lastBlockIdx = -1;
+    this.lastBlockDecompressedLen = -1;
+    this.offset = -1;
+    this.sliceLength = -1;
+    this.sliceFirstBlockIdx = -1;
+    this.sliceLastBlockIdx = -1;
+  }
+
   /**
    * Root constructor. Computes block-count and last-block-length from {@code length}.
    *
@@ -193,7 +211,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped) {
     super(resourceDescription);
     this.cache = cache;
-    this.currentNodeRef = new NodeRefStruct();
+    this.cleanup = cache.register(this, currentNodeRef);
     this.length = length;
     this.blockOffsets = blockOffsets;
     this.guard = guard;
@@ -224,7 +242,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long sliceLen) {
     super(resourceDescription);
     this.cache = parent.cache;
-    this.currentNodeRef = new NodeRefStruct(parent.currentNodeRef);
+    this.cleanup = cache.register(this, currentNodeRef);
     this.length = parent.length;
     this.blockOffsets = parent.blockOffsets;
     this.blockCount = parent.blockCount;
@@ -275,7 +293,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   private void unsetBuffers() {
     accessMapped = null;
-    currentNodeRef.closeFor(cache);
+    cleanup.closeFor(cache);
     postBuffer = null;
     floatViews = null;
     intViews = null;
@@ -1051,10 +1069,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
     private NodeRefStruct() {}
 
-    private NodeRefStruct(NodeRefStruct parent) {
-      // Reserved for future clone-inheritance optimisations.
-    }
-
     /** Updates the current cached block. */
     private int setCurrentNode(Cache.Node<BlockCache.Val> node, int blockIdx, BlockCache cache) {
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
@@ -1085,7 +1099,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
 
     /** Unpins the current block on {@link CachedCompressedIndexInput#close()}. */
-    private void closeFor(BlockCache blockCache) {
+    void closeFor(BlockCache blockCache) {
       Cache.Node<BlockCache.Val> toUnpin = currentNode;
       if (toUnpin != null) {
         currentNode = null;
