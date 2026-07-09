@@ -1092,9 +1092,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       }
       currentNode = node;
       currentBlockIdx = blockIdx;
-      if (node != null) {
-        cache.pin(node);
-      }
       if (blockIdx == extant + 1) {
         // sequential access.
         sequentialAccessCount++;
