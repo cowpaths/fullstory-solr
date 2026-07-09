@@ -359,18 +359,17 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   /**
    * Pins {@code node}. Partition-agnostic: delegates to partition 0 because {@link Cache#pin}
    * operates solely on the node's refCount and list pointers, with no partition-local state.
-   *
-   * <p>{@link Cache#pin(Cache.Node)} is effectively a static method, so it doesn't matter which
-   * queue we call it on. TODO: make it <i>actually</i> static, for clarity?
    */
   boolean pin(Cache.Node<Val> node) {
-    int rc = partitions[0].pin(node);
+    int rc = Cache.pin(node);
     if (rc > 0) {
       pinnedCount.increment();
       if (node.getPayload().fromHot()) hotUnpinned.decrement();
+    } else if (rc < 0) {
+      return false;
     }
-    if (rc >= 0) hits.increment();
-    return rc >= 0;
+    hits.increment();
+    return true;
   }
 
   /**

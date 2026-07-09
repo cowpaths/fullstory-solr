@@ -145,14 +145,8 @@ class Cache<V extends Cache.Val> {
   // Each Cache<V> instance casts these once to Node<V> final fields (see constructor below);
   // all subsequent uses are fully typed. The cast is safe because sentinels are only ever
   // identity-compared (==) and their value/refCount fields are never accessed.
-  private static final Node<?> RESERVED_PROTO = new Node<>();
-  private static final Node<?> REMOVED_PROTO = new Node<>();
-
-  // Per-instance typed views of the sentinels.
-  // RESERVED: this node's `next` link is currently being modified by exactly one thread.
-  // REMOVED:  this node has been spliced out of the list.
-  private final Node<V> RESERVED;
-  private final Node<V> REMOVED;
+  private static final Node<?> RESERVED = new Node<>();
+  private static final Node<?> REMOVED = new Node<>();
 
   /** Cold queue: head sentinel (most-recently-used end). */
   private final Node<V> lruHead = new Node<>();
@@ -181,8 +175,6 @@ class Cache<V extends Cache.Val> {
 
   @SuppressWarnings("unchecked")
   private Cache() {
-    RESERVED = (Node<V>) RESERVED_PROTO;
-    REMOVED = (Node<V>) REMOVED_PROTO;
     lruHead.next = lruTail;
     lruTail.prev = lruHead;
   }
@@ -228,16 +220,16 @@ class Cache<V extends Cache.Val> {
    * prior value. Returns REMOVED immediately if the node has already been spliced out.
    */
   @SuppressWarnings("unchecked")
-  private Node<V> reserve(Node<V> ref, Node<V> reservation) {
+  private static <V extends Val> Node<V> reserve(Node<V> ref, Node<?> reservation) {
     Node<V> next = ref.next;
     for (; ; ) {
-      while (next == RESERVED_PROTO) {
-        if (reservation == REMOVED_PROTO) {
+      while (next == RESERVED) {
+        if (reservation == REMOVED) {
           Thread.yield();
         }
         next = ref.next;
       }
-      if (next == REMOVED_PROTO) {
+      if (next == REMOVED) {
         return next;
       }
       Node<V> extant = (Node<V>) NEXT.compareAndExchange(ref, next, reservation);
@@ -251,7 +243,7 @@ class Cache<V extends Cache.Val> {
   protected boolean insertAtHead(Node<V> listHead, Node<V> node, boolean recordAccess) {
     node.prev = listHead;
     Node<V> oldNext = reserve(listHead, RESERVED);
-    assert oldNext != REMOVED_PROTO : "queue head sentinel should never be removed";
+    assert oldNext != REMOVED : "queue head sentinel should never be removed";
     node.next = oldNext;
     oldNext.prev = node;
     if (!NEXT.compareAndSet(listHead, RESERVED, node)) {
@@ -260,9 +252,9 @@ class Cache<V extends Cache.Val> {
     return false;
   }
 
-  private boolean removeFromList(Node<V> node) {
+  private static <V extends Val> boolean removeFromList(Node<V> node) {
     Node<V> next = reserve(node, REMOVED);
-    if (next == REMOVED_PROTO) {
+    if (next == REMOVED) {
       return false;
     }
     Node<V> prev;
@@ -285,7 +277,7 @@ class Cache<V extends Cache.Val> {
       Node<V> pred = lruTail.prev;
       Node<V> oldNext = reserve(pred, RESERVED);
       if (oldNext != lruTail) {
-        if (oldNext == REMOVED_PROTO) {
+        if (oldNext == REMOVED) {
           continue; // pred was concurrently removed; retry
         }
         // release reservation; pred is no longer tail's predecessor
@@ -322,7 +314,7 @@ class Cache<V extends Cache.Val> {
    * Returns 1 if this was a first pin (refCount 0&rarr;1, node removed from evictable list), 0 if
    * the node was already pinned (refCount incremented only), -1 if the node is permanently dead.
    */
-  int pin(Node<V> node) {
+  static <V extends Cache.Val> int pin(Node<V> node) {
     Val p = node.payload;
     if (p == null) {
       return -1;
