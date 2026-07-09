@@ -25,6 +25,8 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -44,6 +46,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
@@ -98,8 +101,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private long seekPos = -1;
   private ByteBuffer postBuffer = ByteBuffer.allocate(0);
   private int postBufferBaseline;
-  private final NodeRefStruct currentNodeRef = new NodeRefStruct();
-  private final BlockCache.Permit cleanup;
+  private final NodeRefStruct currentNodeRef;
 
   private LongBuffer[] longViews;
   private IntBuffer[] intViews;
@@ -183,7 +185,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   protected CachedCompressedIndexInput(String resourceDescription) {
     super(resourceDescription);
     this.cache = null;
-    this.cleanup = null;
+    this.currentNodeRef = null;
     this.length = -1;
     this.blockOffsets = null;
     this.guard = null;
@@ -211,7 +213,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped) {
     super(resourceDescription);
     this.cache = cache;
-    this.cleanup = cache.register(this, currentNodeRef);
+    this.currentNodeRef = cache.register(this);
     this.length = length;
     this.blockOffsets = blockOffsets;
     this.guard = guard;
@@ -242,7 +244,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long sliceLen) {
     super(resourceDescription);
     this.cache = parent.cache;
-    this.cleanup = cache.register(this, currentNodeRef);
+    this.currentNodeRef = cache.register(this);
     this.length = parent.length;
     this.blockOffsets = parent.blockOffsets;
     this.blockCount = parent.blockCount;
@@ -293,7 +295,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   private void unsetBuffers() {
     accessMapped = null;
-    cleanup.closeFor(cache);
+    currentNodeRef.closeFor(cache);
     postBuffer = null;
     floatViews = null;
     intViews = null;
@@ -1060,14 +1062,26 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * Per-{@link CachedCompressedIndexInput}-instance struct tracking the currently pinned {@link
    * BlockCache.Val} and sequential-access statistics.
    */
-  static final class NodeRefStruct {
+  static final class NodeRefStruct extends WeakReference<IndexInput> {
 
     private Cache.Node<BlockCache.Val> currentNode;
     // Positive = current block index; negative (~idx) = block index with no live pin.
     private int currentBlockIdx = -1;
     private int sequentialAccessCount = 0;
 
-    private NodeRefStruct() {}
+    // for cleanup upon GC
+    private final LongAdder outstandingRefs;
+    private final Cache.Node<?> remove;
+
+    NodeRefStruct(
+        IndexInput referrent,
+        ReferenceQueue<? super IndexInput> q,
+        LongAdder outstandingRefs,
+        Cache.Node<?> remove) {
+      super(referrent, q);
+      this.outstandingRefs = outstandingRefs;
+      this.remove = remove;
+    }
 
     /** Updates the current cached block. */
     private int setCurrentNode(Cache.Node<BlockCache.Val> node, int blockIdx, BlockCache cache) {
@@ -1100,11 +1114,15 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
     /** Unpins the current block on {@link CachedCompressedIndexInput#close()}. */
     void closeFor(BlockCache blockCache) {
-      Cache.Node<BlockCache.Val> toUnpin = currentNode;
-      if (toUnpin != null) {
-        currentNode = null;
-        currentBlockIdx = ~currentBlockIdx;
-        blockCache.unpin(toUnpin);
+      if (Cache.pin(remove) == 1) {
+        // we removed
+        outstandingRefs.decrement();
+        Cache.Node<BlockCache.Val> toUnpin = currentNode;
+        if (toUnpin != null) {
+          currentNode = null;
+          currentBlockIdx = ~currentBlockIdx;
+          blockCache.unpin(toUnpin);
+        }
       }
     }
   }

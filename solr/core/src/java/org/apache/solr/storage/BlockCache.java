@@ -83,52 +83,17 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private static final ByteBuffer EXCEPTION_SENTINEL = ByteBuffer.allocate(0);
 
-  private static final class UnpinRef extends WeakReference<IndexInput> {
-    private final LongAdder outstandingRefs;
-    private final NodeRefStruct nrs;
-    private final Cache.Node<Permit> remove;
+  private static final class StrongRef extends Cache.Val {
 
-    public UnpinRef(
-        IndexInput referent,
-        NodeRefStruct nrs,
-        ReferenceQueue<? super IndexInput> q,
-        Cache.Node<Permit> remove,
-        LongAdder outstandingRefs) {
-      super(referent, q);
-      this.nrs = nrs;
-      this.remove = remove;
-      this.outstandingRefs = outstandingRefs;
-    }
+    private final NodeRefStruct nrs; // reachability only
 
-    public void closeFor(BlockCache blockCache) {
-      if (Cache.pin(remove) == 1) {
-        // we removed
-        outstandingRefs.decrement();
-        nrs.closeFor(blockCache);
-      }
-    }
-  }
-
-  static final class Permit extends Cache.Val {
-
-    private final UnpinRef ref;
-
-    Permit(
-        IndexInput referent,
-        NodeRefStruct nrs,
-        ReferenceQueue<? super IndexInput> q,
-        Cache.Node<Permit> node,
-        LongAdder outstandingRefs) {
+    StrongRef(NodeRefStruct nrs) {
       super(1);
-      this.ref = new UnpinRef(referent, nrs, q, node, outstandingRefs);
-    }
-
-    void closeFor(BlockCache blockCache) {
-      ref.closeFor(blockCache);
+      this.nrs = nrs;
     }
   }
 
-  private final Cache<Permit>[] holdRefs;
+  private final Cache<StrongRef>[] holdRefs;
 
   private final ReferenceQueue<? super IndexInput> collected = new ReferenceQueue<>();
 
@@ -140,7 +105,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private void drain() {
     try {
       while (true) {
-        UnpinRef ref = (UnpinRef) collected.remove();
+        NodeRefStruct ref = (NodeRefStruct) collected.remove();
         ref.closeFor(this);
       }
     } catch (InterruptedException e) {
@@ -148,9 +113,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
   }
 
-  private static Cache<Permit>[] initHoldRefs(int length) {
+  private static Cache<StrongRef>[] initHoldRefs(int length) {
     @SuppressWarnings({"unchecked", "rawtypes"})
-    Cache<Permit>[] ret = new Cache[length];
+    Cache<StrongRef>[] ret = new Cache[length];
     for (int i = length - 1; i >= 0; i--) {
       ret[i] = new Cache<>(List.of());
     }
@@ -162,14 +127,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * WeakReference} carries a strong reference to the associated specified {@link NodeRefStruct},
    * which is used to unpin any pinned cache nodes upon GC of the {@link IndexInput}.
    *
-   * <p>Callers may use the returned {@link Permit} to explicitly unpin any node referenced by the
-   * specified {@link NodeRefStruct} and remove the strong ref to the {@link WeakReference}, thereby
-   * pruning pointless references.
+   * <p>Callers may use the returned {@link StrongRef} to explicitly unpin any node referenced by
+   * the specified {@link NodeRefStruct} and remove the strong ref to the {@link WeakReference},
+   * thereby pruning pointless references.
    */
-  Permit register(IndexInput in, NodeRefStruct nrs) {
-    Cache.Node<Permit> n = new Cache.Node<>();
-    Permit ret = new Permit(in, nrs, collected, n, outstandingRefs);
-    n.setPayload(ret);
+  NodeRefStruct register(IndexInput in) {
+    Cache.Node<StrongRef> n = new Cache.Node<>();
+    NodeRefStruct ret = new NodeRefStruct(in, collected, outstandingRefs, n);
+    n.setPayload(new StrongRef(ret));
     holdRefs[tlrIndex()].unpin(n, false);
     outstandingRefs.increment();
     refsCreated.increment();
