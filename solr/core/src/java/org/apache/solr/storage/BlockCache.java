@@ -84,6 +84,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final ByteBuffer EXCEPTION_SENTINEL = ByteBuffer.allocate(0);
 
   private static final class UnpinRef extends WeakReference<IndexInput> {
+    private final LongAdder outstandingRefs;
     private final NodeRefStruct nrs;
     private final Cache.Node<Permit> remove;
 
@@ -91,15 +92,18 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         IndexInput referent,
         NodeRefStruct nrs,
         ReferenceQueue<? super IndexInput> q,
-        Cache.Node<Permit> remove) {
+        Cache.Node<Permit> remove,
+        LongAdder outstandingRefs) {
       super(referent, q);
       this.nrs = nrs;
       this.remove = remove;
+      this.outstandingRefs = outstandingRefs;
     }
 
     public void closeFor(BlockCache blockCache) {
       if (Cache.pin(remove) == 1) {
         // we removed
+        outstandingRefs.decrement();
         nrs.closeFor(blockCache);
       }
     }
@@ -113,9 +117,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         IndexInput referent,
         NodeRefStruct nrs,
         ReferenceQueue<? super IndexInput> q,
-        Cache.Node<Permit> node) {
+        Cache.Node<Permit> node,
+        LongAdder outstandingRefs) {
       super(1);
-      this.ref = new UnpinRef(referent, nrs, q, node);
+      this.ref = new UnpinRef(referent, nrs, q, node, outstandingRefs);
     }
 
     void closeFor(BlockCache blockCache) {
@@ -163,9 +168,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   Permit register(IndexInput in, NodeRefStruct nrs) {
     Cache.Node<Permit> n = new Cache.Node<>();
-    Permit ret = new Permit(in, nrs, collected, n);
+    Permit ret = new Permit(in, nrs, collected, n, outstandingRefs);
     n.setPayload(ret);
     holdRefs[tlrIndex()].unpin(n, false);
+    outstandingRefs.increment();
+    refsCreated.increment();
     return ret;
   }
 
@@ -356,6 +363,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private final LongAdder failedPin = new LongAdder();
   private final LongAdder prepopulated = new LongAdder();
 
+  private final LongAdder outstandingRefs = new LongAdder();
+  private final LongAdder refsCreated = new LongAdder();
+
   private volatile SolrMetricsContext solrMetricsContext;
 
   /**
@@ -519,6 +529,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     long acq = acquisitions.sum();
     long misses = acq - prep;
     long hotUnpinnedBytes = hotUnpinned.sum() * COMPRESSION_BLOCK_SIZE;
+    ew.put("outstandingRefs", outstandingRefs.sum());
+    ew.put("refsCreated", refsCreated.sum());
     ew.put("totalBytes", totalBytes);
     ew.put("closedCount", closedCount.sum());
     ew.put("closeSkippedDead", closeSkippedDead.sum());
