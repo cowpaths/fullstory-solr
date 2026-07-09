@@ -213,7 +213,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped) {
     super(resourceDescription);
     this.cache = cache;
-    this.currentNodeRef = cache.register(this);
+    this.currentNodeRef = new NodeRefStruct();
     this.length = length;
     this.blockOffsets = blockOffsets;
     this.guard = guard;
@@ -1073,6 +1073,17 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     private final LongAdder outstandingRefs;
     private final Cache.Node<?> remove;
 
+    /**
+     * Root-input constructor: no ReferenceQueue registration. Root inputs are guaranteed to be
+     * explicitly closed, so GC-based cleanup is unnecessary.
+     */
+    NodeRefStruct() {
+      super(null);
+      this.outstandingRefs = null;
+      this.remove = null;
+    }
+
+    /** Slice/clone constructor: registers with the ReferenceQueue as a GC safety net. */
     NodeRefStruct(
         IndexInput referrent,
         ReferenceQueue<? super IndexInput> q,
@@ -1109,17 +1120,18 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       }
     }
 
-    /** Unpins the current block on {@link CachedCompressedIndexInput#close()}. */
+    /** Unpins the current block on {@link CachedCompressedIndexInput#close()} or GC drain. */
     void closeFor(BlockCache blockCache) {
-      if (Cache.pin(remove) == 1) {
-        // we removed
+      if (remove != null) {
+        // slice/clone: guard against double-close (explicit close races with GC drain)
+        if (Cache.pin(remove) != 1) return;
         outstandingRefs.decrement();
-        Cache.Node<BlockCache.Val> toUnpin = currentNode;
-        if (toUnpin != null) {
-          currentNode = null;
-          currentBlockIdx = ~currentBlockIdx;
-          blockCache.unpin(toUnpin);
-        }
+      }
+      Cache.Node<BlockCache.Val> toUnpin = currentNode;
+      if (toUnpin != null) {
+        currentNode = null;
+        currentBlockIdx = ~currentBlockIdx;
+        blockCache.unpin(toUnpin);
       }
     }
   }
