@@ -101,7 +101,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private long seekPos = -1;
   private ByteBuffer postBuffer = ByteBuffer.allocate(0);
   private int postBufferBaseline;
-  private final NodeRefStruct currentNodeRef;
+  private NodeRefStruct currentNodeRef;
 
   private LongBuffer[] longViews;
   private IntBuffer[] intViews;
@@ -234,6 +234,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // Slice / clone constructor
   // ---------------------------------------------------------------------------
 
+  private static final NodeRefStruct UNINITIALIZED = new NodeRefStruct(null, null, null, null);
+
   /**
    * Slice/clone constructor: shares immutable state from parent without owning the backend mapping.
    */
@@ -244,7 +246,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long sliceLen) {
     super(resourceDescription);
     this.cache = parent.cache;
-    this.currentNodeRef = cache.register(this);
+    this.currentNodeRef = UNINITIALIZED; // lazily registered on first block access
     this.length = parent.length;
     this.blockOffsets = parent.blockOffsets;
     this.blockCount = parent.blockCount;
@@ -290,6 +292,15 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       }
     } finally {
       unsetBuffers();
+    }
+  }
+
+  private NodeRefStruct nodeRef() {
+    NodeRefStruct ref = currentNodeRef;
+    if (ref == UNINITIALIZED) {
+      return currentNodeRef = cache.register(this);
+    } else {
+      return ref;
     }
   }
 
@@ -404,7 +415,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   private void setCurrentNode(
       Cache.Node<BlockCache.Val> node, int blockIdx, int type, long loadNanos) {
-    int seqAccessCount = currentNodeRef.setCurrentNode(node, blockIdx, cache);
+    int seqAccessCount = nodeRef().setCurrentNode(node, blockIdx, cache);
     //    System.out.println("XXX type="+ type + ", " + seqAccessCount + ", " + blockIdx+"/"+
     //        accessMapped.length()+", "+ TimeUnit.NANOSECONDS.toMillis(loadNanos) + "ms, " + this);
     switch (seqAccessCount) {
@@ -1111,7 +1122,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
     /** Unpins the current block on {@link CachedCompressedIndexInput#close()}. */
     void closeFor(BlockCache blockCache) {
-      if (Cache.pin(remove) == 1) {
+      if (remove != null && Cache.pin(remove) == 1) {
         // we removed
         outstandingRefs.decrement();
         Cache.Node<BlockCache.Val> toUnpin = currentNode;
