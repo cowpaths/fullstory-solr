@@ -20,6 +20,7 @@ package org.apache.solr.storage;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
 
 /**
  * Generic concurrent LRU cache with pin/unpin support.
@@ -119,6 +120,10 @@ class Cache<V extends Cache.Val> {
       this.prev = prev;
     }
 
+    <K> Node(BiFunction<K, Node<V>, V> payloadFunc, K key) {
+      this.payload = payloadFunc.apply(key, this);
+    }
+
     /** Sentinel constructor (head / tail / protocol sentinels). */
     Node() {
       this.payload = null;
@@ -129,10 +134,6 @@ class Cache<V extends Cache.Val> {
      */
     V getPayload() {
       return payload;
-    }
-
-    void setPayload(V payload) {
-      this.payload = payload;
     }
 
     boolean pinnable() {

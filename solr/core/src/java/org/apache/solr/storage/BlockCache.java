@@ -39,6 +39,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.BiFunction;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
@@ -122,6 +123,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     return ret;
   }
 
+  private StrongRef createStrongRef(IndexInput in, Cache.Node<StrongRef> n) {
+    return new StrongRef(new NodeRefStruct(in, collected, outstandingRefs, n));
+  }
+
+  private final BiFunction<IndexInput, Cache.Node<StrongRef>, StrongRef> createStrongRef =
+      this::createStrongRef;
+
   /**
    * Registers a {@link WeakReference} to the specified {@link IndexInput}. The {@link
    * WeakReference} carries a strong reference to the associated specified {@link NodeRefStruct},
@@ -132,13 +140,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * thereby pruning pointless references.
    */
   NodeRefStruct register(IndexInput in) {
-    Cache.Node<StrongRef> n = new Cache.Node<>();
-    NodeRefStruct ret = new NodeRefStruct(in, collected, outstandingRefs, n);
-    n.setPayload(new StrongRef(ret));
+    Cache.Node<StrongRef> n = new Cache.Node<>(createStrongRef, in);
     holdRefs[tlrIndex()].unpin(n, false);
     outstandingRefs.increment();
     refsCreated.increment();
-    return ret;
+    return n.getPayload().nrs;
   }
 
   /**
