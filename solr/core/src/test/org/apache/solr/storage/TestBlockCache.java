@@ -27,7 +27,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.util.ExecutorUtil;
@@ -41,22 +41,28 @@ public class TestBlockCache extends SolrTestCaseJ4 {
   // Deterministic tests
   // ---------------------------------------------------------------------------
 
-  /** All blocks pinned: acquireNode() must return null rather than spin forever. */
+  /** All blocks pinned: acquireNode() must return NULL_HANDLE rather than spin forever. */
   public void testAllPinned() throws IOException {
     Path tmpDir = createTempDir();
     try (BlockCache cache =
         new BlockCache(2L * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
-      Cache.Node<BlockCache.Val> n1 = cache.acquireNode();
-      Cache.Node<BlockCache.Val> n2 = cache.acquireNode();
-      assertNotNull(n1);
-      assertNotNull(n2);
-      assertNull("expected null when all blocks pinned", cache.acquireNode());
+      long n1 = cache.acquireNode();
+      long n2 = cache.acquireNode();
+      assertNotEquals(BlockCache.NULL_HANDLE, n1);
+      assertNotEquals(BlockCache.NULL_HANDLE, n2);
+      assertEquals(
+          "expected NULL_HANDLE when all blocks pinned",
+          BlockCache.NULL_HANDLE,
+          cache.acquireNode());
 
       // Unpin one; now a block is evictable.
       cache.unpin(n1);
-      Cache.Node<BlockCache.Val> n3 = cache.acquireNode();
-      assertNotNull(n3);
-      assertNull("expected null with n2 and n3 both pinned", cache.acquireNode());
+      long n3 = cache.acquireNode();
+      assertNotEquals(BlockCache.NULL_HANDLE, n3);
+      assertEquals(
+          "expected NULL_HANDLE with n2 and n3 both pinned",
+          BlockCache.NULL_HANDLE,
+          cache.acquireNode());
 
       cache.unpin(n2);
       cache.unpin(n3);
@@ -74,26 +80,26 @@ public class TestBlockCache extends SolrTestCaseJ4 {
     random().nextBytes(expect);
     try (BlockCache cache =
         new BlockCache(2L * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
-      Cache.Node<BlockCache.Val> n1 = cache.acquireNode();
-      Cache.Node<BlockCache.Val> n2 = cache.acquireNode();
-      assertNotNull(n1);
-      assertNotNull(n2);
-      n1.getPayload().populate(dummy, 0, 0, cache);
-      n2.getPayload().populate(expect, 0, COMPRESSION_BLOCK_SIZE, cache); // put real data in
+      long n1 = cache.acquireNode();
+      long n2 = cache.acquireNode();
+      assertNotEquals(BlockCache.NULL_HANDLE, n1);
+      assertNotEquals(BlockCache.NULL_HANDLE, n2);
+      cache.getPayload(n1).populate(dummy, 0, 0, cache);
+      cache.getPayload(n2).populate(expect, 0, COMPRESSION_BLOCK_SIZE, cache); // put real data in
 
       // Unpin both; n2 was acquired last so it sits at the LRU head.
       cache.unpin(n1);
       cache.unpin(n2);
 
       // Explicitly close n2 — should push its buffer to the tail (highest eviction priority).
-      ByteBuffer n2Buf = n2.getPayload().join(cache);
+      ByteBuffer n2Buf = cache.getPayload(n2).join(cache);
       cache.close(n2);
 
       // Next acquisition should reclaim n2's buffer from the tail.
-      Cache.Node<BlockCache.Val> n3 = cache.acquireNode();
-      assertNotNull(n3);
-      ByteBuffer n3Buf = n3.getPayload().populate(dummy, 0, 0, cache);
-      assertSame(n3Buf, n3.getPayload().join(cache));
+      long n3 = cache.acquireNode();
+      assertNotEquals(BlockCache.NULL_HANDLE, n3);
+      ByteBuffer n3Buf = cache.getPayload(n3).populate(dummy, 0, 0, cache);
+      assertSame(n3Buf, cache.getPayload(n3).join(cache));
       assertNotSame(n2Buf, n3Buf);
       byte[] rtx = new byte[COMPRESSION_BLOCK_SIZE];
       n3Buf.clear().get(rtx);
@@ -111,17 +117,17 @@ public class TestBlockCache extends SolrTestCaseJ4 {
     byte[] dummy = new byte[COMPRESSION_BLOCK_SIZE];
     r.nextBytes(dummy);
     try (BlockCache cache = new BlockCache(COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
-      Cache.Node<BlockCache.Val> n1 = cache.acquireNode();
-      assertNotNull(n1);
-      ByteBuffer n1Buf = n1.getPayload().populate(dummy, 0, COMPRESSION_BLOCK_SIZE, cache);
-      assertSame(n1Buf, n1.getPayload().join(cache));
+      long n1 = cache.acquireNode();
+      assertNotEquals(BlockCache.NULL_HANDLE, n1);
+      ByteBuffer n1Buf = cache.getPayload(n1).populate(dummy, 0, COMPRESSION_BLOCK_SIZE, cache);
+      assertSame(n1Buf, cache.getPayload(n1).join(cache));
       cache.unpin(n1); // now evictable
 
       // Evict n1 by acquiring the only block.
-      Cache.Node<BlockCache.Val> n2 = cache.acquireNode();
-      assertNotNull(n2);
-      ByteBuffer n2Buf = n2.getPayload().populate(new byte[0], 0, 0, cache);
-      assertSame(n2Buf, n2.getPayload().join(cache));
+      long n2 = cache.acquireNode();
+      assertNotEquals(BlockCache.NULL_HANDLE, n2);
+      ByteBuffer n2Buf = cache.getPayload(n2).populate(new byte[0], 0, 0, cache);
+      assertSame(n2Buf, cache.getPayload(n2).join(cache));
       assertNotSame(n1Buf, n2Buf); // different wrappers
       byte[] rtx = new byte[COMPRESSION_BLOCK_SIZE];
       n2Buf.clear().get(rtx);
@@ -156,7 +162,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
     try (BlockCache cache =
         new BlockCache((long) nBlocks * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
 
-      AtomicReferenceArray<Cache.Node<BlockCache.Val>> slots = new AtomicReferenceArray<>(nSlots);
+      AtomicLongArray slots = new AtomicLongArray(nSlots); // zero-initializes to NULL_HANDLE
 
       ExecutorService exec =
           ExecutorUtil.newMDCAwareFixedThreadPool(
@@ -183,15 +189,15 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                       int slotIdx = r.nextInt(nSlots);
 
                       // --- Cache hit path: try to pin the existing node ---
-                      Cache.Node<BlockCache.Val> existing = slots.get(slotIdx);
-                      if (existing != null && cache.pin(existing)) {
+                      long existing = slots.get(slotIdx);
+                      if (existing != BlockCache.NULL_HANDLE && cache.pin(existing)) {
                         hits.increment();
                         // Verify that the sentinel written at acquire time is intact.
-                        assertEquals(slotIdx, existing.getPayload().join(cache).getInt(0));
+                        assertEquals(slotIdx, cache.getPayload(existing).join(cache).getInt(0));
                         if (r.nextInt(8) == 0) {
                           // Explicit close: unpin, vacate slot, close.
                           cache.unpin(existing);
-                          if (slots.compareAndSet(slotIdx, existing, null)) {
+                          if (slots.compareAndSet(slotIdx, existing, BlockCache.NULL_HANDLE)) {
                             cache.close(existing);
                             closed.increment();
                           }
@@ -203,19 +209,19 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                       }
 
                       // --- Cache miss path: acquire a new node (evicts LRU if needed) ---
-                      Cache.Node<BlockCache.Val> node = cache.acquireNode();
-                      if (node == null) {
+                      long node = cache.acquireNode();
+                      if (node == BlockCache.NULL_HANDLE) {
                         exhausted.increment();
                         continue;
                       }
                       acquired.increment();
                       // Write sentinel via populate() before publishing.
                       ByteBuffer.wrap(sentinelBuf).putInt(0, slotIdx);
-                      node.getPayload().populate(sentinelBuf, 0, Integer.BYTES, cache);
+                      cache.getPayload(node).populate(sentinelBuf, 0, Integer.BYTES, cache);
                       cache.unpin(node);
                       // Publish to slot; old occupant (if any) will be evicted via normal LRU.
-                      Cache.Node<BlockCache.Val> prev = slots.getAndSet(slotIdx, node);
-                      if (prev != null) {
+                      long prev = slots.getAndSet(slotIdx, node);
+                      if (prev != BlockCache.NULL_HANDLE) {
                         misses.increment();
                       }
                     }
