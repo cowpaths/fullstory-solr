@@ -364,6 +364,19 @@ class Cache2<V extends Cache2.Val> {
   }
 
   /**
+   * Non-mutating optimistic check: returns {@code true} if the slot identified by {@code handle}
+   * appears live and pinnable (refCount &ge; 0, not evicted, generation matches). No CAS is
+   * performed; may race with concurrent eviction. Suitable for best-effort preload skip checks.
+   */
+  boolean pinnable(long handle) {
+    int slot = (int) handle & SLOT_MASK;
+    int expectedGen = (int) (handle >>> 32);
+    Val p = payload[slot];
+    int rc = p.refCount;
+    return rc != -1 && rc != UNPIN_SENTINEL && p.generation == expectedGen;
+  }
+
+  /**
    * Releases a read pin. If this is the last pin (refCount transitions 1&rarr;0), the slot is
    * inserted at the LRU head (most-recently-used position) and becomes evictable.
    *

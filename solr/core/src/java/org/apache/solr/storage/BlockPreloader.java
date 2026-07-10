@@ -27,7 +27,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.function.IntUnaryOperator;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.internal.hppc.IntArrayList;
@@ -114,7 +114,7 @@ class BlockPreloader {
    * remaining byte count.
    */
   static boolean ensureLoaded(
-      AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped,
+      AtomicLongArray accessMapped,
       long[] blockOffsets,
       int idx,
       int decompressedLen,
@@ -123,10 +123,11 @@ class BlockPreloader {
       Permits permits,
       int timeoutMillis,
       BlockSupplier supplier) {
-    Cache.Node<BlockCache.Val> extant = accessMapped.get(idx);
-    if ((extant == null || !extant.pinnable()) && permits.tryAcquire(timeoutMillis)) {
-      Cache.Node<BlockCache.Val> toPopulate = cache.acquireNode();
-      if (toPopulate == null) {
+    long extant = accessMapped.get(idx);
+    if ((extant == BlockCache.NULL_HANDLE || !cache.pinnable(extant))
+        && permits.tryAcquire(timeoutMillis)) {
+      long toPopulate = cache.acquireNode();
+      if (toPopulate == BlockCache.NULL_HANDLE) {
         permits.release();
         return false;
       }
@@ -176,7 +177,7 @@ class BlockPreloader {
    * last, where it is the remaining byte count.
    */
   static boolean ensureLoadedSerial(
-      AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped,
+      AtomicLongArray accessMapped,
       long[] blockOffsets,
       Iterator<IntCursor> blockIdxIter,
       IntUnaryOperator decompressedLen,
@@ -194,10 +195,10 @@ class BlockPreloader {
             try {
               while (blockIdxIter.hasNext()) {
                 int idx = blockIdxIter.next().value;
-                Cache.Node<BlockCache.Val> extant = accessMapped.get(idx);
-                if (extant != null && extant.pinnable()) continue;
-                Cache.Node<BlockCache.Val> toPopulate = cache.acquireNode();
-                if (toPopulate == null) return null; // cache full — stop
+                long extant = accessMapped.get(idx);
+                if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) continue;
+                long toPopulate = cache.acquireNode();
+                if (toPopulate == BlockCache.NULL_HANDLE) return null; // cache full — stop
                 long blockOffset = blockOffsets[idx];
                 int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
                 if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
@@ -242,8 +243,8 @@ class BlockPreloader {
       int compressedLen,
       int blockIdx,
       int decompressedLen,
-      Cache.Node<BlockCache.Val> node,
-      AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped,
+      long node,
+      AtomicLongArray accessMapped,
       BlockCache cache,
       BlockSupplier supplier)
       throws IOException {
@@ -251,10 +252,10 @@ class BlockPreloader {
     ByteBuffer buf;
     try {
       byte[] heapBuf = supplier.supply(blockOffset, compressedLen, decompressedLen);
-      buf = node.getPayload().populate(heapBuf, 0, decompressedLen, cache);
+      buf = cache.getPayload(node).populate(heapBuf, 0, decompressedLen, cache);
     } catch (Throwable t) {
-      node.getPayload().completeExceptionally(t);
-      accessMapped.compareAndSet(blockIdx, node, null);
+      cache.getPayload(node).completeExceptionally(t);
+      accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);
       cache.unpin(node);
       cache.close(node);
       throw CachedCompressedIndexInput.unwrapException(t);

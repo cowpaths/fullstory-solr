@@ -467,6 +467,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     return true;
   }
 
+  /**
+   * Non-mutating optimistic check: returns {@code true} if the handle appears live and pinnable.
+   */
+  boolean pinnable(long handle) {
+    return partitions[partOf(handle)].pinnable(handle);
+  }
+
   /** Releases a pin on the slot identified by {@code handle}. */
   void unpin(long handle) {
     unpin(handle, true);
