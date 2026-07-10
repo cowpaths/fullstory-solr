@@ -87,8 +87,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   /** Number of bits reserved for the local slot within a partition (supports up to 1M slots). */
   static final int PART_SHIFT = 20;
 
-  /** Sentinel handle meaning "no cached block". */
-  static final long NULL_HANDLE = -1L;
+  /**
+   * Sentinel handle meaning "no cached block". Zero is safe because {@link Cache2} never allocates
+   * slot 0 (reserved), so the slot field of any real handle is always &ge;1, making 0 impossible as
+   * a valid handle. This also matches the default element value of {@link AtomicLongArray}.
+   */
+  static final long NULL_HANDLE = 0L;
 
   static long encodeHandle(int partitionIdx, long cache2Handle) {
     return cache2Handle | ((long) partitionIdx << PART_SHIFT);
@@ -497,7 +501,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   long acquireNode() {
     int p = tlrIndex();
     long ar = partitions[p].acquireNode();
-    if (ar != -1L) {
+    if (ar != NULL_HANDLE) {
       acquisitions.increment();
       pinnedCount.increment();
       if (partitions[p].getPayload(ar).fromHot()) {

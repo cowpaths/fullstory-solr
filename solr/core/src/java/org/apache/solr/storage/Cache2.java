@@ -101,15 +101,15 @@ class Cache2<V extends Cache2.Val> {
   private static final int RESERVED_LINK = Integer.MIN_VALUE;
   private static final int REMOVED_LINK = Integer.MIN_VALUE + 1;
 
-  /** Returned by {@link #acquireNode()} when no evictable slot is available. */
-  static final int NULL_SLOT = -1;
+  // Slot 0 is reserved and never allocated; NULL_SLOT doubles as the null handle sentinel.
+  static final int NULL_SLOT = 0;
 
   private static final int SLOT_MASK = (1 << 20) - 1;
 
-  /** Cold queue: head sentinel (most-recently-used end). Index = {@code capacity}. */
+  /** Cold queue: head sentinel (most-recently-used end). Index = {@code capacity + 1}. */
   protected final int COLD_HEAD;
 
-  /** Cold queue: tail sentinel (eviction end). Index = {@code capacity + 1}. */
+  /** Cold queue: tail sentinel (eviction end). Index = {@code capacity + 2}. */
   protected final int COLD_TAIL;
 
   /**
@@ -164,9 +164,10 @@ class Cache2<V extends Cache2.Val> {
   }
 
   /**
-   * Payload for real slots 0..capacity-1. Elements are set at construction and never swapped; only
-   * the Val's internal fields change over time. Since elements are never replaced, GC sees exactly
-   * N live references here (vs. 3N for a traditional doubly-linked Node<V> array).
+   * Payload for slots 0..capacity. Slot 0 is reserved (always null); real slots are 1..capacity.
+   * Elements are set at construction and never swapped; only the Val's internal fields change over
+   * time. Since elements are never replaced, GC sees exactly N live references here (vs. 3N for a
+   * traditional doubly-linked Node<V> array).
    *
    * <p>Package-private: {@link BlockCache}'s {@code Partition.resetPayload()} accesses it directly.
    */
@@ -190,19 +191,19 @@ class Cache2<V extends Cache2.Val> {
   @SuppressWarnings("unchecked")
   private Cache2(int capacity, int extraSentinelSlots, Iterable<? extends V> initialValues) {
     this.capacity = capacity;
-    this.COLD_HEAD = capacity;
-    this.COLD_TAIL = capacity + 1;
-    int arrayLen = capacity + 2 + extraSentinelSlots;
+    this.COLD_HEAD = capacity + 1;
+    this.COLD_TAIL = capacity + 2;
+    int arrayLen = capacity + 3 + extraSentinelSlots;
     this.next = new int[arrayLen];
     this.prev = new int[arrayLen];
-    this.payload = (V[]) new Val[capacity];
+    this.payload = (V[]) new Val[capacity + 1];
 
-    // Build cold-queue chain: COLD_HEAD ↔ slot_0 ↔ slot_1 ↔ … ↔ COLD_TAIL.
-    // Single-threaded init; plain array writes are fine.
+    // Build cold-queue chain: COLD_HEAD ↔ slot_1 ↔ slot_2 ↔ … ↔ COLD_TAIL.
+    // Slot 0 is reserved (null) and never linked. Single-threaded init; plain array writes fine.
     int prevIdx = COLD_HEAD;
-    int slot = 0;
+    int slot = 1;
     for (V v : initialValues) {
-      if (slot >= capacity) throw new IllegalArgumentException("too many initial values");
+      if (slot > capacity) throw new IllegalArgumentException("too many initial values");
       payload[slot] = v;
       next[prevIdx] = slot;
       prev[slot] = prevIdx;
@@ -424,7 +425,7 @@ class Cache2<V extends Cache2.Val> {
   long acquireNode() {
     int slot = acquireTail();
     if (slot == NULL_SLOT) {
-      return -1L;
+      return 0L;
     }
     if (!removeFromList(slot)) {
       throw new IllegalStateException();
@@ -514,8 +515,8 @@ class Cache2<V extends Cache2.Val> {
 
     DualQueueCache(int capacity, Iterable<? extends V> initialValues) {
       super(capacity, 2, initialValues);
-      this.HOT_HEAD = capacity + 2;
-      this.HOT_TAIL = capacity + 3;
+      this.HOT_HEAD = capacity + 3;
+      this.HOT_TAIL = capacity + 4;
       next[HOT_HEAD] = HOT_TAIL;
       prev[HOT_TAIL] = HOT_HEAD;
     }
