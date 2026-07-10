@@ -172,7 +172,7 @@ class Cache2<V extends Cache2.Val> {
    * time. Since elements are never replaced, GC sees exactly N live references here (vs. 3N for a
    * traditional doubly-linked Node<V> array).
    */
-  final V[] payload;
+  final Val[] payload;
 
   // ---------------------------------------------------------------------------
   // Constructor
@@ -189,7 +189,6 @@ class Cache2<V extends Cache2.Val> {
    *     {@link DualQueueCache}'s HOT_HEAD/HOT_TAIL)
    * @param initialValues Val objects in desired initial LRU order (head→tail)
    */
-  @SuppressWarnings("unchecked")
   private Cache2(int capacity, int extraSentinelSlots, Iterable<? extends V> initialValues) {
     this.capacity = capacity;
     this.COLD_HEAD = capacity + 1;
@@ -197,7 +196,7 @@ class Cache2<V extends Cache2.Val> {
     int arrayLen = capacity + 3 + extraSentinelSlots;
     this.next = new int[arrayLen];
     this.prev = new int[arrayLen];
-    this.payload = (V[]) new Val[capacity + 1];
+    this.payload = new Val[capacity + 1];
 
     // Build cold-queue chain: COLD_HEAD ↔ slot_1 ↔ slot_2 ↔ … ↔ COLD_TAIL.
     // Slot 0 is reserved (null) and never linked. Single-threaded init; plain array writes fine.
@@ -219,8 +218,9 @@ class Cache2<V extends Cache2.Val> {
   // Payload access / reset hook
   // ---------------------------------------------------------------------------
 
+  @SuppressWarnings("unchecked")
   final V getPayload(long handle) {
-    return payload[(int) handle & SLOT_MASK];
+    return (V) payload[(int) handle & SLOT_MASK];
   }
 
   /**
@@ -444,7 +444,7 @@ class Cache2<V extends Cache2.Val> {
     if (!removeFromList(slot)) {
       throw new IllegalStateException();
     }
-    int newGen = ++((Val) payload[slot]).generation;
+    int newGen = ++payload[slot].generation;
     resetPayload(slot, 1);
     return (long) newGen << 32 | slot;
   }
@@ -540,7 +540,7 @@ class Cache2<V extends Cache2.Val> {
 
     @Override
     protected final boolean insertAtHead(int head, int slot, boolean recordAccess) {
-      TsVal tvp = payload[slot];
+      TsVal tvp = (TsVal) payload[slot];
       long prev = tvp.lastUnpinNanos;
       tvp.lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
       boolean toHot = toHot(prev);
@@ -571,15 +571,15 @@ class Cache2<V extends Cache2.Val> {
         } else if (hotCandidate == HOT_HEAD) {
           candidate = coldCandidate;
           fromHot = false;
-          coldCandidateTs = lastUnpinNanos(payload[coldCandidate]);
+          coldCandidateTs = lastUnpinNanos((TsVal) payload[coldCandidate]);
         } else {
           // Evict from hot only when cold is at least HOT_EVICTION_MULTIPLIER times as stale,
           // giving hot slots proportional protection. age() maps lastUnpinNanos=0 to a large
           // sentinel so never-used cold slots are always preferred over any real hot slot.
-          coldCandidateTs = lastUnpinNanos(payload[coldCandidate]);
+          coldCandidateTs = lastUnpinNanos((TsVal) payload[coldCandidate]);
           fromHot =
               age(now, coldCandidateTs)
-                  < age(now, lastUnpinNanos(payload[hotCandidate])) >> HOT_EVICTION_SHIFT;
+                  < age(now, lastUnpinNanos((TsVal) payload[hotCandidate])) >> HOT_EVICTION_SHIFT;
           candidate = fromHot ? hotCandidate : coldCandidate;
         }
       } while ((p = payload[candidate]) == null || !REF_COUNT.compareAndSet(p, 0, -1));
