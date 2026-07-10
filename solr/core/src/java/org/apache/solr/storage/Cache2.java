@@ -42,10 +42,10 @@ import java.util.concurrent.TimeUnit;
  *       and returns the slot index pinned (refCount=1).
  * </ul>
  *
- * <p>The capacity is fixed at construction. {@link #acquireNode()} returns an {@code int} slot
- * index (or {@link #NULL_SLOT} = -1 when exhausted). Callers encode a (partitionIndex, localSlot)
- * pair into a single {@code int} handle using {@link BlockCache#encodeHandle} for cross-partition
- * storage.
+ * <p>The capacity is fixed at construction. {@link #acquireNode()} returns an opaque {@code long}
+ * handle encoding the slot index and a generation counter (or -1L when exhausted). {@link
+ * BlockCache#encodeHandle} ORs in the partition index to form the full cross-partition handle
+ * stored in {@code accessMapped}.
  */
 class Cache2<V extends Cache2.Val> {
 
@@ -65,6 +65,11 @@ class Cache2<V extends Cache2.Val> {
      */
     // package-private: BlockCache.Partition.resetPayload() writes it directly
     volatile int refCount;
+
+    // Incremented by acquireNode() on each recycle, before the volatile write to refCount.
+    // Readers who volatile-read refCount before reading this field are guaranteed to see the
+    // current value (happens-before via the volatile write in resetPayload).
+    private int generation;
 
     Val(int initialRefCount) {
       this.refCount = initialRefCount;
@@ -98,6 +103,8 @@ class Cache2<V extends Cache2.Val> {
 
   /** Returned by {@link #acquireNode()} when no evictable slot is available. */
   static final int NULL_SLOT = -1;
+
+  private static final int SLOT_MASK = (1 << 20) - 1;
 
   /** Cold queue: head sentinel (most-recently-used end). Index = {@code capacity}. */
   protected final int COLD_HEAD;
@@ -210,8 +217,8 @@ class Cache2<V extends Cache2.Val> {
   // Payload access / reset hook
   // ---------------------------------------------------------------------------
 
-  V getPayload(int slot) {
-    return payload[slot];
+  V getPayload(long handle) {
+    return (V) payload[(int) handle & SLOT_MASK];
   }
 
   /**
@@ -322,9 +329,12 @@ class Cache2<V extends Cache2.Val> {
    * refcount is simply incremented with no list operation.
    *
    * <p>Returns 1 if this was a first pin (refCount 0&rarr;1, slot removed from evictable list), 0
-   * if the slot was already pinned (refCount incremented only), -1 if the slot is permanently dead.
+   * if the slot was already pinned (refCount incremented only), -1 if the slot is permanently dead
+   * or if the handle's encoded generation does not match the slot's current generation (stale).
    */
-  int pin(int slot) {
+  int pin(long handle) {
+    int slot = (int) handle & SLOT_MASK;
+    int expectedGen = (int) (handle >>> 32);
     Val p = payload[slot];
     int rc = p.refCount;
     for (; ; ) {
@@ -335,6 +345,7 @@ class Cache2<V extends Cache2.Val> {
           rc = p.refCount;
           continue;
       }
+      if (p.generation != expectedGen) return -1;
       assert rc >= 0;
       int witness = (int) REF_COUNT.compareAndExchange(p, rc, rc + 1);
       if (witness == rc) {
@@ -359,7 +370,8 @@ class Cache2<V extends Cache2.Val> {
    * to the cold queue (or base class with no hot/cold distinction), -1 if not the last unpin
    * (refCount decremented only).
    */
-  int unpin(int slot, boolean recordAccess) {
+  int unpin(long handle, boolean recordAccess) {
+    int slot = (int) handle & SLOT_MASK;
     Val p = payload[slot];
     assert p != null;
     int rc = p.refCount;
@@ -409,16 +421,17 @@ class Cache2<V extends Cache2.Val> {
     return NULL_SLOT;
   }
 
-  int acquireNode() {
+  long acquireNode() {
     int slot = acquireTail();
     if (slot == NULL_SLOT) {
-      return NULL_SLOT;
+      return -1L;
     }
     if (!removeFromList(slot)) {
       throw new IllegalStateException();
     }
+    payload[slot].generation++;
     resetPayload(slot, 1);
-    return slot;
+    return (long) payload[slot].generation << 32 | slot;
   }
 
   /**
@@ -427,7 +440,8 @@ class Cache2<V extends Cache2.Val> {
    * highest-priority reuse candidate. Returns {@code true} if the slot was successfully released,
    * {@code false} if the slot was already evicted or pinned (best-effort; caller need not retry).
    */
-  boolean close(int slot) {
+  boolean close(long handle) {
+    int slot = (int) handle & SLOT_MASK;
     Val p = payload[slot];
     if (p == null || !REF_COUNT.compareAndSet(p, 0, -1)) {
       // pinned or already dead — best effort, bail
@@ -448,7 +462,8 @@ class Cache2<V extends Cache2.Val> {
    *
    * <p>Only call if the caller is the only possible owner of a pin on this slot.
    */
-  void closeUnconditional(int slot) {
+  void closeUnconditional(long handle) {
+    int slot = (int) handle & SLOT_MASK;
     resetPayload(slot, 0);
     insertAtTail(slot);
   }

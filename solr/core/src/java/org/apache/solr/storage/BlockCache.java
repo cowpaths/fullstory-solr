@@ -78,27 +78,24 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final int POOL_MASK = MAX_BLOCKS_PER_PARTITION - 1;
 
   // ---------------------------------------------------------------------------
-  // Handle encoding: (partitionIndex << PART_SHIFT) | localSlot
+  // Handle encoding: (generation << 32) | (partitionIndex << PART_SHIFT) | localSlot
+  //
+  // Cache2.acquireNode() returns an opaque long encoding (generation, slot); BlockCache ORs in
+  // the partition index at bits 20-31 to form the full handle stored in accessMapped.
   // ---------------------------------------------------------------------------
 
   /** Number of bits reserved for the local slot within a partition (supports up to 1M slots). */
   static final int PART_SHIFT = 20;
 
-  private static final int SLOT_MASK = (1 << PART_SHIFT) - 1;
-
   /** Sentinel handle meaning "no cached block". */
-  static final int NULL_HANDLE = -1;
+  static final long NULL_HANDLE = -1L;
 
-  static int encodeHandle(int partitionIdx, int localSlot) {
-    return (partitionIdx << PART_SHIFT) | localSlot;
+  static long encodeHandle(int partitionIdx, long cache2Handle) {
+    return cache2Handle | ((long) partitionIdx << PART_SHIFT);
   }
 
-  private int partOf(int handle) {
-    return handle >>> PART_SHIFT;
-  }
-
-  private int slotOf(int handle) {
-    return handle & SLOT_MASK;
+  private int partOf(long handle) {
+    return ((int) handle) >>> PART_SHIFT;
   }
 
   // ---------------------------------------------------------------------------
@@ -453,12 +450,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * Pins the slot identified by {@code handle}. Routes to the owning partition decoded from the
    * handle. Returns {@code false} if the slot is permanently dead.
    */
-  boolean pin(int handle) {
-    int p = partOf(handle), slot = slotOf(handle);
-    int rc = partitions[p].pin(slot);
+  boolean pin(long handle) {
+    int p = partOf(handle);
+    int rc = partitions[p].pin(handle);
     if (rc > 0) {
       pinnedCount.increment();
-      if (partitions[p].getPayload(slot).fromHot()) hotUnpinned.decrement();
+      if (partitions[p].getPayload(handle).fromHot()) hotUnpinned.decrement();
     } else if (rc < 0) {
       return false;
     }
@@ -467,21 +464,21 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   /** Releases a pin on the slot identified by {@code handle}. */
-  void unpin(int handle) {
+  void unpin(long handle) {
     unpin(handle, true);
   }
 
   @SuppressWarnings({"ReferenceEquality", "fallthrough"})
-  void unpin(int handle, boolean recordAccess) {
-    int p = partOf(handle), slot = slotOf(handle);
-    switch (partitions[p].unpin(slot, recordAccess)) {
+  void unpin(long handle, boolean recordAccess) {
+    int p = partOf(handle);
+    switch (partitions[p].unpin(handle, recordAccess)) {
       case 1:
         hotUnpinned.increment();
         // fallthrough
       case 0:
         pinnedCount.decrement();
         // on last unpin, null out the cached ByteBuffer. recreating is cheap.
-        Val v = partitions[p].getPayload(slot);
+        Val v = partitions[p].getPayload(handle);
         if (v != null) {
           ByteBuffer cur = v.cached;
           if (cur != null && cur != EXCEPTION_SENTINEL) {
@@ -497,25 +494,25 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * Acquires a pinned slot from a randomly chosen partition. Returns {@link #NULL_HANDLE} if the
    * partition is exhausted.
    */
-  int acquireNode() {
+  long acquireNode() {
     int p = tlrIndex();
-    int slot = partitions[p].acquireNode();
-    if (slot != Cache2.NULL_SLOT) {
+    long ar = partitions[p].acquireNode();
+    if (ar != -1L) {
       acquisitions.increment();
       pinnedCount.increment();
-      if (partitions[p].getPayload(slot).fromHot()) {
+      if (partitions[p].getPayload(ar).fromHot()) {
         hotAcquisitions.increment();
         hotUnpinned.decrement();
       }
-      return encodeHandle(p, slot);
+      return encodeHandle(p, ar);
     } else {
       poolExhausted.increment();
       return NULL_HANDLE;
     }
   }
 
-  Val getPayload(int handle) {
-    return partitions[partOf(handle)].getPayload(slotOf(handle));
+  Val getPayload(long handle) {
+    return partitions[partOf(handle)].getPayload(handle);
   }
 
   public void writeMetrics(MapWriter.EntryWriter ew) throws IOException {
@@ -604,12 +601,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * partition (making it a high-priority reuse candidate). Used when a slot was acquired but
    * ultimately not needed (e.g. lost CAS race).
    */
-  boolean close(int handle) {
+  boolean close(long handle) {
     return close(handle, false);
   }
 
-  boolean close(int handle, boolean unconditional) {
-    int p = partOf(handle), slot = slotOf(handle);
+  boolean close(long handle, boolean unconditional) {
+    int p = partOf(handle);
     Val v;
     if (unconditional) {
       v = null;
@@ -618,14 +615,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       // Read fromHot() before the close. Only relevant for the non-unconditional path where the
       // slot is in the evictable list (refCount=0); unconditional slots are pinned and not in
       // any queue.
-      v = partitions[p].getPayload(slot);
+      v = partitions[p].getPayload(handle);
     }
     boolean closed;
     if (unconditional) {
-      partitions[p].closeUnconditional(slot);
+      partitions[p].closeUnconditional(handle);
       closed = true;
     } else {
-      closed = partitions[p].close(slot);
+      closed = partitions[p].close(handle);
     }
     if (closed) {
       closedCount.increment();
@@ -634,7 +631,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     } else {
       // Categorize the skip to help diagnose phantom-block accumulation.
       // NOTE: racy read of refCount; accurate enough for diagnostics.
-      Val vv = partitions[p].getPayload(slot);
+      Val vv = partitions[p].getPayload(handle);
       if (vv == null || vv.refCount() < 0) {
         closeSkippedDead.increment();
       } else {
