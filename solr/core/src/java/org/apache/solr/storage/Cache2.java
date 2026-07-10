@@ -20,33 +20,37 @@ package org.apache.solr.storage;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.concurrent.TimeUnit;
-import java.util.function.BiFunction;
 
 /**
- * Generic concurrent LRU cache with pin/unpin support.
+ * Fixed-capacity concurrent LRU cache backed by parallel {@code int[]} arrays for the doubly-linked
+ * list structure. Compared to {@link Cache} (which stores {@code next}/{@code prev} as object
+ * references inside each node), the primitive arrays are not traversed by the GC, reducing the
+ * number of GC-scanned references from 3N to N (just the payload array).
  *
- * <p>Subclasses supply the concrete {@link Node} subtype (which carries the payload) and override
- * {@link #createPayload} to construct it. This class manages the doubly-linked LRU list, the
- * pin/unpin reference-count protocol, and the acquire/release/recycle lifecycle.
+ * <p>The LRU semantics, pin/unpin reference-count protocol, and hot/cold dual-queue logic are
+ * identical to {@link Cache} and {@link Cache.DualQueueCache}.
  *
- * <p><b>LRU invariant:</b> a node is in the doubly-linked list if and only if its {@code refCount}
- * is 0 (evictable). Pinned nodes (refCount &gt; 0) are spliced out of the list.
+ * <p><b>LRU invariant:</b> a slot is in the doubly-linked list if and only if its {@code refCount}
+ * is 0 (evictable). Pinned slots (refCount &gt; 0) are spliced out of the list.
  *
  * <ul>
- *   <li>{@link #pin}: first pin (CAS 0&rarr;1) removes the node from the list; re-pins (CAS
+ *   <li>{@link #pin}: first pin (CAS 0&rarr;1) removes the slot from the list; re-pins (CAS
  *       N&rarr;N+1, N&gt;0) are pure refcount increments.
- *   <li>{@link #unpin}: last unpin (result=0) inserts the node at the list head (most-recently
+ *   <li>{@link #unpin}: last unpin (result=0) inserts the slot at the list head (most-recently
  *       used); higher unpins are pure refcount decrements.
- *   <li>{@link #acquireNode}: evicts the tail node and returns a fresh pinned node carrying the
- *       same value (the subclass controls the concrete node type via {@link #createPayload}).
+ *   <li>{@link #acquireNode}: evicts the tail slot, resets its payload via {@link #resetPayload},
+ *       and returns the slot index pinned (refCount=1).
  * </ul>
  *
- * @param <V> the value type carried by each node
+ * <p>The capacity is fixed at construction. {@link #acquireNode()} returns an {@code int} slot
+ * index (or {@link #NULL_SLOT} = -1 when exhausted). Callers encode a (partitionIndex, localSlot)
+ * pair into a single {@code int} handle using {@link BlockCache#encodeHandle} for cross-partition
+ * storage.
  */
 class Cache2<V extends Cache2.Val> {
 
   // ---------------------------------------------------------------------------
-  // Node
+  // Val hierarchy
   // ---------------------------------------------------------------------------
 
   static class Val {
@@ -56,10 +60,11 @@ class Cache2<V extends Cache2.Val> {
      * <ul>
      *   <li>&ge;1 — pinned (not in LRU list)
      *   <li>0 — evictable (in LRU list)
-     *   <li>-1 — permanently dead (evicted); node must not be used
+     *   <li>-1 — permanently dead (evicted); slot must not be used
      * </ul>
      */
-    private volatile int refCount;
+    // package-private: BlockCache.Partition.resetPayload() writes it directly
+    volatile int refCount;
 
     Val(int initialRefCount) {
       this.refCount = initialRefCount;
@@ -70,75 +75,14 @@ class Cache2<V extends Cache2.Val> {
     }
   }
 
-  private static final VarHandle NEXT;
   private static final VarHandle REF_COUNT;
 
   static {
     try {
       MethodHandles.Lookup lookup = MethodHandles.lookup();
-      NEXT = lookup.findVarHandle(Node.class, "next", Node.class);
       REF_COUNT = lookup.findVarHandle(Val.class, "refCount", int.class);
     } catch (ReflectiveOperationException e) {
       throw new Error(e);
-    }
-  }
-
-  /**
-   * A linked-list node carrying a reference count for safe concurrent eviction.
-   *
-   * <p>The {@code value} field holds the payload managed by the cache (e.g. a {@link
-   * java.nio.ByteBuffer} for {@link BlockCache}); it is {@code null} for sentinel nodes. Subclasses
-   * may also add typed convenience fields that alias this value.
-   *
-   * <ul>
-   *   <li>&ge;1 — pinned (not in LRU list)
-   *   <li>0 — evictable (in LRU list)
-   *   <li>-1 — permanently dead (evicted); node must not be used
-   * </ul>
-   *
-   * <p>Head of the list = most recently used; tail = least recently used / eviction candidate.
-   */
-  static final class Node<V extends Cache2.Val> {
-
-    /**
-     * The payload managed by this cache entry. {@code null} for sentinel nodes. Non-final only in
-     * order to enable nulling out (for GC eligibility) upon node reclaim.
-     */
-    private V payload;
-
-    /** LRU list link toward the head (most-recently-used end). Guarded by atomic access */
-    private volatile Node<V> next;
-
-    /**
-     * LRU list link toward the tail (least-recently-used end). Guarded by atomic access to {@link
-     * #next}
-     */
-    private volatile Node<V> prev;
-
-    Node(V payload, Node<V> prev) {
-      this.payload = payload; // visibility guaranteed by callers incref'ing refCount before access
-      this.prev = prev;
-    }
-
-    <K> Node(BiFunction<K, Node<V>, V> payloadFunc, K key) {
-      this.payload = payloadFunc.apply(key, this);
-    }
-
-    /** Sentinel constructor (head / tail / protocol sentinels). */
-    Node() {
-      this.payload = null;
-    }
-
-    /**
-     * Return the associated payload. If called on a pinned node, is guaranteed to return non-null
-     */
-    V getPayload() {
-      return payload;
-    }
-
-    boolean pinnable() {
-      Val p = this.payload;
-      return p != null && p.refCount >= 0;
     }
   }
 
@@ -146,22 +90,24 @@ class Cache2<V extends Cache2.Val> {
   // Sentinels
   // ---------------------------------------------------------------------------
 
-  // Static prototypes typed as Node<?> to avoid the type-parameter restriction on static fields.
-  // Each Cache<V> instance casts these once to Node<V> final fields (see constructor below);
-  // all subsequent uses are fully typed. The cast is safe because sentinels are only ever
-  // identity-compared (==) and their value/refCount fields are never accessed.
-  private static final Node<?> RESERVED = new Node<>();
-  private static final Node<?> REMOVED = new Node<>();
+  // Sentinel link values stored in next[] to signal list-operation state.
+  // Analogous to the RESERVED / REMOVED Node sentinels in Cache, but encoded as ints
+  // so the int[] arrays remain GC-opaque.
+  private static final int RESERVED_LINK = Integer.MIN_VALUE;
+  private static final int REMOVED_LINK = Integer.MIN_VALUE + 1;
 
-  /** Cold queue: head sentinel (most-recently-used end). */
-  private final Node<V> lruHead = new Node<>();
+  /** Returned by {@link #acquireNode()} when no evictable slot is available. */
+  static final int NULL_SLOT = -1;
 
-  /** Cold queue: tail sentinel (eviction end). */
-  private final Node<V> lruTail = new Node<>();
+  /** Cold queue: head sentinel (most-recently-used end). Index = {@code capacity}. */
+  protected final int COLD_HEAD;
+
+  /** Cold queue: tail sentinel (eviction end). Index = {@code capacity + 1}. */
+  protected final int COLD_TAIL;
 
   /**
-   * Multiplier applied to the hot tail's age during eviction scoring. A hot node is evicted only
-   * when the cold tail is at least {@code HOT_EVICTION_MULTIPLIER} times as stale, giving hot nodes
+   * Multiplier applied to the hot tail's age during eviction scoring. A hot slot is evicted only
+   * when the cold tail is at least {@code HOT_EVICTION_MULTIPLIER} times as stale, giving hot slots
    * proportional protection regardless of absolute time scale.
    */
   private static final int HOT_EVICTION_SHIFT = 2;
@@ -170,49 +116,110 @@ class Cache2<V extends Cache2.Val> {
   private static final long VERY_STALE = TimeUnit.DAYS.toNanos(365);
 
   /**
-   * Returns the age (nanos since last unpin) of a node given its {@code lastUnpinNanos} stamp.
-   * Returns a large sentinel age for never-used nodes ({@code lastUnpinNanos == 0}) so they are
-   * always preferred for eviction over any node that has been genuinely used.
+   * Returns the age (nanos since last unpin) of a slot given its {@code lastUnpinNanos} stamp.
+   * Returns a large sentinel age for never-used slots ({@code lastUnpinNanos == 0}) so they are
+   * always preferred for eviction over any slot that has been genuinely used.
    */
   private static long age(long now, long lastUnpinNanos) {
     return lastUnpinNanos == 0 ? VERY_STALE : now - lastUnpinNanos;
   }
 
-  @SuppressWarnings("unchecked")
-  private Cache2() {
-    lruHead.next = lruTail;
-    lruTail.prev = lruHead;
+  // ---------------------------------------------------------------------------
+  // Fixed arrays
+  // ---------------------------------------------------------------------------
+
+  private final int capacity;
+
+  /**
+   * {@code next[i]} = successor slot index toward the head, or {@link #RESERVED_LINK}/{@link
+   * #REMOVED_LINK}. Indexed over real slots + sentinel slots. CAS'd via {@link #INT_ARRAY_VH}.
+   */
+  protected final int[] next;
+
+  /**
+   * {@code prev[i]} = predecessor slot index toward the tail. Reads/writes use
+   * getVolatile/setVolatile via {@link #INT_ARRAY_VH} to match the {@code volatile} semantics of
+   * {@link Cache}'s {@code Node.prev} field.
+   */
+  protected final int[] prev;
+
+  /**
+   * VarHandle for CAS on {@code int[]} elements (shared for both {@link #next} and {@link #prev}).
+   */
+  private static final VarHandle INT_ARRAY_VH;
+
+  static {
+    try {
+      INT_ARRAY_VH = MethodHandles.arrayElementVarHandle(int[].class);
+    } catch (Exception e) {
+      throw new Error(e);
+    }
   }
+
+  /**
+   * Payload for real slots 0..capacity-1. Elements are set at construction and never swapped; only
+   * the Val's internal fields change over time. Since elements are never replaced, GC sees exactly
+   * N live references here (vs. 3N for a traditional doubly-linked Node<V> array).
+   *
+   * <p>Package-private: {@link BlockCache}'s {@code Partition.resetPayload()} accesses it directly.
+   */
+  final V[] payload;
+
+  // ---------------------------------------------------------------------------
+  // Constructor
+  // ---------------------------------------------------------------------------
 
   /**
    * Initializing constructor: wires {@code initialValues} into the LRU list in order (first value
-   * at the head, last at the tail) using {@link #createPayload}. Equivalent to calling the no-arg
-   * constructor followed by {@link #insertAtTail} for each value, but faster because no CAS is
-   * needed during single-threaded initialization.
+   * at the head, last at the tail). Equivalent to calling a no-arg constructor followed by
+   * insertAtTail for each value, but faster because no CAS is needed during single-threaded
+   * initialization.
+   *
+   * @param capacity number of real slots
+   * @param extraSentinelSlots additional sentinel slots beyond COLD_HEAD/COLD_TAIL (e.g. 2 for
+   *     {@link DualQueueCache}'s HOT_HEAD/HOT_TAIL)
+   * @param initialValues Val objects in desired initial LRU order (head→tail)
    */
-  Cache2(Iterable<V> initialValues) {
-    this();
-    Node<V> prev = lruHead;
-    for (V value : initialValues) {
-      Node<V> node = new Node<>(value, prev);
-      prev.next = node;
-      prev = node;
+  @SuppressWarnings("unchecked")
+  private Cache2(int capacity, int extraSentinelSlots, Iterable<? extends V> initialValues) {
+    this.capacity = capacity;
+    this.COLD_HEAD = capacity;
+    this.COLD_TAIL = capacity + 1;
+    int arrayLen = capacity + 2 + extraSentinelSlots;
+    this.next = new int[arrayLen];
+    this.prev = new int[arrayLen];
+    this.payload = (V[]) new Val[capacity];
+
+    // Build cold-queue chain: COLD_HEAD ↔ slot_0 ↔ slot_1 ↔ … ↔ COLD_TAIL.
+    // Single-threaded init; plain array writes are fine.
+    int prevIdx = COLD_HEAD;
+    int slot = 0;
+    for (V v : initialValues) {
+      if (slot >= capacity) throw new IllegalArgumentException("too many initial values");
+      payload[slot] = v;
+      next[prevIdx] = slot;
+      prev[slot] = prevIdx;
+      prevIdx = slot++;
     }
-    prev.next = lruTail;
-    lruTail.prev = prev;
+    next[prevIdx] = COLD_TAIL;
+    prev[COLD_TAIL] = prevIdx;
+    // COLD_HEAD.prev is never read (head sentinel has no meaningful predecessor).
   }
 
   // ---------------------------------------------------------------------------
-  // Node factory
+  // Payload access / reset hook
   // ---------------------------------------------------------------------------
 
+  V getPayload(int slot) {
+    return payload[slot];
+  }
+
   /**
-   * Creates a new node carrying {@code value}. Subclasses override to return a concrete subtype
-   * (e.g. {@link BlockCache.Val}), ensuring that all nodes in the list are of the expected type.
+   * Resets a slot's payload for reuse after it is claimed by {@link #acquireNode()}. Subclasses
+   * override to reset application-specific fields (e.g. populated, cached) in addition to refCount.
    */
-  @SuppressWarnings("unchecked")
-  protected V createPayload(V oldValue, int initialRefCount) {
-    return (V) new Val(initialRefCount);
+  protected void resetPayload(int slot, int newRefCount) {
+    payload[slot].refCount = newRefCount;
   }
 
   // ---------------------------------------------------------------------------
@@ -220,81 +227,81 @@ class Cache2<V extends Cache2.Val> {
   // ---------------------------------------------------------------------------
 
   /**
-   * Atomically acquires the exclusive right to modify {@code ref.next}. Spins while the link is
-   * held by another thread (RESERVED), then CAS-swaps it to {@code reservation} and returns the
-   * prior value. Returns REMOVED immediately if the node has already been spliced out.
+   * Atomically acquires the exclusive right to modify {@code slot}'s next link. Spins while the
+   * link is held by another thread (RESERVED_LINK), then CAS-swaps it to {@code reservation} and
+   * returns the prior value. Returns REMOVED_LINK immediately if the slot has already been spliced
+   * out.
    */
-  @SuppressWarnings("unchecked")
-  private static <V extends Val> Node<V> reserve(Node<V> ref, Node<?> reservation) {
-    Node<V> next = ref.next;
+  private int reserve(int slot, int reservation) {
+    int cur = (int) INT_ARRAY_VH.getVolatile(next, slot);
     for (; ; ) {
-      while (next == RESERVED) {
-        if (reservation == REMOVED) {
+      while (cur == RESERVED_LINK) {
+        if (reservation == REMOVED_LINK) {
           Thread.yield();
         }
-        next = ref.next;
+        cur = (int) INT_ARRAY_VH.getVolatile(next, slot);
       }
-      if (next == REMOVED) {
-        return next;
+      if (cur == REMOVED_LINK) {
+        return cur;
       }
-      Node<V> extant = (Node<V>) NEXT.compareAndExchange(ref, next, reservation);
-      if (extant == next) {
-        return next;
+      int witness = (int) INT_ARRAY_VH.compareAndExchange(next, slot, cur, reservation);
+      if (witness == cur) {
+        return cur;
       }
-      next = extant;
+      cur = witness;
     }
   }
 
-  protected boolean insertAtHead(Node<V> listHead, Node<V> node, boolean recordAccess) {
-    node.prev = listHead;
-    Node<V> oldNext = reserve(listHead, RESERVED);
-    assert oldNext != REMOVED : "queue head sentinel should never be removed";
-    node.next = oldNext;
-    oldNext.prev = node;
-    if (!NEXT.compareAndSet(listHead, RESERVED, node)) {
+  protected boolean insertAtHead(int listHead, int slot, boolean recordAccess) {
+    INT_ARRAY_VH.setVolatile(prev, slot, listHead);
+    int oldNext = reserve(listHead, RESERVED_LINK);
+    assert oldNext != REMOVED_LINK : "queue head sentinel should never be removed";
+    next[slot] = oldNext;
+    INT_ARRAY_VH.setVolatile(prev, oldNext, slot);
+    if (!INT_ARRAY_VH.compareAndSet(next, listHead, RESERVED_LINK, slot)) {
       throw new IllegalStateException("unexpected concurrent modification of listHead.next");
     }
     return false;
   }
 
-  private static <V extends Val> boolean removeFromList(Node<V> node) {
-    Node<V> next = reserve(node, REMOVED);
-    if (next == REMOVED) {
+  private boolean removeFromList(int slot) {
+    int oldNext = reserve(slot, REMOVED_LINK);
+    if (oldNext == REMOVED_LINK) {
       return false;
     }
-    Node<V> prev;
+    int prevSlot;
     for (; ; ) {
-      prev = node.prev;
-      if (NEXT.compareAndSet(prev, node, RESERVED)) {
+      prevSlot = (int) INT_ARRAY_VH.getVolatile(prev, slot);
+      if (INT_ARRAY_VH.compareAndSet(next, prevSlot, slot, RESERVED_LINK)) {
         break;
       }
       Thread.yield();
     }
-    next.prev = prev;
-    if (!NEXT.compareAndSet(prev, RESERVED, next)) {
+    INT_ARRAY_VH.setVolatile(prev, oldNext, prevSlot);
+    if (!INT_ARRAY_VH.compareAndSet(next, prevSlot, RESERVED_LINK, oldNext)) {
       throw new IllegalStateException("unexpected concurrent modification during list removal");
     }
     return true;
   }
 
-  private void insertAtTail(V value) {
+  private void insertAtTail(int slot) {
     for (; ; ) {
-      Node<V> pred = lruTail.prev;
-      Node<V> oldNext = reserve(pred, RESERVED);
-      if (oldNext != lruTail) {
-        if (oldNext == REMOVED) {
+      int predSlot = (int) INT_ARRAY_VH.getVolatile(prev, COLD_TAIL);
+      int oldNext = reserve(predSlot, RESERVED_LINK);
+      if (oldNext != COLD_TAIL) {
+        if (oldNext == REMOVED_LINK) {
           continue; // pred was concurrently removed; retry
         }
         // release reservation; pred is no longer tail's predecessor
-        if (!NEXT.compareAndSet(pred, RESERVED, oldNext)) {
+        if (!INT_ARRAY_VH.compareAndSet(next, predSlot, RESERVED_LINK, oldNext)) {
           throw new IllegalStateException();
         }
         continue;
       }
-      Node<V> node = new Node<>(createPayload(value, 0), pred);
-      node.next = lruTail;
-      lruTail.prev = node;
-      if (!NEXT.compareAndSet(pred, RESERVED, node)) {
+      next[slot] = COLD_TAIL;
+      INT_ARRAY_VH.setVolatile(prev, slot, predSlot);
+      INT_ARRAY_VH.setVolatile(prev, COLD_TAIL, slot);
+      if (!INT_ARRAY_VH.compareAndSet(next, predSlot, RESERVED_LINK, slot)) {
         throw new IllegalStateException("unexpected concurrent modification during tail insertion");
       }
       return;
@@ -308,22 +315,17 @@ class Cache2<V extends Cache2.Val> {
   private static final int UNPIN_SENTINEL = Integer.MIN_VALUE >> 1;
 
   /**
-   * Pins {@code node} for the duration of a read, preventing eviction. Returns {@code false} if the
-   * node is permanently dead (evicted); the caller must then fall back to loading.
+   * Pins {@code slot} for the duration of a read, preventing eviction.
    *
-   * <p>If this is the <em>first</em> pin (refCount transitions 0&rarr;1), the node is removed from
-   * the LRU list (it is no longer evictable). If the node is already pinned (refCount&gt;0), the
+   * <p>If this is the <em>first</em> pin (refCount transitions 0&rarr;1), the slot is removed from
+   * the LRU list (it is no longer evictable). If the slot is already pinned (refCount&gt;0), the
    * refcount is simply incremented with no list operation.
+   *
+   * <p>Returns 1 if this was a first pin (refCount 0&rarr;1, slot removed from evictable list), 0
+   * if the slot was already pinned (refCount incremented only), -1 if the slot is permanently dead.
    */
-  /**
-   * Returns 1 if this was a first pin (refCount 0&rarr;1, node removed from evictable list), 0 if
-   * the node was already pinned (refCount incremented only), -1 if the node is permanently dead.
-   */
-  static <V extends Cache2.Val> int pin(Node<V> node) {
-    Val p = node.payload;
-    if (p == null) {
-      return -1;
-    }
+  int pin(int slot) {
+    Val p = payload[slot];
     int rc = p.refCount;
     for (; ; ) {
       switch (rc) {
@@ -343,29 +345,29 @@ class Cache2<V extends Cache2.Val> {
     }
     if (rc == 0) {
       // First pin: remove from the evictable list.
-      removeFromList(node);
+      removeFromList(slot);
       return 1;
     }
     return 0;
   }
 
   /**
-   * Releases a read pin. If this is the last pin (refCount transitions 1&rarr;0), the node is
+   * Releases a read pin. If this is the last pin (refCount transitions 1&rarr;0), the slot is
    * inserted at the LRU head (most-recently-used position) and becomes evictable.
    *
-   * <p>Returns 1 if last unpin and the node was routed to the hot queue, 0 if last unpin and routed
+   * <p>Returns 1 if last unpin and the slot was routed to the hot queue, 0 if last unpin and routed
    * to the cold queue (or base class with no hot/cold distinction), -1 if not the last unpin
    * (refCount decremented only).
    */
-  int unpin(Node<V> node, boolean recordAccess) {
-    Val p = node.payload;
+  int unpin(int slot, boolean recordAccess) {
+    Val p = payload[slot];
     assert p != null;
     int rc = p.refCount;
     for (; ; ) {
       if (rc == 1) {
         int witness = (int) REF_COUNT.compareAndExchange(p, 1, UNPIN_SENTINEL);
         if (witness == 1) {
-          boolean toHot = insertAtHead(lruHead, node, recordAccess);
+          boolean toHot = insertAtHead(COLD_HEAD, slot, recordAccess);
           if (!REF_COUNT.compareAndSet(p, UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
@@ -390,81 +392,81 @@ class Cache2<V extends Cache2.Val> {
   // ---------------------------------------------------------------------------
 
   /**
-   * Acquires a pinned node whose value is ready to be used. Evicts the least-recently-used
-   * evictable node from the tail of the list, then returns a fresh node (via {@link
-   * #createPayload}) carrying the same value, pinned (refCount=1) and not yet in the list.
+   * Acquires a pinned slot whose payload is ready to be used. Evicts the least-recently-used
+   * evictable slot from the tail of the list, resets its payload via {@link #resetPayload}, and
+   * returns it pinned (refCount=1) and not yet in the list.
    *
-   * <p>Returns {@code null} if the list is empty (all nodes are pinned).
+   * <p>Returns {@link #NULL_SLOT} if the list is empty (all slots are pinned).
    */
-  final Node<V> acquireNode() {
-    return acquireNode(null);
-  }
-
-  protected Node<V> acquireTail(Node<V> lruTail, Node<V> lruHead) {
-    for (Node<V> candidate; (candidate = lruTail.prev) != lruHead; ) {
-      Val p = candidate.payload;
+  protected int acquireTail() {
+    for (int candidate;
+        (candidate = (int) INT_ARRAY_VH.getVolatile(prev, COLD_TAIL)) != COLD_HEAD; ) {
+      Val p = payload[candidate];
       if (p != null && REF_COUNT.compareAndSet(p, 0, -1)) {
         return candidate;
       }
     }
-    return null;
+    return NULL_SLOT;
   }
 
-  interface ValFunc<N> {
-    N apply(N oldVal, int initialRefCount);
-  }
-
-  final Node<V> acquireNode(ValFunc<V> valFunc) {
-    Node<V> candidate = acquireTail(lruTail, lruHead);
-    if (candidate == null) {
-      return null;
+  int acquireNode() {
+    int slot = acquireTail();
+    if (slot == NULL_SLOT) {
+      return NULL_SLOT;
     }
-    if (!removeFromList(candidate)) {
+    if (!removeFromList(slot)) {
       throw new IllegalStateException();
     }
-    V old = candidate.payload;
-    candidate.payload = null; // ensure eligible for GC
-    V newVal = valFunc == null ? createPayload(old, 1) : valFunc.apply(old, 1);
-    return new Node<>(newVal, null);
+    resetPayload(slot, 1);
+    return slot;
   }
 
   /**
-   * Explicitly releases a node when its owning resource is closed. If the node is still evictable
-   * (refCount==0 and in the list), marks it dead and recycles its value back to the pool via {@link
-   * #insertAtTail}, making it the highest-priority eviction candidate for reuse. Returns {@code
-   * true} if the node was successfully released, {@code false} if the node was already evicted or
-   * pinned (best-effort; caller need not retry).
-   *
-   * <p>Only pass <code>unconditional=true</code> if caller is the only possible owner of a ref to
-   * this node (e.g., if CAS has failed).
+   * Explicitly releases a slot when its owning resource is closed. If the slot is still evictable
+   * (refCount==0 and in the list), marks it dead and recycles it back to the tail, making it the
+   * highest-priority reuse candidate. Returns {@code true} if the slot was successfully released,
+   * {@code false} if the slot was already evicted or pinned (best-effort; caller need not retry).
    */
-  boolean close(Node<V> node, boolean unconditional) {
-    V p = node.payload;
-    if (!unconditional && (p == null || !REF_COUNT.compareAndSet(p, 0, -1))) {
+  boolean close(int slot) {
+    Val p = payload[slot];
+    if (p == null || !REF_COUNT.compareAndSet(p, 0, -1)) {
       // pinned or already dead — best effort, bail
       return false;
     }
-    if (unconditional || removeFromList(node)) {
-      node.payload = null; // ensure eligible for GC
-      insertAtTail(p); // p cannot be null here
+    if (removeFromList(slot)) {
+      resetPayload(slot, 0);
+      insertAtTail(slot);
     } else {
       throw new IllegalStateException();
     }
     return true;
   }
 
+  /**
+   * Unconditionally recycles a slot back to the tail. Used when a slot was acquired (pinned,
+   * refCount=1) but ultimately not needed (e.g. lost CAS race).
+   *
+   * <p>Only call if the caller is the only possible owner of a pin on this slot.
+   */
+  void closeUnconditional(int slot) {
+    resetPayload(slot, 0);
+    insertAtTail(slot);
+  }
+
   static class TsVal extends Val {
 
     /**
      * Nanosecond timestamp of the most recent {@link Cache2#unpin}, or {@code 0} if never unpinned.
-     * {@code 0} is treated as maximally stale, making never-used nodes the highest-priority
+     * {@code 0} is treated as maximally stale, making never-used slots the highest-priority
      * eviction candidates.
+     *
+     * <p>Package-private: {@link BlockCache}'s {@code Partition.resetPayload()} writes it directly.
      */
-    private long lastUnpinNanos;
+    long lastUnpinNanos;
 
     /**
-     * True if this node was most recently routed to the hot queue by {@link
-     * DualQueueCache#insertAtHead}. Copied through {@code createPayload} on eviction so that {@link
+     * True if this slot was most recently routed to the hot queue by {@link
+     * DualQueueCache#insertAtHead}. Set through {@link #resetPayload} on eviction so that {@link
      * BlockCache} can maintain per-queue counters without any list traversal. Volatile for
      * cross-thread visibility between the unpinning thread (writer) and the evicting/pinning thread
      * (reader).
@@ -478,11 +480,6 @@ class Cache2<V extends Cache2.Val> {
     TsVal(int initialRefCount) {
       super(initialRefCount);
     }
-
-    TsVal(TsVal oldValue, int initialRefCount) {
-      super(initialRefCount);
-      this.fromHot = oldValue.fromHot;
-    }
   }
 
   private static long lastUnpinNanos(TsVal v) {
@@ -494,66 +491,69 @@ class Cache2<V extends Cache2.Val> {
     /** Running memoization of last seen non-zero cold queue timestamp */
     private volatile long coldTs;
 
-    /** Hot queue: head sentinel. Nodes promoted from cold are inserted here. */
-    private final Node<V> hotHead = new Node<>();
+    /** Hot queue: head sentinel. Slots promoted from cold are inserted here. */
+    private final int HOT_HEAD;
 
     /** Hot queue: tail sentinel. */
-    private final Node<V> hotTail = new Node<>();
+    private final int HOT_TAIL;
 
-    DualQueueCache(Iterable<V> initialValues) {
-      super(initialValues);
-      hotHead.next = hotTail;
-      hotTail.prev = hotHead;
+    DualQueueCache(int capacity, Iterable<? extends V> initialValues) {
+      super(capacity, 2, initialValues);
+      this.HOT_HEAD = capacity + 2;
+      this.HOT_TAIL = capacity + 3;
+      next[HOT_HEAD] = HOT_TAIL;
+      prev[HOT_TAIL] = HOT_HEAD;
     }
 
     @Override
-    protected final boolean insertAtHead(Node<V> head, Node<V> node, boolean recordAccess) {
-      TsVal tvp = node.payload;
+    protected final boolean insertAtHead(int head, int slot, boolean recordAccess) {
+      TsVal tvp = (TsVal) payload[slot];
       long prev = tvp.lastUnpinNanos;
       tvp.lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
       boolean toHot = toHot(prev);
       tvp.fromHot = toHot;
-      super.insertAtHead(toHot ? hotHead : head, node, recordAccess);
+      super.insertAtHead(toHot ? HOT_HEAD : head, slot, recordAccess);
       return toHot;
     }
 
     @Override
-    protected Node<V> acquireTail(Node<V> lruTail, Node<V> lruHead) {
+    protected int acquireTail() {
       long coldCandidateTs;
-      Node<V> candidate;
+      int candidate;
       boolean fromHot;
       long now = System.nanoTime();
       Val p;
       do {
-        Node<V> coldCandidate = lruTail.prev, hotCandidate = hotTail.prev;
-        if (coldCandidate == lruHead) {
+        int coldCandidate = (int) INT_ARRAY_VH.getVolatile(prev, COLD_TAIL);
+        int hotCandidate = (int) INT_ARRAY_VH.getVolatile(prev, HOT_TAIL);
+        if (coldCandidate == COLD_HEAD) {
           // cold queue is empty
-          if (hotCandidate == hotHead) {
+          if (hotCandidate == HOT_HEAD) {
             // both queues empty
-            return null;
+            return NULL_SLOT;
           }
           candidate = hotCandidate;
           fromHot = true;
           coldCandidateTs = 0;
-        } else if (hotCandidate == hotHead) {
+        } else if (hotCandidate == HOT_HEAD) {
           candidate = coldCandidate;
           fromHot = false;
-          coldCandidateTs = lastUnpinNanos(coldCandidate.payload);
+          coldCandidateTs = lastUnpinNanos(payload[coldCandidate]);
         } else {
           // Evict from hot only when cold is at least HOT_EVICTION_MULTIPLIER times as stale,
-          // giving hot nodes proportional protection. age() maps lastUnpinNanos=0 to a large
-          // sentinel so never-used cold nodes are always preferred over any real hot node.
-          coldCandidateTs = lastUnpinNanos(coldCandidate.payload);
+          // giving hot slots proportional protection. age() maps lastUnpinNanos=0 to a large
+          // sentinel so never-used cold slots are always preferred over any real hot slot.
+          coldCandidateTs = lastUnpinNanos(payload[coldCandidate]);
           fromHot =
               age(now, coldCandidateTs)
-                  < age(now, lastUnpinNanos(hotCandidate.payload)) >> HOT_EVICTION_SHIFT;
+                  < age(now, lastUnpinNanos(payload[hotCandidate])) >> HOT_EVICTION_SHIFT;
           candidate = fromHot ? hotCandidate : coldCandidate;
         }
-      } while ((p = candidate.payload) == null || !REF_COUNT.compareAndSet(p, 0, -1));
+      } while ((p = payload[candidate]) == null || !REF_COUNT.compareAndSet(p, 0, -1));
       if (coldCandidateTs != 0) {
         this.coldTs = coldCandidateTs;
       }
-      ((TsVal) candidate.payload).fromHot = fromHot;
+      ((TsVal) payload[candidate]).fromHot = fromHot;
       return candidate;
     }
 
