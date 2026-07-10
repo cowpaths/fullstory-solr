@@ -92,9 +92,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private final ByteBufferGuard guard;
   // Shared per-file array; null'd on close.
   protected AtomicLongArray accessMapped;
-  // TODO: tailMapped is indexed by block index, so it's allocated at full blockCount length even
-  // when only a small suffix of blocks are tail-mapped. Replace with offset+dense-array later.
-  protected ByteBuffer[] tailMapped;
 
   private final long offset; // absolute start offset of this slice within the file
   private final long sliceLength;
@@ -179,6 +176,17 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * for segment-level read-ahead triggers. Default: no-op.
    */
   protected void onFirstBlockMiss() {}
+
+  /**
+   * Returns a directly-owned (pre-mapped, cache-bypassing) {@link ByteBuffer} for the given block
+   * index, or {@code null} if the block should be served via the normal cache path. The returned
+   * buffer must be a fresh independent view (i.e. a duplicate), positioned at 0, with {@link
+   * ByteOrder#LITTLE_ENDIAN} byte order, and with limit set to the block's decompressed length.
+   * Default: always {@code null}.
+   */
+  protected ByteBuffer ownedBufferFor(int blockIdx) {
+    return null;
+  }
 
   // ---------------------------------------------------------------------------
   // Root constructor
@@ -380,17 +388,15 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   private void initBlock(int blockIdx) throws IOException {
     if (blockIdx > lastBlockIdx) throw new EOFException();
-    if (tailMapped != null) {
-      ByteBuffer tail = tailMapped[blockIdx];
-      if (tail != null) {
-        setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, 0, 0);
-        postBuffer = tail.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
-        postBufferBaseline = 0;
-        longViews = null;
-        intViews = null;
-        floatViews = null;
-        return;
-      }
+    ByteBuffer owned = ownedBufferFor(blockIdx);
+    if (owned != null) {
+      setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, 0, 0);
+      postBuffer = owned;
+      postBufferBaseline = 0;
+      longViews = null;
+      intViews = null;
+      floatViews = null;
+      return;
     }
     long cached = accessMapped.get(blockIdx);
     boolean uninitialized;
