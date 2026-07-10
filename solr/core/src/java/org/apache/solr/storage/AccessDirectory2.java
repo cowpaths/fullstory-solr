@@ -48,13 +48,14 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.locks.StampedLock;
 import java.util.zip.CRC32;
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.internal.hppc.IntArrayList;
 import org.apache.lucene.internal.hppc.IntCursor;
+import org.apache.lucene.internal.hppc.LongArrayList;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBufferGuard;
@@ -102,10 +103,10 @@ public class AccessDirectory2 extends MMapDirectory {
    * get cache hits until they close.
    */
   private static final class NodesEntry {
-    private final AtomicReferenceArray<Cache.Node<BlockCache.Val>> nodes;
+    private final AtomicLongArray nodes;
     private final AtomicInteger refCount = new AtomicInteger(1); // +1 for pendingNodes map itself
 
-    NodesEntry(AtomicReferenceArray<Cache.Node<BlockCache.Val>> nodes) {
+    NodesEntry(AtomicLongArray nodes) {
       this.nodes = nodes;
     }
 
@@ -118,8 +119,8 @@ public class AccessDirectory2 extends MMapDirectory {
     void release(BlockCache cache) {
       if (refCount.decrementAndGet() == 0) {
         for (int i = nodes.length() - 1; i >= 0; i--) {
-          Cache.Node<BlockCache.Val> node = nodes.getAndSet(i, null);
-          if (node != null) cache.close(node);
+          long node = nodes.getAndSet(i, BlockCache.NULL_HANDLE);
+          if (node != BlockCache.NULL_HANDLE) cache.close(node);
         }
       }
     }
@@ -295,8 +296,7 @@ public class AccessDirectory2 extends MMapDirectory {
   }
 
   /** Stores the shared {@code accessMapped} array for {@code name}, pre-populated by the writer. */
-  void storeNodes(
-      String name, AtomicReferenceArray<Cache.Node<BlockCache.Val>> sharedAccessMapped) {
+  void storeNodes(String name, AtomicLongArray sharedAccessMapped) {
     NodesEntry extant;
     synchronized (pendingNodes) {
       extant = pendingNodes.putIfAbsent(name, new NodesEntry(sharedAccessMapped));
@@ -433,14 +433,14 @@ public class AccessDirectory2 extends MMapDirectory {
       final long length;
       final long[] blockOffsets;
       final ByteBuffer[] compressed;
-      final AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped;
+      final AtomicLongArray accessMapped;
       final NodesEntry entry; // null for empty files
 
       RootParams(
           long length,
           long[] blockOffsets,
           ByteBuffer[] compressed,
-          AtomicReferenceArray<Cache.Node<BlockCache.Val>> accessMapped,
+          AtomicLongArray accessMapped,
           NodesEntry entry) {
         this.length = length;
         this.blockOffsets = blockOffsets;
@@ -468,7 +468,7 @@ public class AccessDirectory2 extends MMapDirectory {
 
         long size = channel.size();
         if (size == 0) {
-          return new RootParams(0, null, compressed, new AtomicReferenceArray<>(0), null);
+          return new RootParams(0, null, compressed, null, null);
         }
 
         ByteBuffer initial = compressed[0];
@@ -515,8 +515,7 @@ public class AccessDirectory2 extends MMapDirectory {
           entry = sharedEntry;
         } else {
           // sharedEntry==null: either no pendingNodes entry, or a race — putIfAbsent decides winner
-          AtomicReferenceArray<Cache.Node<BlockCache.Val>> localAccessMapped =
-              new AtomicReferenceArray<>(blockCount);
+          AtomicLongArray localAccessMapped = new AtomicLongArray(blockCount);
           NodesEntry newEntry = new NodesEntry(localAccessMapped); // refCount=1 (for map)
           NodesEntry existing;
           synchronized (pendingNodes) {
@@ -665,10 +664,10 @@ public class AccessDirectory2 extends MMapDirectory {
      * otherwise.
      */
     private static boolean loadBlock(AD2IndexInput in, int idx) throws IOException {
-      Cache.Node<BlockCache.Val> extant = in.accessMapped.get(idx);
-      if (extant != null && extant.pinnable()) return true;
-      Cache.Node<BlockCache.Val> toPopulate = in.cache.acquireNode();
-      if (toPopulate == null) return false;
+      long extant = in.accessMapped.get(idx);
+      if (extant != BlockCache.NULL_HANDLE && in.cache.pinnable(extant)) return true;
+      long toPopulate = in.cache.acquireNode();
+      if (toPopulate == BlockCache.NULL_HANDLE) return false;
       long blockOffset = in.blockOffsets[idx];
       int compressedLen = (int) (in.blockOffsets[idx + 1] - blockOffset);
       if (in.accessMapped.compareAndSet(idx, extant, toPopulate)) {
@@ -765,7 +764,7 @@ public class AccessDirectory2 extends MMapDirectory {
     private final String name;
     private final byte[] blockBuf = new byte[COMPRESSION_BLOCK_SIZE];
     private int blockBufPos = 0;
-    private final ArrayList<Cache.Node<BlockCache.Val>> nodeSlots = new ArrayList<>();
+    private final LongArrayList nodeSlots = new LongArrayList();
     private final CRC32 crc = new CRC32();
 
     WriteThroughOutput(String name, IndexOutput delegate, AccessDirectory2 dir) {
@@ -805,16 +804,16 @@ public class AccessDirectory2 extends MMapDirectory {
     }
 
     private void captureBlock(int len) {
-      Cache.Node<BlockCache.Val> node = dir.cache.acquireNode();
-      if (node != null) {
+      long node = dir.cache.acquireNode();
+      if (node != BlockCache.NULL_HANDLE) {
         try {
-          node.getPayload().populate(blockBuf, 0, len, dir.cache);
+          dir.cache.getPayload(node).populate(blockBuf, 0, len, dir.cache);
         } finally {
           dir.cache.unpin(node, false);
         }
         dir.cache.recordPrepopulated();
       }
-      nodeSlots.add(node); // null = cache exhausted; cold on first read
+      nodeSlots.add(node); // NULL_HANDLE = cache exhausted; cold on first read
       blockBufPos = 0;
     }
 
@@ -834,8 +833,7 @@ public class AccessDirectory2 extends MMapDirectory {
         if (blockBufPos > 0) {
           captureBlock(blockBufPos); // partial last block
         }
-        AtomicReferenceArray<Cache.Node<BlockCache.Val>> sharedAccessMapped =
-            new AtomicReferenceArray<>(nodeSlots.size());
+        AtomicLongArray sharedAccessMapped = new AtomicLongArray(nodeSlots.size());
         for (int i = 0; i < nodeSlots.size(); i++) {
           sharedAccessMapped.set(i, nodeSlots.get(i));
         }
