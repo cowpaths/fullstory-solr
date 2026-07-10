@@ -63,8 +63,7 @@ class Cache2<V extends Cache2.Val> {
      *   <li>-1 — permanently dead (evicted); slot must not be used
      * </ul>
      */
-    // package-private: BlockCache.Partition.resetPayload() writes it directly
-    volatile int refCount;
+    private volatile int refCount;
 
     // Incremented by acquireNode() on each recycle, before the volatile write to refCount.
     // Readers who volatile-read refCount before reading this field are guaranteed to see the
@@ -77,6 +76,10 @@ class Cache2<V extends Cache2.Val> {
 
     int refCount() {
       return refCount;
+    }
+
+    void reset(int newRefCount) {
+      refCount = newRefCount;
     }
   }
 
@@ -168,8 +171,6 @@ class Cache2<V extends Cache2.Val> {
    * Elements are set at construction and never swapped; only the Val's internal fields change over
    * time. Since elements are never replaced, GC sees exactly N live references here (vs. 3N for a
    * traditional doubly-linked Node<V> array).
-   *
-   * <p>Package-private: {@link BlockCache}'s {@code Partition.resetPayload()} accesses it directly.
    */
   final V[] payload;
 
@@ -218,8 +219,8 @@ class Cache2<V extends Cache2.Val> {
   // Payload access / reset hook
   // ---------------------------------------------------------------------------
 
-  V getPayload(long handle) {
-    return (V) payload[(int) handle & SLOT_MASK];
+  final V getPayload(long handle) {
+    return payload[(int) handle & SLOT_MASK];
   }
 
   /**
@@ -227,7 +228,7 @@ class Cache2<V extends Cache2.Val> {
    * override to reset application-specific fields (e.g. populated, cached) in addition to refCount.
    */
   protected void resetPayload(int slot, int newRefCount) {
-    payload[slot].refCount = newRefCount;
+    payload[slot].reset(newRefCount);
   }
 
   // ---------------------------------------------------------------------------
@@ -443,9 +444,9 @@ class Cache2<V extends Cache2.Val> {
     if (!removeFromList(slot)) {
       throw new IllegalStateException();
     }
-    payload[slot].generation++;
+    int newGen = ++((Val) payload[slot]).generation;
     resetPayload(slot, 1);
-    return (long) payload[slot].generation << 32 | slot;
+    return (long) newGen << 32 | slot;
   }
 
   /**
@@ -488,10 +489,8 @@ class Cache2<V extends Cache2.Val> {
      * Nanosecond timestamp of the most recent {@link Cache2#unpin}, or {@code 0} if never unpinned.
      * {@code 0} is treated as maximally stale, making never-used slots the highest-priority
      * eviction candidates.
-     *
-     * <p>Package-private: {@link BlockCache}'s {@code Partition.resetPayload()} writes it directly.
      */
-    long lastUnpinNanos;
+    private long lastUnpinNanos;
 
     /**
      * True if this slot was most recently routed to the hot queue by {@link
@@ -504,6 +503,11 @@ class Cache2<V extends Cache2.Val> {
 
     boolean fromHot() {
       return fromHot;
+    }
+
+    void reset(int newRefCount) {
+      super.reset(newRefCount);
+      lastUnpinNanos = 0;
     }
 
     TsVal(int initialRefCount) {
@@ -536,7 +540,7 @@ class Cache2<V extends Cache2.Val> {
 
     @Override
     protected final boolean insertAtHead(int head, int slot, boolean recordAccess) {
-      TsVal tvp = (TsVal) payload[slot];
+      TsVal tvp = payload[slot];
       long prev = tvp.lastUnpinNanos;
       tvp.lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
       boolean toHot = toHot(prev);

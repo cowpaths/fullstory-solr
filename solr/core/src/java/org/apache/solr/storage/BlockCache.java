@@ -219,6 +219,15 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       this.cacheBlockOrd = cacheBlockOrd;
     }
 
+    void reset(int newRefCount) {
+      super.reset(newRefCount);
+      // fromHot is intentionally NOT reset: acquireTail() sets it before resetPayload() is called,
+      // and BlockCache.acquireNode() reads it immediately after to update hotAcquisitions.
+      populated = false;
+      waiting = false;
+      cached = null;
+    }
+
     ByteBuffer populate(byte[] arr, int off, int len, BlockCache c) {
       assert cacheBlockOrd >= 0;
       ByteBuffer ret = c.slice(cacheBlockOrd);
@@ -303,18 +312,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final class Partition extends Cache2.DualQueueCache<Val> {
     Partition(int capacity, Iterable<BlockCache.Val> pool) {
       super(capacity, pool);
-    }
-
-    @Override
-    protected void resetPayload(int slot, int newRefCount) {
-      BlockCache.Val v = payload[slot];
-      v.refCount = newRefCount;
-      v.lastUnpinNanos = 0;
-      // fromHot is intentionally NOT reset: acquireTail() sets it before resetPayload() is called,
-      // and BlockCache.acquireNode() reads it immediately after to update hotAcquisitions.
-      v.populated = false;
-      v.waiting = false;
-      v.cached = null;
     }
   }
 
