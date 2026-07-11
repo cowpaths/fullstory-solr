@@ -437,7 +437,7 @@ class Cache2<V extends Cache2.Val> {
     for (int candidate;
         (candidate = (int) INT_ARRAY_VH.getVolatile(prev, COLD_TAIL)) != COLD_HEAD; ) {
       Val p = payload[candidate];
-      if (p != null && REF_COUNT.compareAndSet(p, 0, -1)) {
+      if (REF_COUNT.compareAndSet(p, 0, -1)) {
         return candidate;
       }
     }
@@ -468,7 +468,7 @@ class Cache2<V extends Cache2.Val> {
   boolean close(long handle) {
     int slot = (int) handle & SLOT_MASK;
     Val p = payload[slot];
-    if (p == null || !REF_COUNT.compareAndSet(p, 0, -1)) {
+    if (!REF_COUNT.compareAndSet(p, 0, -1)) {
       // pinned or already dead — best effort, bail
       return false;
     }
@@ -597,11 +597,11 @@ class Cache2<V extends Cache2.Val> {
                   < age(now, lastUnpinNanos((TsVal) payload[hotCandidate])) >> HOT_EVICTION_SHIFT;
           candidate = fromHot ? hotCandidate : coldCandidate;
         }
-      } while ((p = payload[candidate]) == null || !REF_COUNT.compareAndSet(p, 0, -1));
+      } while (!REF_COUNT.compareAndSet(p = payload[candidate], 0, -1));
       if (coldCandidateTs != 0) {
         this.coldTs = coldCandidateTs;
       }
-      ((TsVal) payload[candidate]).fromHot = fromHot;
+      ((TsVal) p).fromHot = fromHot;
       return candidate;
     }
 

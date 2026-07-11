@@ -488,13 +488,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         pinnedCount.decrement();
         // on last unpin, null out the cached ByteBuffer. recreating is cheap.
         Val v = partitions[p].getPayload(handle);
-        if (v != null) {
-          ByteBuffer cur = v.cached;
-          if (cur != null && cur != EXCEPTION_SENTINEL) {
-            // CAS ensures we never clobber EXCEPTION_SENTINEL; if it loses, cached is already
-            // null or sentinel, both fine. Worst case of a benign loss: another slice() call.
-            Val.CACHED.compareAndSet(v, cur, null);
-          }
+        ByteBuffer cur = v.cached;
+        if (cur != null && cur != EXCEPTION_SENTINEL) {
+          // CAS ensures we never clobber EXCEPTION_SENTINEL; if it loses, cached is already
+          // null or sentinel, both fine. Worst case of a benign loss: another slice() call.
+          Val.CACHED.compareAndSet(v, cur, null);
         }
     }
   }
