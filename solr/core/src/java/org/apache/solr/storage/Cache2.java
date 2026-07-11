@@ -68,7 +68,7 @@ class Cache2<V extends Cache2.Val> {
     // Incremented by acquireNode() on each recycle, before the volatile write to refCount.
     // Readers who volatile-read refCount before reading this field are guaranteed to see the
     // current value (happens-before via the volatile write in resetPayload).
-    private int generation;
+    private volatile int generation;
 
     Val(int initialRefCount) {
       this.refCount = initialRefCount;
@@ -347,7 +347,6 @@ class Cache2<V extends Cache2.Val> {
           rc = p.refCount;
           continue;
       }
-      if (p.generation != expectedGen) return -1;
       assert rc >= 0;
       int witness = (int) REF_COUNT.compareAndExchange(p, rc, rc + 1);
       if (witness == rc) {
@@ -359,9 +358,17 @@ class Cache2<V extends Cache2.Val> {
     if (rc == 0) {
       // First pin: remove from the evictable list.
       removeFromList(slot);
-      return 1;
     }
-    return 0;
+    // Check generation after acquiring the pin. The CAS above is a volatile read-modify-write
+    // that establishes happens-before with the generation write preceding the volatile refCount
+    // write in acquireNode, so p.generation is guaranteed to reflect the current generation.
+    // If mismatched, the slot was recycled; unpin() correctly reverses the full pin (including
+    // re-insertion into the LRU list for the rc==0 case via UNPIN_SENTINEL → insertAtHead).
+    if (p.generation != expectedGen) {
+      unpin(handle, false);
+      return -1;
+    }
+    return rc == 0 ? 1 : 0;
   }
 
   /**
@@ -463,8 +470,12 @@ class Cache2<V extends Cache2.Val> {
       return false;
     }
     if (removeFromList(slot)) {
-      resetPayload(slot, 0);
+      // Keep rc=-1 ("dead") through insertion so that concurrent pin() attempts see -1 and bail
+      // immediately rather than racing into a window where rc==0 but the slot is not yet in the
+      // list. After insertAtTail the slot is safely linked; only then expose it as evictable.
+      resetPayload(slot, -1);
       insertAtTail(slot);
+      p.reset(0);
     } else {
       throw new IllegalStateException();
     }
