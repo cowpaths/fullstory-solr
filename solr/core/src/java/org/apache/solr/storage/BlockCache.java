@@ -219,6 +219,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       this.cacheBlockOrd = cacheBlockOrd;
     }
 
+    @Override
     void reset(int newRefCount) {
       super.reset(newRefCount);
       // fromHot is intentionally NOT reset: acquireTail() sets it before resetPayload() is called,

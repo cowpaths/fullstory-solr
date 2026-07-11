@@ -519,6 +519,7 @@ class Cache2<V extends Cache2.Val> {
       return fromHot;
     }
 
+    @Override
     void reset(int newRefCount) {
       super.reset(newRefCount);
       lastUnpinNanos = 0;
