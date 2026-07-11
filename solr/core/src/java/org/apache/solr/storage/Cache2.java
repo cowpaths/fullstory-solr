@@ -473,10 +473,10 @@ class Cache2<V extends Cache2.Val> {
       return false;
     }
     if (removeFromList(slot)) {
-      // Keep rc=-1 ("dead") through insertion so that concurrent pin() attempts see -1 and bail
-      // immediately rather than racing into a window where rc==0 but the slot is not yet in the
-      // list. After insertAtTail the slot is safely linked; only then expose it as evictable.
-      resetPayload(slot, -1);
+      // Bump generation so that any handle that was read before close() fails the pre-CAS
+      // generation check in pin() and cannot successfully pin this slot after it has been
+      // recycled. Written before the volatile p.reset(0) for happens-before visibility.
+      ++p.generation;
       insertAtTail(slot);
       p.reset(0);
     } else {
