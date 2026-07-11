@@ -338,6 +338,7 @@ class Cache2<V extends Cache2.Val> {
     int slot = (int) handle & SLOT_MASK;
     int expectedGen = (int) (handle >>> 32);
     Val p = payload[slot];
+    if (p.generation != expectedGen) return -1;
     int rc = p.refCount;
     for (; ; ) {
       switch (rc) {
@@ -451,6 +452,8 @@ class Cache2<V extends Cache2.Val> {
     if (!removeFromList(slot)) {
       throw new IllegalStateException();
     }
+    // NOTE: generation increment here is safe because we hold an effective lock
+    // on this slot here and this is the only place generation is modified.
     int newGen = ++payload[slot].generation;
     resetPayload(slot, 1);
     return (long) newGen << 32 | slot;
