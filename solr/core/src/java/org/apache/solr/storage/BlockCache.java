@@ -505,15 +505,16 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   long acquireNode() {
     int i = tlrIndex();
     Partition p = partitions[i];
-    long ar = p.acquireNode();
-    if (ar != NULL_HANDLE) {
+    long[] outHandle = new long[1];
+    Val v = p.acquireNode(outHandle);
+    if (v != null) {
       acquisitions.increment();
       pinnedCount.increment();
-      if (p.getPayload(ar).fromHot()) {
+      if (v.fromHot()) {
         hotAcquisitions.increment();
         hotUnpinned.decrement();
       }
-      return encodeHandle(i, ar);
+      return encodeHandle(i, outHandle[0]);
     } else {
       poolExhausted.increment();
       return NULL_HANDLE;
@@ -641,7 +642,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       // Categorize the skip to help diagnose phantom-block accumulation.
       // NOTE: racy read of refCount; accurate enough for diagnostics.
       Val vv = p.getPayload(handle);
-      if (vv == null || vv.refCount() < 0) {
+      if (vv.refCount() < 0) {
         closeSkippedDead.increment();
       } else {
         closeSkippedPinned.increment();

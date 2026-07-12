@@ -22,10 +22,11 @@ import java.lang.invoke.VarHandle;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Fixed-capacity concurrent LRU cache backed by parallel {@code int[]} arrays for the doubly-linked
- * list structure. Compared to {@link Cache} (which stores {@code next}/{@code prev} as object
- * references inside each node), the primitive arrays are not traversed by the GC, reducing the
- * number of GC-scanned references from 3N to N (just the payload array).
+ * Fixed-capacity concurrent LRU cache. Each node carries its doubly-linked list {@code next}/{@code
+ * prev} pointers as {@code int} fields directly on the {@link Val} payload object, eliminating the
+ * separate parallel {@code int[]} arrays of earlier designs. This co-locates list-pointer reads
+ * with the refCount and generation fields that are almost always accessed at the same time, trading
+ * the dense-array cache-line benefit for fewer total array index lookups and bounds checks.
  *
  * <p>The LRU semantics, pin/unpin reference-count protocol, and hot/cold dual-queue logic are
  * identical to {@link Cache} and {@link Cache.DualQueueCache}.
@@ -39,13 +40,13 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@link #unpin}: last unpin (result=0) inserts the slot at the list head (most-recently
  *       used); higher unpins are pure refcount decrements.
  *   <li>{@link #acquireNode}: evicts the tail slot, resets its payload via {@link #resetPayload},
- *       and returns the slot index pinned (refCount=1).
+ *       and returns it pinned (refCount=1).
  * </ul>
  *
- * <p>The capacity is fixed at construction. {@link #acquireNode()} returns an opaque {@code long}
- * handle encoding the slot index and a generation counter (or -1L when exhausted). {@link
- * BlockCache#encodeHandle} ORs in the partition index to form the full cross-partition handle
- * stored in {@code accessMapped}.
+ * <p>The capacity is fixed at construction. {@link #acquireNode} writes an opaque {@code long}
+ * handle encoding the slot index and a generation counter into a caller-supplied {@code long[1]}
+ * array. {@link BlockCache#encodeHandle} ORs in the partition index to form the full
+ * cross-partition handle stored in {@code accessMapped}.
  */
 class Cache2<V extends Cache2.Val> {
 
@@ -70,6 +71,15 @@ class Cache2<V extends Cache2.Val> {
     // current value (happens-before via the volatile write in resetPayload).
     private volatile int generation;
 
+    /**
+     * Doubly-linked list successor (toward the head) and predecessor (toward the tail). Accessed
+     * atomically via {@link Cache2#NEXT_VH} and {@link Cache2#PREV_VH}. Sentinel slots (COLD_HEAD,
+     * COLD_TAIL, HOT_HEAD, HOT_TAIL) also carry these fields.
+     */
+    private int next;
+
+    private int prev;
+
     Val(int initialRefCount) {
       this.refCount = initialRefCount;
     }
@@ -84,11 +94,15 @@ class Cache2<V extends Cache2.Val> {
   }
 
   private static final VarHandle REF_COUNT;
+  static final VarHandle NEXT_VH;
+  static final VarHandle PREV_VH;
 
   static {
     try {
       MethodHandles.Lookup lookup = MethodHandles.lookup();
       REF_COUNT = lookup.findVarHandle(Val.class, "refCount", int.class);
+      NEXT_VH = lookup.findVarHandle(Val.class, "next", int.class);
+      PREV_VH = lookup.findVarHandle(Val.class, "prev", int.class);
     } catch (ReflectiveOperationException e) {
       throw new Error(e);
     }
@@ -98,9 +112,9 @@ class Cache2<V extends Cache2.Val> {
   // Sentinels
   // ---------------------------------------------------------------------------
 
-  // Sentinel link values stored in next[] to signal list-operation state.
+  // Sentinel link values stored in Val.next to signal list-operation state.
   // Analogous to the RESERVED / REMOVED Node sentinels in Cache, but encoded as ints
-  // so the int[] arrays remain GC-opaque.
+  // in the Val's next field rather than as object references.
   private static final int RESERVED_LINK = Integer.MIN_VALUE;
   private static final int REMOVED_LINK = Integer.MIN_VALUE + 1;
 
@@ -135,42 +149,16 @@ class Cache2<V extends Cache2.Val> {
   }
 
   // ---------------------------------------------------------------------------
-  // Fixed arrays
+  // Payload array (covers real slots 0..capacity and sentinel slots)
   // ---------------------------------------------------------------------------
 
   private final int capacity;
 
   /**
-   * {@code next[i]} = successor slot index toward the head, or {@link #RESERVED_LINK}/{@link
-   * #REMOVED_LINK}. Indexed over real slots + sentinel slots. CAS'd via {@link #INT_ARRAY_VH}.
-   */
-  protected final int[] next;
-
-  /**
-   * {@code prev[i]} = predecessor slot index toward the tail. Reads/writes use
-   * getVolatile/setVolatile via {@link #INT_ARRAY_VH} to match the {@code volatile} semantics of
-   * {@link Cache}'s {@code Node.prev} field.
-   */
-  protected final int[] prev;
-
-  /**
-   * VarHandle for CAS on {@code int[]} elements (shared for both {@link #next} and {@link #prev}).
-   */
-  private static final VarHandle INT_ARRAY_VH;
-
-  static {
-    try {
-      INT_ARRAY_VH = MethodHandles.arrayElementVarHandle(int[].class);
-    } catch (Exception e) {
-      throw new Error(e);
-    }
-  }
-
-  /**
-   * Payload for slots 0..capacity. Slot 0 is reserved (always null); real slots are 1..capacity.
-   * Elements are set at construction and never swapped; only the Val's internal fields change over
-   * time. Since elements are never replaced, GC sees exactly N live references here (vs. 3N for a
-   * traditional doubly-linked Node<V> array).
+   * Payload for all slot indices 0..arrayLen-1. Slot 0 is reserved (null). Real slots are
+   * 1..capacity. Sentinel slots (COLD_HEAD, COLD_TAIL, and optionally HOT_HEAD, HOT_TAIL) occupy
+   * the remaining indices; they hold base {@link Val} objects whose {@code next}/{@code prev}
+   * fields carry the list-boundary pointers. Elements are set at construction and never swapped.
    */
   final Val[] payload;
 
@@ -189,28 +177,32 @@ class Cache2<V extends Cache2.Val> {
    *     {@link DualQueueCache}'s HOT_HEAD/HOT_TAIL)
    * @param initialValues Val objects in desired initial LRU order (head→tail)
    */
-  private Cache2(int capacity, int extraSentinelSlots, Iterable<? extends V> initialValues) {
+  Cache2(int capacity, int extraSentinelSlots, Iterable<? extends V> initialValues) {
     this.capacity = capacity;
     this.COLD_HEAD = capacity + 1;
     this.COLD_TAIL = capacity + 2;
     int arrayLen = capacity + 3 + extraSentinelSlots;
-    this.next = new int[arrayLen];
-    this.prev = new int[arrayLen];
-    this.payload = new Val[capacity + 1];
+    this.payload = new Val[arrayLen];
+
+    // Initialize sentinel Val objects for the cold queue sentinels.
+    // rc=-1: permanently inert (never evicted by acquireTail's CAS(0→-1)).
+    // DualQueueCache initializes HOT_HEAD / HOT_TAIL sentinel Vals in its own constructor.
+    payload[COLD_HEAD] = new Val(-1);
+    payload[COLD_TAIL] = new Val(-1);
 
     // Build cold-queue chain: COLD_HEAD ↔ slot_1 ↔ slot_2 ↔ … ↔ COLD_TAIL.
-    // Slot 0 is reserved (null) and never linked. Single-threaded init; plain array writes fine.
+    // Slot 0 is reserved (null) and never linked. Single-threaded init; plain field writes fine.
     int prevIdx = COLD_HEAD;
     int slot = 1;
     for (V v : initialValues) {
       if (slot > capacity) throw new IllegalArgumentException("too many initial values");
       payload[slot] = v;
-      next[prevIdx] = slot;
-      prev[slot] = prevIdx;
+      payload[prevIdx].next = slot;
+      ((Val) v).prev = prevIdx;
       prevIdx = slot++;
     }
-    next[prevIdx] = COLD_TAIL;
-    prev[COLD_TAIL] = prevIdx;
+    payload[prevIdx].next = COLD_TAIL;
+    payload[COLD_TAIL].prev = prevIdx;
     // COLD_HEAD.prev is never read (head sentinel has no meaningful predecessor).
   }
 
@@ -224,7 +216,7 @@ class Cache2<V extends Cache2.Val> {
   }
 
   /**
-   * Resets a slot's payload for reuse after it is claimed by {@link #acquireNode()}. Subclasses
+   * Resets a slot's payload for reuse after it is claimed by {@link #acquireNode}. Subclasses
    * override to reset application-specific fields (e.g. populated, cached) in addition to refCount.
    */
   protected void resetPayload(int slot, int newRefCount) {
@@ -242,18 +234,19 @@ class Cache2<V extends Cache2.Val> {
    * out.
    */
   private int reserve(int slot, int reservation) {
-    int cur = (int) INT_ARRAY_VH.getVolatile(next, slot);
+    Val v = payload[slot];
+    int cur = (int) NEXT_VH.getVolatile(v);
     for (; ; ) {
       while (cur == RESERVED_LINK) {
         if (reservation == REMOVED_LINK) {
           Thread.yield();
         }
-        cur = (int) INT_ARRAY_VH.getVolatile(next, slot);
+        cur = (int) NEXT_VH.getVolatile(v);
       }
       if (cur == REMOVED_LINK) {
         return cur;
       }
-      int witness = (int) INT_ARRAY_VH.compareAndExchange(next, slot, cur, reservation);
+      int witness = (int) NEXT_VH.compareAndExchange(v, cur, reservation);
       if (witness == cur) {
         return cur;
       }
@@ -262,12 +255,14 @@ class Cache2<V extends Cache2.Val> {
   }
 
   protected boolean insertAtHead(int listHead, int slot, boolean recordAccess) {
-    INT_ARRAY_VH.setVolatile(prev, slot, listHead);
+    Val vSlot = payload[slot];
+    Val vHead = payload[listHead];
+    PREV_VH.setVolatile(vSlot, listHead);
     int oldNext = reserve(listHead, RESERVED_LINK);
     assert oldNext != REMOVED_LINK : "queue head sentinel should never be removed";
-    next[slot] = oldNext;
-    INT_ARRAY_VH.setVolatile(prev, oldNext, slot);
-    if (!INT_ARRAY_VH.compareAndSet(next, listHead, RESERVED_LINK, slot)) {
+    vSlot.next = oldNext;
+    PREV_VH.setVolatile(payload[oldNext], slot);
+    if (!NEXT_VH.compareAndSet(vHead, RESERVED_LINK, slot)) {
       throw new IllegalStateException("unexpected concurrent modification of listHead.next");
     }
     return false;
@@ -278,39 +273,43 @@ class Cache2<V extends Cache2.Val> {
     if (oldNext == REMOVED_LINK) {
       return false;
     }
+    Val vSlot = payload[slot];
     int prevSlot;
     for (; ; ) {
-      prevSlot = (int) INT_ARRAY_VH.getVolatile(prev, slot);
-      if (INT_ARRAY_VH.compareAndSet(next, prevSlot, slot, RESERVED_LINK)) {
+      prevSlot = (int) PREV_VH.getVolatile(vSlot);
+      if (NEXT_VH.compareAndSet(payload[prevSlot], slot, RESERVED_LINK)) {
         break;
       }
       Thread.yield();
     }
-    INT_ARRAY_VH.setVolatile(prev, oldNext, prevSlot);
-    if (!INT_ARRAY_VH.compareAndSet(next, prevSlot, RESERVED_LINK, oldNext)) {
+    PREV_VH.setVolatile(payload[oldNext], prevSlot);
+    if (!NEXT_VH.compareAndSet(payload[prevSlot], RESERVED_LINK, oldNext)) {
       throw new IllegalStateException("unexpected concurrent modification during list removal");
     }
     return true;
   }
 
   private void insertAtTail(int slot) {
+    Val vSlot = payload[slot];
+    Val vTail = payload[COLD_TAIL];
     for (; ; ) {
-      int predSlot = (int) INT_ARRAY_VH.getVolatile(prev, COLD_TAIL);
+      int predSlot = (int) PREV_VH.getVolatile(vTail);
+      Val vPred = payload[predSlot];
       int oldNext = reserve(predSlot, RESERVED_LINK);
       if (oldNext != COLD_TAIL) {
         if (oldNext == REMOVED_LINK) {
           continue; // pred was concurrently removed; retry
         }
         // release reservation; pred is no longer tail's predecessor
-        if (!INT_ARRAY_VH.compareAndSet(next, predSlot, RESERVED_LINK, oldNext)) {
+        if (!NEXT_VH.compareAndSet(vPred, RESERVED_LINK, oldNext)) {
           throw new IllegalStateException();
         }
         continue;
       }
-      next[slot] = COLD_TAIL;
-      INT_ARRAY_VH.setVolatile(prev, slot, predSlot);
-      INT_ARRAY_VH.setVolatile(prev, COLD_TAIL, slot);
-      if (!INT_ARRAY_VH.compareAndSet(next, predSlot, RESERVED_LINK, slot)) {
+      vSlot.next = COLD_TAIL;
+      PREV_VH.setVolatile(vSlot, predSlot);
+      PREV_VH.setVolatile(vTail, slot);
+      if (!NEXT_VH.compareAndSet(vPred, RESERVED_LINK, slot)) {
         throw new IllegalStateException("unexpected concurrent modification during tail insertion");
       }
       return;
@@ -396,7 +395,6 @@ class Cache2<V extends Cache2.Val> {
   int unpin(long handle, boolean recordAccess) {
     int slot = (int) handle & SLOT_MASK;
     Val p = payload[slot];
-    assert p != null;
     int rc = p.refCount;
     for (; ; ) {
       if (rc == 1) {
@@ -435,7 +433,7 @@ class Cache2<V extends Cache2.Val> {
    */
   protected int acquireTail() {
     for (int candidate;
-        (candidate = (int) INT_ARRAY_VH.getVolatile(prev, COLD_TAIL)) != COLD_HEAD; ) {
+        (candidate = (int) PREV_VH.getVolatile(payload[COLD_TAIL])) != COLD_HEAD; ) {
       Val p = payload[candidate];
       if (REF_COUNT.compareAndSet(p, 0, -1)) {
         return candidate;
@@ -444,10 +442,16 @@ class Cache2<V extends Cache2.Val> {
     return NULL_SLOT;
   }
 
-  long acquireNode() {
+  /**
+   * Evicts the LRU slot, resets it, and returns it pinned (refCount=1). Writes the opaque handle
+   * (generation&lt;&lt;32|slot) into {@code outHandle[0]}. Returns {@code null} (and leaves {@code
+   * outHandle} unmodified) if all slots are pinned.
+   */
+  @SuppressWarnings("unchecked")
+  V acquireNode(long[] outHandle) {
     int slot = acquireTail();
     if (slot == NULL_SLOT) {
-      return 0L;
+      return null;
     }
     if (!removeFromList(slot)) {
       throw new IllegalStateException();
@@ -456,7 +460,8 @@ class Cache2<V extends Cache2.Val> {
     // on this slot here and this is the only place generation is modified.
     int newGen = ++payload[slot].generation;
     resetPayload(slot, 1);
-    return (long) newGen << 32 | slot;
+    outHandle[0] = (long) newGen << 32 | slot;
+    return (V) payload[slot];
   }
 
   /**
@@ -473,11 +478,13 @@ class Cache2<V extends Cache2.Val> {
       return false;
     }
     if (removeFromList(slot)) {
-      // Bump generation so that any handle that was read before close() fails the pre-CAS
-      // generation check in pin() and cannot successfully pin this slot after it has been
-      // recycled. Written before the volatile p.reset(0) for happens-before visibility.
-      ++p.generation;
+      // Keep rc=-1 during insertion so acquireTail cannot grab this slot mid-insertion
+      // (its CAS(0→-1) won't match rc=-1). Bump generation before the volatile p.reset(0) so
+      // that any handle read before close() fails pin()'s pre-CAS generation check and
+      // cannot successfully pin — or hang in join() — after this slot has been recycled.
+      resetPayload(slot, -1);
       insertAtTail(slot);
+      ++p.generation;
       p.reset(0);
     } else {
       throw new IllegalStateException();
@@ -531,7 +538,7 @@ class Cache2<V extends Cache2.Val> {
   }
 
   private static long lastUnpinNanos(TsVal v) {
-    return v == null ? 0 : v.lastUnpinNanos;
+    return v.lastUnpinNanos;
   }
 
   static class DualQueueCache<V extends TsVal> extends Cache2<V> {
@@ -549,16 +556,19 @@ class Cache2<V extends Cache2.Val> {
       super(capacity, 2, initialValues);
       this.HOT_HEAD = capacity + 3;
       this.HOT_TAIL = capacity + 4;
-      next[HOT_HEAD] = HOT_TAIL;
-      prev[HOT_TAIL] = HOT_HEAD;
+      // Initialize sentinel Val objects for the hot queue.
+      payload[HOT_HEAD] = new Val(-1);
+      payload[HOT_TAIL] = new Val(-1);
+      payload[HOT_HEAD].next = HOT_TAIL;
+      payload[HOT_TAIL].prev = HOT_HEAD;
     }
 
     @Override
     protected final boolean insertAtHead(int head, int slot, boolean recordAccess) {
       TsVal tvp = (TsVal) payload[slot];
-      long prev = tvp.lastUnpinNanos;
+      long lastUnpin = tvp.lastUnpinNanos;
       tvp.lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
-      boolean toHot = toHot(prev);
+      boolean toHot = toHot(lastUnpin);
       tvp.fromHot = toHot;
       super.insertAtHead(toHot ? HOT_HEAD : head, slot, recordAccess);
       return toHot;
@@ -572,8 +582,8 @@ class Cache2<V extends Cache2.Val> {
       long now = System.nanoTime();
       Val p;
       do {
-        int coldCandidate = (int) INT_ARRAY_VH.getVolatile(prev, COLD_TAIL);
-        int hotCandidate = (int) INT_ARRAY_VH.getVolatile(prev, HOT_TAIL);
+        int coldCandidate = (int) PREV_VH.getVolatile(payload[COLD_TAIL]);
+        int hotCandidate = (int) PREV_VH.getVolatile(payload[HOT_TAIL]);
         if (coldCandidate == COLD_HEAD) {
           // cold queue is empty
           if (hotCandidate == HOT_HEAD) {
