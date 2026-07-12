@@ -400,22 +400,25 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
     long cached = accessMapped.get(blockIdx);
     boolean uninitialized;
-    if ((uninitialized = cached == BlockCache.NULL_HANDLE) || !cache.pin(cached)) {
+    BlockCache.Val cachedVal = null;
+    if ((uninitialized = cached == BlockCache.NULL_HANDLE)
+        || (cachedVal = cache.pin(cached)) == null) {
       if (!uninitialized) {
         cache.recordFailedPin();
       }
       cacheMiss(cached, blockIdx);
     } else {
-      cacheHit(blockIdx, cached, 0);
+      cacheHit(blockIdx, cached, cachedVal, 0);
     }
   }
 
-  private void cacheHit(int blockIdx, long cached, int type) throws IOException {
+  private void cacheHit(int blockIdx, long cached, BlockCache.Val cachedVal, int type)
+      throws IOException {
     ByteBuffer buf;
     long loadNanos;
     try {
       // long start = System.nanoTime();
-      buf = cache.getPayload(cached).join(cache);
+      buf = cachedVal.join(cache);
       loadNanos = 0; // /System.nanoTime() - start;
     } catch (CompletionException e) {
       cache.unpin(cached);
@@ -505,8 +508,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     int decompressedLen =
         blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
 
-    long node;
-    if ((node = cache.acquireNode()) != BlockCache.NULL_HANDLE) {
+    long[] nodeHandle = new long[1];
+    BlockCache.Val nodeVal = cache.acquireNode(nodeHandle);
+    if (nodeVal != null) {
+      long node = nodeHandle[0];
       long extant = accessMapped.compareAndExchange(blockIdx, cached, node);
       if (extant == cached) {
         // We won the race: fetch from backend and populate the node.
@@ -526,9 +531,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         ByteBuffer buf;
         try {
           byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
-          buf = cache.getPayload(node).populate(heapBuf, 0, decompressedLen, cache);
+          buf = nodeVal.populate(heapBuf, 0, decompressedLen, cache);
         } catch (Throwable t) {
-          cache.getPayload(node).completeExceptionally(t);
+          nodeVal.completeExceptionally(t);
           accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);
           cache.unpin(node);
           cache.close(node);
@@ -544,9 +549,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       } else {
         // Another thread won the race; wait for its result.
         cache.close(node, true);
-        if (cache.pin(extant)) {
+        BlockCache.Val extantVal = cache.pin(extant);
+        if (extantVal != null) {
           cache.recordCasRaceLoss();
-          cacheHit(blockIdx, extant, 1);
+          cacheHit(blockIdx, extant, extantVal, 1);
           return;
         }
       }

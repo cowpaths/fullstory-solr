@@ -524,6 +524,7 @@ class Cache2<V extends Cache2.Val> {
       return fromHot;
     }
 
+    @Override
     void reset() {
       lastUnpinNanos = 0;
     }

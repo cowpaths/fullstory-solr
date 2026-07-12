@@ -126,11 +126,13 @@ class BlockPreloader {
     long extant = accessMapped.get(idx);
     if ((extant == BlockCache.NULL_HANDLE || !cache.pinnable(extant))
         && permits.tryAcquire(timeoutMillis)) {
-      long toPopulate = cache.acquireNode();
-      if (toPopulate == BlockCache.NULL_HANDLE) {
+      long[] nodeHandle = new long[1];
+      BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle);
+      if (toPopulateVal == null) {
         permits.release();
         return false;
       }
+      long toPopulate = nodeHandle[0];
       try {
         ioExec.submit(
             () -> {
@@ -144,6 +146,7 @@ class BlockPreloader {
                       idx,
                       decompressedLen,
                       toPopulate,
+                      toPopulateVal,
                       accessMapped,
                       cache,
                       supplier);
@@ -197,8 +200,10 @@ class BlockPreloader {
                 int idx = blockIdxIter.next().value;
                 long extant = accessMapped.get(idx);
                 if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) continue;
-                long toPopulate = cache.acquireNode();
-                if (toPopulate == BlockCache.NULL_HANDLE) return null; // cache full — stop
+                long[] nodeHandle = new long[1];
+                BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle);
+                if (toPopulateVal == null) return null; // cache full — stop
+                long toPopulate = nodeHandle[0];
                 long blockOffset = blockOffsets[idx];
                 int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
                 if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
@@ -208,6 +213,7 @@ class BlockPreloader {
                       idx,
                       decompressedLen.applyAsInt(idx),
                       toPopulate,
+                      toPopulateVal,
                       accessMapped,
                       cache,
                       supplier);
@@ -244,6 +250,7 @@ class BlockPreloader {
       int blockIdx,
       int decompressedLen,
       long node,
+      BlockCache.Val nodeVal,
       AtomicLongArray accessMapped,
       BlockCache cache,
       BlockSupplier supplier)
@@ -252,9 +259,9 @@ class BlockPreloader {
     ByteBuffer buf;
     try {
       byte[] heapBuf = supplier.supply(blockOffset, compressedLen, decompressedLen);
-      buf = cache.getPayload(node).populate(heapBuf, 0, decompressedLen, cache);
+      buf = nodeVal.populate(heapBuf, 0, decompressedLen, cache);
     } catch (Throwable t) {
-      cache.getPayload(node).completeExceptionally(t);
+      nodeVal.completeExceptionally(t);
       accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);
       cache.unpin(node);
       cache.close(node);

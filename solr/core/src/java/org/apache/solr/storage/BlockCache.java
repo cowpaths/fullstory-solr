@@ -60,7 +60,7 @@ import org.slf4j.LoggerFactory;
  * Fixed-size block cache backed by a memory-mapped file. Manages an LRU queue of decompressed
  * blocks, evicting the least-recently-used evictable block when the pool is exhausted.
  *
- * <p>If eviction finds all blocks pinned, {@link #acquireNode()} returns {@code null} and the
+ * <p>If eviction finds all blocks pinned, {@link #acquireNode(long[])} returns {@code null} and the
  * caller is expected to decompress the block into a temporary heap buffer and serve the read
  * uncached.
  *
@@ -96,7 +96,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   static final long NULL_HANDLE = 0L;
 
-  static long encodeHandle(int partitionIdx, long cache2Handle) {
+  private static long encodeHandle(int partitionIdx, long cache2Handle) {
     return cache2Handle | ((long) partitionIdx << PART_SHIFT);
   }
 
@@ -180,8 +180,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * <p>Lifecycle:
    *
    * <ol>
-   *   <li>Returned by {@link BlockCache#acquireNode()} pinned (refCount=1), <em>not</em> in the LRU
-   *       list.
+   *   <li>Returned by {@link BlockCache#acquireNode(long[])} pinned (refCount=1), <em>not</em> in
+   *       the LRU list.
    *   <li>Caller populates `getValue()` and publishes the node (e.g. via an {@code AtomicReference}
    *       slot). The node is still pinned.
    *   <li>Subsequent callers call {@link Cache#pin(Cache.Node)}, which either re-pins
@@ -190,9 +190,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    *   <li>Each caller eventually calls {@link Cache#unpin(Cache.Node, boolean)}. The last unpin
    *       (refCount→0) inserts the node at the LRU head (most-recently-used, lowest eviction
    *       priority).
-   *   <li>When evicted by {@link BlockCache#acquireNode()}, refCount is set to -1 permanently. Any
-   *       reader that encounters the node via a stale slot sees the negative count, fails {@link
-   *       Cache#pin(Cache.Node)}, and falls back to loading.
+   *   <li>When evicted by {@link BlockCache#acquireNode(long[])}, refCount is set to -1
+   *       permanently. Any reader that encounters the node via a stale slot sees the negative
+   *       count, fails {@link Cache#pin(Cache.Node)}, and falls back to loading.
    * </ol>
    */
   public static final class Val extends Cache2.TsVal {
@@ -461,19 +461,21 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   /**
    * Pins the slot identified by {@code handle}. Routes to the owning partition decoded from the
-   * handle. Returns {@code false} if the slot is permanently dead.
+   * handle. Returns {@code null} if the slot is permanently dead, otherwise the pinned {@link Val}.
    */
-  boolean pin(long handle) {
+  Val pin(long handle) {
     Partition p = partitions[partOf(handle)];
     int rc = p.pin(handle);
+    if (rc < 0) {
+      return null;
+    }
+    Val v = p.getPayload(handle);
     if (rc > 0) {
       pinnedCount.increment();
-      if (p.getPayload(handle).fromHot()) hotUnpinned.decrement();
-    } else if (rc < 0) {
-      return false;
+      if (v.fromHot()) hotUnpinned.decrement();
     }
     hits.increment();
-    return true;
+    return v;
   }
 
   /**
@@ -509,13 +511,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   /**
-   * Acquires a pinned slot from a randomly chosen partition. Returns {@link #NULL_HANDLE} if the
-   * partition is exhausted.
+   * Acquires a pinned slot from a randomly chosen partition. Returns {@code null} if the partition
+   * is exhausted (outHandle[0] remains {@link #NULL_HANDLE}); otherwise returns the {@link Val} and
+   * sets outHandle[0] to the encoded handle.
    */
-  long acquireNode() {
+  Val acquireNode(long[] outHandle) {
     int i = tlrIndex();
     Partition p = partitions[i];
-    long[] outHandle = new long[1];
     Val v = p.acquireNode(outHandle);
     if (v != null) {
       acquisitions.increment();
@@ -524,15 +526,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         hotAcquisitions.increment();
         hotUnpinned.decrement();
       }
-      return encodeHandle(i, outHandle[0]);
+      outHandle[0] = encodeHandle(i, outHandle[0]);
+      return v;
     } else {
       poolExhausted.increment();
-      return NULL_HANDLE;
+      return null;
     }
-  }
-
-  Val getPayload(long handle) {
-    return partitions[partOf(handle)].getPayload(handle);
   }
 
   public void writeMetrics(MapWriter.EntryWriter ew) throws IOException {

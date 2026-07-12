@@ -1299,12 +1299,12 @@ public class GCSDirectory extends SizeAwareDirectory {
       preBuffer.rewind();
       // Pre-warm the block cache with the uncompressed block while it's already in memory,
       // so readers get a cache hit instead of a GCS round-trip.
-      long cacheNode = dir.cache.acquireNode();
-      if (cacheNode != BlockCache.NULL_HANDLE) {
+      long[] nodeHandle = new long[1];
+      BlockCache.Val cacheNodeVal = dir.cache.acquireNode(nodeHandle);
+      long cacheNode = nodeHandle[0];
+      if (cacheNodeVal != null) {
         try {
-          dir.cache
-              .getPayload(cacheNode)
-              .populate(compressBuffer, 0, COMPRESSION_BLOCK_SIZE, dir.cache);
+          cacheNodeVal.populate(compressBuffer, 0, COMPRESSION_BLOCK_SIZE, dir.cache);
         } finally {
           // release writer's pin; node enters LRU, ready for readers
           dir.cache.unpin(cacheNode, false);
@@ -1753,16 +1753,18 @@ public class GCSDirectory extends SizeAwareDirectory {
                 if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) {
                   continue; // already cached — bytes discarded
                 }
-                long toPopulate = cache.acquireNode();
-                if (toPopulate == BlockCache.NULL_HANDLE) {
+                long[] nodeHandle = new long[1];
+                BlockCache.Val v = cache.acquireNode(nodeHandle);
+                if (v == null) {
                   return null; // cache full — stop
                 }
+                long toPopulate = nodeHandle[0];
                 int dl = decompressedLenFor.applyAsInt(i);
                 byte[] decomp = new byte[dl + 7];
                 CompressingDirectory.decompress(comp, 0, dl, decomp, 0);
                 if (accessMapped.compareAndSet(i, extant, toPopulate)) {
                   BlockPreloader.populateBuf(
-                      bo, cl, i, dl, toPopulate, accessMapped, cache, (a, b, c) -> decomp);
+                      bo, cl, i, dl, toPopulate, v, accessMapped, cache, (a, b, c) -> decomp);
                   cache.unpin(toPopulate, false);
                 } else {
                   cache.close(toPopulate, true);

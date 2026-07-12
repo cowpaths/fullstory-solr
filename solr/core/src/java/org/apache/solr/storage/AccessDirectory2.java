@@ -666,8 +666,10 @@ public class AccessDirectory2 extends MMapDirectory {
     private static boolean loadBlock(AD2IndexInput in, int idx) throws IOException {
       long extant = in.accessMapped.get(idx);
       if (extant != BlockCache.NULL_HANDLE && in.cache.pinnable(extant)) return true;
-      long toPopulate = in.cache.acquireNode();
-      if (toPopulate == BlockCache.NULL_HANDLE) return false;
+      long[] nodeHandle = new long[1];
+      BlockCache.Val toPopulateVal = in.cache.acquireNode(nodeHandle);
+      if (toPopulateVal == null) return false;
+      long toPopulate = nodeHandle[0];
       long blockOffset = in.blockOffsets[idx];
       int compressedLen = (int) (in.blockOffsets[idx + 1] - blockOffset);
       if (in.accessMapped.compareAndSet(idx, extant, toPopulate)) {
@@ -677,6 +679,7 @@ public class AccessDirectory2 extends MMapDirectory {
             idx,
             in.decompressedLenFor(idx),
             toPopulate,
+            toPopulateVal,
             in.accessMapped,
             in.cache,
             in.blockSupplier);
@@ -804,10 +807,12 @@ public class AccessDirectory2 extends MMapDirectory {
     }
 
     private void captureBlock(int len) {
-      long node = dir.cache.acquireNode();
-      if (node != BlockCache.NULL_HANDLE) {
+      long[] nodeHandle = new long[1];
+      BlockCache.Val nodeVal = dir.cache.acquireNode(nodeHandle);
+      long node = nodeHandle[0];
+      if (nodeVal != null) {
         try {
-          dir.cache.getPayload(node).populate(blockBuf, 0, len, dir.cache);
+          nodeVal.populate(blockBuf, 0, len, dir.cache);
         } finally {
           dir.cache.unpin(node, false);
         }
