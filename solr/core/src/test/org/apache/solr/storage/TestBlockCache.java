@@ -29,6 +29,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAdder;
+import org.apache.lucene.util.IOUtils;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.SolrNamedThreadFactory;
@@ -248,10 +249,18 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       }
       finished.set(true);
 
+      Throwable th = null;
       for (Future<?> f : futures) {
-        f.get();
+        try {
+          f.get();
+        } catch (Throwable t) {
+          th = IOUtils.useOrSuppress(th, t);
+        }
       }
       exec.shutdown();
+      if (th != null) {
+        throw new RuntimeException(th);
+      }
       assertTrue(exec.awaitTermination(10, TimeUnit.SECONDS));
       assertFalse("stress test encountered an error", failed.get());
 

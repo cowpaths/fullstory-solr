@@ -39,7 +39,7 @@ import java.util.concurrent.TimeUnit;
  *       N&rarr;N+1, N&gt;0) are pure refcount increments.
  *   <li>{@link #unpin}: last unpin (result=0) inserts the slot at the list head (most-recently
  *       used); higher unpins are pure refcount decrements.
- *   <li>{@link #acquireNode}: evicts the tail slot, resets its payload via {@link #resetPayload},
+ *   <li>{@link #acquireNode}: evicts the tail slot, resets its payload via {@link Val#reset(int)},
  *       and returns it pinned (refCount=1).
  * </ul>
  *
@@ -88,7 +88,11 @@ class Cache2<V extends Cache2.Val> {
       return refCount;
     }
 
-    void reset(int newRefCount) {
+    void reset() {
+      // no-op default impl;
+    }
+
+    final void reset(int newRefCount) {
       refCount = newRefCount;
     }
   }
@@ -213,14 +217,6 @@ class Cache2<V extends Cache2.Val> {
   @SuppressWarnings("unchecked")
   final V getPayload(long handle) {
     return (V) payload[(int) handle & SLOT_MASK];
-  }
-
-  /**
-   * Resets a slot's payload for reuse after it is claimed by {@link #acquireNode}. Subclasses
-   * override to reset application-specific fields (e.g. populated, cached) in addition to refCount.
-   */
-  protected void resetPayload(int slot, int newRefCount) {
-    payload[slot].reset(newRefCount);
   }
 
   // ---------------------------------------------------------------------------
@@ -426,7 +422,7 @@ class Cache2<V extends Cache2.Val> {
 
   /**
    * Acquires a pinned slot whose payload is ready to be used. Evicts the least-recently-used
-   * evictable slot from the tail of the list, resets its payload via {@link #resetPayload}, and
+   * evictable slot from the tail of the list, resets its payload via {@link Val#reset(int)}, and
    * returns it pinned (refCount=1) and not yet in the list.
    *
    * <p>Returns {@link #NULL_SLOT} if the list is empty (all slots are pinned).
@@ -458,10 +454,12 @@ class Cache2<V extends Cache2.Val> {
     }
     // NOTE: generation increment here is safe because we hold an effective lock
     // on this slot here and this is the only place generation is modified.
-    int newGen = ++payload[slot].generation;
-    resetPayload(slot, 1);
+    Val p = payload[slot];
+    int newGen = ++p.generation;
+    p.reset();
+    p.reset(1);
     outHandle[0] = (long) newGen << 32 | slot;
-    return (V) payload[slot];
+    return (V) p;
   }
 
   /**
@@ -482,10 +480,10 @@ class Cache2<V extends Cache2.Val> {
       // (its CAS(0→-1) won't match rc=-1). Bump generation before the volatile p.reset(0) so
       // that any handle read before close() fails pin()'s pre-CAS generation check and
       // cannot successfully pin — or hang in join() — after this slot has been recycled.
-      resetPayload(slot, -1);
-      insertAtTail(slot);
+      p.reset();
       ++p.generation;
-      p.reset(0);
+      insertAtTail(slot);
+      p.reset(0); // makes reclaimable
     } else {
       throw new IllegalStateException();
     }
@@ -500,7 +498,7 @@ class Cache2<V extends Cache2.Val> {
    */
   void closeUnconditional(long handle) {
     int slot = (int) handle & SLOT_MASK;
-    resetPayload(slot, 0);
+    payload[slot].reset(0);
     insertAtTail(slot);
   }
 
@@ -515,7 +513,7 @@ class Cache2<V extends Cache2.Val> {
 
     /**
      * True if this slot was most recently routed to the hot queue by {@link
-     * DualQueueCache#insertAtHead}. Set through {@link #resetPayload} on eviction so that {@link
+     * DualQueueCache#insertAtHead}. Set through {@link Val#reset(int)} on eviction so that {@link
      * BlockCache} can maintain per-queue counters without any list traversal. Volatile for
      * cross-thread visibility between the unpinning thread (writer) and the evicting/pinning thread
      * (reader).
@@ -526,9 +524,7 @@ class Cache2<V extends Cache2.Val> {
       return fromHot;
     }
 
-    @Override
-    void reset(int newRefCount) {
-      super.reset(newRefCount);
+    void reset() {
       lastUnpinNanos = 0;
     }
 

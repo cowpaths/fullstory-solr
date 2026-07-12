@@ -38,6 +38,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiFunction;
@@ -221,13 +222,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
 
     @Override
-    void reset(int newRefCount) {
-      super.reset(newRefCount);
+    void reset() {
       // fromHot is intentionally NOT reset: acquireTail() sets it before resetPayload() is called,
       // and BlockCache.acquireNode() reads it immediately after to update hotAcquisitions.
       populated = false;
       waiting = false;
       cached = null;
+      super.reset();
     }
 
     ByteBuffer populate(byte[] arr, int off, int len, BlockCache c) {
@@ -249,6 +250,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       return ret;
     }
 
+    private static final long JOIN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(30);
+
     /**
      * Waits for this node's buffer to be populated, blocking if necessary.
      *
@@ -262,10 +265,17 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       }
       if (!populated) {
         waiting = true;
+        long startNanos = System.nanoTime();
         synchronized (this) {
           while (!populated) {
+            long elapsedNanos = System.nanoTime() - startNanos;
+            if (elapsedNanos >= JOIN_TIMEOUT_NANOS) {
+              throw new IllegalStateException(
+                  "join() timed out: Val was never populated (possible populate() caller crash)");
+            }
+            long remainingNanos = JOIN_TIMEOUT_NANOS - elapsedNanos;
             try {
-              wait();
+              wait(remainingNanos / 1_000_000, (int) (remainingNanos % 1_000_000));
             } catch (InterruptedException e) {
               Thread.currentThread().interrupt();
               throw new ThreadInterruptedException(e);
