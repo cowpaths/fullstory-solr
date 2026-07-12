@@ -38,6 +38,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiFunction;
 import org.apache.lucene.store.IndexInput;
@@ -453,11 +454,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * handle. Returns {@code false} if the slot is permanently dead.
    */
   boolean pin(long handle) {
-    int p = partOf(handle);
-    int rc = partitions[p].pin(handle);
+    Partition p = partitions[partOf(handle)];
+    int rc = p.pin(handle);
     if (rc > 0) {
       pinnedCount.increment();
-      if (partitions[p].getPayload(handle).fromHot()) hotUnpinned.decrement();
+      if (p.getPayload(handle).fromHot()) hotUnpinned.decrement();
     } else if (rc < 0) {
       return false;
     }
@@ -479,15 +480,15 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   @SuppressWarnings({"ReferenceEquality", "fallthrough"})
   void unpin(long handle, boolean recordAccess) {
-    int p = partOf(handle);
-    switch (partitions[p].unpin(handle, recordAccess)) {
+    Partition p = partitions[partOf(handle)];
+    switch (p.unpin(handle, recordAccess)) {
       case 1:
         hotUnpinned.increment();
         // fallthrough
       case 0:
         pinnedCount.decrement();
         // on last unpin, null out the cached ByteBuffer. recreating is cheap.
-        Val v = partitions[p].getPayload(handle);
+        Val v = p.getPayload(handle);
         ByteBuffer cur = v.cached;
         if (cur != null && cur != EXCEPTION_SENTINEL) {
           // CAS ensures we never clobber EXCEPTION_SENTINEL; if it loses, cached is already
@@ -502,16 +503,17 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * partition is exhausted.
    */
   long acquireNode() {
-    int p = tlrIndex();
-    long ar = partitions[p].acquireNode();
+    int i = tlrIndex();
+    Partition p = partitions[i];
+    long ar = p.acquireNode();
     if (ar != NULL_HANDLE) {
       acquisitions.increment();
       pinnedCount.increment();
-      if (partitions[p].getPayload(ar).fromHot()) {
+      if (p.getPayload(ar).fromHot()) {
         hotAcquisitions.increment();
         hotUnpinned.decrement();
       }
-      return encodeHandle(p, ar);
+      return encodeHandle(i, ar);
     } else {
       poolExhausted.increment();
       return NULL_HANDLE;
@@ -613,7 +615,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   boolean close(long handle, boolean unconditional) {
-    int p = partOf(handle);
+    Partition p = partitions[partOf(handle)];
     Val v;
     if (unconditional) {
       v = null;
@@ -622,14 +624,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       // Read fromHot() before the close. Only relevant for the non-unconditional path where the
       // slot is in the evictable list (refCount=0); unconditional slots are pinned and not in
       // any queue.
-      v = partitions[p].getPayload(handle);
+      v = p.getPayload(handle);
     }
     boolean closed;
     if (unconditional) {
-      partitions[p].closeUnconditional(handle);
+      p.closeUnconditional(handle);
       closed = true;
     } else {
-      closed = partitions[p].close(handle);
+      closed = p.close(handle);
     }
     if (closed) {
       closedCount.increment();
@@ -638,7 +640,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     } else {
       // Categorize the skip to help diagnose phantom-block accumulation.
       // NOTE: racy read of refCount; accurate enough for diagnostics.
-      Val vv = partitions[p].getPayload(handle);
+      Val vv = p.getPayload(handle);
       if (vv == null || vv.refCount() < 0) {
         closeSkippedDead.increment();
       } else {
