@@ -25,8 +25,8 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
+import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
-import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -101,7 +101,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private long seekPos = -1;
   private ByteBuffer postBuffer = ByteBuffer.allocate(0);
   private int postBufferBaseline;
-  private NodeRefStruct currentNodeRef;
+  private NodeRefStruct currentNodeRef = UNINITIALIZED;
+  private Object batchReferrent;
 
   private LongBuffer[] longViews;
   private IntBuffer[] intViews;
@@ -196,7 +197,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   protected CachedCompressedIndexInput(String resourceDescription) {
     super(resourceDescription);
     this.cache = null;
-    this.currentNodeRef = null;
     this.length = -1;
     this.blockOffsets = null;
     this.guard = null;
@@ -224,7 +224,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       AtomicLongArray accessMapped) {
     super(resourceDescription);
     this.cache = cache;
-    this.currentNodeRef = cache.register(this);
     this.length = length;
     this.blockOffsets = blockOffsets;
     this.guard = guard;
@@ -257,7 +256,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long sliceLen) {
     super(resourceDescription);
     this.cache = parent.cache;
-    this.currentNodeRef = UNINITIALIZED; // lazily registered on first block access
     this.length = parent.length;
     this.blockOffsets = parent.blockOffsets;
     this.blockCount = parent.blockCount;
@@ -294,16 +292,24 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public final void close() throws IOException {
-    if (accessMapped == null) return;
-    unsetBuffers();
     try {
-      ByteBuffer toUnmap = doClose();
-      if (toUnmap != null) {
-        guard.invalidateAndUnmap(toUnmap);
+      if (accessMapped == null) return;
+      unsetBuffers();
+      try {
+        ByteBuffer toUnmap = doClose();
+        if (toUnmap != null) {
+          guard.invalidateAndUnmap(toUnmap);
+        }
+      } finally {
+        unsetBuffers();
       }
     } finally {
-      unsetBuffers();
+      Reference.reachabilityFence(batchReferrent);
     }
+  }
+
+  void setBatchReferrent(Object batchReferrent) {
+    this.batchReferrent = batchReferrent;
   }
 
   private NodeRefStruct nodeRef() {
@@ -1099,7 +1105,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * Per-{@link CachedCompressedIndexInput}-instance struct tracking the currently pinned {@link
    * BlockCache.Val} and sequential-access statistics.
    */
-  static final class NodeRefStruct extends WeakReference<IndexInput> {
+  static final class NodeRefStruct extends BlockCache.RetainedRef<Object> {
 
     private long currentNode = BlockCache.NULL_HANDLE;
     // Positive = current block index; negative (~idx) = block index with no live pin.
@@ -1108,20 +1114,20 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
     // for cleanup upon GC
     private final LongAdder outstandingRefs;
-    private final Cache.Node<NodeRefStruct> remove; // non-null on Cache fallback path
-    // Cache3 primary path: (partIdx << 32 | slot); -1L if using Cache fallback.
-    private final long cache3Handle;
+
+    NodeRefStruct(LongAdder outstandingRefs) {
+      super();
+      this.outstandingRefs = outstandingRefs;
+    }
 
     NodeRefStruct(
-        IndexInput referrent,
-        ReferenceQueue<? super IndexInput> q,
+        Object referrent,
+        ReferenceQueue<Object> q,
         LongAdder outstandingRefs,
-        Cache.Node<NodeRefStruct> remove,
+        Cache.Node<?> remove,
         long cache3Handle) {
-      super(referrent, q);
+      super(referrent, q, remove, cache3Handle);
       this.outstandingRefs = outstandingRefs;
-      this.remove = remove;
-      this.cache3Handle = cache3Handle;
     }
 
     /** Updates the current cached block. */
@@ -1151,25 +1157,14 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
 
     /** Unpins the current block on {@link CachedCompressedIndexInput#close()}. */
-    void closeFor(BlockCache blockCache) {
-      boolean claimed;
-      switch ((int) cache3Handle) {
-        case -2:
-          return; // UNINITIALIZED: never registered, nothing to do
-        case -1:
-          claimed = Cache.tryRemove(remove);
-          break;
-        default:
-          claimed = blockCache.releaseHoldRef(cache3Handle);
-      }
-      if (claimed) {
-        outstandingRefs.decrement();
-        long toUnpin = currentNode;
-        if (toUnpin != BlockCache.NULL_HANDLE) {
-          currentNode = BlockCache.NULL_HANDLE;
-          currentBlockIdx = ~currentBlockIdx;
-          blockCache.unpin(toUnpin);
-        }
+    @Override
+    void doCloseFor(BlockCache blockCache) {
+      outstandingRefs.decrement();
+      long toUnpin = currentNode;
+      if (toUnpin != BlockCache.NULL_HANDLE) {
+        currentNode = BlockCache.NULL_HANDLE;
+        currentBlockIdx = ~currentBlockIdx;
+        blockCache.unpin(toUnpin);
       }
     }
   }
