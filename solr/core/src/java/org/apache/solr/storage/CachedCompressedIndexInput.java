@@ -491,7 +491,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
               return new AbstractMap.SimpleImmutableEntry<>(
                   IDS.getAndIncrement(), new AtomicLong());
             });
-    if (added[0] && log.isInfoEnabled()) {
+    if (VERBOSE && added[0] && log.isInfoEnabled()) {
       log.info("XXX callStack {}", e.getKey(), ex);
     }
     return "callStack="
@@ -501,6 +501,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         + " : count="
         + e.getValue().incrementAndGet();
   }
+
+  private static final boolean VERBOSE = false;
 
   private void cacheMiss(final long cached, final int blockIdx) throws IOException {
     long blockOffset = blockOffsets[blockIdx];
@@ -518,7 +520,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         if (blockIdx == 0) onFirstBlockMiss();
         // long start = System.nanoTime();
         cache.recordDecompressionDemand();
-        if (log.isInfoEnabled()) {
+        if (VERBOSE && log.isInfoEnabled()) {
           log.info(
               "demand {} of {}/{}/{} {} [{}]",
               blockIdx,
@@ -560,7 +562,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     // Serve uncached (cache full or node race lost with no cached result).
     // long start = System.nanoTime();
     cache.recordDecompressionDemand();
-    if (log.isInfoEnabled()) {
+    if (VERBOSE && log.isInfoEnabled()) {
       log.info(
           "demand HEAP {} of {}/{}/{} {} [{}]",
           blockIdx,
