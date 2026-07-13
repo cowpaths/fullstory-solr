@@ -111,15 +111,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private static final ByteBuffer EXCEPTION_SENTINEL = ByteBuffer.allocate(0);
 
-  private static final class StrongRef extends Cache.Val {
-
-    private final NodeRefStruct nrs; // reachability only
-
-    StrongRef(NodeRefStruct nrs) {
-      this.nrs = nrs;
-    }
-  }
-
   /**
    * Cache3.Val subclass for the primary hold-ref pool. Holds the NodeRefStruct for reachability.
    */
@@ -143,7 +134,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       Integer.getInteger("solr.blockCache.holdRefPoolSize", 1 << 20);
 
   private final Cache3<HoldRef>[] holdRefs3; // primary: fixed-size pool; no per-registration alloc
-  private final Cache<StrongRef>[] holdRefs; // fallback: when pool is exhausted
+  private final Cache<NodeRefStruct>[] holdRefs; // fallback: when pool is exhausted
 
   private final ReferenceQueue<? super IndexInput> collected = new ReferenceQueue<>();
 
@@ -175,20 +166,20 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   @SuppressWarnings({"unchecked", "rawtypes"})
-  private static Cache<StrongRef>[] initHoldRefs(int length) {
-    Cache<StrongRef>[] ret = new Cache[length];
+  private static Cache<NodeRefStruct>[] initHoldRefs(int length) {
+    Cache<NodeRefStruct>[] ret = new Cache[length];
     for (int i = length - 1; i >= 0; i--) {
       ret[i] = new Cache<>();
     }
     return ret;
   }
 
-  private StrongRef createStrongRef(IndexInput in, Cache.Node<StrongRef> n) {
-    return new StrongRef(new NodeRefStruct(in, collected, outstandingRefs, n, -1L));
+  private NodeRefStruct createNrs(IndexInput in, Cache.Node<NodeRefStruct> n) {
+    return new NodeRefStruct(in, collected, outstandingRefs, n, -1L);
   }
 
-  private final BiFunction<IndexInput, Cache.Node<StrongRef>, StrongRef> createStrongRef =
-      this::createStrongRef;
+  private final BiFunction<IndexInput, Cache.Node<NodeRefStruct>, NodeRefStruct> createNrs =
+      this::createNrs;
 
   /**
    * Registers a {@link WeakReference} to the specified {@link IndexInput}. The {@link
@@ -209,9 +200,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       p.getPayload(slot).nrs = nrs;
     } else {
       // Pool exhausted: fall back to heap-allocated Cache.Node.
-      Cache.Node<StrongRef> n = new Cache.Node<>(createStrongRef, in);
+      Cache.Node<NodeRefStruct> n = new Cache.Node<>(createNrs, in);
       holdRefs[partIdx].add(n);
-      nrs = n.getPayload().nrs;
+      nrs = n.getPayload();
     }
     outstandingRefs.increment();
     refsCreated.increment();

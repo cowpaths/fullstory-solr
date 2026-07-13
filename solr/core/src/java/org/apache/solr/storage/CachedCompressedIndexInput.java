@@ -1108,7 +1108,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
     // for cleanup upon GC
     private final LongAdder outstandingRefs;
-    private final Cache.Node<?> remove; // non-null on Cache fallback path
+    private final Cache.Node<NodeRefStruct> remove; // non-null on Cache fallback path
     // Cache3 primary path: (partIdx << 32 | slot); -1L if using Cache fallback.
     private final long cache3Handle;
 
@@ -1116,7 +1116,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         IndexInput referrent,
         ReferenceQueue<? super IndexInput> q,
         LongAdder outstandingRefs,
-        Cache.Node<?> remove,
+        Cache.Node<NodeRefStruct> remove,
         long cache3Handle) {
       super(referrent, q);
       this.outstandingRefs = outstandingRefs;

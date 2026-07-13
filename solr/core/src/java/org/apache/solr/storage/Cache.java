@@ -36,24 +36,15 @@ import java.util.function.BiFunction;
  * <p>Designed for the {@link BlockCache} hold-ref overflow path: nodes are inserted on {@link
  * BlockCache#register} and claimed on {@link CachedCompressedIndexInput.NodeRefStruct#closeFor}.
  */
-class Cache<V extends Cache.Val> {
-
-  // ---------------------------------------------------------------------------
-  // Val
-  // ---------------------------------------------------------------------------
-
-  static class Val {
-    /** 0 = in list (claimable); -1 = claimed/removed. */
-    volatile int state;
-  }
+class Cache<V> {
 
   // ---------------------------------------------------------------------------
   // Node
   // ---------------------------------------------------------------------------
 
-  static final class Node<V extends Cache.Val> {
+  static final class Node<V> {
 
-    private V payload;
+    private final V payload;
 
     /** Link toward the head. Accessed atomically via {@link Cache#NEXT}. */
     private volatile Node<V> next;
@@ -61,8 +52,13 @@ class Cache<V extends Cache.Val> {
     /** Link toward the tail. Written under {@link Cache#NEXT} reservation of predecessor. */
     private volatile Node<V> prev;
 
+    /** 0 = in list (claimable); -1 = claimed/removed. */
+    private volatile int state;
+
     /** Sentinel constructor. */
-    private Node() {}
+    private Node() {
+      this.payload = null;
+    }
 
     /**
      * Payload-factory constructor. Passes {@code this} to the factory so the payload can back-ref
@@ -88,7 +84,7 @@ class Cache<V extends Cache.Val> {
     try {
       MethodHandles.Lookup lookup = MethodHandles.lookup();
       NEXT = lookup.findVarHandle(Node.class, "next", Node.class);
-      STATE = lookup.findVarHandle(Val.class, "state", int.class);
+      STATE = lookup.findVarHandle(Node.class, "state", int.class);
     } catch (ReflectiveOperationException e) {
       throw new Error(e);
     }
@@ -118,7 +114,7 @@ class Cache<V extends Cache.Val> {
   // ---------------------------------------------------------------------------
 
   @SuppressWarnings("unchecked")
-  private static <V extends Val> Node<V> reserve(Node<V> ref, Node<?> reservation) {
+  private static <V> Node<V> reserve(Node<V> ref, Node<?> reservation) {
     Node<V> next = ref.next;
     for (; ; ) {
       while (next == RESERVED) {
@@ -131,12 +127,14 @@ class Cache<V extends Cache.Val> {
         return next;
       }
       Node<V> witness = (Node<V>) NEXT.compareAndExchange(ref, next, reservation);
-      if (witness == next) return next;
+      if (witness == next) {
+        return next;
+      }
       next = witness;
     }
   }
 
-  private static <V extends Val> void removeFromList(Node<V> node) {
+  private static <V> void removeFromList(Node<V> node) {
     Node<V> next = reserve(node, REMOVED);
     if (next == REMOVED) return; // already removed; nothing to do
     Node<V> prev;
@@ -173,9 +171,8 @@ class Cache<V extends Cache.Val> {
    * Atomically claims and removes {@code node}. Returns {@code true} if this thread won the CAS
    * (state 0&rarr;-1); {@code false} if another thread already claimed it.
    */
-  static <V extends Cache.Val> boolean tryRemove(Node<V> node) {
-    Val p = node.payload;
-    if (p == null || !STATE.compareAndSet(p, 0, -1)) {
+  static <V> boolean tryRemove(Node<V> node) {
+    if (!STATE.compareAndSet(node, 0, -1)) {
       return false;
     }
     removeFromList(node);
