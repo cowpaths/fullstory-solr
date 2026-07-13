@@ -126,7 +126,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   static final class HoldRef extends Cache3.Val {
 
-    NodeRefStruct nrs; // cleared by reset() when slot is released
+    private NodeRefStruct nrs; // cleared by reset() when slot is released
 
     HoldRef() {
       super(0);
@@ -202,11 +202,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   NodeRefStruct register(IndexInput in) {
     int partIdx = tlrIndex();
-    int slot = holdRefs3[partIdx].acquire();
+    Cache3<HoldRef> p = holdRefs3[partIdx];
+    int slot = p.acquire();
     NodeRefStruct nrs;
     if (slot != Cache3.NULL_SLOT) {
       nrs = new NodeRefStruct(in, collected, outstandingRefs, null, (long) partIdx << 32 | slot);
-      holdRefs3[partIdx].getPayload(slot).nrs = nrs;
+      p.getPayload(slot).nrs = nrs;
     } else {
       // Pool exhausted: fall back to heap-allocated Cache.Node.
       Cache.Node<StrongRef> n = new Cache.Node<>(createStrongRef, in);
@@ -435,7 +436,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.pool = initPool(nBlocks, backingFile, true);
     this.partitions = distribute(nBlocks);
     this.nPartitions = partitions.length;
-    this.holdRefs3 = initHoldRefs3(nPartitions, Math.max(1, HOLD_REF_POOL_SIZE / nPartitions));
+    this.holdRefs3 = initHoldRefs3(nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
     this.holdRefs = initHoldRefs(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     this.drainTask = drainExec.submit(this::drain);
@@ -461,7 +462,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.pool = initPool(nBlocks, existingBackingFile, false);
     this.partitions = distribute(nBlocks);
     this.nPartitions = partitions.length;
-    this.holdRefs3 = initHoldRefs3(nPartitions, Math.max(1, HOLD_REF_POOL_SIZE / nPartitions));
+    this.holdRefs3 = initHoldRefs3(nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
     this.holdRefs = initHoldRefs(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     this.drainTask = drainExec.submit(this::drain);
