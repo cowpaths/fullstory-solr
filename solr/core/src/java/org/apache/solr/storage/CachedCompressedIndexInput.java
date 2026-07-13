@@ -1157,7 +1157,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         case -2:
           return; // UNINITIALIZED: never registered, nothing to do
         case -1:
-          claimed = Cache.pin(remove) == 1;
+          claimed = Cache.tryRemove(remove);
           break;
         default:
           claimed = blockCache.releaseHoldRef(cache3Handle);

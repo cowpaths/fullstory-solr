@@ -116,7 +116,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     private final NodeRefStruct nrs; // reachability only
 
     StrongRef(NodeRefStruct nrs) {
-      super(1);
       this.nrs = nrs;
     }
   }
@@ -179,7 +178,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static Cache<StrongRef>[] initHoldRefs(int length) {
     Cache<StrongRef>[] ret = new Cache[length];
     for (int i = length - 1; i >= 0; i--) {
-      ret[i] = new Cache<>(List.of());
+      ret[i] = new Cache<>();
     }
     return ret;
   }
@@ -211,7 +210,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     } else {
       // Pool exhausted: fall back to heap-allocated Cache.Node.
       Cache.Node<StrongRef> n = new Cache.Node<>(createStrongRef, in);
-      holdRefs[partIdx].unpin(n, false);
+      holdRefs[partIdx].add(n);
       nrs = n.getPayload().nrs;
     }
     outstandingRefs.increment();
@@ -240,17 +239,15 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * <ol>
    *   <li>Returned by {@link BlockCache#acquireNode(long[])} pinned (refCount=1), <em>not</em> in
    *       the LRU list.
-   *   <li>Caller populates `getValue()` and publishes the node (e.g. via an {@code AtomicReference}
-   *       slot). The node is still pinned.
-   *   <li>Subsequent callers call {@link Cache#pin(Cache.Node)}, which either re-pins
-   *       (refCount&gt;0 → increment only) or first-pins (refCount=0 → remove from list +
-   *       increment).
-   *   <li>Each caller eventually calls {@link Cache#unpin(Cache.Node, boolean)}. The last unpin
-   *       (refCount→0) inserts the node at the LRU head (most-recently-used, lowest eviction
-   *       priority).
+   *   <li>Caller populates the buffer and publishes the node (e.g. via an {@link
+   *       java.util.concurrent.atomic.AtomicLongArray} slot). The node is still pinned.
+   *   <li>Subsequent callers call {@link BlockCache#pin(long)}, which either re-pins (refCount&gt;0
+   *       → increment only) or first-pins (refCount=0 → remove from list + increment).
+   *   <li>Each caller eventually calls {@link BlockCache#unpin(long)}. The last unpin (refCount→0)
+   *       inserts the node at the LRU head (most-recently-used, lowest eviction priority).
    *   <li>When evicted by {@link BlockCache#acquireNode(long[])}, refCount is set to -1
    *       permanently. Any reader that encounters the node via a stale slot sees the negative
-   *       count, fails {@link Cache#pin(Cache.Node)}, and falls back to loading.
+   *       count, fails {@link BlockCache#pin(long)}, and falls back to loading.
    * </ol>
    */
   public static final class Val extends Cache2.TsVal {
@@ -436,7 +433,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.pool = initPool(nBlocks, backingFile, true);
     this.partitions = distribute(nBlocks);
     this.nPartitions = partitions.length;
-    this.holdRefs3 = initHoldRefs3(nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
+    this.holdRefs3 =
+        initHoldRefs3(
+            nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
     this.holdRefs = initHoldRefs(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     this.drainTask = drainExec.submit(this::drain);
@@ -462,7 +461,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.pool = initPool(nBlocks, existingBackingFile, false);
     this.partitions = distribute(nBlocks);
     this.nPartitions = partitions.length;
-    this.holdRefs3 = initHoldRefs3(nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
+    this.holdRefs3 =
+        initHoldRefs3(
+            nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
     this.holdRefs = initHoldRefs(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     this.drainTask = drainExec.submit(this::drain);

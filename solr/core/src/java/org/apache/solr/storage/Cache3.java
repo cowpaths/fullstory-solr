@@ -107,8 +107,6 @@ class Cache3<V extends Cache3.Val> {
    */
   final Val[] payload;
 
-  private final int capacity;
-
   // ---------------------------------------------------------------------------
   // Constructor
   // ---------------------------------------------------------------------------
@@ -118,7 +116,6 @@ class Cache3<V extends Cache3.Val> {
    * objects (one per slot, in free-list order from head to tail).
    */
   Cache3(int capacity, Iterable<? extends V> initialValues) {
-    this.capacity = capacity;
     this.HEAD = capacity + 1;
     this.TAIL = capacity + 2;
     this.payload = new Val[capacity + 3];
@@ -157,12 +154,18 @@ class Cache3<V extends Cache3.Val> {
     int cur = (int) NEXT_VH.getVolatile(v);
     for (; ; ) {
       while (cur == RESERVED_LINK) {
-        if (reservation == REMOVED_LINK) Thread.yield();
+        if (reservation == REMOVED_LINK) {
+          Thread.yield();
+        }
         cur = (int) NEXT_VH.getVolatile(v);
       }
-      if (cur == REMOVED_LINK) return cur;
+      if (cur == REMOVED_LINK) {
+        return cur;
+      }
       int witness = (int) NEXT_VH.compareAndExchange(v, cur, reservation);
-      if (witness == cur) return cur;
+      if (witness == cur) {
+        return cur;
+      }
       cur = witness;
     }
   }
@@ -187,7 +190,9 @@ class Cache3<V extends Cache3.Val> {
     int prevSlot;
     for (; ; ) {
       prevSlot = (int) PREV_VH.getVolatile(vSlot);
-      if (NEXT_VH.compareAndSet(payload[prevSlot], slot, RESERVED_LINK)) break;
+      if (NEXT_VH.compareAndSet(payload[prevSlot], slot, RESERVED_LINK)) {
+        break;
+      }
       Thread.yield();
     }
     PREV_VH.setVolatile(payload[oldNext], prevSlot);
@@ -210,7 +215,9 @@ class Cache3<V extends Cache3.Val> {
     for (int candidate; (candidate = (int) PREV_VH.getVolatile(payload[TAIL])) != HEAD; ) {
       Val p = payload[candidate];
       if (REF_COUNT.compareAndSet(p, 0, -1)) {
-        if (!removeFromList(candidate)) throw new IllegalStateException();
+        if (!removeFromList(candidate)) {
+          throw new IllegalStateException();
+        }
         p.reset();
         // Volatile write: publishing step; marks slot as held.
         p.refCount = 1;
@@ -228,7 +235,9 @@ class Cache3<V extends Cache3.Val> {
    */
   boolean tryRelease(int slot) {
     Val p = payload[slot];
-    if (!REF_COUNT.compareAndSet(p, 1, -1)) return false;
+    if (!REF_COUNT.compareAndSet(p, 1, -1)) {
+      return false;
+    }
     p.reset(); // clear subclass fields; refCount is -1, slot not yet in free list
     insertAtHead(slot); // wire into list; can't be acquired yet (refCount=-1, not 0)
     p.refCount = 0; // volatile publish: slot is now free and acquirable
