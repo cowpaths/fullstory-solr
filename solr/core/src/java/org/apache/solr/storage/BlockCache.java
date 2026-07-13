@@ -30,6 +30,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
@@ -120,7 +121,30 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
   }
 
-  private final Cache<StrongRef>[] holdRefs;
+  /**
+   * Cache3.Val subclass for the primary hold-ref pool. Holds the NodeRefStruct for reachability.
+   */
+  static final class HoldRef extends Cache3.Val {
+
+    NodeRefStruct nrs; // cleared by reset() when slot is released
+
+    HoldRef() {
+      super(0);
+    }
+
+    @Override
+    void reset() {
+      nrs = null;
+    }
+  }
+
+  // Default total pool size for outstanding hold-refs. Covers typical peak workloads (~1M refs).
+  // Override via -Dsolr.blockCache.holdRefPoolSize=<n>.
+  private static final int HOLD_REF_POOL_SIZE =
+      Integer.getInteger("solr.blockCache.holdRefPoolSize", 1 << 20);
+
+  private final Cache3<HoldRef>[] holdRefs3; // primary: fixed-size pool; no per-registration alloc
+  private final Cache<StrongRef>[] holdRefs; // fallback: when pool is exhausted
 
   private final ReferenceQueue<? super IndexInput> collected = new ReferenceQueue<>();
 
@@ -140,8 +164,19 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
   }
 
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  private static Cache3<HoldRef>[] initHoldRefs3(int nPartitions, int perPartitionCapacity) {
+    Cache3<HoldRef>[] ret = new Cache3[nPartitions];
+    for (int i = 0; i < nPartitions; i++) {
+      List<HoldRef> vals = new ArrayList<>(perPartitionCapacity);
+      for (int j = 0; j < perPartitionCapacity; j++) vals.add(new HoldRef());
+      ret[i] = new Cache3<>(perPartitionCapacity, vals);
+    }
+    return ret;
+  }
+
+  @SuppressWarnings({"unchecked", "rawtypes"})
   private static Cache<StrongRef>[] initHoldRefs(int length) {
-    @SuppressWarnings({"unchecked", "rawtypes"})
     Cache<StrongRef>[] ret = new Cache[length];
     for (int i = length - 1; i >= 0; i--) {
       ret[i] = new Cache<>(List.of());
@@ -150,7 +185,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   private StrongRef createStrongRef(IndexInput in, Cache.Node<StrongRef> n) {
-    return new StrongRef(new NodeRefStruct(in, collected, outstandingRefs, n));
+    return new StrongRef(new NodeRefStruct(in, collected, outstandingRefs, n, -1L));
   }
 
   private final BiFunction<IndexInput, Cache.Node<StrongRef>, StrongRef> createStrongRef =
@@ -161,16 +196,38 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * WeakReference} carries a strong reference to the associated specified {@link NodeRefStruct},
    * which is used to unpin any pinned cache nodes upon GC of the {@link IndexInput}.
    *
-   * <p>Callers may use the returned {@link StrongRef} to explicitly unpin any node referenced by
-   * the specified {@link NodeRefStruct} and remove the strong ref to the {@link WeakReference},
-   * thereby pruning pointless references.
+   * <p>Callers may use the returned {@link NodeRefStruct} to explicitly unpin any node referenced
+   * by it and remove the strong ref to the {@link WeakReference}, thereby pruning pointless
+   * references.
    */
   NodeRefStruct register(IndexInput in) {
-    Cache.Node<StrongRef> n = new Cache.Node<>(createStrongRef, in);
-    holdRefs[tlrIndex()].unpin(n, false);
+    int partIdx = tlrIndex();
+    int slot = holdRefs3[partIdx].acquire();
+    NodeRefStruct nrs;
+    if (slot != Cache3.NULL_SLOT) {
+      nrs = new NodeRefStruct(in, collected, outstandingRefs, null, (long) partIdx << 32 | slot);
+      holdRefs3[partIdx].getPayload(slot).nrs = nrs;
+    } else {
+      // Pool exhausted: fall back to heap-allocated Cache.Node.
+      Cache.Node<StrongRef> n = new Cache.Node<>(createStrongRef, in);
+      holdRefs[partIdx].unpin(n, false);
+      nrs = n.getPayload().nrs;
+    }
     outstandingRefs.increment();
     refsCreated.increment();
-    return n.getPayload().nrs;
+    return nrs;
+  }
+
+  /**
+   * Atomically claims and releases the hold-ref slot encoded in {@code handle}. Returns {@code
+   * true} if this thread won the claim (preventing double-cleanup between explicit close and GC
+   * drain). {@code handle} must be a value previously returned by {@link #register} on the Cache3
+   * primary path (i.e. not {@code -1L}).
+   */
+  boolean releaseHoldRef(long handle) {
+    int partIdx = (int) (handle >>> 32);
+    int slot = (int) handle;
+    return holdRefs3[partIdx].tryRelease(slot);
   }
 
   /**
@@ -378,6 +435,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.pool = initPool(nBlocks, backingFile, true);
     this.partitions = distribute(nBlocks);
     this.nPartitions = partitions.length;
+    this.holdRefs3 = initHoldRefs3(nPartitions, Math.max(1, HOLD_REF_POOL_SIZE / nPartitions));
     this.holdRefs = initHoldRefs(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     this.drainTask = drainExec.submit(this::drain);
@@ -403,6 +461,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.pool = initPool(nBlocks, existingBackingFile, false);
     this.partitions = distribute(nBlocks);
     this.nPartitions = partitions.length;
+    this.holdRefs3 = initHoldRefs3(nPartitions, Math.max(1, HOLD_REF_POOL_SIZE / nPartitions));
     this.holdRefs = initHoldRefs(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     this.drainTask = drainExec.submit(this::drain);

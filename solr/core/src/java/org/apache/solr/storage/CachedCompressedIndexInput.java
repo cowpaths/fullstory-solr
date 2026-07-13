@@ -245,7 +245,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // Slice / clone constructor
   // ---------------------------------------------------------------------------
 
-  private static final NodeRefStruct UNINITIALIZED = new NodeRefStruct(null, null, null, null);
+  private static final NodeRefStruct UNINITIALIZED = new NodeRefStruct(null, null, null, null, -2L);
 
   /**
    * Slice/clone constructor: shares immutable state from parent without owning the backend mapping.
@@ -1106,16 +1106,20 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
     // for cleanup upon GC
     private final LongAdder outstandingRefs;
-    private final Cache.Node<?> remove;
+    private final Cache.Node<?> remove; // non-null on Cache fallback path
+    // Cache3 primary path: (partIdx << 32 | slot); -1L if using Cache fallback.
+    private final long cache3Handle;
 
     NodeRefStruct(
         IndexInput referrent,
         ReferenceQueue<? super IndexInput> q,
         LongAdder outstandingRefs,
-        Cache.Node<?> remove) {
+        Cache.Node<?> remove,
+        long cache3Handle) {
       super(referrent, q);
       this.outstandingRefs = outstandingRefs;
       this.remove = remove;
+      this.cache3Handle = cache3Handle;
     }
 
     /** Updates the current cached block. */
@@ -1146,8 +1150,17 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
     /** Unpins the current block on {@link CachedCompressedIndexInput#close()}. */
     void closeFor(BlockCache blockCache) {
-      if (remove != null && Cache.pin(remove) == 1) {
-        // we removed
+      boolean claimed;
+      switch ((int) cache3Handle) {
+        case -2:
+          return; // UNINITIALIZED: never registered, nothing to do
+        case -1:
+          claimed = Cache.pin(remove) == 1;
+          break;
+        default:
+          claimed = blockCache.releaseHoldRef(cache3Handle);
+      }
+      if (claimed) {
         outstandingRefs.decrement();
         long toUnpin = currentNode;
         if (toUnpin != BlockCache.NULL_HANDLE) {
