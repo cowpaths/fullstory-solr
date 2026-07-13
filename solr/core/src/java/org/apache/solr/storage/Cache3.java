@@ -135,7 +135,7 @@ class Cache3<V extends Cache3.Val> {
       if (slot > capacity) throw new IllegalArgumentException("too many initial values");
       payload[slot] = v;
       payload[prevIdx].next = slot;
-      ((Val) v).prev = prevIdx;
+      v.prev = prevIdx;
       prevIdx = slot++;
     }
     payload[prevIdx].next = TAIL;
@@ -208,11 +208,12 @@ class Cache3<V extends Cache3.Val> {
    */
   int acquire() {
     for (int candidate; (candidate = (int) PREV_VH.getVolatile(payload[TAIL])) != HEAD; ) {
-      if (REF_COUNT.compareAndSet(payload[candidate], 0, -1)) {
+      Val p = payload[candidate];
+      if (REF_COUNT.compareAndSet(p, 0, -1)) {
         if (!removeFromList(candidate)) throw new IllegalStateException();
-        payload[candidate].reset();
+        p.reset();
         // Volatile write: publishing step; marks slot as held.
-        payload[candidate].refCount = 1;
+        p.refCount = 1;
         return candidate;
       }
     }
