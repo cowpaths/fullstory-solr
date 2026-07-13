@@ -2219,6 +2219,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     protected boolean ensureBlockLoaded(int blockIdx) {
+      if (blockSupplier == null) return true; // always-mapped: blocks come from ownedBufferFor
       return dir.ensureLoaded(blockSupplier, accessMapped, blockOffsets, blockIdx, 0);
     }
 
