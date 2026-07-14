@@ -463,12 +463,15 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     }
   }
 
+  private static final boolean SUPPRESS_REMOVE_DIR =
+      EnvUtils.getPropertyAsBool("solr.gcsDirectory.suppressRemoveDir", false);
+
   @Override
   @SuppressWarnings("try")
   protected synchronized void removeDirectory(CacheValue cacheValue) throws IOException {
     try (Closeable c = () -> super.removeDirectory(cacheValue)) {
       Directory d = FilterDirectory.unwrap(cacheValue.directory);
-      if (d instanceof GCSDirectory) {
+      if (!SUPPRESS_REMOVE_DIR && d instanceof GCSDirectory) {
         ((GCSDirectory) d).onDirectoryRemove();
       }
     } catch (NoSuchFileException ex) {
