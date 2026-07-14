@@ -1985,7 +1985,13 @@ public class GCSDirectory extends SizeAwareDirectory {
         default:
           {
             // Non-winner: wait for the winner to publish blockOffsets via origMapping.
-            bs.origMapping.join();
+            ByteBuffer localFileMapped = bs.origMapping.join();
+            if (hasTail) {
+              ownedBlocks =
+                  new ByteBuffer[] {
+                    localFileMapped.slice(0, tailLen).order(ByteOrder.LITTLE_ENDIAN)
+                  };
+            }
             break;
           }
       }
