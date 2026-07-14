@@ -116,6 +116,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private static final ByteBuffer EXCEPTION_SENTINEL = ByteBuffer.allocate(0);
 
+  public void decrementOutstandingRefs() {
+    outstandingRefs.decrement();
+  }
+
   /**
    * Cache3.Val subclass for the primary hold-ref pool. Holds the NodeRefStruct for reachability.
    */
@@ -151,12 +155,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private void drain() {
     try {
       while (true) {
-        Object ref = collected.remove();
-        if (ref instanceof Batch) {
-          ((Batch) ref).closeFor(this);
-        } else if (ref instanceof NodeRefStruct) {
-          ((NodeRefStruct) ref).closeFor(this);
-        }
+        ((RetainedRef<?>) collected.remove()).closeFor(this);
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
@@ -185,7 +184,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private NodeRefStruct createNrs(
       CachedCompressedIndexInput in, Cache.Node<WeakReference<Object>> n) {
-    return new NodeRefStruct(in, collected, outstandingRefs, n, -1L);
+    return new NodeRefStruct(in, collected, n, -1L);
   }
 
   private final BiFunction<
@@ -226,8 +225,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
 
     protected RetainedRef(
-        V referrent, ReferenceQueue<? super V> q, Cache.Node<?> remove, long cache3Handle) {
-      super(referrent, q);
+        V referent, ReferenceQueue<? super V> q, Cache.Node<?> remove, long cache3Handle) {
+      super(referent, q);
       this.remove = remove;
       this.cache3Handle = cache3Handle;
     }
@@ -235,7 +234,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     /** Unpins the current block on {@link CachedCompressedIndexInput#close()}. */
     final void closeFor(BlockCache cache) {
       boolean claimed;
-      switch ((int) cache3Handle) {
+      int snapshot = (int) cache3Handle;
+      switch (snapshot) {
         case -3:
           claimed = CACHE3_HANDLE.compareAndSet(this, -3L, -2L);
           break;
@@ -249,6 +249,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       }
       if (claimed) {
         doCloseFor(cache);
+        if (snapshot != -3) {
+          cache.outstandingHoldRefs.decrement();
+        }
       }
     }
 
@@ -293,6 +296,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       holdRefs[partIdx].add(n);
       ret = (Batch) n.getPayload();
     }
+    outstandingHoldRefs.increment();
     return new AbstractMap.SimpleImmutableEntry<>(referent, ret);
   }
 
@@ -311,14 +315,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     SolrRequestInfo sri;
     SolrQueryRequest req;
     if ((sri = SolrRequestInfo.getRequestInfo()) != null && (req = sri.getReq()) != null) {
-      // dummy referrent for batching cleanup.
+      // dummy referent for batching cleanup.
       Map<Object, Object> ctx = req.getContext();
       Map.Entry<Object, Batch> b;
       synchronized (ctx) {
         b = (Map.Entry<Object, Batch>) ctx.computeIfAbsent(referentKey, batchInitFunction);
       }
       in.setBatchReferrent(b.getKey());
-      nrs = new NodeRefStruct(outstandingRefs);
+      nrs = new NodeRefStruct();
       List<NodeRefStruct> toClose = b.getValue().toClose;
       synchronized (toClose) {
         toClose.add(nrs);
@@ -328,7 +332,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       Cache3<HoldRef> p = holdRefs3[partIdx];
       int slot = p.acquire();
       if (slot != Cache3.NULL_SLOT) {
-        nrs = new NodeRefStruct(in, collected, outstandingRefs, null, (long) partIdx << 32 | slot);
+        nrs = new NodeRefStruct(in, collected, null, (long) partIdx << 32 | slot);
         p.getPayload(slot).ref = nrs;
       } else {
         // Pool exhausted: fall back to heap-allocated Cache.Node.
@@ -336,6 +340,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         holdRefs[partIdx].add(n);
         nrs = (NodeRefStruct) n.getPayload();
       }
+      outstandingHoldRefs.increment();
     }
     outstandingRefs.increment();
     refsCreated.increment();
@@ -543,6 +548,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private final LongAdder failedPin = new LongAdder();
   private final LongAdder prepopulated = new LongAdder();
 
+  private final LongAdder outstandingHoldRefs = new LongAdder();
   private final LongAdder outstandingRefs = new LongAdder();
   private final LongAdder refsCreated = new LongAdder();
 
@@ -726,6 +732,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     long acq = acquisitions.sum();
     long misses = acq - prep;
     long hotUnpinnedBytes = hotUnpinned.sum() * COMPRESSION_BLOCK_SIZE;
+    ew.put("outstandingHoldRefs", outstandingHoldRefs.sum());
     ew.put("outstandingRefs", outstandingRefs.sum());
     ew.put("refsCreated", refsCreated.sum());
     ew.put("totalBytes", totalBytes);

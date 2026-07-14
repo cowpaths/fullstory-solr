@@ -46,7 +46,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
-import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
@@ -244,7 +243,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // Slice / clone constructor
   // ---------------------------------------------------------------------------
 
-  private static final NodeRefStruct UNINITIALIZED = new NodeRefStruct(null, null, null, null, -2L);
+  private static final NodeRefStruct UNINITIALIZED = new NodeRefStruct(null, null, null, -2L);
 
   /**
    * Slice/clone constructor: shares immutable state from parent without owning the backend mapping.
@@ -1112,22 +1111,13 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     private int currentBlockIdx = -1;
     private int sequentialAccessCount = 0;
 
-    // for cleanup upon GC
-    private final LongAdder outstandingRefs;
-
-    NodeRefStruct(LongAdder outstandingRefs) {
+    NodeRefStruct() {
       super();
-      this.outstandingRefs = outstandingRefs;
     }
 
     NodeRefStruct(
-        Object referrent,
-        ReferenceQueue<Object> q,
-        LongAdder outstandingRefs,
-        Cache.Node<?> remove,
-        long cache3Handle) {
+        Object referrent, ReferenceQueue<Object> q, Cache.Node<?> remove, long cache3Handle) {
       super(referrent, q, remove, cache3Handle);
-      this.outstandingRefs = outstandingRefs;
     }
 
     /** Updates the current cached block. */
@@ -1159,7 +1149,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     /** Unpins the current block on {@link CachedCompressedIndexInput#close()}. */
     @Override
     void doCloseFor(BlockCache blockCache) {
-      outstandingRefs.decrement();
+      blockCache.decrementOutstandingRefs();
       long toUnpin = currentNode;
       if (toUnpin != BlockCache.NULL_HANDLE) {
         currentNode = BlockCache.NULL_HANDLE;
