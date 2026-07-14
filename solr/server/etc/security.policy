@@ -224,6 +224,10 @@ grant {
 
   permission java.io.FilePermission "${log4j.configurationFile}", "read,write,delete,readlink";
 
+  // GCS attemptDirectPath and ADC
+  permission java.io.FilePermission "${/}sys${/}class${/}dmi${/}id${/}product_name", "read";
+  permission java.io.FilePermission "${user.home}${/}.config${/}gcloud${/}application_default_credentials.json", "read";
+
   // Credentials for S3 Repository
   permission java.io.FilePermission "${aws.sharedCredentialsFile}", "read,readlink";
   permission java.io.FilePermission "${aws.configFile}", "read,readlink";
