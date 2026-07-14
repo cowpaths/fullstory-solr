@@ -227,6 +227,19 @@ grant {
   // GCS attemptDirectPath and ADC
   permission java.io.FilePermission "${/}sys${/}class${/}dmi${/}id${/}product_name", "read";
   permission java.io.FilePermission "${user.home}${/}.config${/}gcloud${/}application_default_credentials.json", "read";
+  // TODO: tighten by setting -Dorg.conscrypt.native.workdir=<dedicated-dir> and granting
+  // execute only on that directory instead of all of /tmp/*.
+  // Conscrypt (used by gRPC-ALTS for DirectPath) extracts a native .so to tmpdir with a random
+  // suffix, so a glob isn't possible with FilePermission's limited wildcard support.
+  permission java.io.FilePermission "${java.io.tmpdir}${/}*", "execute";
+  permission java.lang.RuntimePermission "loadLibrary.conscrypt";
+  permission java.lang.RuntimePermission "loadLibrary.conscrypt_openjdk_jni";
+  permission java.lang.RuntimePermission "loadLibrary.conscrypt_openjdk_jni-linux-x86_64";
+  // Conscrypt extracts its native .so to a path with a random suffix, so a specific
+  // loadLibrary permission is not possible. loadLibrary.* is the only wildcard form supported
+  // by RuntimePermission.
+  permission java.lang.RuntimePermission "loadLibrary.*";
+  permission java.security.SecurityPermission "putProviderProperty.Conscrypt";
 
   // Credentials for S3 Repository
   permission java.io.FilePermission "${aws.sharedCredentialsFile}", "read,readlink";
