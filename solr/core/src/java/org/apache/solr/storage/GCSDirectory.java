@@ -946,37 +946,15 @@ public class GCSDirectory extends SizeAwareDirectory {
   // Offset file helpers
   // ---------------------------------------------------------------------------
 
-  private static final String[] NON_GCS_EXTENSIONS =
-      new String[] {
-        "tmp", // transient, local-only
-        "si", // tiny
-        "cfe" // tiny
-      };
-
   /**
-   * Returns true for files that are backed by a GCS blob with a local offset file. Temp files
-   * (*.tmp) and non-segment files (segments_N, pending_segments_N, etc.) are local-only.
-   *
-   * <p>TODO: this relies on the Lucene convention that all segment files start with {@code _}.
-   * Within an index directory this always holds, but GCSDirectoryFactory is a general-purpose
-   * factory and may be called for non-index directories (snapshot_metadata, tlog, etc.). Those
-   * directories happen not to contain {@code _}-prefixed files today, so routing is correct by
-   * accident. A cleaner fix would be to detect non-index directories at factory time and return a
-   * plain MMapDirectory instead of a GCSDirectory.
+   * Returns true only for {@code .cfs} (compound segment) files, which are the sole segment
+   * artifact backed by a GCS blob. All other files — component codec files, {@code .cfe}, {@code
+   * .si}, {@code .tmp}, {@code segments_N}, generation-based update files, etc. — are local-only.
+   * Should be used in conjunction with {@code noCFSRatio=1.0} so that all segments use
+   * compound-file format.
    */
   static boolean isGcsBacked(String name) {
-    int extIdx;
-    if (name.charAt(0) != '_') {
-      return false;
-    } else if ((extIdx = name.lastIndexOf('.')) != -1) {
-      int from = extIdx + 1;
-      for (String s : NON_GCS_EXTENSIONS) {
-        if (name.startsWith(s, from) && from + s.length() == name.length()) {
-          return false;
-        }
-      }
-    }
-    return true;
+    return name.endsWith(".cfs");
   }
 
   /**
