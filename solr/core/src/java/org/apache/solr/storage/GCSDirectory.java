@@ -123,7 +123,7 @@ import org.slf4j.LoggerFactory;
  *   [tailLen bytes]     uncompressed tail block (last partial block; absent when length is an exact
  *                       multiple of COMPRESSION_BLOCK_SIZE); tailLen = length % COMPRESSION_BLOCK_SIZE
  *   [variable bytes]    ZInt delta-encoded compressed block sizes for the GCS portion (blocks 0..N-2)
- *   [52 bytes trailer]  fixed metadata, fields little-endian:
+ *   [60 bytes trailer]  fixed metadata, fields little-endian:
  *     [1 byte]   compressionBlockType id
  *     [1 byte]   compressionType id
  *     [2 bytes]  reserved
@@ -131,12 +131,13 @@ import org.slf4j.LoggerFactory;
  *     [16 bytes] segment UUID (MSB then LSB)
  *     [8 bytes]  logical (uncompressed) file length
  *     [8 bytes]  total compressed bytes in the GCS object (blocks 0..N-2 only)
+ *     [8 bytes]  {@link #GCS_BACKED_MAGIC} — identifies this as a GCS-backed offset file
  * </pre>
  *
- * <p>Local-only files (flush segments or any file whose uncompressed length is less than one block)
- * contain the raw uncompressed data followed by {@link #LOCAL_ONLY_SENTINEL} (8 bytes) as the very
- * last bytes. Detection reads the last 8 bytes first; if they equal the sentinel the file is
- * local-only, otherwise the full 52-byte trailer is parsed.
+ * <p>Plain local files (non-{@code .cfs} files, pre-migration MMapDirectory files, or {@code .cfs}
+ * files whose uncompressed length is less than one block) contain raw uncompressed data with no
+ * trailer. Detection reads the last 8 bytes; if they equal {@link #GCS_BACKED_MAGIC} the full
+ * 60-byte trailer is parsed, otherwise the file is served directly from local storage.
  */
 public class GCSDirectory extends SizeAwareDirectory {
 
@@ -241,7 +242,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
   // Offset file header size: 8 (length) + 4 (blockType/comprType/reserved) + 16 (blobUUID)
   // + 16 (segUUID) + 8 (gcsObjectSize) = 52 bytes.
-  static final int OFFSET_FILE_HEADER_SIZE = 52;
+  static final int OFFSET_FILE_HEADER_SIZE = 60;
 
   /**
    * GCS resumable-upload chunk size. 8 MiB amortizes HTTP round-trip overhead effectively;
@@ -250,14 +251,15 @@ public class GCSDirectory extends SizeAwareDirectory {
   private static final int GCS_WRITE_CHUNK_SIZE = 8 * 1024 * 1024;
 
   /**
-   * Sentinel written as the last 8 bytes of a local-only file. Derived from a UUID so it is
-   * astronomically unlikely to collide with a valid {@code gcsObjectSize} field that closes a
-   * GCS-backed trailer. Files ending with this value bypass GCS entirely and are served directly
-   * from the local MMap file (all bytes except the final 8).
+   * Magic constant written as the last 8 bytes of a GCS-backed local offset file. Derived from a
+   * UUID so it is astronomically unlikely to appear by accident at the end of a plain local file.
+   * Detection reads the last 8 bytes of a {@code .cfs} local file; if they equal this value the
+   * preceding 52 bytes are parsed as the GCS trailer, otherwise the file is served directly from
+   * local storage (pre-migration MMapDirectory file or tiny segment with no full blocks).
    */
-  static final long LOCAL_ONLY_SENTINEL =
+  static final long GCS_BACKED_MAGIC =
       UUID.nameUUIDFromBytes(
-              "org.apache.solr.storage.GCSDirectory#LOCAL_ONLY_SENTINEL"
+              "org.apache.solr.storage.GCSDirectory#GCS_BACKED_MAGIC"
                   .getBytes(java.nio.charset.StandardCharsets.UTF_8))
           .getMostSignificantBits();
 
@@ -392,8 +394,8 @@ public class GCSDirectory extends SizeAwareDirectory {
         }
         Path path = directory.resolve(file);
         byte[] header = readOffsetFileHeader(path);
-        if (header == null || isLocalOnlyHeader(header)) {
-          continue; // missing, malformed, or local-only flush segment
+        if (header == null) {
+          continue; // missing, not yet GCS-backed, or plain local file
         }
         UUID segUUID = readSegmentUUID(header);
         UUID blobUUID = readBlobUUID(header);
@@ -544,8 +546,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       return;
     }
     byte[] header = readOffsetFileHeader(directory.resolve(file));
-    if (header == null || isLocalOnlyHeader(header)) {
-      return; // missing, malformed, or local-only flush segment
+    if (header == null) {
+      return; // missing, not yet GCS-backed, or plain local file
     }
     UUID segUUID = readSegmentUUID(header);
     UUID blobUUID = readBlobUUID(header);
@@ -586,9 +588,7 @@ public class GCSDirectory extends SizeAwareDirectory {
   protected void deleteFile0(String name) throws IOException {
     ensureOpen();
     byte[] header;
-    if (isGcsBacked(name)
-        && (header = readOffsetFileHeader(directory.resolve(name))) != null
-        && !isLocalOnlyHeader(header)) {
+    if (isGcsBacked(name) && (header = readOffsetFileHeader(directory.resolve(name))) != null) {
       maybeGcsDelete(
           name,
           readBlobUUID(header),
@@ -737,29 +737,23 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
     Path offsetFile = directory.resolve(name);
     byte[] header = readOffsetFileHeader(offsetFile);
-    if (header == null) {
-      throw new NoSuchFileException(name);
+    if (header != null) {
+      // GCS-backed: length is at trailer offset 36:
+      // blockType+comprType+reserved(4) + blobUUID(16) + segUUID(16)
+      ByteArrayDataInput in = new ByteArrayDataInput(header);
+      in.skipBytes(36);
+      return in.readLong();
     }
-    if (isLocalOnlyHeader(header)) {
-      return onDiskFileLength(name) - 8;
+    if (Files.exists(offsetFile)) {
+      return super.fileLength0(name); // plain local .cfs (pre-migration or tiny segment)
     }
-    // length is at trailer offset 36: blockType+comprType+reserved(4) + blobUUID(16) + segUUID(16)
-    ByteArrayDataInput in = new ByteArrayDataInput(header);
-    in.skipBytes(36);
-    return in.readLong();
+    throw new NoSuchFileException(name);
   }
 
   @Override
   protected IndexOutput createOutput0(String name, IOContext context) throws IOException {
-    if (!isGcsBacked(name)) {
+    if (context.context == IOContext.Context.FLUSH || !isGcsBacked(name)) {
       return super.createOutput0(name, context);
-    }
-    // Flush segments are short-lived and frequently replaced, so skip GCS upload for them.
-    // A local-only sentinel is prepended so openInput/fileLength/deleteFile can detect them.
-    // On merge, Lucene reads these files via openInput() (which strips the sentinel) and writes
-    // the merged result via createOutput() with a MERGE context, taking the normal GCS path.
-    if (context.context == IOContext.Context.FLUSH) {
-      return new LocalOnlyIndexOutput(name, super.createOutput0(name, context));
     }
     return pendingWrites
         .computeIfAbsent(
@@ -904,23 +898,22 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
     Path offsetFile = directory.resolve(name);
     byte[] header = readOffsetFileHeader(offsetFile);
-    if (header == null) {
+    if (header != null) {
+      // TODO: if `context.mergeInfo != null` we should preload the entire contents
+      return new GCSIndexInput("gcs:" + name, this, offsetFile, header);
+    }
+    if (!Files.exists(offsetFile)) {
       throw new NoSuchFileException(name);
     }
-    if (isLocalOnlyHeader(header)) {
-      long contentLen = onDiskFileLength(name) - 8;
-      if (DIRECT_MMAP_DIR_INPUT) {
-        IndexInput raw = super.openInput(name, context);
-        return raw.slice("local-only:" + name, 0, contentLen);
-      } else {
-        try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
-          return GCSIndexInput.ofMapped(
-              "local-only:" + name, this, ch.map(FileChannel.MapMode.READ_ONLY, 0, contentLen));
-        }
+    // Plain local .cfs (pre-migration MMapDirectory file or tiny segment with no full blocks).
+    if (DIRECT_MMAP_DIR_INPUT) {
+      return super.openInput(name, context);
+    } else {
+      try (FileChannel ch = FileChannel.open(offsetFile, StandardOpenOption.READ)) {
+        return GCSIndexInput.ofMapped(
+            "plain-local:" + name, this, ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size()));
       }
     }
-    // TODO: if `context.mergeInfo != null` we should preload the entire contents
-    return new GCSIndexInput("gcs:" + name, this, offsetFile, header);
   }
 
   /**
@@ -958,16 +951,12 @@ public class GCSDirectory extends SizeAwareDirectory {
   }
 
   /**
-   * Reads the local-file trailer from {@code path} in a single file open. Returns:
-   *
-   * <ul>
-   *   <li>{@code null} — file missing, unreadable, or shorter than 8 bytes
-   *   <li>array of exactly 8 bytes whose {@code long} value equals {@link #LOCAL_ONLY_SENTINEL} —
-   *       local-only file
-   *   <li>array of exactly {@link #OFFSET_FILE_HEADER_SIZE} bytes — GCS-backed file trailer
-   * </ul>
-   *
-   * Use {@link #isLocalOnlyHeader} to distinguish the two non-null cases.
+   * Reads the 60-byte GCS trailer from {@code path} if the file is GCS-backed. Reads the last
+   * {@link #OFFSET_FILE_HEADER_SIZE} bytes in a single I/O, then checks the final 8 bytes for
+   * {@link #GCS_BACKED_MAGIC}. Returns the trailer array if the magic matches; returns {@code null}
+   * if the file does not exist, is too short, or does not end with the magic (plain local file).
+   * Callers that need to distinguish "file missing" from "plain local" should check {@link
+   * Files#exists} separately when this returns {@code null}.
    */
   private static byte[] readOffsetFileHeader(Path path) throws IOException {
     if (!Files.exists(path)) {
@@ -975,24 +964,13 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
     try (FileChannel ch = FileChannel.open(path, StandardOpenOption.READ)) {
       long fileSize = ch.size();
-      if (fileSize < 8) return null;
-      // Read last 8 bytes to check for the local-only sentinel.
-      ByteBuffer sentinelBuf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
-      ch.read(sentinelBuf, fileSize - 8);
-      if (sentinelBuf.getLong(0) == LOCAL_ONLY_SENTINEL) {
-        return sentinelBuf.array(); // 8 bytes — local-only
-      }
       if (fileSize < OFFSET_FILE_HEADER_SIZE) return null;
-      // GCS-backed: read the full 52-byte trailer from the end.
       ByteBuffer buf = ByteBuffer.allocate(OFFSET_FILE_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN);
       ch.read(buf, fileSize - OFFSET_FILE_HEADER_SIZE);
+      // Last 8 bytes of the trailer must be GCS_BACKED_MAGIC.
+      if (buf.getLong(OFFSET_FILE_HEADER_SIZE - 8) != GCS_BACKED_MAGIC) return null;
       return buf.array();
     }
-  }
-
-  /** Returns true if {@code header} was read from a local-only file. */
-  private static boolean isLocalOnlyHeader(byte[] header) {
-    return header.length < OFFSET_FILE_HEADER_SIZE;
   }
 
   /** Extracts the GCS blob UUID from an already-read GCS-backed trailer. */
@@ -1007,55 +985,6 @@ public class GCSDirectory extends SizeAwareDirectory {
     ByteArrayDataInput in = new ByteArrayDataInput(header);
     in.skipBytes(20); // blockType+comprType+reserved(4) + blobUUID(16)
     return new UUID(in.readLong(), in.readLong());
-  }
-
-  // ---------------------------------------------------------------------------
-  // LocalOnlyIndexOutput
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Wraps a local {@link IndexOutput} (from {@link MMapDirectory}) to produce a local-only file
-   * that bypasses GCS upload. Appends {@link #LOCAL_ONLY_SENTINEL} as the last 8 bytes on {@link
-   * #close()} so that {@link #openInput}, {@link #fileLength}, and {@link #deleteFile} can detect
-   * these files by reading the file's final 8 bytes.
-   */
-  private static final class LocalOnlyIndexOutput extends IndexOutput {
-
-    private final IndexOutput delegate;
-    private final CRC32 crc = new CRC32();
-
-    LocalOnlyIndexOutput(String name, IndexOutput delegate) throws IOException {
-      super("LocalOnly(name=\"" + name + "\")", name);
-      this.delegate = delegate;
-    }
-
-    @Override
-    public void writeByte(byte b) throws IOException {
-      crc.update(b);
-      delegate.writeByte(b);
-    }
-
-    @Override
-    public void writeBytes(byte[] b, int offset, int length) throws IOException {
-      crc.update(b, offset, length);
-      delegate.writeBytes(b, offset, length);
-    }
-
-    @Override
-    public long getFilePointer() {
-      return delegate.getFilePointer();
-    }
-
-    @Override
-    public long getChecksum() {
-      return crc.getValue();
-    }
-
-    @Override
-    public void close() throws IOException {
-      delegate.writeLong(LOCAL_ONLY_SENTINEL);
-      delegate.close();
-    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1119,19 +1048,18 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     /**
-     * Parses segUUID and blobUUID from the trailing 52 bytes (the new trailer format). The last 8
-     * bytes are checked for {@link #LOCAL_ONLY_SENTINEL}; if matched, no registration.
+     * Parses segUUID and blobUUID from the trailing 60 bytes (52-byte trailer + 8-byte magic). The
+     * last 8 bytes are checked for {@link #GCS_BACKED_MAGIC}; if absent, no registration.
      */
     private void parseTrailer() {
-      if (trailerBytesBuffered < 8) return; // too short for even a sentinel
-      // Check last 8 bytes for LOCAL_ONLY_SENTINEL.
+      if (trailerBytesBuffered < OFFSET_FILE_HEADER_SIZE) return; // too short
+      // Check last 8 bytes for GCS_BACKED_MAGIC.
       ByteBuffer last8 =
           ByteBuffer.wrap(trailerBuf, trailerBytesBuffered - 8, 8).order(ByteOrder.LITTLE_ENDIAN);
-      if (last8.getLong(0) == LOCAL_ONLY_SENTINEL) {
-        return; // local-only file received via replication; no GCS blob to register
+      if (last8.getLong(0) != GCS_BACKED_MAGIC) {
+        return; // plain local file; no GCS blob to register
       }
-      if (trailerBytesBuffered < OFFSET_FILE_HEADER_SIZE) return; // partial/unknown format
-      // Parse 52-byte trailer:
+      // Parse 52-byte trailer (bytes [0..51]; magic is at [52..59]):
       // blockType(1)+comprType(1)+reserved(2)+blobUUID(16)+segUUID(16)+length(8)+gcsObjectSize(8)
       ByteArrayDataInput hdr = new ByteArrayDataInput(trailerBuf);
       hdr.readByte(); // blockType
@@ -1139,7 +1067,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       hdr.readShort(); // reserved
       uuid = new UUID(hdr.readLong(), hdr.readLong()); // blobUUID [4–19]
       UUID segUUID = new UUID(hdr.readLong(), hdr.readLong()); // segUUID [20–35]
-      // length [36–43] and gcsObjectSize [44–51] not needed here
+      // length [36–43], gcsObjectSize [44–51], magic [52–59] — not needed here
       segStruct = initSegStruct(segUUID);
     }
 
@@ -1346,19 +1274,18 @@ public class GCSDirectory extends SizeAwareDirectory {
         try (localOut) {
           if (wh == null) {
             // No full blocks were written: entire file fits in less than one block.
-            // Store as local-only: raw data + sentinel.
+            // Store as plain local data with no trailer (detected by absence of GCS_BACKED_MAGIC).
             if (tailLen > 0) {
               localOut.writeBytes(tailBytes, 0, tailLen);
             }
-            localOut.writeLong(LOCAL_ONLY_SENTINEL);
           } else {
-            // GCS-backed: [tail bytes][block deltas][52-byte trailer]
+            // GCS-backed: [tail bytes][block deltas][60-byte trailer]
             if (tailLen > 0) {
               localOut.writeBytes(tailBytes, 0, tailLen);
             }
             localOut.writeBytes(blockDeltas.baos.buf(), 0, blockDeltas.baos.count());
-            // 52-byte trailer:
-            // blockType(1)+comprType(1)+reserved(2)+blobUUID(16)+segUUID(16)+length(8)+gcsObjectSize(8)
+            // 60-byte trailer:
+            // blockType(1)+comprType(1)+reserved(2)+blobUUID(16)+segUUID(16)+length(8)+gcsObjectSize(8)+magic(8)
             UUID segUUID = registerUUID.segUUID;
             localOut.writeByte((byte) COMPRESSION_BLOCK_TYPE.id);
             localOut.writeByte((byte) COMPRESSION_TYPE.id);
@@ -1369,6 +1296,7 @@ public class GCSDirectory extends SizeAwareDirectory {
             localOut.writeLong(segUUID.getLeastSignificantBits());
             localOut.writeLong(filePos); // logical (uncompressed) file length
             localOut.writeLong(gcsObjectSize); // compressed bytes in GCS (full blocks only)
+            localOut.writeLong(GCS_BACKED_MAGIC);
             // GCS write and local file are both committed; register for sync/batched accounting.
             registerUUID.registerFileUUID(getName(), uuid);
             // Publish pre-warmed cache nodes so readers get cache hits instead of GCS fetches.
