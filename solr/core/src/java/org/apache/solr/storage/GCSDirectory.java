@@ -257,7 +257,7 @@ public class GCSDirectory extends SizeAwareDirectory {
    * preceding 52 bytes are parsed as the GCS trailer, otherwise the file is served directly from
    * local storage (pre-migration MMapDirectory file or tiny segment with no full blocks).
    */
-  static final long GCS_BACKED_MAGIC =
+  private static final long GCS_BACKED_MAGIC =
       UUID.nameUUIDFromBytes(
               "org.apache.solr.storage.GCSDirectory#GCS_BACKED_MAGIC"
                   .getBytes(java.nio.charset.StandardCharsets.UTF_8))

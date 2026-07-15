@@ -26,7 +26,9 @@ import java.lang.invoke.VarHandle;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
+import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -37,6 +39,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -44,8 +47,10 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.StampedLock;
 import java.util.function.BiFunction;
 import java.util.function.Function;
+import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
@@ -300,6 +305,27 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     return new AbstractMap.SimpleImmutableEntry<>(referent, ret);
   }
 
+  private static final long CACHE_VALIDATION_MAGIC =
+      UUID.nameUUIDFromBytes(
+              "org.apache.solr.storage.BlockCache#CACHE_VALIDATION_MAGIC"
+                  .getBytes(java.nio.charset.StandardCharsets.UTF_8))
+          .getMostSignificantBits();
+
+  /**
+   * TODO: there are 16 bytes at the end of the allocated file. on startup, read these bytes and
+   * compare them to determine whether the cache contents are valid; if so, we can reconstruct cache
+   * from on-disk. After reading, overwrite the first 8 of these bytes with the below `randomId` and
+   * force/flush. Upon successful shutdown/flush-to-disk, write the last 8 of these bytes xor'ed
+   * with {@link #CACHE_VALIDATION_MAGIC}, and one final flush to ensure the bytes are on disk.
+   */
+  private final long randomId =
+      UUID.nameUUIDFromBytes(
+              Long.toString(System.currentTimeMillis() ^ System.nanoTime())
+                  .getBytes(StandardCharsets.UTF_8))
+          .getMostSignificantBits();
+
+  private final StampedLock closeLock = new StampedLock();
+
   /**
    * Registers a {@link WeakReference} to the specified {@link IndexInput}. The {@link
    * WeakReference} carries a strong reference to the associated specified {@link NodeRefStruct},
@@ -394,12 +420,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     private volatile ByteBuffer cached;
 
-    private Val(ByteBuffer prepopulated) {
-      super(Integer.MAX_VALUE >> 1);
-      this.cached = prepopulated;
-      this.cacheBlockOrd = -1;
-    }
-
     Val(int cacheBlockOrd, int initialRefCount) {
       super(initialRefCount);
       this.cacheBlockOrd = cacheBlockOrd;
@@ -415,14 +435,28 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       super.reset();
     }
 
+    // TODO: add `UUID blobUUID, int blockIdx` params, to be recorded at the tail of the persistent
+    //  pool file. These can be used to create a space-efficient map. GCSDirectory will pass
+    //  blobUUID, TeeDirectory will pass a blob UUID derived from segUUID (derived analogous to as
+    //  GCSDirectory does + fileName)
     ByteBuffer populate(byte[] arr, int off, int len, BlockCache c) {
       assert cacheBlockOrd >= 0;
       ByteBuffer ret = c.slice(cacheBlockOrd);
-      // NOTE: for consistency between `populate()` and on-demand restore
-      // in `join()`, we call `clear()` here, _not_ `flip()`.
-      // It is the responsibility of the buffer lease recipient to duplicate
-      // and set proper limit and byte order.
-      ret = ret.put(arr, off, len).clear().asReadOnlyBuffer();
+      StampedLock l = c.closeLock;
+      long stamp = l.tryReadLock();
+      if (stamp == 0) {
+        throw new AlreadyClosedException("blockcache shutting down");
+      }
+      try {
+        // NOTE: for consistency between `populate()` and on-demand restore
+        // in `join()`, we call `clear()` here, _not_ `flip()`.
+        // It is the responsibility of the buffer lease recipient to duplicate
+        // and set proper limit and byte order.
+        ret = ret.put(arr, off, len).clear().asReadOnlyBuffer();
+        // TODO: ByteBuffer.put([blobUUID, off] -- encoded as byte[20])
+      } finally {
+        l.unlock(stamp);
+      }
       cached = ret;
       assert !populated;
       populated = true;
@@ -586,9 +620,23 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         Files.size(existingBackingFile) / COMPRESSION_BLOCK_SIZE * COMPRESSION_BLOCK_SIZE);
   }
 
+  private static long[] buildExtantMap(int nBlocks) {
+    long[] ret = new long[nBlocks * 3]; // [ uuidLow, uuidHigh, (blockId << 32 | cacheBlockOrd)]
+    // TODO: read in from metadata trailer entries, then custom in-place sort to sort the
+    //  array by long triplets for retrieval by binary search in `acquireNode(long[], UUID, int)`.
+    //  For a 340g (usable) cache size, on-disk metadata will be 27M, in-memory this "extant map"
+    //  will be 32M. Even if we never trim or discard it, this is acceptable overhead.
+    return ret;
+  }
+
   private BlockCache(Path existingBackingFile, long targetBytes) throws IOException {
     int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
     this.pool = initPool(nBlocks, existingBackingFile, false);
+    // TODO: on existingBackingFile path, read and compare last 16 bytes and if possible
+    //  bootstrap this cache from existing values on-disk. NOTE: we'll also have to adjust
+    //  the usable pool size (nBlocks) to accommodate 20 bytes metadata per block (in addition
+    //  to the 16 bytes at the very end for verifying cache integrity.
+    buildExtantMap(nBlocks);
     this.partitions = distribute(nBlocks);
     this.nPartitions = partitions.length;
     this.holdRefs3 =
@@ -707,6 +755,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * sets outHandle[0] to the encoded handle.
    */
   Val acquireNode(long[] outHandle) {
+    // TODO: add `UUID blobUUID, int blockIdx` params, to opportunistically retrieve via binary
+    //  search from in-memory "extantMap" of pre-existing valid cache entries (if applicable)
     int i = tlrIndex();
     Partition p = partitions[i];
     Val v = p.acquireNode(outHandle);
@@ -889,8 +939,20 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   @SuppressWarnings("try")
   public void close() throws IOException {
     try (Closeable c = SolrMetricProducer.super::close) {
-      drainTask.cancel(true);
-      ExecutorUtil.shutdownAndAwaitTermination(drainExec);
+      try {
+        // acquire `closeLock` and never release, to prevent further writes
+        if (closeLock.tryWriteLock(10, TimeUnit.SECONDS) != 0) {
+          for (ByteBuffer bb : pool) {
+            ((MappedByteBuffer) bb).force();
+          }
+          // TODO: write `randomId ^ CACHE_VALIDATION_MAGIC` and flush/force a final time.
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      } finally {
+        drainTask.cancel(true);
+        ExecutorUtil.shutdownAndAwaitTermination(drainExec);
+      }
     }
     // MappedByteBuffers are not explicitly unmapped here; the JVM will release them on exit.
   }
