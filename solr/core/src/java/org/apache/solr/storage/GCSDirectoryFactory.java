@@ -22,15 +22,12 @@ import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.StorageException;
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -176,8 +173,8 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     /**
      * The Solr core root directory (from {@link CoreContainer#getCoreRootDirectory()}); used to
      * bound the upward search for {@code core.properties} in {@link
-     * #refIdFromCoreProperties(Path)}. Null when no {@link CoreContainer} is available (e.g. in
-     * standalone tests), in which case the search falls back to a depth limit.
+     * BlockCache#refIdFromCoreProperties(Path, Path)}. Null when no {@link CoreContainer} is
+     * available (e.g. in standalone tests), in which case the search falls back to a depth limit.
      */
     private final Path coreRootDirectory;
 
@@ -265,7 +262,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
      * GcsBlobLifecycleCoordinator}.
      */
     GCSDirectory.BlobLifecycleCoordinator createBlobCoordinator(Path localPath) throws IOException {
-      UUID refId = refIdFromCoreProperties(localPath);
+      UUID refId = BlockCache.refIdFromCoreProperties(coreRootDirectory, localPath);
       if (refId == null) {
         refId =
             UUID.nameUUIDFromBytes(
@@ -276,38 +273,6 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
         return new ZkBlobLifecycleCoordinator(zkClient, refId);
       }
       return new GcsBlobLifecycleCoordinator(storage, metadataBucket, refId, useMultipartUpload);
-    }
-
-    /**
-     * Derives a stable, replica-unique refId from the nearest {@code core.properties} file found by
-     * walking up from {@code localPath}. Returns {@code null} if no {@code core.properties} is
-     * found or if it contains neither a {@code name} nor a {@code coreNodeName} property.
-     */
-    private UUID refIdFromCoreProperties(Path localPath) throws IOException {
-      if (coreRootDirectory == null) return null;
-      Path root = coreRootDirectory.toAbsolutePath().normalize();
-      Path normalized = localPath.toAbsolutePath().normalize();
-      if (!normalized.startsWith(root)) return null;
-      // Walk up from localPath, stopping before coreRootDirectory itself (core.properties lives
-      // in a direct subdirectory of it, not in coreRootDirectory itself).
-      for (Path dir = normalized; !dir.equals(root); dir = dir.getParent()) {
-        Path corePropsPath = dir.resolve("core.properties");
-        if (Files.isRegularFile(corePropsPath)) {
-          Properties props = new Properties();
-          try (InputStream in = Files.newInputStream(corePropsPath)) {
-            props.load(in);
-          }
-          String name = props.getProperty("name", "");
-          String coreNodeName = props.getProperty("coreNodeName", "");
-          if (name.isEmpty() && coreNodeName.isEmpty()) {
-            return null;
-          }
-          String relPath = dir.relativize(normalized).toString();
-          String key = name + "\n" + coreNodeName + "\n" + relPath;
-          return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
-        }
-      }
-      return null;
     }
 
     @Override

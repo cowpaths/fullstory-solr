@@ -21,6 +21,7 @@ import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZ
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.lang.ref.ReferenceQueue;
@@ -40,6 +41,7 @@ import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
@@ -125,6 +127,38 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   public void decrementOutstandingRefs() {
     outstandingRefs.decrement();
+  }
+
+  /**
+   * Derives a stable, replica-unique refId from the nearest {@code core.properties} file found by
+   * walking up from {@code localPath}. Returns {@code null} if no {@code core.properties} is found
+   * or if it contains neither a {@code name} nor a {@code coreNodeName} property.
+   */
+  static UUID refIdFromCoreProperties(Path coreRootDirectory, Path localPath) throws IOException {
+    if (coreRootDirectory == null) return null;
+    Path root = coreRootDirectory.toAbsolutePath().normalize();
+    Path normalized = localPath.toAbsolutePath().normalize();
+    if (!normalized.startsWith(root)) return null;
+    // Walk up from localPath, stopping before coreRootDirectory itself (core.properties lives
+    // in a direct subdirectory of it, not in coreRootDirectory itself).
+    for (Path dir = normalized; !dir.equals(root); dir = dir.getParent()) {
+      Path corePropsPath = dir.resolve("core.properties");
+      if (Files.isRegularFile(corePropsPath)) {
+        Properties props = new Properties();
+        try (InputStream in = Files.newInputStream(corePropsPath)) {
+          props.load(in);
+        }
+        String name = props.getProperty("name", "");
+        String coreNodeName = props.getProperty("coreNodeName", "");
+        if (name.isEmpty() && coreNodeName.isEmpty()) {
+          return null;
+        }
+        String relPath = dir.relativize(normalized).toString();
+        String key = name + "\n" + coreNodeName + "\n" + relPath;
+        return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
+      }
+    }
+    return null;
   }
 
   /**
