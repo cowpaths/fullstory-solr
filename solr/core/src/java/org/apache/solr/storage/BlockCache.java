@@ -709,24 +709,70 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     return valid;
   }
 
-  /** Sorts the first {@code nEntries} triplets in {@code map} by {@code (uuidMsb, uuidLsb)}. */
+  private static final int SORT_RADIX_BITS = 16;
+  private static final int SORT_BUCKETS = 1 << SORT_RADIX_BITS;
+  private static final int SORT_MASK = SORT_BUCKETS - 1;
+
+  /**
+   * Sorts the first {@code nEntries} triplets in {@code map} by {@code (uuidMsb, uuidLsb,
+   * blockIdx)} using LSD radix sort with a 16-bit radix (10 passes over the 160-bit key). The count
+   * array (65536 ints = 256 KiB) fits in L2 cache. Ping-pong between {@code map} and a scratch
+   * buffer; 10 passes (even) guarantees the result lands back in {@code map} without a final copy.
+   */
   private static void sortExtantMap(long[] map, int nEntries) {
-    // TODO: replace with a proper in-place quicksort for large caches (>100k entries).
-    for (int i = 1; i < nEntries; i++) {
-      long k0 = map[i * 3], k1 = map[i * 3 + 1], k2 = map[i * 3 + 2];
-      int j = i - 1;
-      while (j >= 0
-          && (Long.compareUnsigned(map[j * 3], k0) > 0
-              || (map[j * 3] == k0 && Long.compareUnsigned(map[j * 3 + 1], k1) > 0))) {
-        map[(j + 1) * 3] = map[j * 3];
-        map[(j + 1) * 3 + 1] = map[j * 3 + 1];
-        map[(j + 1) * 3 + 2] = map[j * 3 + 2];
-        j--;
+    if (nEntries < 2) return;
+    int[] count = new int[SORT_BUCKETS];
+    final int n3 = map.length;
+    long[] src = map, dst = new long[n3];
+    for (int pass = 0; pass < 10; pass++) {
+      // Passes 0-1: blockIdx = upper 32 bits of index 2 (least significant; done first).
+      // Passes 2-5: uuidLsb (index 1).
+      // Passes 6-9: uuidMsb (index 0; most significant; done last, determines final order).
+      int keyIdx = pass < 2 ? 2 : pass < 6 ? 1 : 0;
+      int shift;
+      switch (pass) {
+        case 2:
+        case 6:
+          shift = 0;
+          break;
+        case 3:
+        case 7:
+          shift = 16;
+          break;
+        case 0:
+        case 4:
+        case 8:
+          shift = 32;
+          break;
+        case 1:
+        case 5:
+        case 9:
+          shift = 48;
+          break;
+        default:
+          throw new AssertionError("unexpected pass: " + pass);
       }
-      map[(j + 1) * 3] = k0;
-      map[(j + 1) * 3 + 1] = k1;
-      map[(j + 1) * 3 + 2] = k2;
+      Arrays.fill(count, 0);
+      for (int i = keyIdx; i < n3; i += 3) {
+        count[(int) (src[i] >>> shift) & SORT_MASK]++;
+      }
+      // Inclusive prefix sums, pre-multiplied by 3 so each count[b] is a direct array index.
+      int sum = 0;
+      for (int b = 0; b < SORT_BUCKETS; b++) {
+        sum += count[b];
+        count[b] = sum * 3;
+      }
+      for (int i = n3 - 3; i >= 0; i -= 3) { // reverse scatter preserves stability
+        int dest = count[(int) (src[i + keyIdx] >>> shift) & SORT_MASK] -= 3;
+        dst[dest] = src[i];
+        dst[dest + 1] = src[i + 1];
+        dst[dest + 2] = src[i + 2];
+      }
+      long[] tmp = src;
+      src = dst;
+      dst = tmp;
     }
+    // After 10 passes (even) the result is in `map` (verified by ping-pong trace).
   }
 
   private static Partition[] distribute(int nBlocks) {
