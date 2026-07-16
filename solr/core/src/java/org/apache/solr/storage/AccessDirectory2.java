@@ -29,6 +29,7 @@ import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
@@ -92,6 +93,9 @@ public class AccessDirectory2 extends MMapDirectory {
   public static final int MAX_MAP_MASK = MAX_MAP_SIZE - 1;
   public static final int MAX_MAP_SHIFT = Integer.numberOfTrailingZeros(MAX_MAP_SIZE);
 
+  private final long uuidMsb;
+  private final long uuidLsb;
+
   private final Path compressedPath;
   private final BlockCache cache;
   private final ExecutorService ioExec;
@@ -138,8 +142,26 @@ public class AccessDirectory2 extends MMapDirectory {
   private static final AD2IndexInput INIT_DONE_SENTINEL = new AD2IndexInput();
   private static final int INIT_PRELOAD_TIMEOUT_MILLIS = 1000;
 
+  private UUID uuidForFile(String name) {
+    if (uuidMsb == 0 && uuidLsb == 0) {
+      return UUID.nameUUIDFromBytes(
+          compressedPath
+              .resolve(name)
+              .toAbsolutePath()
+              .normalize()
+              .toString()
+              .getBytes(StandardCharsets.UTF_8));
+    } else {
+      UUID nameOnly = UUID.nameUUIDFromBytes(name.getBytes(StandardCharsets.UTF_8));
+      return new UUID(
+          uuidMsb ^ nameOnly.getMostSignificantBits(),
+          uuidLsb ^ nameOnly.getLeastSignificantBits());
+    }
+  }
+
   @SuppressWarnings("try")
   public AccessDirectory2(
+      Path coreRootDirectory,
       Path path,
       LockFactory lockFactory,
       Path compressedPath,
@@ -147,6 +169,14 @@ public class AccessDirectory2 extends MMapDirectory {
       ExecutorService ioExec)
       throws IOException {
     super(path, lockFactory);
+    UUID uuid = BlockCache.refIdFromCoreProperties(coreRootDirectory, compressedPath);
+    if (uuid == null) {
+      this.uuidMsb = 0;
+      this.uuidLsb = 0;
+    } else {
+      this.uuidMsb = uuid.getMostSignificantBits();
+      this.uuidLsb = uuid.getLeastSignificantBits();
+    }
     this.compressedPath = compressedPath;
     this.cache = cache;
     this.ioExec = ioExec;
@@ -415,7 +445,11 @@ public class AccessDirectory2 extends MMapDirectory {
         NodesEntry sharedEntry,
         HashMap<String, NodesEntry> pendingNodes)
         throws IOException {
-      this("lazy:" + source, dir, parseRootParams(source, sharedEntry, pendingNodes));
+      this(
+          "lazy:" + source,
+          dir,
+          parseRootParams(
+              source, sharedEntry, pendingNodes, dir.uuidForFile(source.getFileName().toString())));
     }
 
     private AD2IndexInput() {
@@ -455,7 +489,10 @@ public class AccessDirectory2 extends MMapDirectory {
     }
 
     private static RootParams parseRootParams(
-        Path source, NodesEntry sharedEntry, HashMap<String, NodesEntry> pendingNodes)
+        Path source,
+        NodesEntry sharedEntry,
+        HashMap<String, NodesEntry> pendingNodes,
+        UUID blobUUID)
         throws IOException {
       try (FileChannel channel = FileChannel.open(source, StandardOpenOption.READ)) {
         long compressedFileSize = channel.size();
@@ -534,10 +571,6 @@ public class AccessDirectory2 extends MMapDirectory {
           }
         }
 
-        // TODO: replace with a stable content-specific UUID (e.g. from segment UUID + file name)
-        UUID blobUUID =
-            UUID.nameUUIDFromBytes(
-                source.getFileName().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
         return new RootParams(length, blockOffsets, compressed, entry.nodes, entry, blobUUID);
       }
     }
@@ -824,10 +857,7 @@ public class AccessDirectory2 extends MMapDirectory {
       long node = nodeHandle[0];
       if (nodeVal != null) {
         try {
-          // TODO: replace with a stable content-specific UUID (e.g. from segment UUID + file name)
-          UUID captureUUID =
-              UUID.nameUUIDFromBytes(name.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-          nodeVal.populate(blockBuf, 0, len, captureUUID, nodeSlots.size(), dir.cache);
+          nodeVal.populate(blockBuf, 0, len, dir.uuidForFile(name), nodeSlots.size(), dir.cache);
         } finally {
           dir.cache.unpin(node, false);
         }

@@ -487,6 +487,7 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
             if (nodeLevelState.blockCache != null) {
               dir =
                   new AccessDirectory2(
+                      coreContainer.getCoreRootDirectory(),
                       access,
                       lockFactory,
                       persistentPath,
