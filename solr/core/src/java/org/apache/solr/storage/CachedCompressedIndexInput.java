@@ -41,6 +41,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -137,6 +138,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    */
   protected abstract CachedCompressedIndexInput cloneSlice(
       String description, long sliceOffset, long sliceLen);
+
+  /**
+   * Returns the blob UUID identifying the backend object that backs this input. Used to record
+   * per-block metadata in the persistent {@link BlockCache} on populate.
+   */
+  protected abstract UUID blobUUID();
 
   /**
    * Release backend-specific resources owned by this root input. Not called for slices (which do
@@ -538,7 +545,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         ByteBuffer buf;
         try {
           byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
-          buf = nodeVal.populate(heapBuf, 0, decompressedLen, cache);
+          buf = nodeVal.populate(heapBuf, 0, decompressedLen, blobUUID(), blockIdx, cache);
         } catch (Throwable t) {
           nodeVal.completeExceptionally(t);
           accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);

@@ -1210,7 +1210,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       long cacheNode = nodeHandle[0];
       if (cacheNodeVal != null) {
         try {
-          cacheNodeVal.populate(compressBuffer, 0, COMPRESSION_BLOCK_SIZE, dir.cache);
+          cacheNodeVal.populate(
+              compressBuffer, 0, COMPRESSION_BLOCK_SIZE, uuid, cachedNodes.size(), dir.cache);
         } finally {
           // release writer's pin; node enters LRU, ready for readers
           dir.cache.unpin(cacheNode, false);
@@ -1451,7 +1452,12 @@ public class GCSDirectory extends SizeAwareDirectory {
                   if (fp == null) {
                     for (IntCursor i : blockIndexes) {
                       ensureLoaded(
-                          blobS, blocks.accessMapped, blocks.blockOffsets, i.value, timeoutMillis);
+                          blobS,
+                          blocks.accessMapped,
+                          blocks.blockOffsets,
+                          i.value,
+                          timeoutMillis,
+                          blob);
                     }
                   } else {
                     Iterator<IntCursor> iter = blockIndexes.iterator();
@@ -1461,7 +1467,8 @@ public class GCSDirectory extends SizeAwareDirectory {
                           blocks.accessMapped,
                           blocks.blockOffsets,
                           iter.next().value,
-                          timeoutMillis);
+                          timeoutMillis,
+                          blob);
                     }
                     if (iter.hasNext()) {
                       fp.add(
@@ -1472,7 +1479,8 @@ public class GCSDirectory extends SizeAwareDirectory {
                                   blocks.accessMapped,
                                   blocks.blockOffsets,
                                   iter.next().value,
-                                  timeoutMillis);
+                                  timeoutMillis,
+                                  blob);
                             } while (iter.hasNext());
                           });
                     }
@@ -1517,7 +1525,8 @@ public class GCSDirectory extends SizeAwareDirectory {
             blocks.accessMapped,
             blocks.blockOffsets,
             0,
-            timeoutMillis);
+            timeoutMillis,
+            blobId);
       }
     }
   }
@@ -1536,7 +1545,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       AtomicLongArray accessMapped,
       long[] blockOffsets,
       int idx,
-      int timeoutMillis) {
+      int timeoutMillis,
+      UUID blobUUID) {
     return BlockPreloader.ensureLoaded(
         accessMapped,
         blockOffsets,
@@ -1546,7 +1556,8 @@ public class GCSDirectory extends SizeAwareDirectory {
         ioExec,
         readAheadPermits,
         timeoutMillis,
-        blockSupplier);
+        blockSupplier,
+        blobUUID);
   }
 
   /**
@@ -1619,7 +1630,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       long[] blockOffsets,
       int toIdx,
       IntUnaryOperator decompressedLenFor,
-      ExecutorService ioExec)
+      ExecutorService ioExec,
+      UUID blobUUID)
       throws IOException {
     if (!rangePreloadSem.tryAcquire()) {
       return supply(blobName, blockOffset, compressedLen, decompressedLen);
@@ -1670,7 +1682,16 @@ public class GCSDirectory extends SizeAwareDirectory {
                 CompressingDirectory.decompress(comp, 0, dl, decomp, 0);
                 if (accessMapped.compareAndSet(i, extant, toPopulate)) {
                   BlockPreloader.populateBuf(
-                      bo, cl, i, dl, toPopulate, v, accessMapped, cache, (a, b, c) -> decomp);
+                      bo,
+                      cl,
+                      i,
+                      dl,
+                      toPopulate,
+                      v,
+                      accessMapped,
+                      cache,
+                      (a, b, c) -> decomp,
+                      blobUUID);
                   cache.unpin(toPopulate, false);
                 } else {
                   cache.close(toPopulate, true);
@@ -2036,7 +2057,8 @@ public class GCSDirectory extends SizeAwareDirectory {
               blockOffsets,
               toIdx,
               this::decompressedLenFor,
-              dir.ioExec);
+              dir.ioExec,
+              blobUUID);
         }
       }
       return dir.supply(blobName, blockOffset, compressedLen, decompressedLen);
@@ -2130,9 +2152,14 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     @Override
+    protected UUID blobUUID() {
+      return blobUUID;
+    }
+
+    @Override
     protected boolean ensureBlockLoaded(int blockIdx) {
       if (blockSupplier == null) return true; // always-mapped: blocks come from ownedBufferFor
-      return dir.ensureLoaded(blockSupplier, accessMapped, blockOffsets, blockIdx, 0);
+      return dir.ensureLoaded(blockSupplier, accessMapped, blockOffsets, blockIdx, 0, blobUUID);
     }
 
     @Override

@@ -83,8 +83,8 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       long n2 = h[0];
       assertNotNull(v1);
       assertNotNull(v2);
-      v1.populate(dummy, 0, 0, cache);
-      v2.populate(expect, 0, COMPRESSION_BLOCK_SIZE, cache); // put real data in
+      v1.populate(dummy, 0, 0, null, 0, cache);
+      v2.populate(expect, 0, COMPRESSION_BLOCK_SIZE, null, 0, cache); // put real data in
 
       // Unpin both; n2 was acquired last so it sits at the LRU head.
       cache.unpin(n1);
@@ -98,7 +98,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       BlockCache.Val v3 = cache.acquireNode(h);
       long n3 = h[0];
       assertNotNull(v3);
-      ByteBuffer n3Buf = v3.populate(dummy, 0, 0, cache);
+      ByteBuffer n3Buf = v3.populate(dummy, 0, 0, null, 0, cache);
       assertSame(n3Buf, v3.join(cache));
       assertNotSame(n2Buf, n3Buf);
       byte[] rtx = new byte[COMPRESSION_BLOCK_SIZE];
@@ -121,7 +121,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       BlockCache.Val v1 = cache.acquireNode(h);
       long n1 = h[0];
       assertNotNull(v1);
-      ByteBuffer n1Buf = v1.populate(dummy, 0, COMPRESSION_BLOCK_SIZE, cache);
+      ByteBuffer n1Buf = v1.populate(dummy, 0, COMPRESSION_BLOCK_SIZE, null, 0, cache);
       assertSame(n1Buf, v1.join(cache));
       cache.unpin(n1); // now evictable
 
@@ -129,7 +129,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       BlockCache.Val v2 = cache.acquireNode(h);
       long n2 = h[0];
       assertNotNull(v2);
-      ByteBuffer n2Buf = v2.populate(new byte[0], 0, 0, cache);
+      ByteBuffer n2Buf = v2.populate(new byte[0], 0, 0, null, 0, cache);
       assertSame(n2Buf, v2.join(cache));
       assertNotSame(n1Buf, n2Buf); // different wrappers
       byte[] rtx = new byte[COMPRESSION_BLOCK_SIZE];
@@ -224,7 +224,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                       acquired.increment();
                       // Write sentinel via populate() before publishing.
                       ByteBuffer.wrap(sentinelBuf).putInt(0, slotIdx);
-                      nodeVal.populate(sentinelBuf, 0, Integer.BYTES, cache);
+                      nodeVal.populate(sentinelBuf, 0, Integer.BYTES, null, 0, cache);
                       cache.unpin(node);
                       // Publish to slot; old occupant (if any) will be evicted via normal LRU.
                       long prev = slots.getAndSet(slotIdx, node);

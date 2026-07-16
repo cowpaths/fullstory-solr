@@ -24,6 +24,7 @@ import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.util.Iterator;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -122,7 +123,8 @@ class BlockPreloader {
       ExecutorService ioExec,
       Permits permits,
       int timeoutMillis,
-      BlockSupplier supplier) {
+      BlockSupplier supplier,
+      UUID blobUUID) {
     long extant = accessMapped.get(idx);
     if ((extant == BlockCache.NULL_HANDLE || !cache.pinnable(extant))
         && permits.tryAcquire(timeoutMillis)) {
@@ -149,7 +151,8 @@ class BlockPreloader {
                       toPopulateVal,
                       accessMapped,
                       cache,
-                      supplier);
+                      supplier,
+                      blobUUID);
                   // NOTE: don't unpin in `finally`! populateBuf already unpins on the error path.
                   cache.unpin(toPopulate, false);
                 } else {
@@ -188,7 +191,8 @@ class BlockPreloader {
       ExecutorService ioExec,
       Permits permits,
       int timeoutMillis,
-      BlockSupplier supplier) {
+      BlockSupplier supplier,
+      UUID blobUUID) {
     // TODO: pre-inspect at least some of the blocks (analogous to the extant.pinnable() check in
     // ensureLoaded) to avoid acquiring a permit when all requested blocks are already cached.
     if (!permits.tryAcquire(timeoutMillis)) return false;
@@ -216,7 +220,8 @@ class BlockPreloader {
                       toPopulateVal,
                       accessMapped,
                       cache,
-                      supplier);
+                      supplier,
+                      blobUUID);
                   cache.unpin(toPopulate, false);
                 } else {
                   cache.recordCasRaceLoss();
@@ -253,13 +258,14 @@ class BlockPreloader {
       BlockCache.Val nodeVal,
       AtomicLongArray accessMapped,
       BlockCache cache,
-      BlockSupplier supplier)
+      BlockSupplier supplier,
+      UUID blobUUID)
       throws IOException {
     cache.recordDecompressionReadahead();
     ByteBuffer buf;
     try {
       byte[] heapBuf = supplier.supply(blockOffset, compressedLen, decompressedLen);
-      buf = nodeVal.populate(heapBuf, 0, decompressedLen, cache);
+      buf = nodeVal.populate(heapBuf, 0, decompressedLen, blobUUID, blockIdx, cache);
     } catch (Throwable t) {
       nodeVal.completeExceptionally(t);
       accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);

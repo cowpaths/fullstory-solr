@@ -43,6 +43,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
@@ -397,6 +398,9 @@ public class AccessDirectory2 extends MMapDirectory {
     // non-null for root inputs with tracked nodes; null otherwise
     private final NodesEntry nodesEntry;
 
+    // TODO: derive a stable, content-specific UUID (e.g. from segment UUID + file name)
+    private final UUID blobUUID;
+
     // Guards compressed ByteBuffer lifetime. Root holds write lock on close; supply calls hold
     // read lock. StampedLock.tryReadLock() returns 0 while a write lock is waiting, so in-flight
     // supply calls drain before invalidateAndUnmap runs, and new tasks see 0 and throw rather than
@@ -427,6 +431,7 @@ public class AccessDirectory2 extends MMapDirectory {
       this.blockSupplier = null;
       this.nodesEntry = null;
       this.supplyLock = null;
+      this.blobUUID = null;
     }
 
     private static final class RootParams {
@@ -435,18 +440,21 @@ public class AccessDirectory2 extends MMapDirectory {
       final ByteBuffer[] compressed;
       final AtomicLongArray accessMapped;
       final NodesEntry entry; // null for empty files
+      final UUID blobUUID;
 
       RootParams(
           long length,
           long[] blockOffsets,
           ByteBuffer[] compressed,
           AtomicLongArray accessMapped,
-          NodesEntry entry) {
+          NodesEntry entry,
+          UUID blobUUID) {
         this.length = length;
         this.blockOffsets = blockOffsets;
         this.compressed = compressed;
         this.accessMapped = accessMapped;
         this.entry = entry;
+        this.blobUUID = blobUUID;
       }
     }
 
@@ -468,7 +476,7 @@ public class AccessDirectory2 extends MMapDirectory {
 
         long size = channel.size();
         if (size == 0) {
-          return new RootParams(0, null, compressed, null, null);
+          return new RootParams(0, null, compressed, null, null, null);
         }
 
         ByteBuffer initial = compressed[0];
@@ -530,7 +538,11 @@ public class AccessDirectory2 extends MMapDirectory {
           }
         }
 
-        return new RootParams(length, blockOffsets, compressed, entry.nodes, entry);
+        // TODO: replace with a stable content-specific UUID (e.g. from segment UUID + file name)
+        UUID blobUUID =
+            UUID.nameUUIDFromBytes(
+                source.getFileName().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return new RootParams(length, blockOffsets, compressed, entry.nodes, entry, blobUUID);
       }
     }
 
@@ -548,6 +560,7 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressed = p.compressed;
       this.isRoot = true;
       this.nodesEntry = p.entry;
+      this.blobUUID = p.blobUUID;
       this.supplyLock = new StampedLock();
       blockSupplier =
           (blockOffset, compressedLen, decompressedLen) -> {
@@ -575,6 +588,7 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressed = parent.compressed;
       this.isRoot = false;
       this.nodesEntry = null;
+      this.blobUUID = parent.blobUUID;
       this.supplyLock = null; // lock is captured in the blockSupplier lambda; not needed here
       blockSupplier = parent.blockSupplier;
       maybePreloadSlice();
@@ -583,6 +597,11 @@ public class AccessDirectory2 extends MMapDirectory {
     // -------------------------------------------------------------------------
     // CachedCompressedIndexInput abstract method implementations
     // -------------------------------------------------------------------------
+
+    @Override
+    protected UUID blobUUID() {
+      return blobUUID;
+    }
 
     @Override
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
@@ -602,7 +621,8 @@ public class AccessDirectory2 extends MMapDirectory {
           ioExec,
           readAheadPermits,
           0,
-          blockSupplier);
+          blockSupplier,
+          blobUUID);
     }
 
     boolean preloadSerial(Iterator<IntCursor> blockIdxIter, int timeoutMillis) {
@@ -615,7 +635,8 @@ public class AccessDirectory2 extends MMapDirectory {
           ioExec,
           readAheadPermits,
           timeoutMillis,
-          blockSupplier);
+          blockSupplier,
+          blobUUID);
     }
 
     /**
@@ -682,7 +703,8 @@ public class AccessDirectory2 extends MMapDirectory {
             toPopulateVal,
             in.accessMapped,
             in.cache,
-            in.blockSupplier);
+            in.blockSupplier,
+            in.blobUUID);
         in.cache.unpin(toPopulate, false);
       } else {
         in.cache.close(toPopulate, true);
@@ -812,7 +834,10 @@ public class AccessDirectory2 extends MMapDirectory {
       long node = nodeHandle[0];
       if (nodeVal != null) {
         try {
-          nodeVal.populate(blockBuf, 0, len, dir.cache);
+          // TODO: replace with a stable content-specific UUID (e.g. from segment UUID + file name)
+          UUID captureUUID =
+              UUID.nameUUIDFromBytes(name.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+          nodeVal.populate(blockBuf, 0, len, captureUUID, nodeSlots.size(), dir.cache);
         } finally {
           dir.cache.unpin(node, false);
         }
