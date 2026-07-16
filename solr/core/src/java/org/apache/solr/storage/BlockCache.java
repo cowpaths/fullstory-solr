@@ -877,8 +877,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * sets outHandle[0] to the encoded handle.
    */
   Val acquireNode(long[] outHandle) {
-    // TODO: add `UUID blobUUID, int blockIdx` params, to opportunistically retrieve via binary
-    //  search from in-memory "extantMap" of pre-existing valid cache entries (if applicable)
     int i = tlrIndex();
     Partition p = partitions[i];
     Val v = p.acquireNode(outHandle);
@@ -895,6 +893,49 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       poolExhausted.increment();
       return null;
     }
+  }
+
+  /**
+   * Variant of {@link #acquireNode(long[])} that first checks the extant map for a pre-existing
+   * warm cache entry matching {@code (blobUUID, blockIdx)}. On a hit, the pool buffer at the
+   * returned {@link Val}'s {@code cacheBlockOrd} already contains valid decompressed data, so the
+   * caller can skip the fetch+decompress step.
+   *
+   * <p>Falls through to the normal eviction-based acquire if the extant map has no entry or the
+   * backing file was not present at startup (ephemeral cache).
+   */
+  Val acquireNode(long[] outHandle, UUID blobUUID, int blockIdx) {
+    int cacheBlockOrd = extantMapLookup(blobUUID, blockIdx);
+    if (cacheBlockOrd >= 0) {
+      // TODO: acquire the specific Val at cacheBlockOrd, set outHandle, return pre-populated.
+    }
+    return acquireNode(outHandle);
+  }
+
+  /**
+   * Binary-searches {@link #extantMap} for {@code (blobUUID, blockIdx)}.
+   *
+   * @return the {@code cacheBlockOrd} if found, or {@code -1}
+   */
+  private int extantMapLookup(UUID blobUUID, int blockIdx) {
+    long searchMsb = blobUUID.getMostSignificantBits();
+    long searchLsb = blobUUID.getLeastSignificantBits();
+    int lo = 0, hi = extantMap.length / 3 - 1;
+    while (lo <= hi) {
+      int mid = (lo + hi) >>> 1;
+      int base = mid * 3;
+      int cmp = Long.compareUnsigned(extantMap[base], searchMsb);
+      if (cmp == 0) cmp = Long.compareUnsigned(extantMap[base + 1], searchLsb);
+      if (cmp == 0) cmp = Integer.compareUnsigned((int) (extantMap[base + 2] >>> 32), blockIdx);
+      if (cmp < 0) {
+        lo = mid + 1;
+      } else if (cmp > 0) {
+        hi = mid - 1;
+      } else {
+        return (int) extantMap[base + 2]; // cacheBlockOrd in low 32 bits
+      }
+    }
+    return -1;
   }
 
   public void writeMetrics(MapWriter.EntryWriter ew) throws IOException {
