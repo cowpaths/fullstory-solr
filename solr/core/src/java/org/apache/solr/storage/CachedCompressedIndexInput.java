@@ -78,6 +78,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private static final FloatBuffer EMPTY_FLOATBUFFER = FloatBuffer.allocate(0);
 
   protected final BlockCache cache;
+  protected final UUID blobUUID;
   // Total logical (decompressed) length of the underlying file.
   private final long length;
   // blockOffsets[i] = compressed byte offset of block i within the backend storage;
@@ -140,12 +141,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       String description, long sliceOffset, long sliceLen);
 
   /**
-   * Returns the blob UUID identifying the backend object that backs this input. Used to record
-   * per-block metadata in the persistent {@link BlockCache} on populate.
-   */
-  protected abstract UUID blobUUID();
-
-  /**
    * Release backend-specific resources owned by this root input. Not called for slices (which do
    * not own the mapping). Called inside a {@code try-finally} by {@link #close()}; {@link
    * #unsetBuffers()} always executes in the {@code finally} block regardless of exceptions here.
@@ -203,6 +198,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   protected CachedCompressedIndexInput(String resourceDescription) {
     super(resourceDescription);
     this.cache = null;
+    this.blobUUID = null;
     this.length = -1;
     this.blockOffsets = null;
     this.guard = null;
@@ -224,12 +220,14 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   protected CachedCompressedIndexInput(
       String resourceDescription,
       BlockCache cache,
+      UUID blobUUID,
       long length,
       long[] blockOffsets,
       ByteBufferGuard guard,
       AtomicLongArray accessMapped) {
     super(resourceDescription);
     this.cache = cache;
+    this.blobUUID = blobUUID;
     this.length = length;
     this.blockOffsets = blockOffsets;
     this.guard = guard;
@@ -262,6 +260,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long sliceLen) {
     super(resourceDescription);
     this.cache = parent.cache;
+    this.blobUUID = parent.blobUUID;
     this.length = parent.length;
     this.blockOffsets = parent.blockOffsets;
     this.blockCount = parent.blockCount;
@@ -545,7 +544,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         ByteBuffer buf;
         try {
           byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
-          buf = nodeVal.populate(heapBuf, 0, decompressedLen, blobUUID(), blockIdx, cache);
+          buf = nodeVal.populate(heapBuf, 0, decompressedLen, blobUUID, blockIdx, cache);
         } catch (Throwable t) {
           nodeVal.completeExceptionally(t);
           accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);

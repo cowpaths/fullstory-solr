@@ -1725,9 +1725,6 @@ public class GCSDirectory extends SizeAwareDirectory {
     private final GCSDirectory dir;
 
     /** Null for always-mapped inputs and for slices. */
-    private final UUID blobUUID;
-
-    /** Null for always-mapped inputs and for slices. */
     private final UUID segUUID;
 
     /** Null for always-mapped inputs and for slices. */
@@ -1932,12 +1929,12 @@ public class GCSDirectory extends SizeAwareDirectory {
       super(
           resourceDescription,
           dir.cache,
+          p.blobUUID,
           p.length,
           p.bs.blockOffsets,
           p.bs.guard,
           p.bs.accessMapped);
       this.dir = dir;
-      this.blobUUID = p.blobUUID;
       this.blobName = p.blobUUID.toString();
       this.segUUID = p.segUUID;
       this.blocksStruct = p.bs;
@@ -1997,12 +1994,12 @@ public class GCSDirectory extends SizeAwareDirectory {
       super(
           resourceDescription,
           dir.cache,
+          null,
           p.length,
           null /*blockOffsets — never accessed for always-mapped*/,
           p.bs.guard,
           new AtomicLongArray(0));
       this.dir = dir;
-      this.blobUUID = null;
       this.blobName = null;
       this.segUUID = null;
       this.blocksStruct = p.bs;
@@ -2020,7 +2017,6 @@ public class GCSDirectory extends SizeAwareDirectory {
         String resourceDescription, GCSIndexInput parent, long sliceOffset, long sliceLen) {
       super(resourceDescription, parent, sliceOffset, sliceLen);
       this.dir = parent.dir;
-      this.blobUUID = parent.blobUUID;
       this.blobName = parent.blobName;
       this.segUUID = parent.segUUID;
       this.blocksStruct = null; // slice does not own the mapping
@@ -2149,11 +2145,6 @@ public class GCSDirectory extends SizeAwareDirectory {
       int i = blockIdx - ownedBlocksOffset;
       if (i < 0 || i >= ownedBlocks.length) return null;
       return ownedBlocks[i].duplicate().order(ByteOrder.LITTLE_ENDIAN);
-    }
-
-    @Override
-    protected UUID blobUUID() {
-      return blobUUID;
     }
 
     @Override

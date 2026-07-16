@@ -398,9 +398,6 @@ public class AccessDirectory2 extends MMapDirectory {
     // non-null for root inputs with tracked nodes; null otherwise
     private final NodesEntry nodesEntry;
 
-    // TODO: derive a stable, content-specific UUID (e.g. from segment UUID + file name)
-    private final UUID blobUUID;
-
     // Guards compressed ByteBuffer lifetime. Root holds write lock on close; supply calls hold
     // read lock. StampedLock.tryReadLock() returns 0 while a write lock is waiting, so in-flight
     // supply calls drain before invalidateAndUnmap runs, and new tasks see 0 and throw rather than
@@ -431,7 +428,6 @@ public class AccessDirectory2 extends MMapDirectory {
       this.blockSupplier = null;
       this.nodesEntry = null;
       this.supplyLock = null;
-      this.blobUUID = null;
     }
 
     private static final class RootParams {
@@ -550,6 +546,7 @@ public class AccessDirectory2 extends MMapDirectory {
       super(
           description,
           dir.cache,
+          p.blobUUID,
           p.length,
           p.blockOffsets,
           new ByteBufferGuard("ad2-decompressed", unmapHack()),
@@ -560,7 +557,6 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressed = p.compressed;
       this.isRoot = true;
       this.nodesEntry = p.entry;
-      this.blobUUID = p.blobUUID;
       this.supplyLock = new StampedLock();
       blockSupplier =
           (blockOffset, compressedLen, decompressedLen) -> {
@@ -588,7 +584,6 @@ public class AccessDirectory2 extends MMapDirectory {
       this.compressed = parent.compressed;
       this.isRoot = false;
       this.nodesEntry = null;
-      this.blobUUID = parent.blobUUID;
       this.supplyLock = null; // lock is captured in the blockSupplier lambda; not needed here
       blockSupplier = parent.blockSupplier;
       maybePreloadSlice();
@@ -597,11 +592,6 @@ public class AccessDirectory2 extends MMapDirectory {
     // -------------------------------------------------------------------------
     // CachedCompressedIndexInput abstract method implementations
     // -------------------------------------------------------------------------
-
-    @Override
-    protected UUID blobUUID() {
-      return blobUUID;
-    }
 
     @Override
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
