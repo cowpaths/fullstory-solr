@@ -455,11 +455,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       super.reset();
     }
 
-    // TODO: add `UUID blobUUID, int blockIdx` params, to be recorded at the tail of the persistent
-    //  pool file. These can be used to create a space-efficient map. GCSDirectory will pass
-    //  blobUUID, TeeDirectory will pass a blob UUID derived from segUUID (derived analogous to as
-    //  GCSDirectory does + fileName)
-    ByteBuffer populate(byte[] arr, int off, int len, BlockCache c) {
+    ByteBuffer populate(byte[] arr, int off, int len, UUID blobUUID, int blockIdx, BlockCache c) {
       assert cacheBlockOrd >= 0;
       ByteBuffer ret = c.slice(cacheBlockOrd);
       StampedLock l = c.closeLock;
@@ -468,12 +464,26 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         throw new AlreadyClosedException("blockcache shutting down");
       }
       try {
+        MappedByteBuffer meta = c.metaBuf;
+        int metaBase = meta == null ? -1 : cacheBlockOrd * META_BYTES_PER_BLOCK;
+        if (metaBase >= 0) {
+          // Sentinel blockIdx=-1 written before msb for strict safety: even under adversarial
+          // write reordering, no entry can be committed with a garbage blockIdx.
+          // Any crash before the commit writes (msb + lsb + real blockIdx) leaves this slot with
+          // blockIdx=-1; buildExtantMap skips it.
+          meta.putInt(metaBase + 16, -1);
+        }
         // NOTE: for consistency between `populate()` and on-demand restore
         // in `join()`, we call `clear()` here, _not_ `flip()`.
         // It is the responsibility of the buffer lease recipient to duplicate
         // and set proper limit and byte order.
         ret = ret.put(arr, off, len).clear().asReadOnlyBuffer();
-        // TODO: ByteBuffer.put([blobUUID, off] -- encoded as byte[20])
+        if (metaBase >= 0) {
+          meta.putLong(metaBase, blobUUID.getMostSignificantBits());
+          meta.putLong(metaBase + 8, blobUUID.getLeastSignificantBits());
+          // Commit: blockIdx != -1 acts as the "entry is valid" signal.
+          meta.putInt(metaBase + 16, blockIdx);
+        }
       } finally {
         l.unlock(stamp);
       }
@@ -700,6 +710,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       long uuidLsb = metaBuf.getLong(base + 8);
       if (uuidMsb == 0 && uuidLsb == 0) continue; // uninitialized entry
       int blockIdx = metaBuf.getInt(base + 16);
+      if (blockIdx == -1) continue; // in-progress write (populate() did not commit)
       ret[j++] = uuidMsb;
       ret[j++] = uuidLsb;
       ret[j++] = ((long) blockIdx << 32) | (i & 0xFFFFFFFFL);
