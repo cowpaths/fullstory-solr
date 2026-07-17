@@ -140,7 +140,7 @@ class BlockPreloader {
             () -> {
               try {
                 if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-                  if (!toPopulateVal.populated) {
+                  if (!toPopulateVal.isPopulated()) {
                     long blockOffset = blockOffsets[idx];
                     int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
                     populateBuf(
@@ -211,7 +211,7 @@ class BlockPreloader {
                 if (toPopulateVal == null) return null; // cache full — stop
                 long toPopulate = nodeHandle[0];
                 if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-                  if (!toPopulateVal.populated) {
+                  if (!toPopulateVal.isPopulated()) {
                     long blockOffset = blockOffsets[idx];
                     int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
                     populateBuf(

@@ -487,7 +487,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
      * with {@code notifyAll()}; fast-path readers check this volatile field before entering the
      * monitor.
      */
-    volatile boolean populated;
+    private volatile boolean populated;
+
+    boolean isPopulated() {
+      return populated;
+    }
 
     private volatile boolean waiting;
 
@@ -993,7 +997,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       Val v = pin(handle);
       if (v != null) {
         // Signal to callers that the pool buffer already holds valid data from a previous run;
-        // they can skip populate(). Only written from within BlockCache (enclosing class).
+        // they can skip populate(). Set before publishing the handle, so any thread that obtains
+        // this Val sees populated=true immediately and join() fast-paths to the slice without
+        // ever entering the synchronized notify machinery (which exists only for the async cold
+        // path where one thread fetches while others wait). Only written from within BlockCache.
         v.populated = true;
         outHandle[0] = handle;
         return v;

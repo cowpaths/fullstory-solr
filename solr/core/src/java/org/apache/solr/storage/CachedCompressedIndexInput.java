@@ -528,7 +528,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long extant = accessMapped.compareAndExchange(blockIdx, cached, node);
       if (extant == cached) {
         ByteBuffer buf;
-        if (nodeVal.populated) {
+        if (nodeVal.isPopulated()) {
           // Warm-start hit: pool buffer already holds valid data from a previous run.
           buf = nodeVal.join(cache);
         } else {
