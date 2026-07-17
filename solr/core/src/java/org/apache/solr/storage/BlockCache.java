@@ -1132,37 +1132,39 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * ultimately not needed (e.g. lost CAS race).
    */
   boolean close(long handle) {
-    return close(handle, false);
+    return close(handle, null);
   }
 
-  boolean close(long handle, boolean unconditional) {
+  boolean close(long handle, BlockCache.Val lostCAS) {
     Partition p = partitions[partOf(handle)];
+    boolean closed;
     Val v;
-    if (unconditional) {
-      v = null;
-      pinnedCount.decrement();
-    } else {
+    if (lostCAS == null) {
       // Read fromHot() before the close. Only relevant for the non-unconditional path where the
       // slot is in the evictable list (refCount=0); unconditional slots are pinned and not in
       // any queue.
       v = p.getPayload(handle);
-    }
-    boolean closed;
-    if (unconditional) {
+      closed = p.close(handle);
+    } else if (lostCAS.isPopulated()) {
+      p.unpin(handle, false);
+      closeSkippedPinned.increment();
+      return false;
+    } else {
+      v = null;
+      pinnedCount.decrement();
       p.closeUnconditional(handle);
       closed = true;
-    } else {
-      closed = p.close(handle);
     }
     if (closed) {
       closedCount.increment();
-      if (v != null && v.fromHot()) hotUnpinned.decrement();
+      if (v != null && v.fromHot()) {
+        hotUnpinned.decrement();
+      }
       return true;
     } else {
       // Categorize the skip to help diagnose phantom-block accumulation.
       // NOTE: racy read of refCount; accurate enough for diagnostics.
-      Val vv = p.getPayload(handle);
-      if (vv.refCount() < 0) {
+      if (v.refCount() < 0) {
         closeSkippedDead.increment();
       } else {
         closeSkippedPinned.increment();

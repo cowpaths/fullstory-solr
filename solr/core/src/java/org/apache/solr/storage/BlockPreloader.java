@@ -161,7 +161,7 @@ class BlockPreloader {
                   cache.unpin(toPopulate, false);
                 } else {
                   cache.recordCasRaceLoss();
-                  cache.close(toPopulate, true);
+                  cache.close(toPopulate, toPopulateVal);
                 }
               } finally {
                 permits.release();
@@ -233,7 +233,7 @@ class BlockPreloader {
                   cache.unpin(toPopulate, false);
                 } else {
                   cache.recordCasRaceLoss();
-                  cache.close(toPopulate, true);
+                  cache.close(toPopulate, toPopulateVal);
                 }
               }
             } finally {

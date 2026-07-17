@@ -727,7 +727,7 @@ public class AccessDirectory2 extends MMapDirectory {
         }
         in.cache.unpin(toPopulate, false);
       } else {
-        in.cache.close(toPopulate, true);
+        in.cache.close(toPopulate, toPopulateVal);
       }
       return true;
     }

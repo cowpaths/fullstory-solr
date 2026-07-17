@@ -1695,7 +1695,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                   }
                   cache.unpin(toPopulate, false);
                 } else {
-                  cache.close(toPopulate, true);
+                  cache.close(toPopulate, v);
                 }
               }
             } catch (IOException e) {
