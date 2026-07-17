@@ -264,10 +264,10 @@ class Cache2<V extends Cache2.Val> {
     return false;
   }
 
-  private boolean removeFromList(int slot) {
+  private void removeFromList(int slot) {
     int oldNext = reserve(slot, REMOVED_LINK);
     if (oldNext == REMOVED_LINK) {
-      return false;
+      throw new IllegalStateException("already removed");
     }
     Val vSlot = payload[slot];
     int prevSlot;
@@ -282,7 +282,6 @@ class Cache2<V extends Cache2.Val> {
     if (!NEXT_VH.compareAndSet(payload[prevSlot], RESERVED_LINK, oldNext)) {
       throw new IllegalStateException("unexpected concurrent modification during list removal");
     }
-    return true;
   }
 
   private void insertAtTail(int slot) {
@@ -449,9 +448,7 @@ class Cache2<V extends Cache2.Val> {
     if (slot == NULL_SLOT) {
       return null;
     }
-    if (!removeFromList(slot)) {
-      throw new IllegalStateException();
-    }
+    removeFromList(slot);
     // NOTE: generation increment here is safe because we hold an effective lock
     // on this slot here and this is the only place generation is modified.
     Val p = payload[slot];
@@ -475,18 +472,15 @@ class Cache2<V extends Cache2.Val> {
     int ret = (int) REF_COUNT.compareAndExchange(p, 0, -1);
     if (ret == 0) {
       // successfully closed
-      if (removeFromList(slot)) {
-        // Keep rc=-1 during insertion so acquireTail cannot grab this slot mid-insertion
-        // (its CAS(0→-1) won't match rc=-1). Bump generation before the volatile p.reset(0) so
-        // that any handle read before close() fails pin()'s pre-CAS generation check and
-        // cannot successfully pin — or hang in join() — after this slot has been recycled.
-        p.reset();
-        ++p.generation;
-        insertAtTail(slot);
-        p.reset(0); // makes reclaimable
-      } else {
-        throw new IllegalStateException();
-      }
+      removeFromList(slot);
+      // Keep rc=-1 during insertion so acquireTail cannot grab this slot mid-insertion
+      // (its CAS(0→-1) won't match rc=-1). Bump generation before the volatile p.reset(0) so
+      // that any handle read before close() fails pin()'s pre-CAS generation check and
+      // cannot successfully pin — or hang in join() — after this slot has been recycled.
+      p.reset();
+      ++p.generation;
+      insertAtTail(slot);
+      p.reset(0); // makes reclaimable
     }
     return ret;
   }
