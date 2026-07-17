@@ -522,35 +522,40 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
 
     long[] nodeHandle = new long[1];
-    BlockCache.Val nodeVal = cache.acquireNode(nodeHandle);
+    BlockCache.Val nodeVal = cache.acquireNode(nodeHandle, blobUUID, blockIdx);
     if (nodeVal != null) {
       long node = nodeHandle[0];
       long extant = accessMapped.compareAndExchange(blockIdx, cached, node);
       if (extant == cached) {
-        // We won the race: fetch from backend and populate the node.
-        if (blockIdx == 0) onFirstBlockMiss();
-        // long start = System.nanoTime();
-        cache.recordDecompressionDemand();
-        if (VERBOSE && log.isInfoEnabled()) {
-          log.info(
-              "demand {} of {}/{}/{} {} [{}]",
-              blockIdx,
-              sliceFirstBlockIdx,
-              sliceLastBlockIdx,
-              lastBlockIdx,
-              this,
-              stackTraceId());
-        }
         ByteBuffer buf;
-        try {
-          byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
-          buf = nodeVal.populate(heapBuf, 0, decompressedLen, blobUUID, blockIdx, cache);
-        } catch (Throwable t) {
-          nodeVal.completeExceptionally(t);
-          accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);
-          cache.unpin(node);
-          cache.close(node);
-          throw unwrapException(t);
+        if (nodeVal.populated) {
+          // Warm-start hit: pool buffer already holds valid data from a previous run.
+          buf = nodeVal.join(cache);
+        } else {
+          // We won the race: fetch from backend and populate the node.
+          if (blockIdx == 0) onFirstBlockMiss();
+          // long start = System.nanoTime();
+          cache.recordDecompressionDemand();
+          if (VERBOSE && log.isInfoEnabled()) {
+            log.info(
+                "demand {} of {}/{}/{} {} [{}]",
+                blockIdx,
+                sliceFirstBlockIdx,
+                sliceLastBlockIdx,
+                lastBlockIdx,
+                this,
+                stackTraceId());
+          }
+          try {
+            byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
+            buf = nodeVal.populate(heapBuf, 0, decompressedLen, blobUUID, blockIdx, cache);
+          } catch (Throwable t) {
+            nodeVal.completeExceptionally(t);
+            accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);
+            cache.unpin(node);
+            cache.close(node);
+            throw unwrapException(t);
+          }
         }
         setCurrentNode(node, blockIdx, 2, 0 /* System.nanoTime() - start */);
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);

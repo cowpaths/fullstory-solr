@@ -129,7 +129,7 @@ class BlockPreloader {
     if ((extant == BlockCache.NULL_HANDLE || !cache.pinnable(extant))
         && permits.tryAcquire(timeoutMillis)) {
       long[] nodeHandle = new long[1];
-      BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle);
+      BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle, blobUUID, idx);
       if (toPopulateVal == null) {
         permits.release();
         return false;
@@ -140,19 +140,21 @@ class BlockPreloader {
             () -> {
               try {
                 if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-                  long blockOffset = blockOffsets[idx];
-                  int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
-                  populateBuf(
-                      blockOffset,
-                      compressedLen,
-                      idx,
-                      decompressedLen,
-                      toPopulate,
-                      toPopulateVal,
-                      accessMapped,
-                      cache,
-                      supplier,
-                      blobUUID);
+                  if (!toPopulateVal.populated) {
+                    long blockOffset = blockOffsets[idx];
+                    int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
+                    populateBuf(
+                        blockOffset,
+                        compressedLen,
+                        idx,
+                        decompressedLen,
+                        toPopulate,
+                        toPopulateVal,
+                        accessMapped,
+                        cache,
+                        supplier,
+                        blobUUID);
+                  }
                   // NOTE: don't unpin in `finally`! populateBuf already unpins on the error path.
                   cache.unpin(toPopulate, false);
                 } else {
@@ -205,23 +207,25 @@ class BlockPreloader {
                 long extant = accessMapped.get(idx);
                 if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) continue;
                 long[] nodeHandle = new long[1];
-                BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle);
+                BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle, blobUUID, idx);
                 if (toPopulateVal == null) return null; // cache full — stop
                 long toPopulate = nodeHandle[0];
-                long blockOffset = blockOffsets[idx];
-                int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
                 if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-                  populateBuf(
-                      blockOffset,
-                      compressedLen,
-                      idx,
-                      decompressedLen.applyAsInt(idx),
-                      toPopulate,
-                      toPopulateVal,
-                      accessMapped,
-                      cache,
-                      supplier,
-                      blobUUID);
+                  if (!toPopulateVal.populated) {
+                    long blockOffset = blockOffsets[idx];
+                    int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
+                    populateBuf(
+                        blockOffset,
+                        compressedLen,
+                        idx,
+                        decompressedLen.applyAsInt(idx),
+                        toPopulate,
+                        toPopulateVal,
+                        accessMapped,
+                        cache,
+                        supplier,
+                        blobUUID);
+                  }
                   cache.unpin(toPopulate, false);
                 } else {
                   cache.recordCasRaceLoss();

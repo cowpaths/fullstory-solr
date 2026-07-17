@@ -487,7 +487,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
      * with {@code notifyAll()}; fast-path readers check this volatile field before entering the
      * monitor.
      */
-    private volatile boolean populated;
+    volatile boolean populated;
 
     private volatile boolean waiting;
 
@@ -992,6 +992,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       long handle = Integer.toUnsignedLong(handleLow);
       Val v = pin(handle);
       if (v != null) {
+        // Signal to callers that the pool buffer already holds valid data from a previous run;
+        // they can skip populate(). Only written from within BlockCache (enclosing class).
+        v.populated = true;
         outHandle[0] = handle;
         return v;
       }
