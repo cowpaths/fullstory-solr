@@ -975,17 +975,26 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   /**
    * Variant of {@link #acquireNode(long[])} that first checks the extant map for a pre-existing
-   * warm cache entry matching {@code (blobUUID, blockIdx)}. On a hit, the pool buffer at the
-   * returned {@link Val}'s {@code cacheBlockOrd} already contains valid decompressed data, so the
-   * caller can skip the fetch+decompress step.
+   * warm cache entry matching {@code (blobUUID, blockIdx)}. On a hit, the returned {@link Val}
+   * already contains valid decompressed data, so the caller can skip the fetch+decompress step.
    *
    * <p>Falls through to the normal eviction-based acquire if the extant map has no entry or the
    * backing file was not present at startup (ephemeral cache).
    */
   Val acquireNode(long[] outHandle, UUID blobUUID, int blockIdx) {
-    int cacheBlockOrd = extantMapLookup(blobUUID, blockIdx);
-    if (cacheBlockOrd >= 0) {
-      // TODO: acquire the specific Val at cacheBlockOrd, set outHandle, return pre-populated.
+    int handleLow = extantMapLookup(blobUUID, blockIdx);
+    if (handleLow > 0) {
+      // Attempt to pin the pre-existing slot at generation=0 (upper 32 bits zero). If the slot
+      // was evicted and recycled since startup, its generation will have advanced past 0 and
+      // pin() returns null, in which case we fall through to the normal eviction-based acquire.
+      // Generation wraps back to 0 after 2^32 evictions of the same slot (~4 billion), which
+      // is not a realistic scenario within a single process lifetime.
+      long handle = Integer.toUnsignedLong(handleLow);
+      Val v = pin(handle);
+      if (v != null) {
+        outHandle[0] = handle;
+        return v;
+      }
     }
     return acquireNode(outHandle);
   }
@@ -993,7 +1002,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   /**
    * Binary-searches {@link #extantMap} for {@code (blobUUID, blockIdx)}.
    *
-   * @return the {@code cacheBlockOrd} if found, or {@code -1}
+   * @return the handle's low 32 bits ({@code (partIdx << PART_SHIFT) | localSlot}) if found, or
+   *     {@code -1}
    */
   private int extantMapLookup(UUID blobUUID, int blockIdx) {
     long searchMsb = blobUUID.getMostSignificantBits();
@@ -1010,7 +1020,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       } else if (cmp > 0) {
         hi = mid - 1;
       } else {
-        return (int) extantMap[base + 2]; // cacheBlockOrd in low 32 bits
+        return (int) extantMap[base + 2]; // handleLow32 in low 32 bits
       }
     }
     return -1;
