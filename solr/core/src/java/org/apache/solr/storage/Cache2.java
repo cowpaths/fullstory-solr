@@ -465,29 +465,30 @@ class Cache2<V extends Cache2.Val> {
   /**
    * Explicitly releases a slot when its owning resource is closed. If the slot is still evictable
    * (refCount==0 and in the list), marks it dead and recycles it back to the tail, making it the
-   * highest-priority reuse candidate. Returns {@code true} if the slot was successfully released,
-   * {@code false} if the slot was already evicted or pinned (best-effort; caller need not retry).
+   * highest-priority reuse candidate. Returns {@code 0} if the slot was successfully released,
+   * existing refCount if the slot was already evicted or pinned (best-effort; caller need not
+   * retry).
    */
-  boolean close(long handle) {
+  int close(long handle) {
     int slot = (int) handle & SLOT_MASK;
     Val p = payload[slot];
-    if (!REF_COUNT.compareAndSet(p, 0, -1)) {
-      // pinned or already dead — best effort, bail
-      return false;
+    int ret = (int) REF_COUNT.compareAndExchange(p, 0, -1);
+    if (ret == 0) {
+      // successfully closed
+      if (removeFromList(slot)) {
+        // Keep rc=-1 during insertion so acquireTail cannot grab this slot mid-insertion
+        // (its CAS(0→-1) won't match rc=-1). Bump generation before the volatile p.reset(0) so
+        // that any handle read before close() fails pin()'s pre-CAS generation check and
+        // cannot successfully pin — or hang in join() — after this slot has been recycled.
+        p.reset();
+        ++p.generation;
+        insertAtTail(slot);
+        p.reset(0); // makes reclaimable
+      } else {
+        throw new IllegalStateException();
+      }
     }
-    if (removeFromList(slot)) {
-      // Keep rc=-1 during insertion so acquireTail cannot grab this slot mid-insertion
-      // (its CAS(0→-1) won't match rc=-1). Bump generation before the volatile p.reset(0) so
-      // that any handle read before close() fails pin()'s pre-CAS generation check and
-      // cannot successfully pin — or hang in join() — after this slot has been recycled.
-      p.reset();
-      ++p.generation;
-      insertAtTail(slot);
-      p.reset(0); // makes reclaimable
-    } else {
-      throw new IllegalStateException();
-    }
-    return true;
+    return ret;
   }
 
   /**
