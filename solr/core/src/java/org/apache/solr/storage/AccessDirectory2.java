@@ -29,7 +29,6 @@ import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
@@ -144,18 +143,12 @@ public class AccessDirectory2 extends MMapDirectory {
 
   private UUID uuidForFile(String name) {
     if (uuidMsb == 0 && uuidLsb == 0) {
-      return UUID.nameUUIDFromBytes(
-          compressedPath
-              .resolve(name)
-              .toAbsolutePath()
-              .normalize()
-              .toString()
-              .getBytes(StandardCharsets.UTF_8));
+      // No directory-level UUID, fallback to absolutePath string
+      return BlockCache.rawMd5UUID(
+          compressedPath.resolve(name).toAbsolutePath().normalize().toString());
     } else {
-      UUID nameOnly = UUID.nameUUIDFromBytes(name.getBytes(StandardCharsets.UTF_8));
-      return new UUID(
-          uuidMsb ^ nameOnly.getMostSignificantBits(),
-          uuidLsb ^ nameOnly.getLeastSignificantBits());
+      ByteBuffer hash = BlockCache.rawMd5(name);
+      return new UUID(uuidMsb ^ hash.getLong(), uuidLsb ^ hash.getLong());
     }
   }
 

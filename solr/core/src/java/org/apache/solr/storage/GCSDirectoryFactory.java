@@ -264,9 +264,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     GCSDirectory.BlobLifecycleCoordinator createBlobCoordinator(Path localPath) throws IOException {
       UUID refId = BlockCache.refIdFromCoreProperties(coreRootDirectory, localPath);
       if (refId == null) {
-        refId =
-            UUID.nameUUIDFromBytes(
-                localPath.toAbsolutePath().normalize().toString().getBytes(StandardCharsets.UTF_8));
+        refId = BlockCache.rawMd5UUID(localPath.toAbsolutePath().normalize().toString());
       }
       if (EnvUtils.getPropertyAsBool("solr.gcsDirectory.useZkCoordinator", false)
           && zkClient != null) {

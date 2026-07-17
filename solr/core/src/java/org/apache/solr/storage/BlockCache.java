@@ -34,6 +34,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -54,6 +56,7 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.StampedLock;
 import java.util.function.BiFunction;
 import java.util.function.Function;
+import org.apache.lucene.internal.hppc.BitMixer;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.RamUsageEstimator;
@@ -130,6 +133,25 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   /**
+   * Returns a UUID whose 128 bits are the raw MD5 digest of {@code key} (encoded as UTF-8), with no
+   * version/variant bit masking. Prefer this over {@link UUID#nameUUIDFromBytes} when the full
+   * 128-bit space matters (e.g. content-keyed cache identifiers).
+   */
+  static UUID rawMd5UUID(String key) {
+    ByteBuffer hash = rawMd5(key);
+    return new UUID(hash.getLong(), hash.getLong());
+  }
+
+  static ByteBuffer rawMd5(String val) {
+    try {
+      return ByteBuffer.wrap(
+          MessageDigest.getInstance("MD5").digest(val.getBytes(StandardCharsets.UTF_8)));
+    } catch (NoSuchAlgorithmException e) {
+      throw new AssertionError(e); // MD5 is mandated by the JVM spec
+    }
+  }
+
+  /**
    * Derives a stable, replica-unique refId from the nearest {@code core.properties} file found by
    * walking up from {@code localPath}. Returns {@code null} if no {@code core.properties} is found
    * or if it contains neither a {@code name} nor a {@code coreNodeName} property.
@@ -155,7 +177,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         }
         String relPath = dir.relativize(normalized).toString();
         String key = name + "\n" + coreNodeName + "\n" + relPath;
-        return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
+        return rawMd5UUID(key);
       }
     }
     return null;
@@ -342,10 +364,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   private static final long CACHE_VALIDATION_MAGIC =
-      UUID.nameUUIDFromBytes(
-              "org.apache.solr.storage.BlockCache#CACHE_VALIDATION_MAGIC"
-                  .getBytes(java.nio.charset.StandardCharsets.UTF_8))
-          .getMostSignificantBits();
+      rawMd5("org.apache.solr.storage.BlockCache#CACHE_VALIDATION_MAGIC").getLong();
 
   /**
    * Metadata bytes per cache block in the persistent backing file: 16-byte UUID + 4-byte blockIdx.
@@ -361,10 +380,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * startup, if {@code storedId ^ storedSig == CACHE_VALIDATION_MAGIC} the cache is valid.
    */
   private final long randomId =
-      UUID.nameUUIDFromBytes(
-              Long.toString(System.currentTimeMillis() ^ System.nanoTime())
-                  .getBytes(StandardCharsets.UTF_8))
-          .getMostSignificantBits();
+      rawMd5(
+              Long.toString(
+                  BitMixer.mixPhi(System.currentTimeMillis()) ^ BitMixer.mix(System.nanoTime())))
+          .getLong();
 
   private final StampedLock closeLock = new StampedLock();
 

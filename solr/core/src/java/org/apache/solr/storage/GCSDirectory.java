@@ -258,10 +258,7 @@ public class GCSDirectory extends SizeAwareDirectory {
    * local storage (pre-migration MMapDirectory file or tiny segment with no full blocks).
    */
   private static final long GCS_BACKED_MAGIC =
-      UUID.nameUUIDFromBytes(
-              "org.apache.solr.storage.GCSDirectory#GCS_BACKED_MAGIC"
-                  .getBytes(java.nio.charset.StandardCharsets.UTF_8))
-          .getMostSignificantBits();
+      BlockCache.rawMd5("org.apache.solr.storage.GCSDirectory#GCS_BACKED_MAGIC").getLong();
 
   private static final ByteBufferGuard.BufferCleaner UNMAP = unmapHack();
 
