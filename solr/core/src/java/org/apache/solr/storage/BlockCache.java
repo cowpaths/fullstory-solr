@@ -670,6 +670,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private final LongAdder failedPin = new LongAdder();
   private final LongAdder prepopulated = new LongAdder();
+  // Warm-start hits: acquireNode(uuid, blockIdx) found a pre-existing slot in the extant map and
+  // successfully pinned it (generation still 0). The caller skips fetch+decompress entirely.
+  private final LongAdder warmStartHits = new LongAdder();
 
   private final LongAdder outstandingHoldRefs = new LongAdder();
   private final LongAdder outstandingRefs = new LongAdder();
@@ -1057,6 +1060,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     ew.put("unpinnedBytes", totalBytes - pinnedBytes);
     ew.put("hotUnpinnedBytes", hotUnpinnedBytes);
     ew.put("prepopulated", prep);
+    ew.put("warmStartHits", warmStartHits.sum());
     ew.put("blocksDecompressedDemand", blocksDecompressedDemand.sum());
     ew.put("blocksDecompressedReadahead", blocksDecompressedReadahead.sum());
     ew.put("casRaceLoss", casRaceLoss.sum());
@@ -1092,6 +1096,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   void recordCasRaceLoss() {
     casRaceLoss.increment();
+  }
+
+  void recordWarmStartHit() {
+    warmStartHits.increment();
   }
 
   void recordFailedPin() {

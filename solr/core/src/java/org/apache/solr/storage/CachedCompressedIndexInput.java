@@ -530,6 +530,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         ByteBuffer buf;
         if (nodeVal.isPopulated()) {
           // Warm-start hit: pool buffer already holds valid data from a previous run.
+          cache.recordWarmStartHit();
           buf = nodeVal.join(cache);
         } else {
           // We won the race: fetch from backend and populate the node.

@@ -708,7 +708,9 @@ public class AccessDirectory2 extends MMapDirectory {
       if (toPopulateVal == null) return false;
       long toPopulate = nodeHandle[0];
       if (in.accessMapped.compareAndSet(idx, extant, toPopulate)) {
-        if (!toPopulateVal.isPopulated()) {
+        if (toPopulateVal.isPopulated()) {
+          in.cache.recordWarmStartHit();
+        } else {
           long blockOffset = in.blockOffsets[idx];
           int compressedLen = (int) (in.blockOffsets[idx + 1] - blockOffset);
           BlockPreloader.populateBuf(
