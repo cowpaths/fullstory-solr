@@ -187,7 +187,7 @@ public class AccessDirectory2 extends MMapDirectory {
     if (files == null) {
       files = new String[0];
     }
-    BlockingQueue<AD2IndexInput> initQueue = new ArrayBlockingQueue<>((files.length / 3) + 1);
+    BlockingQueue<AD2IndexInput> initQueue = new ArrayBlockingQueue<>(files.length + 1);
     Iterator<AD2IndexInput> initIter =
         new Iterator<AD2IndexInput>() {
           AD2IndexInput next;
