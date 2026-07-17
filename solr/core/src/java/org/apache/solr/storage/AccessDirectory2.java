@@ -704,23 +704,25 @@ public class AccessDirectory2 extends MMapDirectory {
       long extant = in.accessMapped.get(idx);
       if (extant != BlockCache.NULL_HANDLE && in.cache.pinnable(extant)) return true;
       long[] nodeHandle = new long[1];
-      BlockCache.Val toPopulateVal = in.cache.acquireNode(nodeHandle);
+      BlockCache.Val toPopulateVal = in.cache.acquireNode(nodeHandle, in.blobUUID, idx);
       if (toPopulateVal == null) return false;
       long toPopulate = nodeHandle[0];
-      long blockOffset = in.blockOffsets[idx];
-      int compressedLen = (int) (in.blockOffsets[idx + 1] - blockOffset);
       if (in.accessMapped.compareAndSet(idx, extant, toPopulate)) {
-        BlockPreloader.populateBuf(
-            blockOffset,
-            compressedLen,
-            idx,
-            in.decompressedLenFor(idx),
-            toPopulate,
-            toPopulateVal,
-            in.accessMapped,
-            in.cache,
-            in.blockSupplier,
-            in.blobUUID);
+        if (!toPopulateVal.isPopulated()) {
+          long blockOffset = in.blockOffsets[idx];
+          int compressedLen = (int) (in.blockOffsets[idx + 1] - blockOffset);
+          BlockPreloader.populateBuf(
+              blockOffset,
+              compressedLen,
+              idx,
+              in.decompressedLenFor(idx),
+              toPopulate,
+              toPopulateVal,
+              in.accessMapped,
+              in.cache,
+              in.blockSupplier,
+              in.blobUUID);
+        }
         in.cache.unpin(toPopulate, false);
       } else {
         in.cache.close(toPopulate, true);

@@ -1669,26 +1669,28 @@ public class GCSDirectory extends SizeAwareDirectory {
                   continue; // already cached — bytes discarded
                 }
                 long[] nodeHandle = new long[1];
-                BlockCache.Val v = cache.acquireNode(nodeHandle);
+                BlockCache.Val v = cache.acquireNode(nodeHandle, blobUUID, i);
                 if (v == null) {
                   return null; // cache full — stop
                 }
                 long toPopulate = nodeHandle[0];
-                int dl = decompressedLenFor.applyAsInt(i);
-                byte[] decomp = new byte[dl + 7];
-                CompressingDirectory.decompress(comp, 0, dl, decomp, 0);
                 if (accessMapped.compareAndSet(i, extant, toPopulate)) {
-                  BlockPreloader.populateBuf(
-                      bo,
-                      cl,
-                      i,
-                      dl,
-                      toPopulate,
-                      v,
-                      accessMapped,
-                      cache,
-                      (a, b, c) -> decomp,
-                      blobUUID);
+                  if (!v.isPopulated()) {
+                    int dl = decompressedLenFor.applyAsInt(i);
+                    byte[] decomp = new byte[dl + 7];
+                    CompressingDirectory.decompress(comp, 0, dl, decomp, 0);
+                    BlockPreloader.populateBuf(
+                        bo,
+                        cl,
+                        i,
+                        dl,
+                        toPopulate,
+                        v,
+                        accessMapped,
+                        cache,
+                        (a, b, c) -> decomp,
+                        blobUUID);
+                  }
                   cache.unpin(toPopulate, false);
                 } else {
                   cache.close(toPopulate, true);
