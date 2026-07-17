@@ -394,8 +394,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private final MappedByteBuffer metaBuf;
 
   /**
-   * Sorted triplets {@code [uuidMsb, uuidLsb, (blockIdx << 32 | cacheBlockOrd)]} for binary-search
-   * lookup of pre-existing valid cache entries on startup. Empty for ephemeral or fresh caches.
+   * Sorted triplets {@code [uuidMsb, uuidLsb, (blockIdx << 32 | handleLow32)]} for binary-search
+   * lookup of pre-existing valid cache entries on startup. {@code handleLow32} encodes {@code
+   * (partIdx << PART_SHIFT) | localSlot} and can be passed directly to {@link #pin} with
+   * generation=0 in the upper 32 bits. Empty for ephemeral or fresh caches.
    */
   private final long[] extantMap;
 
@@ -715,8 +717,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     long storedId = mb.getLong(trailerOffset);
     long storedSig = mb.getLong(trailerOffset + 8);
     boolean valid = (storedId ^ storedSig) == CACHE_VALIDATION_MAGIC;
+    this.partitions = distribute(nBlocks);
+    this.nPartitions = partitions.length;
     if (valid) {
-      this.extantMap = buildExtantMap(nBlocks, mb);
+      this.extantMap = buildExtantMap(nBlocks, mb, partitions);
     } else {
       log.warn(
           "BlockCache backing file {} failed validation (storedId={} sig={}); cold start",
@@ -729,8 +733,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     mb.putLong(trailerOffset, randomId);
     mb.putLong(trailerOffset + 8, 0L);
     mb.force();
-    this.partitions = distribute(nBlocks);
-    this.nPartitions = partitions.length;
     this.holdRefs3 =
         initHoldRefs3(
             nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
@@ -748,25 +750,37 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   /**
    * Reads the metadata region and returns a sorted extant map of pre-existing valid cache entries.
-   * Each entry is a triplet {@code [uuidMsb, uuidLsb, (blockIdx << 32 | cacheBlockOrd)]} sorted
-   * ascending by {@code (uuidMsb, uuidLsb)} for binary-search access in {@code acquireNode}.
+   * Each entry is a triplet {@code [uuidMsb, uuidLsb, (blockIdx << 32 | handleLow32)]} sorted
+   * ascending by {@code (uuidMsb, uuidLsb)} for binary-search access in {@code acquireNode}. {@code
+   * handleLow32} encodes {@code (partIdx << PART_SHIFT) | localSlot} for the slot that holds global
+   * block {@code i}, so the warm-start path can call {@link #pin} directly with generation=0 in the
+   * upper 32 bits.
    *
    * <p>For a 340 GiB (usable) cache the on-disk metadata is ~27 MiB; the in-memory extant map is
    * ~32 MiB. Even if never trimmed, this is acceptable steady-state overhead.
    */
-  private static long[] buildExtantMap(int nBlocks, ByteBuffer metaBuf) {
+  private static long[] buildExtantMap(int nBlocks, ByteBuffer metaBuf, Partition[] partitions) {
     long[] ret = new long[nBlocks * 3];
     int j = 0;
+    int curPart = 0;
+    int curPartStart = 0;
+    int curPartEnd = partitions[0].capacity; // exclusive; i == curPartEnd triggers advance
     for (int i = 0; i < nBlocks; i++) {
+      if (i == curPartEnd) {
+        curPartStart = curPartEnd;
+        curPartEnd += partitions[++curPart].capacity;
+      }
       int base = i * META_BYTES_PER_BLOCK;
       long uuidMsb = metaBuf.getLong(base);
       long uuidLsb = metaBuf.getLong(base + 8);
       if (uuidMsb == 0 && uuidLsb == 0) continue; // uninitialized entry
       int blockIdx = metaBuf.getInt(base + 16);
       if (blockIdx == -1) continue; // in-progress write (populate() did not commit)
+      int localSlot = i - curPartStart + 1; // 1-indexed
+      int handleLow32 = (curPart << PART_SHIFT) | localSlot;
       ret[j++] = uuidMsb;
       ret[j++] = uuidLsb;
-      ret[j++] = ((long) blockIdx << 32) | (i & 0xFFFFFFFFL);
+      ret[j++] = ((long) blockIdx << 32) | (handleLow32 & 0xFFFFFFFFL);
     }
     long[] valid = j == ret.length ? ret : Arrays.copyOf(ret, j);
     sortExtantMap(valid, j / 3);

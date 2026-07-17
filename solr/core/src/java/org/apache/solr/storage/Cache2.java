@@ -156,7 +156,7 @@ class Cache2<V extends Cache2.Val> {
   // Payload array (covers real slots 0..capacity and sentinel slots)
   // ---------------------------------------------------------------------------
 
-  private final int capacity;
+  final int capacity;
 
   /**
    * Payload for all slot indices 0..arrayLen-1. Slot 0 is reserved (null). Real slots are
