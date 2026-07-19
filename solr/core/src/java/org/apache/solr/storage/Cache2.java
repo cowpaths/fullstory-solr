@@ -392,25 +392,32 @@ class Cache2<V extends Cache2.Val> {
     Val p = payload[slot];
     int rc = p.refCount;
     for (; ; ) {
-      if (rc == 1) {
-        int witness = (int) REF_COUNT.compareAndExchange(p, 1, UNPIN_SENTINEL);
-        if (witness == 1) {
-          boolean toHot = insertAtHead(COLD_HEAD, slot, recordAccess);
-          if (!REF_COUNT.compareAndSet(p, UNPIN_SENTINEL, 0)) {
-            throw new IllegalStateException();
+      switch (rc) {
+        case 1:
+          int witness = (int) REF_COUNT.compareAndExchange(p, 1, UNPIN_SENTINEL);
+          if (witness == 1) {
+            boolean toHot = insertAtHead(COLD_HEAD, slot, recordAccess);
+            if (!REF_COUNT.compareAndSet(p, UNPIN_SENTINEL, 0)) {
+              throw new IllegalStateException();
+            }
+            return toHot ? 1 : 0;
+          } else {
+            rc = witness;
           }
-          return toHot ? 1 : 0;
-        } else {
-          rc = witness;
-        }
-      } else {
-        assert rc > 1;
-        int witness = (int) REF_COUNT.compareAndExchange(p, rc, rc - 1);
-        if (witness == rc) {
-          return -1;
-        } else {
-          rc = witness;
-        }
+          break;
+        case UNPIN_SENTINEL:
+          // Another thread won the CAS(1→UNPIN_SENTINEL) and is mid-insertAtHead; spin until it
+          // completes and clears UNPIN_SENTINEL→0, then re-read rc normally.
+          rc = p.refCount;
+          break;
+        default:
+          assert rc > 1;
+          int witness1 = (int) REF_COUNT.compareAndExchange(p, rc, rc - 1);
+          if (witness1 == rc) {
+            return -1;
+          } else {
+            rc = witness1;
+          }
       }
     }
   }
