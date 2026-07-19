@@ -680,6 +680,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private volatile SolrMetricsContext solrMetricsContext;
 
+  /** Returns the total backing-file size in bytes required to hold {@code nBlocks} blocks. */
+  static long backingFileBytes(int nBlocks) {
+    return (long) nBlocks * (COMPRESSION_BLOCK_SIZE + META_BYTES_PER_BLOCK) + TRAILER_BYTES;
+  }
+
   /**
    * Creates a new ephemeral block cache backed by a freshly-created file. The file is deleted
    * immediately after mapping and does not outlive the JVM. No metadata or trailer is maintained.

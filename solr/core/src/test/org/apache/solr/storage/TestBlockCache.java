@@ -20,14 +20,19 @@ import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZ
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Random;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.Phaser;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.util.IOUtils;
 import org.apache.solr.SolrTestCaseJ4;
@@ -141,6 +146,135 @@ public class TestBlockCache extends SolrTestCaseJ4 {
 
       cache.unpin(n2);
     }
+  }
+
+  /**
+   * Warm-start concurrent stress test: pre-populates a persistent cache, reopens it, then hammers
+   * the warm-start acquireNode path from N threads. Each thread repeatedly acquires a random block
+   * (hitting the extant map) and immediately unpins it, exercising concurrent warm-start pins and
+   * last-unpin races on the same slots.
+   */
+  public void testWarmStartStress() throws Exception {
+    final int nBlocks = 4;
+    final int N = 8;
+    final int ITERS = 1000;
+
+    Path tmpDir = createTempDir();
+    Path cachePath = tmpDir.resolve("cache.tmp");
+    // Each block gets a UUID whose LSB encodes its index; MSB is zero.
+    // extantMapLookup key = (blobUUID, blockIdx=0) per block.
+
+    // Pre-create backing file at the correct size.
+    try (FileChannel fc =
+        FileChannel.open(cachePath, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+      fc.write(ByteBuffer.wrap(new byte[1]), BlockCache.backingFileBytes(nBlocks) - 1);
+    }
+
+    // Populate pass: fill every block with a sentinel (its index).
+    try (BlockCache cache = new BlockCache(cachePath)) {
+      long[] h = new long[1];
+      byte[] sentinel = new byte[Integer.BYTES];
+      for (int idx = 0; idx < nBlocks; idx++) {
+        UUID uuid = new UUID(0, idx);
+        BlockCache.Val v = cache.acquireNode(h, uuid, 0);
+        assertNotNull(v);
+        ByteBuffer.wrap(sentinel).putInt(0, idx);
+        v.populate(sentinel, 0, Integer.BYTES, uuid, 0, cache);
+        cache.unpin(h[0]);
+      }
+    }
+
+    // Stress pass: reopen (warm start) and hammer acquireNode from N threads.
+    ExecutorService exec =
+        ExecutorUtil.newMDCAwareFixedThreadPool(
+            N, new SolrNamedThreadFactory("testWarmStartStress"));
+    @SuppressWarnings("rawtypes")
+    Future<?>[] futures = new Future[N];
+    Phaser p = new Phaser(N + 1);
+    AtomicReference<BlockCache> c = new AtomicReference<>(new BlockCache(cachePath));
+    int valCount = nBlocks + 3;
+    AtomicLongArray handles = new AtomicLongArray(valCount);
+    for (int i = 0; i < N; i++) {
+      Random r = new Random(random().nextLong());
+      futures[i] =
+          exec.submit(
+              () -> {
+                try {
+                  long[] h = new long[1];
+                  BlockCache cache;
+                  p.arriveAndAwaitAdvance();
+                  while ((cache = c.get()) != null) {
+                    for (int iter = 0; iter < 128; iter++) {
+                      int idx = r.nextInt(valCount);
+                      UUID uuid = new UUID(0, idx);
+                      long handle = handles.get(idx);
+                      BlockCache.Val v;
+                      if (handle != BlockCache.NULL_HANDLE && (v = cache.pin(handle)) != null) {
+                        ByteBuffer join = v.join(cache);
+                        assertEquals(idx, join.getInt(0));
+                        cache.unpin(handle);
+                      } else {
+                        v = cache.acquireNode(h, uuid, 0);
+                        if (v != null) {
+                          long extant = handles.compareAndExchange(idx, handle, h[0]);
+                          if (extant == handle) {
+                            handle = h[0];
+                            if (v.isPopulated()) {
+                              ByteBuffer join = v.join(cache);
+                              assertEquals(idx, join.getInt(0));
+                            } else {
+                              byte[] arr =
+                                  ByteBuffer.allocate(Integer.BYTES).putInt(0, idx).array();
+                              v.populate(arr, 0, Integer.BYTES, uuid, 0, cache);
+                            }
+                          } else {
+                            cache.close(h[0], v);
+                            v = cache.pin(extant);
+                            if (v == null) {
+                              continue; // whatever
+                            }
+                            handle = extant;
+                            ByteBuffer join = v.join(cache);
+                            assertEquals(idx, join.getInt(0));
+                          }
+                          cache.unpin(handle);
+                        }
+                      }
+                    }
+                    p.arriveAndAwaitAdvance();
+                    p.arriveAndAwaitAdvance();
+                  }
+                  return null;
+                } catch (Throwable t) {
+                  t.printStackTrace(System.err);
+                  throw t;
+                }
+              });
+    }
+    p.arriveAndAwaitAdvance();
+    for (int i = 1; i <= ITERS; i++) {
+      p.arriveAndAwaitAdvance();
+      BlockCache cache = c.getAndSet(null);
+      cache.close();
+      if (i == ITERS) {
+        c.set(null);
+        p.arriveAndAwaitAdvance();
+      } else {
+        // Clear stale handles before making the new cache visible: after reopen all slots reset
+        // to generation=0, so any handle from the old cache whose generation now matches would
+        // pass pin()'s generation check and double-pin a freshly-acquired slot.
+        for (int k = valCount - 1; k >= 0; k--) {
+          handles.set(k, BlockCache.NULL_HANDLE);
+        }
+        c.set(new BlockCache(cachePath));
+        p.arrive();
+      }
+    }
+    for (Future<?> f : futures) {
+      f.get();
+    }
+    exec.shutdown();
+    assertTrue(exec.awaitTermination(5, TimeUnit.SECONDS));
   }
 
   // ---------------------------------------------------------------------------

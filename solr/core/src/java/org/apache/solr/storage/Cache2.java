@@ -84,16 +84,8 @@ class Cache2<V extends Cache2.Val> {
       this.refCount = initialRefCount;
     }
 
-    int refCount() {
-      return refCount;
-    }
-
     void reset() {
       // no-op default impl;
-    }
-
-    final void reset(int newRefCount) {
-      refCount = newRefCount;
     }
   }
 
@@ -375,8 +367,13 @@ class Cache2<V extends Cache2.Val> {
     int slot = (int) handle & SLOT_MASK;
     int expectedGen = (int) (handle >>> 32);
     Val p = payload[slot];
-    int rc = p.refCount;
-    return rc != -1 && rc != UNPIN_SENTINEL && p.generation == expectedGen;
+    switch (p.refCount) {
+      case UNPIN_SENTINEL:
+      case -1:
+        return false;
+      default:
+        return p.generation == expectedGen;
+    }
   }
 
   /**
@@ -392,32 +389,25 @@ class Cache2<V extends Cache2.Val> {
     Val p = payload[slot];
     int rc = p.refCount;
     for (; ; ) {
-      switch (rc) {
-        case 1:
-          int witness = (int) REF_COUNT.compareAndExchange(p, 1, UNPIN_SENTINEL);
-          if (witness == 1) {
-            boolean toHot = insertAtHead(COLD_HEAD, slot, recordAccess);
-            if (!REF_COUNT.compareAndSet(p, UNPIN_SENTINEL, 0)) {
-              throw new IllegalStateException();
-            }
-            return toHot ? 1 : 0;
-          } else {
-            rc = witness;
+      if (rc == 1) {
+        int witness = (int) REF_COUNT.compareAndExchange(p, 1, UNPIN_SENTINEL);
+        if (witness == 1) {
+          boolean toHot = insertAtHead(COLD_HEAD, slot, recordAccess);
+          if (!REF_COUNT.compareAndSet(p, UNPIN_SENTINEL, 0)) {
+            throw new IllegalStateException();
           }
-          break;
-        case UNPIN_SENTINEL:
-          // Another thread won the CAS(1→UNPIN_SENTINEL) and is mid-insertAtHead; spin until it
-          // completes and clears UNPIN_SENTINEL→0, then re-read rc normally.
-          rc = p.refCount;
-          break;
-        default:
-          assert rc > 1;
-          int witness1 = (int) REF_COUNT.compareAndExchange(p, rc, rc - 1);
-          if (witness1 == rc) {
-            return -1;
-          } else {
-            rc = witness1;
-          }
+          return toHot ? 1 : 0;
+        } else {
+          rc = witness;
+        }
+      } else {
+        assert rc > 1 : "unexpected refCount: " + rc;
+        int witness1 = (int) REF_COUNT.compareAndExchange(p, rc, rc - 1);
+        if (witness1 == rc) {
+          return -1;
+        } else {
+          rc = witness1;
+        }
       }
     }
   }
@@ -461,7 +451,9 @@ class Cache2<V extends Cache2.Val> {
     Val p = payload[slot];
     int newGen = ++p.generation;
     p.reset();
-    p.reset(1);
+    if (!REF_COUNT.compareAndSet(p, -1, 1)) {
+      throw new IllegalStateException();
+    }
     outHandle[0] = (long) newGen << 32 | slot;
     return (V) p;
   }
@@ -487,21 +479,52 @@ class Cache2<V extends Cache2.Val> {
       p.reset();
       ++p.generation;
       insertAtTail(slot);
-      p.reset(0); // makes reclaimable
+      // refCount -> 0 makes reclaimable
+      if (!REF_COUNT.compareAndSet(p, -1, 0)) {
+        throw new IllegalStateException();
+      }
     }
     return ret;
   }
 
   /**
-   * Unconditionally recycles a slot back to the tail. Used when a slot was acquired (pinned,
-   * refCount=1) but ultimately not needed (e.g. lost CAS race).
+   * Recycles a slot back to the tail of the eviction list. Used when a slot was acquired (pinned,
+   * refCount=1 from acquireNode) but ultimately not needed (e.g. lost CAS race).
    *
-   * <p>Only call if the caller is the only possible owner of a pin on this slot.
+   * <p>Normally the caller is the only pinner, but a stale {@link #pin} that passed its pre-CAS
+   * generation check before the slot was recycled may have raced and bumped refCount above 1. In
+   * that case we decrement our own pin and return; the stale pinner's post-CAS generation mismatch
+   * will call {@link #unpin} and drive refCount to 0, reinserting the slot into the LRU.
    */
   void closeUnconditional(long handle) {
     int slot = (int) handle & SLOT_MASK;
-    payload[slot].reset(0);
-    insertAtTail(slot);
+    Val v = payload[slot];
+    int rc = v.refCount;
+    for (; ; ) {
+      if (rc == 1) {
+        // Sole holder: use -1 as intermediate to block acquireTail during tail insertion.
+        int witness = (int) REF_COUNT.compareAndExchange(v, 1, -1);
+        if (witness == 1) {
+          insertAtTail(slot);
+          if (!REF_COUNT.compareAndSet(v, -1, 0)) {
+            throw new IllegalStateException("rc changed during insertAtTail in closeUnconditional");
+          }
+          return;
+        }
+        rc = witness;
+      } else if (rc > 1) {
+        // A stale pin() raced: its CAS retry loop incremented rc past 1 before its post-CAS
+        // generation check could call unpin(). Decrement our own pin and return; the stale
+        // pinner's subsequent unpin() will see rc==1 and reinstate this slot in the LRU.
+        int witness = (int) REF_COUNT.compareAndExchange(v, rc, rc - 1);
+        if (witness == rc) {
+          return;
+        }
+        rc = witness;
+      } else {
+        throw new IllegalStateException("unexpected rc=" + rc + " in closeUnconditional");
+      }
+    }
   }
 
   static class TsVal extends Val {
