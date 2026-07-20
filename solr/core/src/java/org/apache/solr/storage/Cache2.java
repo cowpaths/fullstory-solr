@@ -402,11 +402,11 @@ class Cache2<V extends Cache2.Val> {
         }
       } else {
         assert rc > 1 : "unexpected refCount: " + rc;
-        int witness1 = (int) REF_COUNT.compareAndExchange(p, rc, rc - 1);
-        if (witness1 == rc) {
+        int witness = (int) REF_COUNT.compareAndExchange(p, rc, rc - 1);
+        if (witness == rc) {
           return -1;
         } else {
-          rc = witness1;
+          rc = witness;
         }
       }
     }
