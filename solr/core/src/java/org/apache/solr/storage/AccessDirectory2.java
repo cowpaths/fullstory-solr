@@ -587,7 +587,7 @@ public class AccessDirectory2 extends MMapDirectory {
       blockSupplier =
           (blockOffset, compressedLen, decompressedLen) -> {
             long stamp = supplyLock.tryReadLock();
-            if (stamp == 0) throw new AlreadyClosedException("compressed buffers closed: " + this);
+            if (stamp == 0) throw new IOException("compressed buffers closed: " + this);
             try {
               return supplyFromBuffers(
                   compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);

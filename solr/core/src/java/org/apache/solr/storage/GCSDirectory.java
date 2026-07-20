@@ -1589,6 +1589,8 @@ public class GCSDirectory extends SizeAwareDirectory {
                   + (pos + compBuf.position()));
         }
       }
+    } catch (RuntimeException e) {
+      throw new IOException("GCS read error in blob " + blobName, e);
     } finally {
       channelSemaphore.release();
     }

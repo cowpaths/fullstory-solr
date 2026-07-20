@@ -163,6 +163,10 @@ class BlockPreloader {
                   cache.recordCasRaceLoss();
                   cache.close(toPopulate, toPopulateVal);
                 }
+              } catch (Throwable t) {
+                if (!(t instanceof IOException))
+                  log.error("Unexpected exception in async preload task", t);
+                throw t;
               } finally {
                 permits.release();
               }
@@ -236,6 +240,10 @@ class BlockPreloader {
                   cache.close(toPopulate, toPopulateVal);
                 }
               }
+            } catch (Throwable t) {
+              if (!(t instanceof IOException))
+                log.error("Unexpected exception in async preload task", t);
+              throw t;
             } finally {
               permits.release();
             }
