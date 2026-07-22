@@ -56,6 +56,9 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
   /** HTTP status code returned by GCS when an {@code generationMatch} precondition fails. */
   private static final int HTTP_PRECONDITION_FAILED = 412;
 
+  /** HTTP status code returned by GCS when an object (or a specific generation) is not found. */
+  private static final int HTTP_NOT_FOUND = 404;
+
   private final Storage storage;
   private final String metadataBucket;
 
@@ -99,7 +102,19 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
           }
         }
       }
-      byte[] existing = blob.getContent();
+      byte[] existing;
+      try {
+        existing = blob.getContent();
+      } catch (StorageException e) {
+        if (e.getCode() != HTTP_NOT_FOUND) {
+          throw new IOException("Failed to register batch " + segUUID, e);
+        }
+        // storage.get() encodes the object's generation ID into the Blob handle; blob.getContent()
+        // fetches that exact generation. If another writer overwrote the object between our get()
+        // and here, the old generation is gone and GCS returns NOT_FOUND. Our generation-pinned
+        // write precondition would also fail, so discard this handle and retry from scratch.
+        continue;
+      }
       byte[] merged = BlobMetadataCodec.mergeInto(existing, refId, sortedBlobs);
       if (merged == existing) {
         return; // Already registered; nothing to do.
@@ -125,7 +140,17 @@ public class GcsBlobLifecycleCoordinator implements GCSDirectory.BlobLifecycleCo
       if (blob == null) {
         return Collections.emptyList(); // Already cleaned up.
       }
-      byte[] existing = blob.getContent();
+      byte[] existing;
+      try {
+        existing = blob.getContent();
+      } catch (StorageException e) {
+        if (e.getCode() != HTTP_NOT_FOUND) {
+          throw new IOException("Failed to release batch " + segUUID, e);
+        }
+        // Generation mismatch: the object was overwritten between storage.get() and here.
+        // Our generation-pinned write precondition would fail anyway; retry from scratch.
+        continue;
+      }
       byte[] updated = BlobMetadataCodec.removeRef(existing, refId);
       if (updated == existing) {
         return Collections.emptyList(); // Our ref not present.
