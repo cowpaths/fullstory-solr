@@ -296,22 +296,24 @@ class BlockPreloader {
    * Parses a Lucene {@code .cfe} compound-entry file and returns the block index (within the
    * corresponding {@code .cfs} blob) of the first compressed block of each logical sub-file. Block
    * indices are computed as {@code subFileByteOffset >> COMPRESSION_BLOCK_SHIFT}. Duplicate and
-   * out-of-order indices are suppressed.
+   * out-of-order indices are suppressed. Only indices in {@code [0, gcsBlockCount)} are returned;
+   * indices falling in locally-owned blocks are omitted.
    *
    * @param dir the {@link Directory} to read the {@code .cfe} from (read access only)
    * @param cfeName the name of the {@code .cfe} file
+   * @param gcsBlockCount number of blocks stored in GCS (exclusive upper bound on returned indices)
    * @return sorted, deduplicated list of block indices; empty list on parse failure
    */
-  static IntArrayList parseCfeBlockIndexes(Directory dir, String cfeName) {
+  static IntArrayList parseCfeBlockIndexes(Directory dir, String cfeName, int gcsBlockCount) {
     try (IndexInput cfeIn = dir.openInput(cfeName, IOContext.READONCE)) {
-      return parseCfeBlockIndexes(cfeIn);
+      return parseCfeBlockIndexes(cfeIn, gcsBlockCount);
     } catch (IOException e) {
       log.debug("parseCfeBlockIndexes: failed to parse {}", cfeName, e);
     }
     return new IntArrayList();
   }
 
-  static IntArrayList parseCfeBlockIndexes(IndexInput cfeIn) {
+  static IntArrayList parseCfeBlockIndexes(IndexInput cfeIn, int gcsBlockCount) {
     IntArrayList blockIndexes = new IntArrayList(16);
     try {
       if (CodecUtil.readBEInt(cfeIn) != CodecUtil.CODEC_MAGIC) return blockIndexes;
@@ -326,6 +328,7 @@ class BlockPreloader {
         long offset = cfeIn.readLong(); // byte offset of this sub-file within the .cfs data
         cfeIn.readLong(); // length — discard
         int offsetBlock = (int) (offset >> COMPRESSION_BLOCK_SHIFT);
+        if (offsetBlock >= gcsBlockCount) continue; // locally-owned block — not in GCS
         if (offsetBlock > last) {
           blockIndexes.add(offsetBlock);
           last = offsetBlock;

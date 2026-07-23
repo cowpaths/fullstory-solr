@@ -1316,7 +1316,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                       blockOffsetsArr,
                       accessMapped,
                       0,
-                      tailLen > 0));
+                      tailLen > 0 ? 1 : 0));
             }
           }
         }
@@ -1378,7 +1378,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     private final AtomicInteger refCount;
     private final long[] blockOffsets;
     private final AtomicLongArray accessMapped;
-    private final boolean hasTail;
+    private final int ownedBlockCount;
     private final CompletableFuture<ByteBuffer> origMapping = new CompletableFuture<>();
     private final ByteBufferGuard guard = new ByteBufferGuard("gcsLocalFile", UNMAP);
     private Runnable pendingDeletion;
@@ -1389,13 +1389,13 @@ public class GCSDirectory extends SizeAwareDirectory {
         long[] blockOffsets,
         AtomicLongArray accessMapped,
         int initialRefCount,
-        boolean hasTail) {
+        int ownedBlockCount) {
       this.segUUID = segUUID;
       this.segName = segName;
       this.blockOffsets = blockOffsets;
       this.accessMapped = accessMapped;
       this.refCount = new AtomicInteger(initialRefCount);
-      this.hasTail = hasTail;
+      this.ownedBlockCount = ownedBlockCount;
       // origMapping is completed by the winner after blockOffsets is fully populated, so that
       // non-winners use origMapping.join() as a publication barrier for blockOffsets.
     }
@@ -1407,10 +1407,10 @@ public class GCSDirectory extends SizeAwareDirectory {
         newAccessMapped.setPlain(i, accessMapped.getPlain(i)); // plain/best-effort
       }
       BlocksStruct copy =
-          new BlocksStruct(segUUID, segName, blockOffsets, newAccessMapped, 0, hasTail);
+          new BlocksStruct(segUUID, segName, blockOffsets, newAccessMapped, 0, ownedBlockCount);
       // blockOffsets is already populated in the copy; complete immediately so any re-win winner
       // (and non-winners racing a re-win) see the barrier as already cleared.
-      if (!hasTail) {
+      if (ownedBlockCount == 0) {
         copy.origMapping.complete(null);
       }
       return copy;
@@ -1444,7 +1444,8 @@ public class GCSDirectory extends SizeAwareDirectory {
                 UUID blob = blobs.keySet().iterator().next();
                 BlocksStruct blocks = pendingNodes.get(blob);
                 if (blocks != null) {
-                  IntArrayList blockIndexes = parseCfeBlockIndexes(cfeName);
+                  int gcsBlockCount = blocks.accessMapped.length() - blocks.ownedBlockCount;
+                  IntArrayList blockIndexes = parseCfeBlockIndexes(cfeName, gcsBlockCount);
                   BlockPreloader.BlockSupplier blobS = supplier(blob.toString());
                   if (fp == null) {
                     for (IntCursor i : blockIndexes) {
@@ -1533,8 +1534,8 @@ public class GCSDirectory extends SizeAwareDirectory {
    * of the first block of each logical sub-file. Block indices are computed as {@code subFileOffset
    * >> COMPRESSION_BLOCK_SHIFT}.
    */
-  private IntArrayList parseCfeBlockIndexes(String cfeName) {
-    return BlockPreloader.parseCfeBlockIndexes(this, cfeName);
+  private IntArrayList parseCfeBlockIndexes(String cfeName, int gcsBlockCount) {
+    return BlockPreloader.parseCfeBlockIndexes(this, cfeName, gcsBlockCount);
   }
 
   private boolean ensureLoaded(
@@ -1839,7 +1840,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                           new long[blockCount + 1],
                           new AtomicLongArray(blockCount),
                           1,
-                          hasTail);
+                          hasTail ? 1 : 0);
                 } else if (v.refCount.getAndIncrement() == 0) {
                   winType[0] = 2;
                 }
@@ -1988,7 +1989,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         blockBuf.limit(blockEnd).position(blockStart);
         ownedBlocks[i] = blockBuf.slice().order(ByteOrder.LITTLE_ENDIAN);
       }
-      BlocksStruct bs = new BlocksStruct(null, null, null, null, 0, hasTail);
+      BlocksStruct bs = new BlocksStruct(null, null, null, null, 0, hasTail ? 1 : 0);
       bs.origMapping.complete(content);
       return new AlwaysMappedParams(len, bs, ownedBlocks);
     }
@@ -2101,7 +2102,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           (k, v) -> {
             int outstandingRefs = v.refCount.decrementAndGet();
             if (outstandingRefs == 0) {
-              toUnmap[0] = v.hasTail ? v.origMapping : null;
+              toUnmap[0] = v.ownedBlockCount > 0 ? v.origMapping : null;
               if (v.pendingDeletion == null) {
                 // file has not yet been deleted, and could be re-opened.
                 // `v.copy()` keeps non-local (cached) mappings only.
