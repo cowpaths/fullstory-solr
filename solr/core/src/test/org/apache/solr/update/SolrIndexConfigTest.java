@@ -55,6 +55,8 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
       "solrconfig-concurrentmergescheduler.xml";
   private static final String solrConfigFileNameSortingMergePolicyFactory =
       "solrconfig-sortingmergepolicyfactory.xml";
+  private static final String solrConfigFileNamePreferredMergePolicyFactory =
+      "solrconfig-preferred-merge-policy-factory.xml";
   private static final String schemaFileName = "schema.xml";
 
   private static boolean compoundMergePolicySort = false;
@@ -92,6 +94,17 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
         ex.getMessage()
             .contains(
                 "Error instantiating class: 'org.apache.solr.index.DummyMergePolicyFactory'"));
+  }
+
+  @Test
+  public void testPreferredMergePolicyFactoryOverridesMergePolicyFactory() throws Exception {
+    SolrConfig solrConfig =
+        new SolrConfig(instanceDir, solrConfigFileNamePreferredMergePolicyFactory);
+    SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
+    assertNotNull(solrIndexConfig.mergePolicyFactoryInfo);
+    assertEquals(
+        org.apache.solr.index.DefaultMergePolicyFactory.class.getName(),
+        solrIndexConfig.mergePolicyFactoryInfo.className);
   }
 
   @Test
