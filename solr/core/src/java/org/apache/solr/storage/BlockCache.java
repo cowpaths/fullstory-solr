@@ -878,16 +878,16 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       Iterable<Val> poolList =
           () ->
               new Iterator<Val>() {
-                int i = from;
+                int i = to - 1;
 
                 @Override
                 public boolean hasNext() {
-                  return i < to;
+                  return i >= from;
                 }
 
                 @Override
                 public Val next() {
-                  return new Val(i++, 0);
+                  return new Val(i--, 0);
                 }
               };
       parts[i] = new Partition(count, poolList);
