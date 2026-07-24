@@ -1822,7 +1822,6 @@ public class GCSDirectory extends SizeAwareDirectory {
       int tailLen = (int) (length & COMPRESSION_BLOCK_MASK_LOW);
       boolean hasTail = tailLen > 0;
       int blockCount = (int) (((length - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-      int lastBlockIdx = blockCount - 1;
       int gcsBlockCount = hasTail ? blockCount - 1 : blockCount;
 
       String segName = IndexFileNames.parseSegmentName(offsetFile.getFileName().toString());
@@ -1926,7 +1925,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
       Boolean logicalRoot =
           offsetFile.getFileName().toString().endsWith(".cfs") ? null : Boolean.TRUE;
-      return new RootParams(blobUUID, segUUID, length, bs, logicalRoot, ownedBlocks, lastBlockIdx);
+      return new RootParams(blobUUID, segUUID, length, bs, logicalRoot, ownedBlocks, gcsBlockCount);
     }
 
     private GCSIndexInput(String resourceDescription, GCSDirectory dir, RootParams p) {
@@ -2153,7 +2152,7 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     @Override
     protected boolean ensureBlockLoaded(int blockIdx) {
-      if (blockSupplier == null) return true; // always-mapped: blocks come from ownedBufferFor
+      if (blockIdx >= ownedBlocksOffset) return true; // always-mapped or locally owned
       return dir.ensureLoaded(blockSupplier, accessMapped, blockOffsets, blockIdx, 0, blobUUID);
     }
 
