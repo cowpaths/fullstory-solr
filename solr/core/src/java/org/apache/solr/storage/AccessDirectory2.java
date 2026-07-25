@@ -284,7 +284,8 @@ public class AccessDirectory2 extends MMapDirectory {
                   inputIter, ioExec, readAheadPermits, INIT_PRELOAD_TIMEOUT_MILLIS);
               fp.add(
                   () -> {
-                    IntArrayList blockIndexes = BlockPreloader.parseCfeBlockIndexes(cfeInputFinal);
+                    IntArrayList blockIndexes =
+                        BlockPreloader.parseCfeBlockIndexes(cfeInputFinal, Integer.MAX_VALUE);
                     cfsInputFinal.preloadSerial(
                         blockIndexes.iterator(), INIT_PRELOAD_TIMEOUT_MILLIS);
                   });
