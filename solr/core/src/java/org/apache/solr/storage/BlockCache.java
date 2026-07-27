@@ -27,24 +27,18 @@ import java.lang.invoke.VarHandle;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.MappedByteBuffer;
-import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
@@ -58,6 +52,8 @@ import java.util.function.BiFunction;
 import java.util.function.Function;
 import org.apache.lucene.internal.hppc.BitMixer;
 import org.apache.lucene.store.AlreadyClosedException;
+import org.apache.lucene.store.BlockCacheMapping;
+import org.apache.lucene.store.BlockCacheMmapProvider;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
@@ -387,11 +383,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private final StampedLock closeLock = new StampedLock();
 
+  private final BlockCacheMapping mapping;
+
   /**
    * Maps the metadata+trailer region of the backing file, or {@code null} for ephemeral caches.
    * Layout: {@code [nBlocks × META_BYTES_PER_BLOCK bytes][TRAILER_BYTES]}.
    */
-  private final MappedByteBuffer metaBuf;
+  private final ByteBuffer metaBuf;
 
   /**
    * Sorted triplets {@code [uuidMsb, uuidLsb, (blockIdx << 32 | handleLow32)]} for binary-search
@@ -523,7 +521,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         throw new AlreadyClosedException("blockcache shutting down");
       }
       try {
-        MappedByteBuffer meta = c.metaBuf;
+        ByteBuffer meta = c.metaBuf;
         int metaBase = meta == null ? -1 : cacheBlockOrd * META_BYTES_PER_BLOCK;
         if (metaBase >= 0) {
           // Sentinel blockIdx=-1 written before msb for strict safety: even under adversarial
@@ -638,7 +636,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // Construction
   // ---------------------------------------------------------------------------
 
-  private final MappedByteBuffer[] pool;
+  private final ByteBuffer[] pool;
 
   private final int nPartitions;
   private final Partition[] partitions;
@@ -690,8 +688,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * immediately after mapping and does not outlive the JVM. No metadata or trailer is maintained.
    */
   public BlockCache(long targetBytes, Path backingFile) throws IOException {
-    int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
-    this.pool = initPool(nBlocks, backingFile, true);
+    BlockCacheMapping m =
+        BlockCacheMmapProvider.getDefault()
+            .openEphemeral(backingFile, COMPRESSION_BLOCK_SIZE, targetBytes);
+    int nBlocks = m.nBlocks();
+    this.mapping = m;
+    this.pool = m.dataPool();
     this.metaBuf = null;
     this.extantMap = new long[0];
     this.partitions = distribute(nBlocks);
@@ -715,15 +717,20 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * data region is still used.
    */
   public BlockCache(Path existingBackingFile) throws IOException {
-    long fileSize = Files.size(existingBackingFile);
-    long dataPerBlock = (long) COMPRESSION_BLOCK_SIZE + META_BYTES_PER_BLOCK;
-    int nBlocks = Math.toIntExact((fileSize - TRAILER_BYTES) / dataPerBlock);
+    BlockCacheMapping m =
+        BlockCacheMmapProvider.getDefault()
+            .open(existingBackingFile, COMPRESSION_BLOCK_SIZE, META_BYTES_PER_BLOCK, TRAILER_BYTES);
+    int nBlocks = m.nBlocks();
     if (nBlocks <= 0) {
-      throw new IOException(
-          "BlockCache backing file too small (" + fileSize + " bytes): " + existingBackingFile);
+      try {
+        m.close();
+      } catch (IOException ignored) {
+      }
+      throw new IOException("BlockCache backing file too small: " + existingBackingFile);
     }
-    this.pool = initPool(nBlocks, existingBackingFile, false);
-    MappedByteBuffer mb = initMetaBuf(nBlocks, existingBackingFile);
+    this.mapping = m;
+    this.pool = m.dataPool();
+    ByteBuffer mb = m.metaBuf();
     this.metaBuf = mb;
     int trailerOffset = nBlocks * META_BYTES_PER_BLOCK;
     long storedId = mb.getLong(trailerOffset);
@@ -744,7 +751,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     // Claim the file: write randomId, clear signature (prevents stale warm-start on crash).
     mb.putLong(trailerOffset, randomId);
     mb.putLong(trailerOffset + 8, 0L);
-    mb.force();
+    m.forceMetaBuf();
     this.holdRefs3 =
         initHoldRefs3(
             nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
@@ -1213,14 +1220,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           if (closeLock.tryWriteLock(10, TimeUnit.SECONDS) == 0) {
             log.warn("could not acquire lock to write cache validation; entries not persistent");
           } else {
-            for (MappedByteBuffer bb : pool) {
-              bb.force(); // sync all data
-            }
+            mapping.force(); // sync all data
             int nBlocks = (int) (totalBytes / COMPRESSION_BLOCK_SIZE);
             int trailerOffset = nBlocks * META_BYTES_PER_BLOCK;
-            metaBuf.force(); // sync all metadata
+            mapping.forceMetaBuf(); // sync all metadata
             metaBuf.putLong(trailerOffset + 8, randomId ^ CACHE_VALIDATION_MAGIC);
-            metaBuf.force(); // record validation
+            mapping.forceMetaBuf(); // record validation
           }
         }
       } catch (InterruptedException e) {
@@ -1228,75 +1233,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       } finally {
         drainTask.cancel(true);
         ExecutorUtil.shutdownAndAwaitTermination(drainExec);
+        try {
+          mapping.close();
+        } catch (IOException e) {
+          log.warn("Failed to close cache mapping", e);
+        }
       }
-    }
-    // MappedByteBuffers are not explicitly unmapped here; the JVM will release them on exit.
-  }
-
-  // ---------------------------------------------------------------------------
-  // Pool initialization
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Allocates the pool as slices of a file-backed memory-mapped region (adapted from {@code
-   * HeapCacheFbsModifier.poolFileBacked}). If {@code ephemeral} is true, the file is created fresh,
-   * sized to {@code nBlocks * COMPRESSION_BLOCK_SIZE}, and deleted immediately after mapping. If
-   * false, the file must already exist and is mmapped without truncation or deletion.
-   */
-  private static MappedByteBuffer[] initPool(final int nBlocks, Path backingFile, boolean ephemeral)
-      throws IOException {
-    final long blockSizeL = COMPRESSION_BLOCK_SIZE;
-    // Round partition size down to a 2 MiB boundary (matches HeapCacheFbsModifier convention).
-    final long partitionMaxBytes = ((MAX_BLOCKS_PER_PARTITION * blockSizeL) >> 21) << 21;
-    final int effectiveMaxBlocksPerPartition = Math.toIntExact(partitionMaxBytes / blockSizeL);
-    final int numPartitions = ((nBlocks - 1) / effectiveMaxBlocksPerPartition) + 1;
-    final MappedByteBuffer[] pool = new MappedByteBuffer[numPartitions];
-
-    Set<StandardOpenOption> openOpts =
-        EnumSet.of(StandardOpenOption.READ, StandardOpenOption.WRITE);
-    if (ephemeral) {
-      openOpts.add(StandardOpenOption.CREATE_NEW);
-    }
-    try (FileChannel fc = FileChannel.open(backingFile, openOpts)) {
-      if (ephemeral) {
-        fc.truncate(nBlocks * blockSizeL);
-      }
-
-      // Iterate partitions from high to low so that the remainder partition (which may be
-      // smaller than effectiveMaxBlocksPerPartition) is handled first.
-      for (int i = numPartitions - 1,
-              partitionNumBlocks = ((nBlocks - 1) % effectiveMaxBlocksPerPartition) + 1;
-          i >= 0;
-          i--) {
-        MappedByteBuffer partition =
-            fc.map(
-                FileChannel.MapMode.READ_WRITE,
-                (long) i * partitionMaxBytes,
-                partitionNumBlocks * blockSizeL);
-        pool[i] = partition;
-        partitionNumBlocks = effectiveMaxBlocksPerPartition;
-      }
-    } finally {
-      if (ephemeral) {
-        Files.delete(backingFile);
-      }
-    }
-    return pool;
-  }
-
-  /**
-   * Maps the metadata+trailer region of the backing file as a single {@link MappedByteBuffer}. The
-   * region starts at {@code nBlocks * COMPRESSION_BLOCK_SIZE} and covers {@code nBlocks *
-   * META_BYTES_PER_BLOCK + TRAILER_BYTES} bytes.
-   */
-  private static MappedByteBuffer initMetaBuf(int nBlocks, Path backingFile) throws IOException {
-    long metaOffset = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
-    long metaSize = (long) nBlocks * META_BYTES_PER_BLOCK + TRAILER_BYTES;
-    try (FileChannel fc =
-        FileChannel.open(backingFile, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-      MappedByteBuffer mbb = fc.map(FileChannel.MapMode.READ_WRITE, metaOffset, metaSize);
-      mbb.order(ByteOrder.LITTLE_ENDIAN);
-      return mbb;
     }
   }
 
