@@ -786,11 +786,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     long[] ret = new long[nBlocks * 3];
     int j = 0;
     int curPart = 0;
-    int curPartStart = 0;
     int curPartEnd = partitions[0].capacity; // exclusive; i == curPartEnd triggers advance
     for (int i = 0; i < nBlocks; i++) {
       if (i == curPartEnd) {
-        curPartStart = curPartEnd;
         curPartEnd += partitions[++curPart].capacity;
       }
       int base = i * META_BYTES_PER_BLOCK;
@@ -799,7 +797,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       if (uuidMsb == 0 && uuidLsb == 0) continue; // uninitialized entry
       int blockIdx = metaBuf.getInt(base + 16);
       if (blockIdx == -1) continue; // in-progress write (populate() did not commit)
-      int localSlot = i - curPartStart + 1; // 1-indexed
+      int localSlot = curPartEnd - i; // 1-indexed; matches reverse-order Val insertion in distribute()
       int handleLow32 = (curPart << PART_SHIFT) | localSlot;
       ret[j++] = uuidMsb;
       ret[j++] = uuidLsb;
