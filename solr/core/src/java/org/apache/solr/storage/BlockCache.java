@@ -501,6 +501,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     private volatile ByteBuffer cached;
 
+    private volatile long lastLoadHintNanos;
+
     Val(int cacheBlockOrd, int initialRefCount) {
       super(initialRefCount);
       this.cacheBlockOrd = cacheBlockOrd;
@@ -513,6 +515,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       populated = false;
       waiting = false;
       cached = null;
+      lastLoadHintNanos = 0;
       super.reset();
     }
 
@@ -549,6 +552,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         l.unlock(stamp);
       }
       cached = ret;
+      lastLoadHintNanos = System.nanoTime();
       assert !populated;
       populated = true;
       if (waiting) {
@@ -616,12 +620,27 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
 
     private static final VarHandle CACHED;
+    private static final VarHandle LAST_LOAD_HINT_NANOS;
 
     static {
       try {
-        CACHED = MethodHandles.lookup().findVarHandle(Val.class, "cached", ByteBuffer.class);
+        MethodHandles.Lookup lookup = MethodHandles.lookup();
+        CACHED = lookup.findVarHandle(Val.class, "cached", ByteBuffer.class);
+        LAST_LOAD_HINT_NANOS =
+            lookup.findVarHandle(Val.class, "lastLoadHintNanos", long.class);
       } catch (ReflectiveOperationException e) {
         throw new Error(e);
+      }
+    }
+
+    private static final long LOAD_HINT_THROTTLE_NANOS = TimeUnit.SECONDS.toNanos(1);
+
+    private void maybeLoadHint(BlockCache c) {
+      long now = System.nanoTime();
+      long last = lastLoadHintNanos;
+      if (now - last < LOAD_HINT_THROTTLE_NANOS) return;
+      if (LAST_LOAD_HINT_NANOS.compareAndSet(this, last, now)) {
+        c.mapping.loadHint(cacheBlockOrd);
       }
     }
   }
@@ -930,6 +949,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       return null;
     }
     Val v = p.getPayload(handle);
+    v.maybeLoadHint(this);
     if (rc > 0) {
       pinnedCount.increment();
       if (v.fromHot()) hotUnpinned.decrement();
@@ -942,7 +962,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * Non-mutating optimistic check: returns {@code true} if the handle appears live and pinnable.
    */
   boolean pinnable(long handle) {
-    return partitions[partOf(handle)].pinnable(handle);
+    Val v = (Val) partitions[partOf(handle)].pinnable(handle);
+    if (v == null) {
+      return false;
+    } else {
+      v.maybeLoadHint(this);
+      return true;
+    }
   }
 
   /** Releases a pin on the slot identified by {@code handle}. */

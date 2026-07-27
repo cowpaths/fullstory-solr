@@ -363,16 +363,16 @@ class Cache2<V extends Cache2.Val> {
    * appears live and pinnable (refCount &ge; 0, not evicted, generation matches). No CAS is
    * performed; may race with concurrent eviction. Suitable for best-effort preload skip checks.
    */
-  boolean pinnable(long handle) {
+  Val pinnable(long handle) {
     int slot = (int) handle & SLOT_MASK;
     int expectedGen = (int) (handle >>> 32);
     Val p = payload[slot];
     switch (p.refCount) {
       case UNPIN_SENTINEL:
       case -1:
-        return false;
+        return null;
       default:
-        return p.generation == expectedGen;
+        return p.generation == expectedGen ? p : null;
     }
   }
 
