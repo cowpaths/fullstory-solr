@@ -97,6 +97,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final boolean ENABLE_CACHE_PERSISTENCE =
       EnvUtils.getPropertyAsBool("solr.blockCache.persistence", true);
 
+  private static final boolean PROSPECTIVE_READAHEAD =
+      EnvUtils.getPropertyAsBool("solr.blockCache.prospectiveReadahead", false);
+
   // ---------------------------------------------------------------------------
   // Handle encoding: (generation << 32) | (partitionIndex << PART_SHIFT) | localSlot
   //
@@ -626,14 +629,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       try {
         MethodHandles.Lookup lookup = MethodHandles.lookup();
         CACHED = lookup.findVarHandle(Val.class, "cached", ByteBuffer.class);
-        LAST_LOAD_HINT_NANOS =
-            lookup.findVarHandle(Val.class, "lastLoadHintNanos", long.class);
+        LAST_LOAD_HINT_NANOS = lookup.findVarHandle(Val.class, "lastLoadHintNanos", long.class);
       } catch (ReflectiveOperationException e) {
         throw new Error(e);
       }
     }
 
-    private static final long LOAD_HINT_THROTTLE_NANOS = TimeUnit.SECONDS.toNanos(1);
+    private static final long LOAD_HINT_THROTTLE_NANOS = TimeUnit.SECONDS.toNanos(5);
 
     private void maybeLoadHint(BlockCache c) {
       long now = System.nanoTime();
@@ -816,7 +818,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       if (uuidMsb == 0 && uuidLsb == 0) continue; // uninitialized entry
       int blockIdx = metaBuf.getInt(base + 16);
       if (blockIdx == -1) continue; // in-progress write (populate() did not commit)
-      int localSlot = curPartEnd - i; // 1-indexed; matches reverse-order Val insertion in distribute()
+
+      // 1-indexed; matches reverse-order Val insertion in distribute()
+      int localSlot = curPartEnd - i;
+
       int handleLow32 = (curPart << PART_SHIFT) | localSlot;
       ret[j++] = uuidMsb;
       ret[j++] = uuidLsb;
@@ -966,7 +971,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     if (v == null) {
       return false;
     } else {
-      v.maybeLoadHint(this);
+      if (PROSPECTIVE_READAHEAD) v.maybeLoadHint(this);
       return true;
     }
   }
