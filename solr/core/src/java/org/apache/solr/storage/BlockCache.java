@@ -58,6 +58,7 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.SolrNamedThreadFactory;
 import org.apache.solr.core.SolrInfoBean;
@@ -92,6 +93,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       Integer.highestOneBit(Integer.MAX_VALUE / COMPRESSION_BLOCK_SIZE);
   private static final int POOL_SHIFT = Integer.numberOfTrailingZeros(MAX_BLOCKS_PER_PARTITION);
   private static final int POOL_MASK = MAX_BLOCKS_PER_PARTITION - 1;
+
+  private static final boolean ENABLE_CACHE_PERSISTENCE =
+      EnvUtils.getPropertyAsBool("solr.blockCache.persistence", true);
 
   // ---------------------------------------------------------------------------
   // Handle encoding: (generation << 32) | (partitionIndex << PART_SHIFT) | localSlot
@@ -738,7 +742,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     boolean valid = (storedId ^ storedSig) == CACHE_VALIDATION_MAGIC;
     this.partitions = distribute(nBlocks);
     this.nPartitions = partitions.length;
-    if (valid) {
+    if (ENABLE_CACHE_PERSISTENCE && valid) {
       this.extantMap = buildExtantMap(nBlocks, mb, partitions);
     } else {
       log.warn(
