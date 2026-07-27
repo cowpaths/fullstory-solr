@@ -1112,6 +1112,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     casRaceLoss.increment();
   }
 
+  void releaseHint(Val v) {
+    mapping.release(v.cacheBlockOrd);
+  }
+
   void recordWarmStartHit() {
     warmStartHits.increment();
   }

@@ -282,6 +282,7 @@ class BlockPreloader {
     try {
       byte[] heapBuf = supplier.supply(blockOffset, compressedLen, decompressedLen);
       buf = nodeVal.populate(heapBuf, 0, decompressedLen, blobUUID, blockIdx, cache);
+      cache.releaseHint(nodeVal);
     } catch (Throwable t) {
       nodeVal.completeExceptionally(t);
       accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);
