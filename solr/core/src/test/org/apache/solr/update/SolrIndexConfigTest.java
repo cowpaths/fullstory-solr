@@ -98,12 +98,29 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
 
   @Test
   public void testPreferredMergePolicyFactoryOverridesMergePolicyFactory() throws Exception {
+    System.setProperty("solr.usePreferredMergePolicyFactory", "true");
+    try {
+      SolrConfig solrConfig =
+          new SolrConfig(instanceDir, solrConfigFileNamePreferredMergePolicyFactory);
+      SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
+      assertNotNull(solrIndexConfig.mergePolicyFactoryInfo);
+      assertEquals(
+          org.apache.solr.index.DefaultMergePolicyFactory.class.getName(),
+          solrIndexConfig.mergePolicyFactoryInfo.className);
+    } finally {
+      System.clearProperty("solr.usePreferredMergePolicyFactory");
+    }
+  }
+
+  @Test
+  public void testPreferredMergePolicyFactoryIgnoredWithoutSysprop() throws Exception {
+    System.clearProperty("solr.usePreferredMergePolicyFactory");
     SolrConfig solrConfig =
         new SolrConfig(instanceDir, solrConfigFileNamePreferredMergePolicyFactory);
     SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
     assertNotNull(solrIndexConfig.mergePolicyFactoryInfo);
     assertEquals(
-        org.apache.solr.index.DefaultMergePolicyFactory.class.getName(),
+        org.apache.solr.index.TieredMergePolicyFactory.class.getName(),
         solrIndexConfig.mergePolicyFactoryInfo.className);
   }
 
