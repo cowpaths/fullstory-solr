@@ -1041,6 +1041,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         hotAcquisitions.increment();
         hotUnpinned.decrement();
       }
+      mapping.prepareWrite(v.cacheBlockOrd);
       outHandle[0] = encodeHandle(i, outHandle[0]);
       return v;
     } else {
