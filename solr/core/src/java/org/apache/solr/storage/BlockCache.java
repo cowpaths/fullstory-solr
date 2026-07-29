@@ -35,12 +35,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.EnumSet;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +51,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.StampedLock;
@@ -673,6 +674,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private final Partition[] partitions;
 
   private final long totalBytes;
+  private final boolean alwaysPrepareWrite;
+  private volatile boolean firstAcquireLogged;
+  private final AtomicLong prepareWriteFailures = new AtomicLong();
   private final LongAdder acquisitions = new LongAdder();
   private final LongAdder poolExhausted = new LongAdder();
   private final LongAdder pinnedCount = new LongAdder();
@@ -737,8 +741,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       Files.delete(backingFile);
     }
     this.mapping = m;
+    log.info("BlockCache ephemeral mapping: {}", m);
     this.pool = m.dataPool();
     this.metaBuf = null;
+    this.alwaysPrepareWrite = false;
     this.extantMap = new long[0];
     this.partitions = distribute(nBlocks);
     this.nPartitions = partitions.length;
@@ -777,8 +783,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
     mb.order(ByteOrder.LITTLE_ENDIAN);
     BlockCacheMapping m =
-        BlockCacheMmapProvider.getDefault().open(existingBackingFile, COMPRESSION_BLOCK_SIZE, nBlocks);
+        BlockCacheMmapProvider.getDefault()
+            .open(existingBackingFile, COMPRESSION_BLOCK_SIZE, nBlocks);
     this.mapping = m;
+    log.info("BlockCache persistent mapping: {}", m);
     this.pool = m.dataPool();
     this.metaBuf = mb;
     int trailerOffset = nBlocks * META_BYTES_PER_BLOCK;
@@ -788,6 +796,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.partitions = distribute(nBlocks);
     this.nPartitions = partitions.length;
     if (ENABLE_CACHE_PERSISTENCE && valid) {
+      this.alwaysPrepareWrite = true;
       this.extantMap = buildExtantMap(nBlocks, mb, partitions);
     } else {
       log.warn(
@@ -795,6 +804,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           existingBackingFile,
           Long.toHexString(storedId),
           Long.toHexString(storedSig));
+      this.alwaysPrepareWrite = !m.invalidateAll();
       this.extantMap = new long[0];
     }
     // Claim the file: write randomId, clear signature (prevents stale warm-start on crash).
@@ -1031,6 +1041,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * sets outHandle[0] to the encoded handle.
    */
   Val acquireNode(long[] outHandle) {
+    if (!firstAcquireLogged) {
+      firstAcquireLogged = true;
+      log.info("acquireNode first call, mapping={}", mapping);
+    }
     int i = tlrIndex();
     Partition p = partitions[i];
     Val v = p.acquireNode(outHandle);
@@ -1041,7 +1055,15 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         hotAcquisitions.increment();
         hotUnpinned.decrement();
       }
-      mapping.prepareWrite(v.cacheBlockOrd);
+      if (alwaysPrepareWrite || (outHandle[0] >>> 32) > 1) {
+        int ret = mapping.prepareWrite(v.cacheBlockOrd);
+        if (ret != 0) {
+          long n = prepareWriteFailures.incrementAndGet();
+          if (n == 1 || n % 1000 == 0) {
+            log.warn("prepareWrite failure #{}: ret={} blockIdx={}", n, ret, v.cacheBlockOrd);
+          }
+        }
+      }
       outHandle[0] = encodeHandle(i, outHandle[0]);
       return v;
     } else {
