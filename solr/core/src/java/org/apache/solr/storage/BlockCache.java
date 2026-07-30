@@ -49,10 +49,12 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAdder;
@@ -151,7 +153,23 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         (CompletableFuture<T>)
             ENFORCE_UNIQUE.putIfAbsent(uniquenessKey, (CompletableFuture<Object>) weCompute);
     if (otherComputes != null) {
-      return otherComputes.join();
+      try {
+        return otherComputes.get(1, TimeUnit.MINUTES);
+      } catch (TimeoutException e) {
+        throw new RuntimeException(e);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new ThreadInterruptedException(e);
+      } catch (ExecutionException e) {
+        Throwable cause = e.getCause();
+        if (cause instanceof RuntimeException) {
+          throw (RuntimeException) cause;
+        } else if (cause instanceof Error) {
+          throw (Error) cause;
+        } else {
+          throw new RuntimeException(e);
+        }
+      }
     }
     try {
       T ret = c.get(key, clazz);
