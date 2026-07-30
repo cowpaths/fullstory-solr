@@ -46,7 +46,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
@@ -67,7 +69,9 @@ import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
 import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.common.util.ObjectCache;
 import org.apache.solr.common.util.SolrNamedThreadFactory;
+import org.apache.solr.core.CoreContainer;
 import org.apache.solr.core.SolrInfoBean;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricProducer;
@@ -126,6 +130,47 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private static long encodeHandle(int partitionIdx, long cache2Handle) {
     return cache2Handle | ((long) partitionIdx << PART_SHIFT);
+  }
+
+  private static final ConcurrentHashMap<
+          Map.Entry<CoreContainer, String>, CompletableFuture<Object>>
+      ENFORCE_UNIQUE = new ConcurrentHashMap<>();
+
+  public static <T> T coreContainerSingleton(
+      CoreContainer cc, String key, Class<T> clazz, Function<String, ? extends T> mappingFunction) {
+    ObjectCache c = cc.getObjectCache();
+    T extant = c.get(key, clazz);
+    if (extant != null) {
+      return extant;
+    }
+    Map.Entry<CoreContainer, String> uniquenessKey =
+        new AbstractMap.SimpleImmutableEntry<>(cc, key);
+    CompletableFuture<T> weCompute = new CompletableFuture<>();
+    @SuppressWarnings("unchecked")
+    CompletableFuture<T> otherComputes =
+        (CompletableFuture<T>)
+            ENFORCE_UNIQUE.putIfAbsent(uniquenessKey, (CompletableFuture<Object>) weCompute);
+    if (otherComputes != null) {
+      return otherComputes.join();
+    }
+    try {
+      T ret = c.get(key, clazz);
+      if (ret == null) {
+        ret = mappingFunction.apply(key);
+        if (c.put(key, ret) != null) {
+          throw new IllegalStateException();
+        }
+      }
+      weCompute.complete(ret);
+      return ret;
+    } catch (Throwable t) {
+      weCompute.completeExceptionally(t);
+      throw t;
+    } finally {
+      if (!ENFORCE_UNIQUE.remove(uniquenessKey, weCompute)) {
+        log.error("unable to remove entry for {}", uniquenessKey);
+      }
+    }
   }
 
   private int partOf(long handle) {

@@ -317,31 +317,31 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
       final ZkController zkController = cc.getZkController();
       final Path coreRootDirectory = cc.getCoreRootDirectory();
       BlockCache blockCache =
-          cc.getObjectCache()
-              .computeIfAbsent(
-                  "nodeBlockCache",
-                  BlockCache.class,
-                  k -> {
-                    try {
-                      return BlockCache.buildFromProperties();
-                    } catch (IOException e) {
-                      throw new UncheckedIOException(e);
-                    }
-                  });
+          BlockCache.coreContainerSingleton(
+              cc,
+              "nodeBlockCache",
+              BlockCache.class,
+              k -> {
+                try {
+                  return BlockCache.buildFromProperties();
+                } catch (IOException e) {
+                  throw new UncheckedIOException(e);
+                }
+              });
       nodeLevelState =
-          cc.getObjectCache()
-              .computeIfAbsent(
-                  "nodeLevelGCSDirectoryState",
-                  NodeLevelGCSDirectoryState.class,
-                  k -> {
-                    final Storage storage = initStorage(params); // TODO: race here.
-                    try {
-                      return new NodeLevelGCSDirectoryState(
-                          blockCache, storage, metadataBucket, zkController, coreRootDirectory);
-                    } catch (IOException e) {
-                      throw new UncheckedIOException(e);
-                    }
-                  });
+          BlockCache.coreContainerSingleton(
+              cc,
+              "nodeLevelGCSDirectoryState",
+              NodeLevelGCSDirectoryState.class,
+              k -> {
+                final Storage storage = initStorage(params); // TODO: race here.
+                try {
+                  return new NodeLevelGCSDirectoryState(
+                      blockCache, storage, metadataBucket, zkController, coreRootDirectory);
+                } catch (IOException e) {
+                  throw new UncheckedIOException(e);
+                }
+              });
       blockCache.initializeMetrics(cc.getMetricsHandler().getSolrMetricsContext(), "blockCache");
     } else {
       try {

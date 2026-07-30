@@ -389,30 +389,29 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
       assert cc != null;
       BlockCache blockCache =
           USE_BLOCK_CACHE
-              ? cc.getObjectCache()
-                  .computeIfAbsent(
-                      "nodeBlockCache",
-                      BlockCache.class,
-                      k -> {
-                        try {
-                          return BlockCache.buildFromProperties();
-                        } catch (IOException e) {
-                          throw new UncheckedIOException(e);
-                        }
-                      })
+              ? BlockCache.coreContainerSingleton(
+                  cc,
+                  "nodeBlockCache",
+                  BlockCache.class,
+                  k -> {
+                    try {
+                      return BlockCache.buildFromProperties();
+                    } catch (IOException e) {
+                      throw new UncheckedIOException(e);
+                    }
+                  })
               : null;
       nodeLevelState =
-          cc.getObjectCache()
-              .computeIfAbsent(
-                  "nodeLevelTeeDirectoryState",
-                  NodeLevelTeeDirectoryState.class,
-                  (k) -> {
-                    NodeLevelTeeDirectoryState ret =
-                        new NodeLevelTeeDirectoryState(4096, blockCache);
-                    ret.initializeMetrics(
-                        cc.getMetricsHandler().getSolrMetricsContext(), "teeDirectory");
-                    return ret;
-                  });
+          BlockCache.coreContainerSingleton(
+              cc,
+              "nodeLevelTeeDirectoryState",
+              NodeLevelTeeDirectoryState.class,
+              (k) -> {
+                NodeLevelTeeDirectoryState ret = new NodeLevelTeeDirectoryState(4096, blockCache);
+                ret.initializeMetrics(
+                    cc.getMetricsHandler().getSolrMetricsContext(), "teeDirectory");
+                return ret;
+              });
     } else {
       try {
         BlockCache cache = USE_BLOCK_CACHE ? BlockCache.buildFromProperties() : null;
