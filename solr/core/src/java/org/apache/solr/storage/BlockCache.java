@@ -33,6 +33,7 @@ import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileChannel.MapMode;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -45,6 +46,7 @@ import java.util.Date;
 import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
@@ -1367,11 +1369,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * Builds a node-level {@link BlockCache} from system properties:
    *
    * <ul>
-   *   <li>{@code solr.blockCache.path} — path to a pre-existing persistent backing file; if the
-   *       file exists its size determines the capacity and the cache is warmed from it. If absent
-   *       or the file does not exist, an ephemeral temporary file is used instead.
-   *   <li>{@code solr.blockCache.kilobytes} — capacity in KiB for the ephemeral fallback (default 1
-   *       GiB); ignored when an existing persistent file is found.
+   *   <li>{@code solr.blockCache.path} — path for a persistent backing file. If the file exists and
+   *       is exactly the configured size, it is used as-is (warm start). If it exists but is the
+   *       wrong size, it is deleted and a new file is created (cold start). If it does not exist,
+   *       the filesystem is checked for sufficient free space (overhead &gt; 10% of total or 10
+   *       GiB, whichever is larger) and a new file is created (cold start).
+   *   <li>{@code solr.blockCache.kilobytes} — capacity in KiB (default 1 GiB); determines the
+   *       backing file size when {@code solr.blockCache.path} is set, and the ephemeral cache size
+   *       when it is not.
    * </ul>
    *
    * <p>Must be set as JVM system properties before startup.
@@ -1379,16 +1384,68 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   public static BlockCache buildFromProperties() throws IOException {
     String pathProp = System.getProperty("solr.blockCache.path", "");
     long kilobytes = Long.getLong("solr.blockCache.kilobytes", 1L << 20);
+    long targetBytes = kilobytes * 1024L;
     if (!pathProp.isEmpty()) {
       Path backingFile = Path.of(pathProp);
       if (Files.exists(backingFile)) {
-        return new BlockCache(backingFile);
+        long actualBytes = Files.size(backingFile);
+        if (actualBytes != targetBytes) {
+          log.info(
+              "BlockCache backing file size mismatch (expected={}, actual={}); recreating: {}",
+              targetBytes,
+              actualBytes,
+              backingFile);
+          if (targetBytes > actualBytes) {
+            checkDiskSpace(backingFile, targetBytes - actualBytes);
+          }
+          Files.delete(backingFile);
+          createBackingFile(backingFile, targetBytes);
+        }
+      } else {
+        checkDiskSpace(backingFile, targetBytes);
+        createBackingFile(backingFile, targetBytes);
       }
+      return new BlockCache(backingFile);
     }
     Path tmpFile =
         Path.of(System.getProperty("java.io.tmpdir"))
             .resolve("solr-block-cache-" + java.util.UUID.randomUUID() + ".tmp");
-    return new BlockCache(kilobytes * 1024L, tmpFile); // ephemeral
+    return new BlockCache(targetBytes, tmpFile); // ephemeral
+  }
+
+  private static void createBackingFile(Path path, long size) throws IOException {
+    try (FileChannel fc =
+        FileChannel.open(
+            path,
+            StandardOpenOption.CREATE_NEW,
+            StandardOpenOption.READ,
+            StandardOpenOption.WRITE)) {
+      fc.write(ByteBuffer.allocate(1), size - 1);
+    }
+    log.info("BlockCache backing file created: path={}, size={}", path, size);
+  }
+
+  // Cap on required free overhead: on large drives we allow the cache to consume nearly all space.
+  private static final long FREE_OVERHEAD_CAP_BYTES = 10L << 30; // 10 GiB
+
+  private static void checkDiskSpace(Path backingFile, long requiredBytes) throws IOException {
+    FileStore store = Files.getFileStore(backingFile.getParent());
+    long usable = store.getUsableSpace();
+    long total = store.getTotalSpace();
+    long overhead = usable - requiredBytes;
+    long minOverhead = Math.min(FREE_OVERHEAD_CAP_BYTES, total / 10);
+    if (overhead < minOverhead) {
+      throw new IOException(
+          String.format(
+              Locale.ENGLISH,
+              "Insufficient disk space for BlockCache backing file %s: "
+                  + "usable=%d, required=%d, overhead=%d, minOverhead=%d",
+              backingFile,
+              usable,
+              requiredBytes,
+              overhead,
+              minOverhead));
+    }
   }
 
   @Override
