@@ -262,7 +262,7 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
      * GcsBlobLifecycleCoordinator}.
      */
     GCSDirectory.BlobLifecycleCoordinator createBlobCoordinator(Path localPath) throws IOException {
-      UUID refId = BlockCache.refIdFromCoreProperties(coreRootDirectory, localPath);
+      UUID refId = BlockCache.refIdFromCoreProperties(coreRootDirectory, localPath, false);
       if (refId == null) {
         refId = BlockCache.rawMd5UUID(localPath.toAbsolutePath().normalize().toString());
       }

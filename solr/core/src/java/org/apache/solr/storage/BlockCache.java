@@ -19,6 +19,7 @@ package org.apache.solr.storage;
 
 import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZE;
 
+import java.io.BufferedReader;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
@@ -40,6 +41,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
@@ -229,7 +231,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * walking up from {@code localPath}. Returns {@code null} if no {@code core.properties} is found
    * or if it contains neither a {@code name} nor a {@code coreNodeName} property.
    */
-  static UUID refIdFromCoreProperties(Path coreRootDirectory, Path localPath) throws IOException {
+  static UUID refIdFromCoreProperties(
+      Path coreRootDirectory, Path localPath, boolean includeCreationTimestamp) throws IOException {
     if (coreRootDirectory == null) return null;
     Path root = coreRootDirectory.toAbsolutePath().normalize();
     Path normalized = localPath.toAbsolutePath().normalize();
@@ -250,6 +253,33 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         }
         String relPath = dir.relativize(normalized).toString();
         String key = name + "\n" + coreNodeName + "\n" + relPath;
+        if (includeCreationTimestamp) {
+          // Incorporate the on-disk core creation timestamp, e.g.:
+          //   #Written by CorePropertiesLocator
+          //   #Tue Jul 21 17:17:22 UTC 2026
+          // Properties.load() strips comments so we read them separately.
+          // Without this, oldShard.delete() -> newShardSameName.create() -> process.restart()
+          // could pick up stale cached blocks for the recreated core.
+          // Falls back to a per-JVM nonce if no valid timestamp is present, preventing
+          // cross-restart reuse when the timestamp is unavailable.
+          String timestamp = "";
+          try (BufferedReader br = Files.newBufferedReader(corePropsPath)) {
+            String line1 = br.readLine();
+            if ("#Written by CorePropertiesLocator".equals(line1)) {
+              String line2 = br.readLine();
+              if (line2 != null && line2.startsWith("#")) {
+                String candidate = line2.substring(1).trim();
+                try {
+                  Date.parse(candidate); // validate it's a recognizable date
+                  timestamp = candidate;
+                } catch (IllegalArgumentException ignored) {
+                }
+              }
+            }
+          }
+          String ts = timestamp.isEmpty() ? Long.toHexString(INSTANCE_NONCE) : timestamp;
+          key = key + "\n" + ts;
+        }
         return rawMd5UUID(key);
       }
     }
@@ -272,6 +302,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       ref = null;
     }
   }
+
+  // Stable per-JVM random nonce, used as fallback when core.properties has no creation timestamp.
+  // Prevents cross-restart cache block reuse when the timestamp is unavailable.
+  private static final long INSTANCE_NONCE = ThreadLocalRandom.current().nextLong();
 
   // Default total pool size for outstanding hold-refs. Covers typical peak workloads (~1M refs).
   // Override via -Dsolr.blockCache.holdRefPoolSize=<n>.

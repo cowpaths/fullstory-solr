@@ -162,7 +162,7 @@ public class AccessDirectory2 extends MMapDirectory {
       ExecutorService ioExec)
       throws IOException {
     super(path, lockFactory);
-    UUID uuid = BlockCache.refIdFromCoreProperties(coreRootDirectory, compressedPath);
+    UUID uuid = BlockCache.refIdFromCoreProperties(coreRootDirectory, compressedPath, true);
     if (uuid == null) {
       this.uuidMsb = 0;
       this.uuidLsb = 0;
