@@ -65,7 +65,7 @@ import org.slf4j.LoggerFactory;
  *
  * <ul>
  *   <li>{@code solr.gcsDirectory.bucket} — GCS bucket name (system property)
- *   <li>{@code solr.blockCache.kilobytes} / {@code solr.blockCache.path} — see {@link
+ *   <li>{@code solr.blockCache.byteSize} / {@code solr.blockCache.path} — see {@link
  *       BlockCache#buildFromProperties()}
  *   <li>{@code useAsyncIO} — whether to use double-buffered async GCS writes (solrconfig.xml,
  *       default: true)

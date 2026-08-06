@@ -1374,17 +1374,17 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    *       wrong size, it is deleted and a new file is created (cold start). If it does not exist,
    *       the filesystem is checked for sufficient free space (overhead &gt; 10% of total or 10
    *       GiB, whichever is larger) and a new file is created (cold start).
-   *   <li>{@code solr.blockCache.kilobytes} — capacity in KiB (default 1 GiB); determines the
-   *       backing file size when {@code solr.blockCache.path} is set, and the ephemeral cache size
-   *       when it is not.
+   *   <li>{@code solr.blockCache.byteSize} — capacity with optional suffix: {@code K}/{@code k}
+   *       (KiB), {@code M}/{@code m} (MiB), {@code G}/{@code g} (GiB); default 1 GiB. Determines
+   *       the backing file size when {@code solr.blockCache.path} is set, and the ephemeral cache
+   *       size when it is not.
    * </ul>
    *
    * <p>Must be set as JVM system properties before startup.
    */
   public static BlockCache buildFromProperties() throws IOException {
-    String pathProp = System.getProperty("solr.blockCache.path", "");
-    long kilobytes = Long.getLong("solr.blockCache.kilobytes", 1L << 20);
-    long targetBytes = kilobytes * 1024L;
+    String pathProp = EnvUtils.getProperty("solr.blockCache.path", "");
+    long targetBytes = parseByteSize(EnvUtils.getProperty("solr.blockCache.byteSize", "1G"));
     if (!pathProp.isEmpty()) {
       Path backingFile = Path.of(pathProp);
       if (Files.exists(backingFile)) {
@@ -1423,6 +1423,37 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       fc.write(ByteBuffer.allocate(1), size - 1);
     }
     log.info("BlockCache backing file created: path={}, size={}", path, size);
+  }
+
+  static long parseByteSize(String s) {
+    if (s == null || s.isEmpty()) throw new IllegalArgumentException("empty byteSize");
+    char suffix = s.charAt(s.length() - 1);
+    long multiplier;
+    String digits;
+    switch (suffix) {
+      case 'K':
+      case 'k':
+        multiplier = 1L << 10;
+        digits = s.substring(0, s.length() - 1);
+        break;
+      case 'M':
+      case 'm':
+        multiplier = 1L << 20;
+        digits = s.substring(0, s.length() - 1);
+        break;
+      case 'G':
+      case 'g':
+        multiplier = 1L << 30;
+        digits = s.substring(0, s.length() - 1);
+        break;
+      default:
+        multiplier = 1L;
+        digits = s;
+        break;
+    }
+    long n = Long.parseLong(digits);
+    if (n <= 0) throw new IllegalArgumentException("byteSize must be positive: " + s);
+    return n * multiplier;
   }
 
   // Cap on required free overhead: on large drives we allow the cache to consume nearly all space.
