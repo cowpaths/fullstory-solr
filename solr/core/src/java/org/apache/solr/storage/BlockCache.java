@@ -905,6 +905,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           Long.toHexString(storedSig));
       this.alwaysPrepareWrite = !m.invalidateAll();
       this.extantMap = new long[0];
+      // Zero the metadata region so stale per-block entries from a prior crashed run
+      // don't appear valid to the next successful run's extant map.
+      for (int pos = 0; pos < trailerOffset; pos += 4) {
+        mb.putInt(pos, 0);
+      }
     }
     // Claim the file: write randomId, clear signature (prevents stale warm-start on crash).
     mb.putLong(trailerOffset, randomId);
