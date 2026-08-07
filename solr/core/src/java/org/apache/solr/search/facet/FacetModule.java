@@ -381,7 +381,13 @@ public class FacetModule extends SearchComponent {
   }
 
   // base class for facet functions that can be used in a sort
-  abstract static class FacetSortableMerger extends FacetMerger {
+  /**
+   * Base merger for facet statistics that can also be used to sort facet buckets.
+   *
+   * <p>This type is public so external {@link AggValueSource} plugins can preserve the native
+   * distributed sorting behavior of built-in statistics.
+   */
+  public abstract static class FacetSortableMerger extends FacetMerger {
     public void prepareSort() {}
 
     @Override
