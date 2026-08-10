@@ -197,7 +197,7 @@ public class DocSetUtil {
   private static DocSet createSmallSet(
       List<LeafReaderContext> leaves, PostingsEnum[] postList, int maxPossible, int firstReader)
       throws IOException {
-    int[][] docs = SortedIntDocSet.allocate(maxPossible);
+    SortedIntDocSet.DocIdList docs = SortedIntDocSet.allocate(maxPossible);
     int sz = 0;
     for (int i = firstReader; i < postList.length; i++) {
       PostingsEnum postings = postList[i];
@@ -210,7 +210,7 @@ public class DocSetUtil {
         if (subId == DocIdSetIterator.NO_MORE_DOCS) break;
         if (liveDocs != null && !liveDocs.get(subId)) continue;
         int globalId = subId + base;
-        docs[sz >> SortedIntDocSet.WORDS_SHIFT][sz++ & SortedIntDocSet.ARR_MASK] = globalId;
+        docs.set(sz++, globalId);
       }
     }
 
@@ -253,12 +253,12 @@ public class DocSetUtil {
 
   public static DocSet toSmallSet(BitDocSet bitSet) {
     int sz = bitSet.size();
-    int[][] docs = SortedIntDocSet.allocate(sz);
+    SortedIntDocSet.DocIdList docs = SortedIntDocSet.allocate(sz);
     FixedBitSet bs = bitSet.getBits();
     int doc = -1;
     for (int i = 0; i < sz; i++) {
       doc = bs.nextSetBit(doc + 1);
-      docs[i >> SortedIntDocSet.WORDS_SHIFT][i & SortedIntDocSet.ARR_MASK] = doc;
+      docs.set(i, doc);
     }
     return new SortedIntDocSet(docs);
   }

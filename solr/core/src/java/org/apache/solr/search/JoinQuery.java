@@ -457,7 +457,7 @@ class JoinQuery extends Query {
       for (DocSet set : resultList) {
         SortedIntDocSet sorted = (SortedIntDocSet) set;
         int capacity = sorted.capacity;
-        final int[][] docs = sorted.getDocs();
+        final SortedIntDocSet.DocIdList docs = sorted.getDocs();
         pq.add(
             new DisiWrapper(
                 new ConstantScoreScorer(
@@ -479,8 +479,7 @@ class JoinQuery extends Query {
                           return id = NO_MORE_DOCS;
                         } else {
                           return id =
-                              docs[idx >> SortedIntDocSet.WORDS_SHIFT][
-                                  idx & SortedIntDocSet.ARR_MASK];
+                              docs.get(idx);
                         }
                       }
 
