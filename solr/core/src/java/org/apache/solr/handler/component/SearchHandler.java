@@ -58,6 +58,7 @@ import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.common.util.StrUtils;
+import org.apache.solr.common.util.Utils;
 import org.apache.solr.core.CloseHook;
 import org.apache.solr.core.CoreContainer;
 import org.apache.solr.core.PluginInfo;
@@ -550,6 +551,15 @@ public class SearchHandler extends RequestHandlerBase
         // An IOException on a non-distributed request is typically an issue parsing the query at
         // the lucene level
         throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, ex);
+      } finally {
+        if (!rb.getFilterStats()
+            .isEmpty()) { // always attempt to add filter cache stats if possible
+          NamedList<Object> headers = rb.rsp.getResponseHeader();
+          if (headers != null) {
+            headers.add("filtersStats", rb.getFilterStats());
+          }
+          rsp.getToLog().add("filtersStats", Utils.toJSONString(rb.getFilterStats(), -1));
+        }
       }
     } else {
       // a distributed request

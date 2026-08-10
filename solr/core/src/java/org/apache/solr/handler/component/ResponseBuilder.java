@@ -97,6 +97,18 @@ public class ResponseBuilder {
 
   public List<SearchComponent> components;
 
+  // Always-on per-fq filter stats with keys: "key" (query string), "time" (Long ms), "cacheHit"
+  // (boolean)
+  // and docSetIdCount (docSet size)
+  private final List<NamedList<Object>> filterStats = new ArrayList<>();
+
+  private FilterStatsTriggerType filterStatsTriggerType;
+
+  public enum FilterStatsTriggerType {
+    FACET,
+    SESSION_STITCH
+  }
+
   SolrRequestInfo requestInfo;
 
   public ResponseBuilder(
@@ -315,6 +327,22 @@ public class ResponseBuilder {
 
   public void setDebugInfo(NamedList<Object> debugInfo) {
     this.debugInfo = debugInfo;
+  }
+
+  public List<NamedList<Object>> getFilterStats() {
+    return filterStats;
+  }
+
+  public void addFilterStats(NamedList<Object> entry) {
+    this.filterStats.add(entry);
+  }
+
+  public void setFilterStatsTriggerType(FilterStatsTriggerType filterStatsTriggerType) {
+    this.filterStatsTriggerType = filterStatsTriggerType;
+  }
+
+  public FilterStatsTriggerType getFilterStatsTriggerType() {
+    return filterStatsTriggerType;
   }
 
   public int getFieldFlags() {
