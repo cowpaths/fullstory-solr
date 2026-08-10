@@ -37,6 +37,7 @@ import org.apache.solr.common.util.Utils;
 import org.apache.solr.index.LogDocMergePolicyFactory;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.schema.SchemaField;
+import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -45,12 +46,39 @@ public class TestExportWriter extends SolrTestCaseJ4 {
 
   private ObjectMapper mapper = new ObjectMapper();
 
+  private static final String ENABLE_FILTER_CACHE_PROPNAME = "tests.solr.enableFilterCache";
+  private static final String USE_FILTER_FOR_SORTED_QUERY_PROPNAME =
+      "tests.solr.useFilterForSortedQuery";
+  private static String restoreEnableFilterCache;
+  private static String restoreUseFilterForSortedQuery;
+
   @BeforeClass
   public static void beforeClass() throws Exception {
     // force LogDocMergePolicy so that we get a predictable doc order
     // when testing index order results
     systemSetPropertySolrTestsMergePolicyFactory(LogDocMergePolicyFactory.class.getName());
+    boolean enableFilterCache = random().nextBoolean();
+    boolean useFilterForSortedQuery = random().nextBoolean();
+    restoreEnableFilterCache =
+        System.setProperty(ENABLE_FILTER_CACHE_PROPNAME, Boolean.toString(enableFilterCache));
+    restoreUseFilterForSortedQuery =
+        System.setProperty(
+            USE_FILTER_FOR_SORTED_QUERY_PROPNAME, Boolean.toString(useFilterForSortedQuery));
     initCore("solrconfig-sortingresponse.xml", "schema-sortingresponse.xml");
+  }
+
+  @AfterClass
+  public static void afterClass() throws Exception {
+    if (restoreEnableFilterCache == null) {
+      System.clearProperty(ENABLE_FILTER_CACHE_PROPNAME);
+    } else {
+      System.setProperty(ENABLE_FILTER_CACHE_PROPNAME, restoreEnableFilterCache);
+    }
+    if (restoreUseFilterForSortedQuery == null) {
+      System.clearProperty(USE_FILTER_FOR_SORTED_QUERY_PROPNAME);
+    } else {
+      System.setProperty(USE_FILTER_FOR_SORTED_QUERY_PROPNAME, restoreUseFilterForSortedQuery);
+    }
   }
 
   @Before
