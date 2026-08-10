@@ -13,8 +13,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import org.apache.solr.core.SolrInfoBean;
-import org.apache.solr.metrics.SolrMetricManager;
 import org.apache.solr.metrics.SolrMetricProducer;
 import org.apache.solr.metrics.SolrMetricsContext;
 import org.slf4j.Logger;
@@ -33,6 +31,7 @@ class SlowNodeDetector implements SolrMetricProducer {
   private final int maxSlowResponsePercentage;
   private final int minShardCountPerRequest;
   private final int slowLatencyThreshold;
+  private SolrMetricsContext metricsContext;
 
   /**
    * @param latencyDropRatioThreshold identify as a latency drop point when current latency is < 0.5
@@ -213,29 +212,15 @@ class SlowNodeDetector implements SolrMetricProducer {
 
   @Override
   public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
-    String nodeRegistry = SolrMetricManager.getRegistryName(SolrInfoBean.Group.node);
-    SolrMetricManager manager = parentContext.getMetricManager();
-    manager.registerGauge(
-        parentContext,
-        nodeRegistry,
-        slowNodes::keySet,
-        parentContext.getTag(),
-        SolrMetricManager.ResolutionStrategy.REPLACE,
-        "slowNodes",
-        scope);
-    manager.registerGauge(
-        parentContext,
-        nodeRegistry,
-        slowNodes::size,
-        parentContext.getTag(),
-        SolrMetricManager.ResolutionStrategy.REPLACE,
-        "slowNodeCount",
-        scope);
+    metricsContext = parentContext.getChildContext(this);
+
+    metricsContext.gauge(slowNodes::keySet, true, "slowNodes", scope);
+    metricsContext.gauge(slowNodes::size, true, "slowNodeCount", scope);
   }
 
   @Override
   public SolrMetricsContext getSolrMetricsContext() { // using the same context as parent
-    return null;
+    return metricsContext;
   }
 
   static class Builder {

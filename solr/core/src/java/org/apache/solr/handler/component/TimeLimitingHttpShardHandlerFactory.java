@@ -17,6 +17,7 @@
 package org.apache.solr.handler.component;
 
 import com.codahale.metrics.Counter;
+import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.util.concurrent.ExecutorService;
 import org.apache.solr.common.util.ExecutorUtil;
@@ -45,7 +46,6 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
   private static final String DRY_RUN_CONFIG_KEY = "dryRun";
 
   private SlowNodeDetector slowNodeDetector;
-  private SolrMetricsContext solrMetricsContext;
   Counter cancelledSlowNodeRequests;
   Counter cancelledDryRunSlowNodeRequests;
   private ExecutorService executorService;
@@ -153,26 +153,28 @@ public class TimeLimitingHttpShardHandlerFactory extends HttpShardHandlerFactory
   @Override
   public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
     super.initializeMetrics(parentContext, scope);
-    solrMetricsContext = parentContext.getChildContext(this);
     String expandedScope = SolrMetricManager.mkName(scope, SolrInfoBean.Category.QUERY.name());
     cancelledSlowNodeRequests =
-        solrMetricsContext.counter("cancelledSlowNodeRequests", expandedScope);
+        getSolrMetricsContext().counter("cancelledSlowNodeRequests", expandedScope);
     cancelledDryRunSlowNodeRequests =
-        solrMetricsContext.counter("cancelledDryRunSlowNodeRequests", expandedScope);
+        getSolrMetricsContext().counter("cancelledDryRunSlowNodeRequests", expandedScope);
 
     if (slowNodeDetector != null) {
-      slowNodeDetector.initializeMetrics(solrMetricsContext, expandedScope);
+      slowNodeDetector.initializeMetrics(getSolrMetricsContext(), expandedScope);
     }
-  }
-
-  @Override
-  public SolrMetricsContext getSolrMetricsContext() {
-    return solrMetricsContext;
   }
 
   @Override
   public void close() {
     super.close();
+    if (slowNodeDetector != null) {
+      try {
+        slowNodeDetector.close();
+      } catch (IOException e) {
+        log.warn("Failed to close the slowNodeDetector", e);
+      }
+    }
+
     if (executorService != null) {
       ExecutorUtil.shutdownNowAndAwaitTermination(executorService);
     }
