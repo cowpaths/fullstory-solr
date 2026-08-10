@@ -44,7 +44,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -1736,17 +1735,6 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private final BlockPreloader.BlockSupplier blockSupplier;
 
-    /**
-     * Encodes nesting depth for range-preload eligibility:
-     *
-     * <ul>
-     *   <li>{@code null} — this is a CFS outer file (container); no preload.
-     *   <li>{@code true} — this is a logical-file root (CFS sub-file or non-CFS root); no preload.
-     *   <li>{@code false} — this is a sub-slice of a logical file; eligible for range preload.
-     * </ul>
-     */
-    private final Boolean logicalRoot;
-
     /** Set on first {@link #supply} call that triggers a range preload; prevents re-triggering. */
     private boolean rangePreloadTriggered;
 
@@ -1936,13 +1924,13 @@ public class GCSDirectory extends SizeAwareDirectory {
           p.length,
           p.bs.blockOffsets,
           p.bs.guard,
-          p.bs.accessMapped);
+          p.bs.accessMapped,
+          p.logicalRoot);
       this.dir = dir;
       this.blobName = p.blobUUID.toString();
       this.segUUID = p.segUUID;
       this.blocksStruct = p.bs;
       this.blockSupplier = dir.supplier(blobName);
-      this.logicalRoot = p.logicalRoot;
       this.ownedBlocks = p.ownedBlocks;
       this.ownedBlocksOffset = p.ownedBlocksOffset;
     }
@@ -2001,13 +1989,13 @@ public class GCSDirectory extends SizeAwareDirectory {
           p.length,
           null /*blockOffsets — never accessed for always-mapped*/,
           p.bs.guard,
-          new AtomicLongArray(0));
+          new AtomicLongArray(0),
+          null /*logicalRoot — always-mapped: no GCS fetching, no preload*/);
       this.dir = dir;
       this.blobName = null;
       this.segUUID = null;
       this.blocksStruct = p.bs;
       this.blockSupplier = null;
-      this.logicalRoot = null; // always-mapped: no GCS fetching, no preload
       this.ownedBlocks = p.ownedBlocks;
       this.ownedBlocksOffset = 0;
     }
@@ -2018,17 +2006,20 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private GCSIndexInput(
         String resourceDescription, GCSIndexInput parent, long sliceOffset, long sliceLen) {
-      super(resourceDescription, parent, sliceOffset, sliceLen);
+      // null (CFS outer) → true (logical file); t/f (any logical file) → false (sub-slice)
+      super(
+          resourceDescription,
+          parent,
+          sliceOffset,
+          sliceLen,
+          parent.logicalRoot == null ? Boolean.TRUE : Boolean.FALSE);
       this.dir = parent.dir;
       this.blobName = parent.blobName;
       this.segUUID = parent.segUUID;
       this.blocksStruct = null; // slice does not own the mapping
       this.blockSupplier = parent.blockSupplier;
-      // null (CFS outer) → true (logical file); t/f (any logical file) → false (sub-slice)
-      this.logicalRoot = parent.logicalRoot == null ? Boolean.TRUE : Boolean.FALSE;
       this.ownedBlocks = parent.ownedBlocks;
       this.ownedBlocksOffset = parent.ownedBlocksOffset;
-      maybePreloadSlice();
     }
 
     // -------------------------------------------------------------------------
@@ -2039,10 +2030,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     @SuppressWarnings("ReferenceEquality")
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
-      int sliceLastBlockIdx;
-      if (logicalRoot == Boolean.FALSE
-          && !rangePreloadTriggered
-          && blockIdx < (sliceLastBlockIdx = sliceLastBlockIdx())) {
+      if (logicalRoot == Boolean.FALSE && !rangePreloadTriggered && blockIdx < sliceLastBlockIdx) {
         rangePreloadTriggered = true;
         int toIdx = lastUnpinnableIdx(blockIdx, sliceLastBlockIdx);
         if (toIdx != -1) {
@@ -2148,17 +2136,6 @@ public class GCSDirectory extends SizeAwareDirectory {
       int i = blockIdx - ownedBlocksOffset;
       if (i < 0 || i >= ownedBlocks.length) return null;
       return ownedBlocks[i].duplicate().order(ByteOrder.LITTLE_ENDIAN);
-    }
-
-    @Override
-    protected boolean ensureBlockLoaded(int blockIdx) {
-      if (blockIdx >= ownedBlocksOffset) return true; // always-mapped or locally owned
-      return dir.ensureLoaded(blockSupplier, accessMapped, blockOffsets, blockIdx, 0, blobUUID);
-    }
-
-    @Override
-    protected void onFirstBlockMiss() {
-      dir.maybeReadAheadSeg(segUUID, Collections.emptyIterator(), null, null, 0);
     }
   }
 

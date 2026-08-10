@@ -97,8 +97,15 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   private final long offset; // absolute start offset of this slice within the file
   private final long sliceLength;
-  private final int sliceFirstBlockIdx;
-  private final int sliceLastBlockIdx;
+  protected final int sliceFirstBlockIdx;
+  protected final int sliceLastBlockIdx;
+
+  /**
+   * Encodes nesting depth for range-preload eligibility. Meaning is subclass-defined; CCII stores
+   * and exposes it but does not interpret it. Typical convention (GCSIndexInput): {@code null} =
+   * CFS outer; {@code true} = logical-file root; {@code false} = sub-slice eligible for preload.
+   */
+  protected final Boolean logicalRoot;
 
   private long seekPos = -1;
   private ByteBuffer postBuffer = ByteBuffer.allocate(0);
@@ -110,9 +117,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private IntBuffer[] intViews;
   private FloatBuffer[] floatViews;
 
+  /** Shared default read-ahead window size; used by subclasses for semaphore sizing. */
   static final int MAX_READ_AHEAD =
       EnvUtils.getPropertyAsInteger("solr.compressingDirectory.maxReadAhead", 16);
-  private int readAheadTo;
+
+  protected int readAheadTo;
+  protected int seqAccessCount;
 
   // ---------------------------------------------------------------------------
   // Abstract methods
@@ -163,23 +173,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   }
 
   /**
-   * Attempt to pre-load block {@code blockIdx} asynchronously. Returns {@code true} if loading was
-   * initiated or the block is already present; {@code false} to signal that read-ahead should stop
-   * (e.g., thread-pool or semaphore saturation). Default: no-op, always returns {@code false}.
+   * Called on a genuine cache hit (block already pinnable in cache) just before the block is made
+   * current. {@link #seqAccessCount} and {@link #readAheadTo} reflect the updated state for this
+   * access. Subclasses may use this to issue prefetch hints (e.g. {@code MADV_WILLNEED}) or advance
+   * read-ahead. Default: no-op.
    */
-  protected boolean ensureBlockLoaded(int blockIdx) {
-    return false;
-  }
-
-  protected final int sliceLastBlockIdx() {
-    return sliceLastBlockIdx;
-  }
-
-  /**
-   * Called when block 0 is first fetched from the backend (a cache-miss win on block 0). Intended
-   * for segment-level read-ahead triggers. Default: no-op.
-   */
-  protected void onFirstBlockMiss() {}
+  protected void onCacheHit(int blockIdx) {}
 
   /**
    * Returns a directly-owned (pre-mapped, cache-bypassing) {@link ByteBuffer} for the given block
@@ -211,6 +210,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     this.sliceLength = -1;
     this.sliceFirstBlockIdx = -1;
     this.sliceLastBlockIdx = -1;
+    this.logicalRoot = null;
   }
 
   /**
@@ -226,7 +226,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long length,
       long[] blockOffsets,
       ByteBufferGuard guard,
-      AtomicLongArray accessMapped) {
+      AtomicLongArray accessMapped,
+      Boolean logicalRoot) {
     super(resourceDescription);
     this.cache = cache;
     this.blobUUID = blobUUID;
@@ -242,8 +243,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     this.offset = 0;
     this.sliceLength = length;
     this.sliceFirstBlockIdx = 0;
-    this.readAheadTo = 0;
     this.sliceLastBlockIdx = lastBlockIdx;
+    this.logicalRoot = logicalRoot;
   }
 
   // ---------------------------------------------------------------------------
@@ -259,7 +260,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       String resourceDescription,
       CachedCompressedIndexInput parent,
       long sliceOffset,
-      long sliceLen) {
+      long sliceLen,
+      Boolean logicalRoot) {
     super(resourceDescription);
     this.cache = parent.cache;
     this.blobUUID = parent.blobUUID;
@@ -280,17 +282,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         sliceLen == 0
             ? sliceFirstBlockIdx
             : Math.toIntExact((this.offset + sliceLen - 1) >> COMPRESSION_BLOCK_SHIFT);
-  }
-
-  /**
-   * Heuristic: if this slice spans exactly one block, pre-load it now. Must be called at the end of
-   * the subclass slice constructor, after all subclass fields are initialized, to avoid
-   * virtual-dispatch-before-initialization bugs.
-   */
-  protected final void maybePreloadSlice() {
-    if (sliceFirstBlockIdx == sliceLastBlockIdx && sliceLength != 0) {
-      ensureBlockLoaded(sliceFirstBlockIdx);
-    }
+    this.logicalRoot = logicalRoot;
   }
 
   // ---------------------------------------------------------------------------
@@ -445,46 +437,15 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     floatViews = null;
   }
 
-  private static int readAheadCount(int sequentialAccessCount) {
-    return sequentialAccessCount << 1;
-  }
-
   private void setCurrentNode(long node, int blockIdx, int type, long loadNanos) {
-    int seqAccessCount = nodeRef().setCurrentNode(node, blockIdx, cache);
-    //    System.out.println("XXX type="+ type + ", " + seqAccessCount + ", " + blockIdx+"/"+
-    //        accessMapped.length()+", "+ TimeUnit.NANOSECONDS.toMillis(loadNanos) + "ms, " + this);
-    switch (seqAccessCount) {
-      case -1:
-        // gone backward, no read-ahead
-        readAheadTo = sliceFirstBlockIdx;
-        return;
-      case 0:
-        // moved forward but not sequential, update high-water mark
-        if (blockIdx > readAheadTo) {
-          readAheadTo = blockIdx;
-        }
-        return;
+    seqAccessCount = nodeRef().setCurrentNode(node, blockIdx, cache);
+    if (seqAccessCount == -1) {
+      readAheadTo = sliceFirstBlockIdx;
+    } else if (blockIdx > readAheadTo) {
+      readAheadTo = blockIdx;
     }
     if (type == 0) {
-      if (blockIdx > readAheadTo) {
-        readAheadTo = blockIdx;
-      }
-      return;
-    }
-    int newReadAheadTo;
-    if (seqAccessCount > 0
-        && (newReadAheadTo =
-                Math.min(
-                    sliceLastBlockIdx,
-                    blockIdx + Math.min(MAX_READ_AHEAD, readAheadCount(seqAccessCount))))
-            > readAheadTo) {
-      for (int i = readAheadTo + 1; i <= newReadAheadTo; i++) {
-        if (!ensureBlockLoaded(i)) {
-          newReadAheadTo = i - 1;
-          break;
-        }
-      }
-      readAheadTo = newReadAheadTo;
+      onCacheHit(blockIdx);
     }
   }
 
@@ -536,7 +497,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
           buf = nodeVal.join(cache);
         } else {
           // We won the race: fetch from backend and populate the node.
-          if (blockIdx == 0) onFirstBlockMiss();
           // long start = System.nanoTime();
           cache.recordDecompressionDemand();
           if (VERBOSE && log.isInfoEnabled()) {
