@@ -173,8 +173,9 @@ public class GCSDirectoryFactory extends StandardDirectoryFactory {
     /**
      * The Solr core root directory (from {@link CoreContainer#getCoreRootDirectory()}); used to
      * bound the upward search for {@code core.properties} in {@link
-     * BlockCache#refIdFromCoreProperties(Path, Path)}. Null when no {@link CoreContainer} is
-     * available (e.g. in standalone tests), in which case the search falls back to a depth limit.
+     * BlockCache#refIdFromCoreProperties(Path, Path, boolean)}. Null when no {@link CoreContainer}
+     * is available (e.g. in standalone tests), in which case the search falls back to a depth
+     * limit.
      */
     private final Path coreRootDirectory;
 

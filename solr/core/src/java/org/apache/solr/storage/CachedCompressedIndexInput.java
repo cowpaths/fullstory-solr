@@ -52,6 +52,7 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
 import org.apache.lucene.util.BitUtil;
 import org.apache.lucene.util.CollectionUtil;
+import org.apache.solr.common.util.EnvUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -109,7 +110,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private IntBuffer[] intViews;
   private FloatBuffer[] floatViews;
 
-  static final int MAX_READ_AHEAD = 16;
+  static final int MAX_READ_AHEAD =
+      EnvUtils.getPropertyAsInteger("solr.compressingDirectory.maxReadAhead", 16);
   private int readAheadTo;
 
   // ---------------------------------------------------------------------------
