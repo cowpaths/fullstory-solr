@@ -75,14 +75,11 @@ class TimeLimitingHttpShardHandler extends HttpShardHandler {
             k -> {
               List<ShardRequestActor> actors = new ArrayList<>();
               actors.add(new NodeStatsCollector(slowNodeDetector));
-              if (shardsTolerant) {
+              Set<String> slowNodes = slowNodeDetector.getSlowNodes();
+              if (shardsTolerant && !slowNodes.isEmpty()) {
                 actors.add(
                     new SlowNodeTimeoutActor(
-                        slowNodeTimeout,
-                        dryRun,
-                        slowNodeDetector.getSlowNodes(),
-                        timeoutCallback,
-                        executorService));
+                        slowNodeTimeout, dryRun, slowNodes, timeoutCallback, executorService));
               }
               return new ShardRequestTracker(actors);
             });
@@ -308,7 +305,9 @@ class SlowNodeTimeoutActor implements ShardRequestActor {
     }
 
     // all pending reqs are from slow nodes, start a countdown to possibly cancel those requests
-    if (cancelCountDownLatch == null && pendingFutureCountFromFastNode.get() <= 0) {
+    if (!pendingFutures.isEmpty()
+        && cancelCountDownLatch == null
+        && pendingFutureCountFromFastNode.get() <= 0) {
       cancelCountDownLatch = new CountDownLatch(1);
       executorService.submit(
           () -> {
