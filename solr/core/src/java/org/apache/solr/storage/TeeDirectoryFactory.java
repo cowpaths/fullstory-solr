@@ -382,6 +382,10 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
 
   @Override
   public void init(NamedList<?> args) {
+    if (!isDataNode) {
+      // no setup necessary; `create()` delegates directly to MMapDirectory
+      return;
+    }
     SolrParams params = args.toSolrParams();
     if (this.cc != null) {
       CoreContainer cc = this.cc.get();
