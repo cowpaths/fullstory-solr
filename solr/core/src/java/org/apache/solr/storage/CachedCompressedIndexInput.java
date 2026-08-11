@@ -175,10 +175,15 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   /**
    * Called on a genuine cache hit (block already pinnable in cache) just before the block is made
    * current. {@link #seqAccessCount} and {@link #readAheadTo} reflect the updated state for this
-   * access. Subclasses may use this to issue prefetch hints (e.g. {@code MADV_WILLNEED}) or advance
-   * read-ahead. Default: no-op.
+   * access. Issues a length-aware {@code MADV_WILLNEED} hint on the cache file block, covering only
+   * the populated data (avoids paging in unused tail-block padding).
    */
-  protected void onCacheHit(int blockIdx) {}
+  protected void onCacheHit(int blockIdx) {
+    long handle = accessMapped.get(blockIdx);
+    if (handle != BlockCache.NULL_HANDLE) {
+      cache.maybeLoadHint(handle, decompressedLenFor(blockIdx));
+    }
+  }
 
   /**
    * Returns a directly-owned (pre-mapped, cache-bypassing) {@link ByteBuffer} for the given block
