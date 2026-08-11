@@ -631,35 +631,58 @@ public class AccessDirectory2 extends MMapDirectory {
     @SuppressWarnings("ReferenceEquality")
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
-      if (logicalRoot == Boolean.FALSE && sliceLastBlockIdx > readAheadTo) {
-        readAheadTo = sliceLastBlockIdx;
-        final int fromIdx = blockIdx + 1;
-        if (fromIdx <= sliceLastBlockIdx) {
-          final IntCursor cursor = new IntCursor();
-          BlockPreloader.ensureLoadedSerial(
-              accessMapped,
-              blockOffsets,
-              new Iterator<IntCursor>() {
-                int next = fromIdx;
-
-                @Override
-                public boolean hasNext() {
-                  return next <= sliceLastBlockIdx;
-                }
-
-                @Override
-                public IntCursor next() {
-                  cursor.value = next++;
-                  return cursor;
-                }
-              },
-              this::decompressedLenFor,
-              cache,
-              ioExec,
-              readAheadPermits,
-              0,
-              blockSupplier,
-              blobUUID);
+      if (logicalRoot == Boolean.FALSE && blockIdx >= readAheadTo) {
+        int batchSize = Math.min(seqAccessCount, MAX_READ_AHEAD);
+        if (batchSize > 0) {
+          int preloadTo = Math.min(blockIdx + batchSize, sliceLastBlockIdx);
+          readAheadTo = preloadTo;
+          final int fromIdx = blockIdx + 1;
+          if (fromIdx <= preloadTo) {
+            final AtomicLongArray am = accessMapped;
+            final long[] offsets = blockOffsets;
+            final BlockPreloader.BlockSupplier supplier = blockSupplier;
+            final UUID uuid = blobUUID;
+            ioExec.submit(
+                () -> {
+                  try {
+                    for (int idx = fromIdx; idx <= preloadTo; idx++) {
+                      long extant = am.get(idx);
+                      if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) continue;
+                      long[] nodeHandle = new long[1];
+                      BlockCache.Val val = cache.acquireNode(nodeHandle, uuid, idx);
+                      if (val == null) return null; // cache full — stop
+                      long node = nodeHandle[0];
+                      if (am.compareAndSet(idx, extant, node)) {
+                        if (val.isPopulated()) {
+                          cache.recordWarmStartHit();
+                        } else {
+                          long off = offsets[idx];
+                          int cLen = (int) (offsets[idx + 1] - off);
+                          BlockPreloader.populateBuf(
+                              off,
+                              cLen,
+                              idx,
+                              decompressedLenFor(idx),
+                              node,
+                              val,
+                              am,
+                              cache,
+                              supplier,
+                              uuid);
+                        }
+                        cache.unpin(node, false);
+                      } else {
+                        cache.recordCasRaceLoss();
+                        cache.close(node, val);
+                      }
+                    }
+                  } catch (Throwable t) {
+                    if (!(t instanceof IOException))
+                      log.error("Unexpected exception in async preload task", t);
+                  }
+                  return null;
+                });
+          }
         }
       }
       return supplyFromBuffers(
