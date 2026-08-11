@@ -443,7 +443,8 @@ public class AccessDirectory2 extends MMapDirectory {
           "lazy:" + source,
           dir,
           parseRootParams(
-              source, sharedEntry, pendingNodes, dir.uuidForFile(source.getFileName().toString())));
+              source, sharedEntry, pendingNodes, dir.uuidForFile(source.getFileName().toString())),
+          source.getFileName().toString().endsWith(".cfs") ? null : Boolean.TRUE);
     }
 
     private AD2IndexInput() {
@@ -569,7 +570,8 @@ public class AccessDirectory2 extends MMapDirectory {
       }
     }
 
-    private AD2IndexInput(String description, AccessDirectory2 dir, RootParams p) {
+    private AD2IndexInput(
+        String description, AccessDirectory2 dir, RootParams p, Boolean logicalRoot) {
       super(
           description,
           dir.cache,
@@ -577,7 +579,8 @@ public class AccessDirectory2 extends MMapDirectory {
           p.length,
           p.blockOffsets,
           new ByteBufferGuard("ad2-decompressed", unmapHack()),
-          p.accessMapped);
+          p.accessMapped,
+          logicalRoot);
       this.ioExec = dir.ioExec;
       this.readAheadPermits = dir.readAheadPermits;
       this.compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
@@ -604,7 +607,12 @@ public class AccessDirectory2 extends MMapDirectory {
 
     private AD2IndexInput(
         String description, AD2IndexInput parent, long sliceOffset, long sliceLen) {
-      super(description, parent, sliceOffset, sliceLen);
+      super(
+          description,
+          parent,
+          sliceOffset,
+          sliceLen,
+          parent.logicalRoot == null ? Boolean.TRUE : Boolean.FALSE);
       this.ioExec = parent.ioExec;
       this.readAheadPermits = parent.readAheadPermits;
       this.compressedGuard = parent.compressedGuard;
@@ -613,7 +621,6 @@ public class AccessDirectory2 extends MMapDirectory {
       this.nodesEntry = null;
       this.supplyLock = null; // lock is captured in the blockSupplier lambda; not needed here
       blockSupplier = parent.blockSupplier;
-      maybePreloadSlice();
     }
 
     // -------------------------------------------------------------------------
@@ -621,25 +628,42 @@ public class AccessDirectory2 extends MMapDirectory {
     // -------------------------------------------------------------------------
 
     @Override
+    @SuppressWarnings("ReferenceEquality")
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
+      if (logicalRoot == Boolean.FALSE && sliceLastBlockIdx > readAheadTo) {
+        readAheadTo = sliceLastBlockIdx;
+        final int fromIdx = blockIdx + 1;
+        if (fromIdx <= sliceLastBlockIdx) {
+          final IntCursor cursor = new IntCursor();
+          BlockPreloader.ensureLoadedSerial(
+              accessMapped,
+              blockOffsets,
+              new Iterator<IntCursor>() {
+                int next = fromIdx;
+
+                @Override
+                public boolean hasNext() {
+                  return next <= sliceLastBlockIdx;
+                }
+
+                @Override
+                public IntCursor next() {
+                  cursor.value = next++;
+                  return cursor;
+                }
+              },
+              this::decompressedLenFor,
+              cache,
+              ioExec,
+              readAheadPermits,
+              0,
+              blockSupplier,
+              blobUUID);
+        }
+      }
       return supplyFromBuffers(
           compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
-    }
-
-    @Override
-    protected boolean ensureBlockLoaded(int blockIdx) {
-      return BlockPreloader.ensureLoaded(
-          accessMapped,
-          blockOffsets,
-          blockIdx,
-          decompressedLenFor(blockIdx),
-          cache,
-          ioExec,
-          readAheadPermits,
-          0,
-          blockSupplier,
-          blobUUID);
     }
 
     boolean preloadSerial(Iterator<IntCursor> blockIdxIter, int timeoutMillis) {

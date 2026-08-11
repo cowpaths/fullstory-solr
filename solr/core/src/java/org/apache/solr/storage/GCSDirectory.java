@@ -1735,9 +1735,6 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private final BlockPreloader.BlockSupplier blockSupplier;
 
-    /** Set on first {@link #supply} call that triggers a range preload; prevents re-triggering. */
-    private boolean rangePreloadTriggered;
-
     /**
      * Non-null only in the root input (not slices). For always-mapped roots: a minimal struct
      * holding guard + origMapping only; for GCS-backed roots: the shared struct from pendingNodes.
@@ -2030,8 +2027,10 @@ public class GCSDirectory extends SizeAwareDirectory {
     @SuppressWarnings("ReferenceEquality")
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
-      if (logicalRoot == Boolean.FALSE && !rangePreloadTriggered && blockIdx < sliceLastBlockIdx) {
-        rangePreloadTriggered = true;
+      if (logicalRoot == Boolean.FALSE
+          && sliceLastBlockIdx > readAheadTo
+          && blockIdx < sliceLastBlockIdx) {
+        readAheadTo = sliceLastBlockIdx;
         int toIdx = lastUnpinnableIdx(blockIdx, sliceLastBlockIdx);
         if (toIdx != -1) {
           return dir.supplyAndHandoff(
