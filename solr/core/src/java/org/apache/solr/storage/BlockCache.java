@@ -117,6 +117,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final boolean PROSPECTIVE_READAHEAD =
       EnvUtils.getPropertyAsBool("solr.blockCache.prospectiveReadahead", false);
 
+  private static final boolean NO_LOAD_HINT =
+      EnvUtils.getPropertyAsBool("solr.blockCache.noLoadHint", false);
+
   // ---------------------------------------------------------------------------
   // Handle encoding: (generation << 32) | (partitionIndex << PART_SHIFT) | localSlot
   //
@@ -744,6 +747,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     private static final long LOAD_HINT_THROTTLE_NANOS = TimeUnit.SECONDS.toNanos(5);
 
     private void maybeLoadHint(BlockCache c) {
+      if (NO_LOAD_HINT) return;
       long now = System.nanoTime();
       long last = lastLoadHintNanos;
       if (now - last < LOAD_HINT_THROTTLE_NANOS) return;
