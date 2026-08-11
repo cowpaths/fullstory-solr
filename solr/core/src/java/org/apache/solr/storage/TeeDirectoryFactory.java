@@ -103,6 +103,8 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
     // AccessDirectory2 mode (blockCache != null)
     // ---------------------------------------------------------------------------
     final BlockCache blockCache;
+    final ArrayBlockingQueue<Runnable> preloadQueue;
+    private final Future<?> preloadTask;
 
     // ---------------------------------------------------------------------------
     // AccessDirectory mode (blockCache == null)
@@ -132,6 +134,24 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
 
       if (blockCache != null) {
         // AccessDirectory2 mode: no lazy-activation machinery needed.
+        preloadQueue = new ArrayBlockingQueue<>(16384);
+        preloadTask =
+            ioExec.submit(
+                () -> {
+                  Thread t = Thread.currentThread();
+                  while (!t.isInterrupted()) {
+                    try {
+                      preloadQueue.take().run();
+                    } catch (InterruptedException e) {
+                      t.interrupt();
+                      break;
+                    } catch (Throwable e) {
+                      // best-effort: log and continue
+                      log.error("Unexpected exception in preload consumer", e);
+                    }
+                  }
+                  return null;
+                });
         activationQueue = null;
         priorityActivate = null;
         rawCt = null;
@@ -146,6 +166,8 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
         activationTask = null;
       } else {
         // AccessDirectory mode: full lazy-activation machinery.
+        preloadQueue = null;
+        preloadTask = null;
         activationQueue = new LinkedBlockingQueue<>();
         priorityActivate = new ConcurrentHashMap<>();
         rawCt = new LongAdder();
@@ -284,8 +306,14 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
         try {
           lengthVerificationTask.cancel(true);
         } finally {
-          if (activationTask != null) {
-            activationTask.cancel(true);
+          try {
+            if (preloadTask != null) {
+              preloadTask.cancel(true);
+            }
+          } finally {
+            if (activationTask != null) {
+              activationTask.cancel(true);
+            }
           }
         }
       }
@@ -495,7 +523,8 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
                       lockFactory,
                       persistentPath,
                       nodeLevelState.blockCache,
-                      nodeLevelState.ioExec);
+                      nodeLevelState.ioExec,
+                      nodeLevelState.preloadQueue);
             } else {
               dir = new AccessDirectory(access, lockFactory, persistentPath, nodeLevelState);
             }

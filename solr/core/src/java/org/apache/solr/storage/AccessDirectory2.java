@@ -99,6 +99,7 @@ public class AccessDirectory2 extends MMapDirectory {
   private final BlockCache cache;
   private final ExecutorService ioExec;
   private final BlockPreloader.Permits readAheadPermits;
+  private final ArrayBlockingQueue<Runnable> preloadQueue;
 
   /**
    * Ref-counted wrapper around a shared {@code accessMapped} array. The map itself holds a +1 ref;
@@ -159,7 +160,8 @@ public class AccessDirectory2 extends MMapDirectory {
       LockFactory lockFactory,
       Path compressedPath,
       BlockCache cache,
-      ExecutorService ioExec)
+      ExecutorService ioExec,
+      ArrayBlockingQueue<Runnable> preloadQueue)
       throws IOException {
     super(path, lockFactory);
     UUID uuid = BlockCache.refIdFromCoreProperties(coreRootDirectory, compressedPath, true);
@@ -173,6 +175,7 @@ public class AccessDirectory2 extends MMapDirectory {
     this.compressedPath = compressedPath;
     this.cache = cache;
     this.ioExec = ioExec;
+    this.preloadQueue = preloadQueue;
     this.readAheadPermits =
         BlockPreloader.ofSemaphore(new Semaphore(CachedCompressedIndexInput.MAX_READ_AHEAD, true));
 
@@ -413,6 +416,7 @@ public class AccessDirectory2 extends MMapDirectory {
 
     private final ExecutorService ioExec;
     private final BlockPreloader.Permits readAheadPermits;
+    private final ArrayBlockingQueue<Runnable> preloadQueue;
     private final ByteBufferGuard compressedGuard;
     private final ByteBuffer[] compressed;
     private final boolean isRoot;
@@ -451,6 +455,7 @@ public class AccessDirectory2 extends MMapDirectory {
       super("done_sentinel");
       this.ioExec = null;
       this.readAheadPermits = null;
+      this.preloadQueue = null;
       this.compressedGuard = null;
       this.compressed = null;
       this.isRoot = false;
@@ -583,6 +588,7 @@ public class AccessDirectory2 extends MMapDirectory {
           logicalRoot);
       this.ioExec = dir.ioExec;
       this.readAheadPermits = dir.readAheadPermits;
+      this.preloadQueue = dir.preloadQueue;
       this.compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
       this.compressed = p.compressed;
       this.isRoot = true;
@@ -615,6 +621,7 @@ public class AccessDirectory2 extends MMapDirectory {
           parent.logicalRoot == null ? Boolean.TRUE : Boolean.FALSE);
       this.ioExec = parent.ioExec;
       this.readAheadPermits = parent.readAheadPermits;
+      this.preloadQueue = parent.preloadQueue;
       this.compressedGuard = parent.compressedGuard;
       this.compressed = parent.compressed;
       this.isRoot = false;
@@ -642,22 +649,22 @@ public class AccessDirectory2 extends MMapDirectory {
             final long[] offsets = blockOffsets;
             final BlockPreloader.BlockSupplier supplier = blockSupplier;
             final UUID uuid = blobUUID;
-            ioExec.submit(
+            preloadQueue.offer(
                 () -> {
-                  try {
-                    for (int idx = fromIdx; idx <= preloadTo; idx++) {
-                      long extant = am.get(idx);
-                      if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) continue;
-                      long[] nodeHandle = new long[1];
-                      BlockCache.Val val = cache.acquireNode(nodeHandle, uuid, idx);
-                      if (val == null) return null; // cache full — stop
-                      long node = nodeHandle[0];
-                      if (am.compareAndSet(idx, extant, node)) {
-                        if (val.isPopulated()) {
-                          cache.recordWarmStartHit();
-                        } else {
-                          long off = offsets[idx];
-                          int cLen = (int) (offsets[idx + 1] - off);
+                  for (int idx = fromIdx; idx <= preloadTo; idx++) {
+                    long extant = am.get(idx);
+                    if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) continue;
+                    long[] nodeHandle = new long[1];
+                    BlockCache.Val val = cache.acquireNode(nodeHandle, uuid, idx);
+                    if (val == null) return; // cache full — stop
+                    long node = nodeHandle[0];
+                    if (am.compareAndSet(idx, extant, node)) {
+                      if (val.isPopulated()) {
+                        cache.recordWarmStartHit();
+                      } else {
+                        long off = offsets[idx];
+                        int cLen = (int) (offsets[idx + 1] - off);
+                        try {
                           BlockPreloader.populateBuf(
                               off,
                               cLen,
@@ -669,18 +676,16 @@ public class AccessDirectory2 extends MMapDirectory {
                               cache,
                               supplier,
                               uuid);
+                        } catch (IOException e) {
+                          return; // best-effort — stop on I/O error
                         }
-                        cache.unpin(node, false);
-                      } else {
-                        cache.recordCasRaceLoss();
-                        cache.close(node, val);
                       }
+                      cache.unpin(node, false);
+                    } else {
+                      cache.recordCasRaceLoss();
+                      cache.close(node, val);
                     }
-                  } catch (Throwable t) {
-                    if (!(t instanceof IOException))
-                      log.error("Unexpected exception in async preload task", t);
                   }
-                  return null;
                 });
           }
         }
