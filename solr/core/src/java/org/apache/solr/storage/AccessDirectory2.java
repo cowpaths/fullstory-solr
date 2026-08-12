@@ -592,6 +592,9 @@ public class AccessDirectory2 extends MMapDirectory {
     @SuppressWarnings("ReferenceEquality")
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
+      byte[] result =
+          supplyFromBuffers(
+              compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
       if (logicalRoot == Boolean.FALSE && blockIdx >= readAheadTo) {
         int batchSize = Math.min(seqAccessCount, MAX_READ_AHEAD);
         if (batchSize > 0) {
@@ -603,11 +606,14 @@ public class AccessDirectory2 extends MMapDirectory {
             final long[] offsets = blockOffsets;
             final BlockPreloader.BlockSupplier supplier = blockSupplier;
             final UUID uuid = blobUUID;
+            final int seqCount = seqAccessCount;
             preloadQueue.offer(
                 () -> {
                   for (int idx = fromIdx; idx <= preloadTo; idx++) {
                     long extant = am.get(idx);
-                    if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) continue;
+                    if (extant != BlockCache.NULL_HANDLE && pinnable(idx, extant, seqCount)) {
+                      continue;
+                    }
                     long[] nodeHandle = new long[1];
                     BlockCache.Val val = cache.acquireNode(nodeHandle, uuid, idx);
                     if (val == null) return; // cache full — stop
@@ -644,8 +650,7 @@ public class AccessDirectory2 extends MMapDirectory {
           }
         }
       }
-      return supplyFromBuffers(
-          compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
+      return result;
     }
 
     /**

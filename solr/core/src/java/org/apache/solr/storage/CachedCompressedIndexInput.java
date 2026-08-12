@@ -121,8 +121,17 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   static final int MAX_READ_AHEAD =
       EnvUtils.getPropertyAsInteger("solr.compressingDirectory.maxReadAhead", 16);
 
-  private static final boolean PROSPECTIVE_READAHEAD =
-      EnvUtils.getPropertyAsBool("solr.blockCache.prospectiveReadahead", false);
+  private static final int PROSPECTIVE_READAHEAD_THRESHOLD;
+
+  static {
+    int v =
+        EnvUtils.getPropertyAsInteger(
+            "solr.blockCache.prospectiveReadaheadThreshold", Integer.MAX_VALUE);
+    if (v < 0) {
+      v = Integer.MAX_VALUE;
+    }
+    PROSPECTIVE_READAHEAD_THRESHOLD = v;
+  }
 
   protected int readAheadTo;
   protected int seqAccessCount;
@@ -181,14 +190,29 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * access. Issues a length-aware {@code MADV_WILLNEED} hint on the cache file block, covering only
    * the populated data (avoids paging in unused tail-block padding).
    */
-  protected void onCacheHit(int blockIdx, BlockCache.Val val) {
+  protected void onCacheHit(int blockIdx, BlockCache.Val val, int seqAccessCount) {
     val.maybeLoadHint(cache, decompressedLenFor(blockIdx));
-    if (PROSPECTIVE_READAHEAD && blockIdx < lastBlockIdx) {
+    if (seqAccessCount >= PROSPECTIVE_READAHEAD_THRESHOLD && blockIdx < lastBlockIdx) {
       int nextIdx = blockIdx + 1;
       long nextHandle = accessMapped.get(nextIdx);
       if (nextHandle != BlockCache.NULL_HANDLE) {
         cache.maybeLoadHint(nextHandle, decompressedLenFor(nextIdx));
       }
+    }
+  }
+
+  /**
+   * Checks whether the cache block at {@code handle} is live and pinnable. When {@code
+   * seqAccessCount} meets the {@link #PROSPECTIVE_READAHEAD_THRESHOLD}, also issues a throttled
+   * length-aware {@code MADV_WILLNEED} hint on the cache file block. Used by preload tasks to warm
+   * the page cache for blocks that are already in the block cache but may not yet be paged in from
+   * the backing file.
+   */
+  protected boolean pinnable(int blockIdx, long handle, int seqAccessCount) {
+    if (seqAccessCount < PROSPECTIVE_READAHEAD_THRESHOLD) {
+      return cache.pinnable(handle);
+    } else {
+      return cache.maybeLoadHint(handle, decompressedLenFor(blockIdx));
     }
   }
 
@@ -458,7 +482,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       readAheadTo = blockIdx;
     }
     if (type == 0) {
-      onCacheHit(blockIdx, val);
+      onCacheHit(blockIdx, val, seqAccessCount);
     }
   }
 
