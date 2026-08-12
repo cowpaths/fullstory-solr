@@ -23,9 +23,7 @@ import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZ
 import static org.apache.solr.storage.CompressingDirectory.DirectIOIndexOutput.HEADER_SIZE;
 import static org.apache.solr.storage.CompressingDirectory.readLengthFromHeader;
 
-import java.io.Closeable;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -39,15 +37,11 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.NoSuchElementException;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.locks.StampedLock;
@@ -67,7 +61,6 @@ import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.MappedByteBufferIndexInputProvider;
 import org.apache.lucene.util.IOUtils;
-import org.apache.lucene.util.ThreadInterruptedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -98,7 +91,6 @@ public class AccessDirectory2 extends MMapDirectory {
   private final Path compressedPath;
   private final BlockCache cache;
   private final ExecutorService ioExec;
-  private final BlockPreloader.Permits readAheadPermits;
   private final ArrayBlockingQueue<Runnable> preloadQueue;
 
   /**
@@ -139,9 +131,6 @@ public class AccessDirectory2 extends MMapDirectory {
    */
   private final HashMap<String, NodesEntry> pendingNodes = new HashMap<>();
 
-  private static final AD2IndexInput INIT_DONE_SENTINEL = new AD2IndexInput();
-  private static final int INIT_PRELOAD_TIMEOUT_MILLIS = 1000;
-
   private UUID uuidForFile(String name) {
     if (uuidMsb == 0 && uuidLsb == 0) {
       // No directory-level UUID, fallback to absolutePath string
@@ -176,151 +165,120 @@ public class AccessDirectory2 extends MMapDirectory {
     this.cache = cache;
     this.ioExec = ioExec;
     this.preloadQueue = preloadQueue;
-    this.readAheadPermits =
-        BlockPreloader.ofSemaphore(new Semaphore(CachedCompressedIndexInput.MAX_READ_AHEAD, true));
 
-    // Scan existing compressed files:
-    //  - segments_N: open immediately and async-preload block 0 as a hint (will be read soon)
-    //  - all others: open and group by segment name → one SegmentPreloadTask per segment
-    // After the scan, parse segments_N (hopefully cache-hot) to order tasks by seg ordinal.
+    // Scan existing compressed files, open inputs, and group by segment.
     Map<String, List<Map.Entry<String, AD2IndexInput>>> segToInputs = new HashMap<>();
     List<String> segmentsFiles = new ArrayList<>();
+    List<AD2IndexInput> priorityInputs = new ArrayList<>();
 
     String[] files = compressedPath.toFile().list();
     if (files == null) {
       files = new String[0];
     }
-    BlockingQueue<AD2IndexInput> initQueue = new ArrayBlockingQueue<>(files.length + 1);
-    Iterator<AD2IndexInput> initIter =
-        new Iterator<AD2IndexInput>() {
-          AD2IndexInput next;
-
-          @Override
-          public boolean hasNext() {
-            if (next == null) {
-              try {
-                return (next = initQueue.take()) != INIT_DONE_SENTINEL;
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new ThreadInterruptedException(e);
-              }
-            } else {
-              return next != INIT_DONE_SENTINEL;
-            }
-          }
-
-          @Override
-          public AD2IndexInput next() {
-            AD2IndexInput ret = next;
-            if (ret == null) {
-              throw new IllegalStateException();
-            } else if (ret == INIT_DONE_SENTINEL) {
-              throw new NoSuchElementException();
-            }
-            next = null;
-            return ret;
-          }
-        };
     List<IndexInput> toClose = new ArrayList<>(files.length);
-    try {
-      AD2IndexInput.preloadSerial(initIter, ioExec, readAheadPermits, INIT_PRELOAD_TIMEOUT_MILLIS);
-      for (String file : files) {
-        if (file.endsWith(".tmp")) continue;
-        AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
-        toClose.add(input);
-        if (file.startsWith("segments_")) {
-          segmentsFiles.add(file);
-          initQueue.add(input); // async hint; segments_N is small — likely done before we need it
-          continue;
-        } else if (file.endsWith(".si")) {
-          initQueue.add(input);
-          continue;
-        }
+    for (String file : files) {
+      if (file.endsWith(".tmp")) continue;
+      AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
+      toClose.add(input);
+      if (file.startsWith("segments_")) {
+        segmentsFiles.add(file);
+        priorityInputs.add(input);
+      } else if (file.endsWith(".si")) {
+        priorityInputs.add(input);
+      } else {
         String segName = IndexFileNames.parseSegmentName(file);
         segToInputs
             .computeIfAbsent(segName, k -> new ArrayList<>())
             .add(new AbstractMap.SimpleImmutableEntry<>(file, input));
       }
-    } finally {
-      initQueue.add(INIT_DONE_SENTINEL);
     }
 
-    // Build one SegmentPreloadTask per segment group.
-    List<String> segOrder = new ArrayList<>(segToInputs.keySet());
-    if (!segmentsFiles.isEmpty() && !segOrder.isEmpty()) {
-      Map<String, Integer> segOrds = new HashMap<>();
-      for (String segmentsFile : segmentsFiles) {
-        try {
-          SegmentInfos infos = SegmentInfos.readCommit(this, segmentsFile);
-          for (int i = infos.size() - 1; i >= 0; i--) {
-            segOrds.put(infos.info(i).info.name, i);
-          }
-        } catch (Exception e) {
-          // best-effort; proceed with unordered segments
-        }
-      }
-      segOrder.sort(Comparator.comparingInt(s -> segOrds.getOrDefault(s, Integer.MAX_VALUE)));
-    }
+    // Submit a single async task that preloads everything serially.
+    AccessDirectory2 dir = this;
+    ioExec.submit(
+        () -> {
+          try {
+            // Phase 1: priority files (segments_N, .si) — all blocks (small, fully read)
+            for (AD2IndexInput in : priorityInputs) {
+              for (int idx = 0, blockCount = in.blockOffsets.length - 1; idx < blockCount; idx++) {
+                if (!AD2IndexInput.loadBlock(in, idx)) return null;
+              }
+            }
 
-    List<BlockPreloader.SegmentPreloadTask> tasks = new ArrayList<>(segOrder.size());
-    for (String seg : segOrder) {
-      List<Map.Entry<String, AD2IndexInput>> inputs = segToInputs.get(seg);
-      // CFS segment: preload the first block of each logical sub-file via the .cfe entry table.
-      AD2IndexInput cfsInput = null;
-      AD2IndexInput cfeInput = null;
-      for (Map.Entry<String, AD2IndexInput> e : inputs) {
-        String name = e.getKey();
-        if (name.endsWith(".cfs")) {
-          cfsInput = e.getValue();
-        } else if (name.endsWith(".cfe")) {
-          cfeInput = e.getValue();
-        }
-      }
-      if (cfsInput != null && cfeInput != null) {
-        final AD2IndexInput cfsInputFinal = cfsInput;
-        final AD2IndexInput cfeInputFinal = cfeInput;
-        tasks.add(
-            (fp) -> {
-              Iterator<AD2IndexInput> inputIter =
-                  inputs.stream().map(Map.Entry::getValue).iterator();
-              AD2IndexInput.preloadSerial(
-                  inputIter, ioExec, readAheadPermits, INIT_PRELOAD_TIMEOUT_MILLIS);
-              fp.add(
-                  () -> {
-                    IntArrayList blockIndexes =
-                        BlockPreloader.parseCfeBlockIndexes(cfeInputFinal, Integer.MAX_VALUE);
-                    cfsInputFinal.preloadSerial(
-                        blockIndexes.iterator(), INIT_PRELOAD_TIMEOUT_MILLIS);
-                  });
-            });
-      } else {
-        // Non-CFS segment: preload block 0 of each file.
-        tasks.add(
-            (fp) -> {
-              Iterator<AD2IndexInput> inputIter =
-                  inputs.stream().map(Map.Entry::getValue).iterator();
-              AD2IndexInput.preloadSerial(
-                  inputIter, ioExec, readAheadPermits, INIT_PRELOAD_TIMEOUT_MILLIS);
-            });
-      }
-    }
+            // Order segments by ordinal from segments_N (best-effort; data is now cache-hot)
+            List<String> segOrder = new ArrayList<>(segToInputs.keySet());
+            if (!segmentsFiles.isEmpty() && !segOrder.isEmpty()) {
+              Map<String, Integer> segOrds = new HashMap<>();
+              for (String segmentsFile : segmentsFiles) {
+                try {
+                  SegmentInfos infos = SegmentInfos.readCommit(dir, segmentsFile);
+                  for (int i = infos.size() - 1; i >= 0; i--) {
+                    segOrds.put(infos.info(i).info.name, i);
+                  }
+                } catch (Exception e) {
+                  // best-effort; proceed with unordered segments
+                }
+              }
+              segOrder.sort(
+                  Comparator.comparingInt(s -> segOrds.getOrDefault(s, Integer.MAX_VALUE)));
+            }
 
-    if (!tasks.isEmpty()) {
-      Runnable onComplete =
-          () -> {
-            try (Closeable c = () -> IOUtils.close(toClose)) {
+            // Phase 2: CFS/CFE boundary blocks (header/footer) so CFE is parseable in phase 3
+            for (String seg : segOrder) {
+              for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
+                String name = e.getKey();
+                if (name.endsWith(".cfs") || name.endsWith(".cfe")) {
+                  AD2IndexInput in = e.getValue();
+                  if (!AD2IndexInput.loadBlock(in, 0)) return null;
+                  int lastIdx = in.blockOffsets.length - 2;
+                  if (lastIdx > 0 && !AD2IndexInput.loadBlock(in, lastIdx)) return null;
+                }
+              }
+            }
+
+            // Phase 3: all logical file boundary blocks in segment order —
+            // non-CFS files and CFS sub-files interleaved
+            for (String seg : segOrder) {
+              List<Map.Entry<String, AD2IndexInput>> inputs = segToInputs.get(seg);
+              AD2IndexInput cfsInput = null;
+              AD2IndexInput cfeInput = null;
+              for (Map.Entry<String, AD2IndexInput> e : inputs) {
+                String name = e.getKey();
+                if (name.endsWith(".cfs")) {
+                  cfsInput = e.getValue();
+                } else if (name.endsWith(".cfe")) {
+                  cfeInput = e.getValue();
+                } else {
+                  // non-CFS file: load boundary blocks
+                  AD2IndexInput in = e.getValue();
+                  if (!AD2IndexInput.loadBlock(in, 0)) return null;
+                  int lastIdx = in.blockOffsets.length - 2;
+                  if (lastIdx > 0 && !AD2IndexInput.loadBlock(in, lastIdx)) return null;
+                }
+              }
+              if (cfsInput != null && cfeInput != null) {
+                IntArrayList blockIndexes =
+                    BlockPreloader.parseCfeBlockIndexes(cfeInput, Integer.MAX_VALUE);
+                for (IntCursor cursor : blockIndexes) {
+                  if (!AD2IndexInput.loadBlock(cfsInput, cursor.value)) return null;
+                }
+              }
+            }
+          } finally {
+            try {
+              // wait a nominal amount of time so that the main code loads its own copies of
+              // inputs and can inherit the structures we've prepopulated. If we close too
+              // early, refCount will drop to 0, triggering cleanup, and all our work is
+              // wasted!
               Thread.sleep(5000);
             } catch (InterruptedException e) {
               Thread.currentThread().interrupt();
-              throw new ThreadInterruptedException(e);
-            } catch (IOException ex) {
-              throw new UncheckedIOException(ex);
+            } finally {
+              IOUtils.close(toClose);
             }
-          };
-      BlockPreloader.readAheadSegs(tasks.iterator(), ioExec, new ArrayList<>(), onComplete);
-    } else {
-      IOUtils.close(toClose);
-    }
+          }
+          return null;
+        });
   }
 
   /** Stores the shared {@code accessMapped} array for {@code name}, pre-populated by the writer. */
@@ -415,7 +373,6 @@ public class AccessDirectory2 extends MMapDirectory {
   static final class AD2IndexInput extends CachedCompressedIndexInput {
 
     private final ExecutorService ioExec;
-    private final BlockPreloader.Permits readAheadPermits;
     private final ArrayBlockingQueue<Runnable> preloadQueue;
     private final ByteBufferGuard compressedGuard;
     private final ByteBuffer[] compressed;
@@ -454,7 +411,6 @@ public class AccessDirectory2 extends MMapDirectory {
     private AD2IndexInput() {
       super("done_sentinel");
       this.ioExec = null;
-      this.readAheadPermits = null;
       this.preloadQueue = null;
       this.compressedGuard = null;
       this.compressed = null;
@@ -587,7 +543,6 @@ public class AccessDirectory2 extends MMapDirectory {
           p.accessMapped,
           logicalRoot);
       this.ioExec = dir.ioExec;
-      this.readAheadPermits = dir.readAheadPermits;
       this.preloadQueue = dir.preloadQueue;
       this.compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
       this.compressed = p.compressed;
@@ -620,7 +575,6 @@ public class AccessDirectory2 extends MMapDirectory {
           sliceLen,
           parent.logicalRoot == null ? Boolean.TRUE : Boolean.FALSE);
       this.ioExec = parent.ioExec;
-      this.readAheadPermits = parent.readAheadPermits;
       this.preloadQueue = parent.preloadQueue;
       this.compressedGuard = parent.compressedGuard;
       this.compressed = parent.compressed;
@@ -692,60 +646,6 @@ public class AccessDirectory2 extends MMapDirectory {
       }
       return supplyFromBuffers(
           compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
-    }
-
-    boolean preloadSerial(Iterator<IntCursor> blockIdxIter, int timeoutMillis) {
-      return BlockPreloader.ensureLoadedSerial(
-          accessMapped,
-          blockOffsets,
-          blockIdxIter,
-          this::decompressedLenFor,
-          cache,
-          ioExec,
-          readAheadPermits,
-          timeoutMillis,
-          blockSupplier,
-          blobUUID);
-    }
-
-    /**
-     * Acquires one permit and submits one {@code ioExec} task that loads block 0 and the last block
-     * of each input in {@code inputs} serially. Appropriate when preloading the boundary blocks of
-     * several files that belong to the same segment, so that all of those reads share a single
-     * permit and run sequentially on spinning-disk-friendly I/O.
-     */
-    static boolean preloadSerial(
-        Iterator<AD2IndexInput> inputs,
-        ExecutorService ioExec,
-        BlockPreloader.Permits permits,
-        int timeoutMillis) {
-      // TODO: pre-inspect block 0 of at least some inputs (check extant.pinnable()) before
-      // acquiring a permit, to avoid paying the permit cost when all blocks are already cached.
-      if (!permits.tryAcquire(timeoutMillis)) return false;
-      try {
-        ioExec.submit(
-            () -> {
-              try {
-                while (inputs.hasNext()) {
-                  AD2IndexInput in = inputs.next();
-                  if (!loadBlock(in, 0)) {
-                    return null; // cache full — stop
-                  }
-                  int lastIdx = in.blockOffsets.length - 2;
-                  if (lastIdx > 0 && !loadBlock(in, lastIdx)) {
-                    return null;
-                  }
-                }
-              } finally {
-                permits.release();
-              }
-              return null;
-            });
-      } catch (Throwable t) {
-        permits.release();
-        throw t;
-      }
-      return true;
     }
 
     /**
