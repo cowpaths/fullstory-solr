@@ -746,7 +746,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     private static final long LOAD_HINT_THROTTLE_NANOS = TimeUnit.SECONDS.toNanos(5);
 
-    private void maybeLoadHint(BlockCache c, int length) {
+    void maybeLoadHint(BlockCache c, int length) {
       if (NO_LOAD_HINT) return;
       long now = System.nanoTime();
       long last = lastLoadHintNanos;
@@ -1113,17 +1113,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       return false;
     } else {
       return true;
-    }
-  }
-
-  /**
-   * Issues a throttled {@code MADV_WILLNEED} hint for the cache block identified by {@code handle},
-   * covering only {@code length} bytes of actual data (tail blocks may be shorter than block size).
-   */
-  void maybeLoadHint(long handle, int length) {
-    Val v = (Val) partitions[partOf(handle)].pinnable(handle);
-    if (v != null) {
-      v.maybeLoadHint(this, length);
     }
   }
 

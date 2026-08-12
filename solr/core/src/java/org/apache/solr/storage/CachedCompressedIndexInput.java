@@ -178,11 +178,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * access. Issues a length-aware {@code MADV_WILLNEED} hint on the cache file block, covering only
    * the populated data (avoids paging in unused tail-block padding).
    */
-  protected void onCacheHit(int blockIdx) {
-    long handle = accessMapped.get(blockIdx);
-    if (handle != BlockCache.NULL_HANDLE) {
-      cache.maybeLoadHint(handle, decompressedLenFor(blockIdx));
-    }
+  protected void onCacheHit(int blockIdx, BlockCache.Val val) {
+    val.maybeLoadHint(cache, decompressedLenFor(blockIdx));
   }
 
   /**
@@ -400,7 +397,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     if (blockIdx > lastBlockIdx) throw new EOFException();
     ByteBuffer owned = ownedBufferFor(blockIdx);
     if (owned != null) {
-      setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, 0, 0);
+      setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, -1, 0);
       postBuffer = owned;
       postBufferBaseline = 0;
       longViews = null;
@@ -434,7 +431,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       cache.unpin(cached);
       throw unwrapException(e.getCause());
     }
-    setCurrentNode(cached, blockIdx, type, loadNanos);
+    setCurrentNode(cached, blockIdx, cachedVal, type, loadNanos);
     postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
     postBufferBaseline = 0;
     longViews = null;
@@ -442,7 +439,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     floatViews = null;
   }
 
-  private void setCurrentNode(long node, int blockIdx, int type, long loadNanos) {
+  private void setCurrentNode(
+      long node, int blockIdx, BlockCache.Val val, int type, long loadNanos) {
     seqAccessCount = nodeRef().setCurrentNode(node, blockIdx, cache);
     if (seqAccessCount == -1) {
       readAheadTo = sliceFirstBlockIdx;
@@ -450,7 +448,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       readAheadTo = blockIdx;
     }
     if (type == 0) {
-      onCacheHit(blockIdx);
+      onCacheHit(blockIdx, val);
     }
   }
 
@@ -525,7 +523,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
             throw unwrapException(t);
           }
         }
-        setCurrentNode(node, blockIdx, 2, 0 /* System.nanoTime() - start */);
+        setCurrentNode(node, blockIdx, null, 2, 0 /* System.nanoTime() - start */);
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
         postBufferBaseline = 0;
         longViews = null;
@@ -559,7 +557,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     ByteBuffer heapBuf =
         ByteBuffer.wrap(
             supply(blockIdx, blockOffset, compressedLen, decompressedLen), 0, decompressedLen);
-    setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, 3, 0 /* System.nanoTime() - start */);
+    setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, 3, 0 /* System.nanoTime() - start */);
     postBuffer = heapBuf;
     postBufferBaseline = heapBuf.position();
     heapBuf.order(ByteOrder.LITTLE_ENDIAN);
