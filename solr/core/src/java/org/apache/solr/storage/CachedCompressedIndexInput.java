@@ -121,6 +121,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   static final int MAX_READ_AHEAD =
       EnvUtils.getPropertyAsInteger("solr.compressingDirectory.maxReadAhead", 16);
 
+  private static final boolean PROSPECTIVE_READAHEAD =
+      EnvUtils.getPropertyAsBool("solr.blockCache.prospectiveReadahead", false);
+
   protected int readAheadTo;
   protected int seqAccessCount;
 
@@ -180,6 +183,13 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    */
   protected void onCacheHit(int blockIdx, BlockCache.Val val) {
     val.maybeLoadHint(cache, decompressedLenFor(blockIdx));
+    if (PROSPECTIVE_READAHEAD && blockIdx < lastBlockIdx) {
+      int nextIdx = blockIdx + 1;
+      long nextHandle = accessMapped.get(nextIdx);
+      if (nextHandle != BlockCache.NULL_HANDLE) {
+        cache.maybeLoadHint(nextHandle, decompressedLenFor(nextIdx));
+      }
+    }
   }
 
   /**

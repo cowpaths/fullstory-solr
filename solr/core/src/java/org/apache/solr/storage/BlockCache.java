@@ -114,9 +114,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final boolean ENABLE_CACHE_PERSISTENCE =
       EnvUtils.getPropertyAsBool("solr.blockCache.persistence", true);
 
-  private static final boolean PROSPECTIVE_READAHEAD =
-      EnvUtils.getPropertyAsBool("solr.blockCache.prospectiveReadahead", false);
-
   private static final boolean NO_LOAD_HINT =
       EnvUtils.getPropertyAsBool("solr.blockCache.noLoadHint", false);
 
@@ -1108,10 +1105,20 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * Non-mutating optimistic check: returns {@code true} if the handle appears live and pinnable.
    */
   boolean pinnable(long handle) {
+    return partitions[partOf(handle)].pinnable(handle) != null;
+  }
+
+  /**
+   * Non-mutating optimistic check: returns {@code true} if the handle appears live and pinnable. If
+   * {@code loadHintLen > 0} and the block is pinnable, issues a throttled length-aware {@code
+   * MADV_WILLNEED} hint.
+   */
+  boolean maybeLoadHint(long handle, int loadHintLen) {
     Val v = (Val) partitions[partOf(handle)].pinnable(handle);
     if (v == null) {
       return false;
     } else {
+      v.maybeLoadHint(this, loadHintLen);
       return true;
     }
   }
