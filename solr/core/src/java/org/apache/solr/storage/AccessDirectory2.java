@@ -733,16 +733,10 @@ public class AccessDirectory2 extends MMapDirectory {
       if (nodesEntry != null) {
         nodesEntry.release(cache);
       }
-      // Acquire exclusive lock to drain any in-flight supplyFromBuffers calls before unmapping.
-      // StampedLock.tryReadLock() returns 0 while this write lock is pending, so new tasks
-      // arriving after this point will throw AlreadyClosedException instead of touching freed
-      // memory.
-      long stamp = supplyLock.writeLock();
-      try {
-        compressedGuard.invalidateAndUnmap(compressed);
-      } finally {
-        supplyLock.unlockWrite(stamp);
-      }
+      // Acquire exclusive lock and never release — drains in-flight supplyFromBuffers calls,
+      // and all subsequent tryReadLock() calls return 0, preventing access to freed memory.
+      supplyLock.writeLock();
+      compressedGuard.invalidateAndUnmap(compressed);
       return null;
     }
   }
