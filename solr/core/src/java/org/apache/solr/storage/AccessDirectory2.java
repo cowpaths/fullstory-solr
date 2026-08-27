@@ -34,6 +34,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -189,19 +190,59 @@ public class AccessDirectory2 extends MMapDirectory {
       }
     }
 
+    // Issue MADV_WILLNEED hints inline so the kernel starts I/O immediately,
+    // before the async preload task begins decompressing.
+    // Rough segment ordering by generation (oldest first) — no file I/O needed.
+    final String[] roughSegOrder = new String[segToInputs.size()];
+    {
+      long[] segIds = new long[roughSegOrder.length];
+      int i = 0;
+      for (String seg : segToInputs.keySet()) {
+        segIds[i++] = Long.parseLong(seg.substring(1), Character.MAX_RADIX);
+      }
+      Arrays.sort(segIds);
+      for (i = segIds.length - 1; i >= 0; i--) {
+        roughSegOrder[i] = "_".concat(Long.toString(segIds[i], Character.MAX_RADIX));
+      }
+    }
+
+    // Priority files: hint all blocks (small, fully read).
+    for (AD2IndexInput in : priorityInputs) {
+      int blockCount = in.blockOffsets.length - 1;
+      if (blockCount > 0) {
+        in.hintCompressedRange(0, blockCount - 1);
+      }
+    }
+    // CFS/CFE boundary blocks, then other files' boundary blocks — in rough segment order.
+    for (String segName : roughSegOrder) {
+      for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+        String name = e.getKey();
+        if (name.endsWith(".cfs") || name.endsWith(".cfe")) {
+          AD2IndexInput in = e.getValue();
+          in.hintCompressedRange(0, 0);
+          int lastIdx = in.blockOffsets.length - 2;
+          if (lastIdx > 0) in.hintCompressedRange(lastIdx, lastIdx);
+        }
+      }
+    }
+    for (String segName : roughSegOrder) {
+      for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+        String name = e.getKey();
+        if (!name.endsWith(".cfs") && !name.endsWith(".cfe")) {
+          AD2IndexInput in = e.getValue();
+          in.hintCompressedRange(0, 0);
+          int lastIdx = in.blockOffsets.length - 2;
+          if (lastIdx > 0) in.hintCompressedRange(lastIdx, lastIdx);
+        }
+      }
+    }
+
     // Submit a single async task that preloads everything serially.
     AccessDirectory2 dir = this;
     ioExec.submit(
         () -> {
           try {
             // Phase 1: priority files (segments_N, .si) — all blocks (small, fully read)
-            // Hint all compressed data up front so the kernel starts I/O while we decompress.
-            for (AD2IndexInput in : priorityInputs) {
-              int blockCount = in.blockOffsets.length - 1;
-              if (blockCount > 0) {
-                in.hintCompressedRange(0, blockCount - 1);
-              }
-            }
             for (AD2IndexInput in : priorityInputs) {
               for (int idx = 0, blockCount = in.blockOffsets.length - 1; idx < blockCount; idx++) {
                 if (!AD2IndexInput.loadBlock(in, idx)) return null;
@@ -227,18 +268,6 @@ public class AccessDirectory2 extends MMapDirectory {
             }
 
             // Phase 2: CFS/CFE boundary blocks (header/footer) so CFE is parseable in phase 3
-            // Hint boundary block compressed ranges up front.
-            for (String seg : segOrder) {
-              for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
-                String name = e.getKey();
-                if (name.endsWith(".cfs") || name.endsWith(".cfe")) {
-                  AD2IndexInput in = e.getValue();
-                  in.hintCompressedRange(0, 0);
-                  int lastIdx = in.blockOffsets.length - 2;
-                  if (lastIdx > 0) in.hintCompressedRange(lastIdx, lastIdx);
-                }
-              }
-            }
             for (String seg : segOrder) {
               for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
                 String name = e.getKey();
@@ -253,18 +282,6 @@ public class AccessDirectory2 extends MMapDirectory {
 
             // Phase 3: all logical file boundary blocks in segment order —
             // non-CFS files and CFS sub-files interleaved.
-            // Hint non-CFS boundary blocks up front.
-            for (String seg : segOrder) {
-              for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
-                String name = e.getKey();
-                if (!name.endsWith(".cfs") && !name.endsWith(".cfe")) {
-                  AD2IndexInput in = e.getValue();
-                  in.hintCompressedRange(0, 0);
-                  int lastIdx = in.blockOffsets.length - 2;
-                  if (lastIdx > 0) in.hintCompressedRange(lastIdx, lastIdx);
-                }
-              }
-            }
             for (String seg : segOrder) {
               List<Map.Entry<String, AD2IndexInput>> inputs = segToInputs.get(seg);
               AD2IndexInput cfsInput = null;
