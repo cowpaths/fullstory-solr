@@ -217,7 +217,11 @@ public class AccessDirectory2 extends MMapDirectory {
     for (String segName : roughSegOrder) {
       for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
         String name = e.getKey();
-        if (name.endsWith(".cfs") || name.endsWith(".cfe")) {
+        if (name.endsWith(".cfe")) {
+          AD2IndexInput in = e.getValue();
+          int blockCount = in.blockOffsets.length - 1;
+          if (blockCount > 0) in.hintCompressedRange(0, blockCount - 1);
+        } else if (name.endsWith(".cfs")) {
           AD2IndexInput in = e.getValue();
           in.hintCompressedRange(0, 0);
           int lastIdx = in.blockOffsets.length - 2;
@@ -250,9 +254,10 @@ public class AccessDirectory2 extends MMapDirectory {
         }
       }
       if (cfeInput != null) {
-        AD2IndexInput.loadBlock(cfeInput, 0);
-        int lastIdx = cfeInput.blockOffsets.length - 2;
-        if (lastIdx > 0) AD2IndexInput.loadBlock(cfeInput, lastIdx);
+        int cfeBlockCount = cfeInput.blockOffsets.length - 1;
+        for (int i = 0; i < cfeBlockCount; i++) {
+          AD2IndexInput.loadBlock(cfeInput, i);
+        }
         IntArrayList blockIndexes =
             BlockPreloader.parseCfeBlockIndexes(cfeInput, Integer.MAX_VALUE);
         if (!blockIndexes.isEmpty()) {
