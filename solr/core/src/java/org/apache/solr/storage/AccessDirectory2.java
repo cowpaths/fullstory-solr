@@ -177,12 +177,17 @@ public class AccessDirectory2 extends MMapDirectory {
     List<IndexInput> toClose = new ArrayList<>(files.length);
     for (String file : files) {
       if (file.endsWith(".tmp")) continue;
-      AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
-      toClose.add(input);
       if (file.startsWith("segments_")) {
         segmentsFiles.add(file);
+        AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
+        toClose.add(input);
         priorityInputs.add(input);
-      } else if (file.endsWith(".si")) {
+        continue;
+      }
+      if (!file.startsWith("_")) continue;
+      AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
+      toClose.add(input);
+      if (file.endsWith(".si")) {
         priorityInputs.add(input);
       } else {
         String segName = IndexFileNames.parseSegmentName(file);
