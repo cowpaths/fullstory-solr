@@ -223,9 +223,13 @@ public class AccessDirectory2 extends MMapDirectory {
           if (blockCount > 0) in.hintCompressedRange(0, blockCount - 1);
         } else if (name.endsWith(".cfs")) {
           AD2IndexInput in = e.getValue();
-          in.hintCompressedRange(0, 0);
           int lastIdx = in.blockOffsets.length - 2;
-          if (lastIdx > 0) in.hintCompressedRange(lastIdx, lastIdx);
+          if (lastIdx <= 1) {
+            in.hintCompressedRange(0, lastIdx);
+          } else {
+            in.hintCompressedRange(0, 0);
+            in.hintCompressedRange(lastIdx, lastIdx);
+          }
         }
       }
     }
@@ -234,9 +238,13 @@ public class AccessDirectory2 extends MMapDirectory {
         String name = e.getKey();
         if (!name.endsWith(".cfs") && !name.endsWith(".cfe")) {
           AD2IndexInput in = e.getValue();
-          in.hintCompressedRange(0, 0);
           int lastIdx = in.blockOffsets.length - 2;
-          if (lastIdx > 0) in.hintCompressedRange(lastIdx, lastIdx);
+          if (lastIdx <= 1) {
+            in.hintCompressedRange(0, lastIdx);
+          } else {
+            in.hintCompressedRange(0, 0);
+            in.hintCompressedRange(lastIdx, lastIdx);
+          }
         }
       }
     }
@@ -262,13 +270,23 @@ public class AccessDirectory2 extends MMapDirectory {
             BlockPreloader.parseCfeBlockIndexes(cfeInput, Integer.MAX_VALUE);
         if (!blockIndexes.isEmpty()) {
           cfsBlockIndexes.put(segName, blockIndexes);
-          // Find the CFS input and hint all sub-file compressed ranges.
+          // Find the CFS input and hint sub-file compressed ranges, coalescing adjacent blocks.
           for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
             if (e.getKey().endsWith(".cfs")) {
               AD2IndexInput cfsInput = e.getValue();
-              for (IntCursor cursor : blockIndexes) {
-                cfsInput.hintCompressedRange(cursor.value, cursor.value);
+              int rangeStart = blockIndexes.get(0);
+              int rangeEnd = rangeStart;
+              for (int i = 1, size = blockIndexes.size(); i < size; i++) {
+                int val = blockIndexes.get(i);
+                if (val == rangeEnd + 1) {
+                  rangeEnd = val;
+                } else {
+                  cfsInput.hintCompressedRange(rangeStart, rangeEnd);
+                  rangeStart = val;
+                  rangeEnd = val;
+                }
               }
+              cfsInput.hintCompressedRange(rangeStart, rangeEnd);
               break;
             }
           }
