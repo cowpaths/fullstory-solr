@@ -190,192 +190,193 @@ public class AccessDirectory2 extends MMapDirectory {
       }
     }
 
-    // Issue MADV_WILLNEED hints inline so the kernel starts I/O immediately,
-    // before the async preload task begins decompressing.
-    // Rough segment ordering by generation (oldest first) — no file I/O needed.
-    final String[] roughSegOrder = new String[segToInputs.size()];
-    {
-      long[] segIds = new long[roughSegOrder.length];
-      int i = 0;
-      for (String seg : segToInputs.keySet()) {
-        segIds[i++] = Long.parseLong(seg.substring(1), Character.MAX_RADIX);
+    boolean submitted = false;
+    try {
+      // Issue MADV_WILLNEED hints inline so the kernel starts I/O immediately,
+      // before the async preload task begins decompressing.
+      // Rough segment ordering by generation (oldest first) — no file I/O needed.
+      final String[] roughSegOrder = new String[segToInputs.size()];
+      {
+        long[] segIds = new long[roughSegOrder.length];
+        int i = 0;
+        for (String seg : segToInputs.keySet()) {
+          segIds[i++] = Long.parseLong(seg.substring(1), Character.MAX_RADIX);
+        }
+        Arrays.sort(segIds);
+        for (i = segIds.length - 1; i >= 0; i--) {
+          roughSegOrder[i] = "_".concat(Long.toString(segIds[i], Character.MAX_RADIX));
+        }
       }
-      Arrays.sort(segIds);
-      for (i = segIds.length - 1; i >= 0; i--) {
-        roughSegOrder[i] = "_".concat(Long.toString(segIds[i], Character.MAX_RADIX));
-      }
-    }
 
-    // Priority files: hint all blocks (small, fully read).
-    for (AD2IndexInput in : priorityInputs) {
-      int blockCount = in.blockOffsets.length - 1;
-      if (blockCount > 0) {
-        in.hintCompressedRange(0, blockCount - 1);
-      }
-    }
-    // CFS/CFE boundary blocks, then other files' boundary blocks — in rough segment order.
-    for (String segName : roughSegOrder) {
-      for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
-        String name = e.getKey();
-        if (name.endsWith(".cfe")) {
-          AD2IndexInput in = e.getValue();
-          int blockCount = in.blockOffsets.length - 1;
-          if (blockCount > 0) in.hintCompressedRange(0, blockCount - 1);
-        } else if (name.endsWith(".cfs")) {
-          AD2IndexInput in = e.getValue();
-          int lastIdx = in.blockOffsets.length - 2;
-          if (lastIdx <= 1) {
-            in.hintCompressedRange(0, lastIdx);
-          } else {
-            in.hintCompressedRange(0, 0);
-            in.hintCompressedRange(lastIdx, lastIdx);
-          }
+      // Priority files: hint all blocks (small, fully read).
+      for (AD2IndexInput in : priorityInputs) {
+        int blockCount = in.blockOffsets.length - 1;
+        if (blockCount > 0) {
+          in.hintCompressedRange(0, blockCount - 1);
         }
       }
-    }
-    for (String segName : roughSegOrder) {
-      for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
-        String name = e.getKey();
-        if (!name.endsWith(".cfs") && !name.endsWith(".cfe")) {
-          AD2IndexInput in = e.getValue();
-          int lastIdx = in.blockOffsets.length - 2;
-          if (lastIdx <= 1) {
-            in.hintCompressedRange(0, lastIdx);
-          } else {
-            in.hintCompressedRange(0, 0);
-            in.hintCompressedRange(lastIdx, lastIdx);
-          }
-        }
-      }
-    }
-
-    // Load CFE boundary blocks inline and parse sub-file block indices.
-    // CFE files are small (1-2 blocks); loading them synchronously lets us
-    // know which CFS blocks to hint before the async task starts.
-    HashMap<String, IntArrayList> cfsBlockIndexes = new HashMap<>();
-    for (String segName : roughSegOrder) {
-      AD2IndexInput cfeInput = null;
-      for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
-        if (e.getKey().endsWith(".cfe")) {
-          cfeInput = e.getValue();
-          break;
-        }
-      }
-      if (cfeInput != null) {
-        int cfeBlockCount = cfeInput.blockOffsets.length - 1;
-        for (int i = 0; i < cfeBlockCount; i++) {
-          AD2IndexInput.loadBlock(cfeInput, i);
-        }
-        IntArrayList blockIndexes =
-            BlockPreloader.parseCfeBlockIndexes(cfeInput, Integer.MAX_VALUE);
-        if (!blockIndexes.isEmpty()) {
-          cfsBlockIndexes.put(segName, blockIndexes);
-          // Find the CFS input and hint sub-file compressed ranges, coalescing adjacent blocks.
-          for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
-            if (e.getKey().endsWith(".cfs")) {
-              AD2IndexInput cfsInput = e.getValue();
-              int rangeStart = blockIndexes.get(0);
-              int rangeEnd = rangeStart;
-              for (int i = 1, size = blockIndexes.size(); i < size; i++) {
-                int val = blockIndexes.get(i);
-                if (val == rangeEnd + 1) {
-                  rangeEnd = val;
-                } else {
-                  cfsInput.hintCompressedRange(rangeStart, rangeEnd);
-                  rangeStart = val;
-                  rangeEnd = val;
-                }
-              }
-              cfsInput.hintCompressedRange(rangeStart, rangeEnd);
-              break;
+      // CFS/CFE boundary blocks, then other files' boundary blocks — in rough segment order.
+      for (String segName : roughSegOrder) {
+        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+          String name = e.getKey();
+          if (name.endsWith(".cfe")) {
+            AD2IndexInput in = e.getValue();
+            int blockCount = in.blockOffsets.length - 1;
+            if (blockCount > 0) in.hintCompressedRange(0, blockCount - 1);
+          } else if (name.endsWith(".cfs")) {
+            AD2IndexInput in = e.getValue();
+            int lastIdx = in.blockOffsets.length - 2;
+            if (lastIdx <= 1) {
+              in.hintCompressedRange(0, lastIdx);
+            } else {
+              in.hintCompressedRange(0, 0);
+              in.hintCompressedRange(lastIdx, lastIdx);
             }
           }
         }
       }
-    }
-
-    // Submit a single async task that preloads everything serially.
-    AccessDirectory2 dir = this;
-    ioExec.submit(
-        () -> {
-          try {
-            // Phase 1: priority files (segments_N, .si) — all blocks (small, fully read)
-            for (AD2IndexInput in : priorityInputs) {
-              for (int idx = 0, blockCount = in.blockOffsets.length - 1; idx < blockCount; idx++) {
-                if (!AD2IndexInput.loadBlock(in, idx)) return null;
-              }
+      for (String segName : roughSegOrder) {
+        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+          String name = e.getKey();
+          if (!name.endsWith(".cfs") && !name.endsWith(".cfe")) {
+            AD2IndexInput in = e.getValue();
+            int lastIdx = in.blockOffsets.length - 2;
+            if (lastIdx <= 1) {
+              in.hintCompressedRange(0, lastIdx);
+            } else {
+              in.hintCompressedRange(0, 0);
+              in.hintCompressedRange(lastIdx, lastIdx);
             }
+          }
+        }
+      }
 
-            // Order segments by ordinal from segments_N (best-effort; data is now cache-hot)
-            List<String> segOrder = new ArrayList<>(segToInputs.keySet());
-            if (!segmentsFiles.isEmpty() && !segOrder.isEmpty()) {
-              Map<String, Integer> segOrds = new HashMap<>();
-              for (String segmentsFile : segmentsFiles) {
-                try {
-                  SegmentInfos infos = SegmentInfos.readCommit(dir, segmentsFile);
-                  for (int i = infos.size() - 1; i >= 0; i--) {
-                    segOrds.put(infos.info(i).info.name, i);
+      // Load CFE boundary blocks inline and parse sub-file block indices.
+      // CFE files are small (1-2 blocks); loading them synchronously lets us
+      // know which CFS blocks to hint before the async task starts.
+      HashMap<String, IntArrayList> cfsBlockIndexes = new HashMap<>();
+      for (String segName : roughSegOrder) {
+        AD2IndexInput cfeInput = null;
+        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+          if (e.getKey().endsWith(".cfe")) {
+            cfeInput = e.getValue();
+            break;
+          }
+        }
+        if (cfeInput != null) {
+          int cfeBlockCount = cfeInput.blockOffsets.length - 1;
+          for (int i = 0; i < cfeBlockCount; i++) {
+            AD2IndexInput.loadBlock(cfeInput, i);
+          }
+          IntArrayList blockIndexes =
+              BlockPreloader.parseCfeBlockIndexes(cfeInput, Integer.MAX_VALUE);
+          if (!blockIndexes.isEmpty()) {
+            cfsBlockIndexes.put(segName, blockIndexes);
+            // Find the CFS input and hint sub-file compressed ranges, coalescing adjacent blocks.
+            for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+              if (e.getKey().endsWith(".cfs")) {
+                AD2IndexInput cfsInput = e.getValue();
+                int rangeStart = blockIndexes.get(0);
+                int rangeEnd = rangeStart;
+                for (int i = 1, size = blockIndexes.size(); i < size; i++) {
+                  int val = blockIndexes.get(i);
+                  if (val == rangeEnd + 1) {
+                    rangeEnd = val;
+                  } else {
+                    cfsInput.hintCompressedRange(rangeStart, rangeEnd);
+                    rangeStart = val;
+                    rangeEnd = val;
                   }
-                } catch (Exception e) {
-                  // best-effort; proceed with unordered segments
                 }
+                cfsInput.hintCompressedRange(rangeStart, rangeEnd);
+                break;
               }
-              segOrder.sort(
-                  Comparator.comparingInt(s -> segOrds.getOrDefault(s, Integer.MAX_VALUE)));
             }
+          }
+        }
+      }
 
-            // Phase 2: CFS boundary blocks (CFE already loaded inline)
-            for (String seg : segOrder) {
-              for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
-                String name = e.getKey();
-                if (name.endsWith(".cfs")) {
-                  AD2IndexInput in = e.getValue();
-                  if (!AD2IndexInput.loadBlock(in, 0)) return null;
-                  int lastIdx = in.blockOffsets.length - 2;
-                  if (lastIdx > 0 && !AD2IndexInput.loadBlock(in, lastIdx)) return null;
-                }
-              }
-            }
+      // Phase 1: priority files (segments_N, .si) — all blocks (small, fully read)
+      for (AD2IndexInput in : priorityInputs) {
+        for (int idx = 0, blockCount = in.blockOffsets.length - 1; idx < blockCount; idx++) {
+          AD2IndexInput.loadBlock(in, idx);
+        }
+      }
 
-            // Phase 3: all logical file boundary blocks in segment order —
-            // non-CFS files and CFS sub-files interleaved.
-            for (String seg : segOrder) {
-              List<Map.Entry<String, AD2IndexInput>> inputs = segToInputs.get(seg);
-              AD2IndexInput cfsInput = null;
-              for (Map.Entry<String, AD2IndexInput> e : inputs) {
-                String name = e.getKey();
-                if (name.endsWith(".cfs")) {
-                  cfsInput = e.getValue();
-                } else if (!name.endsWith(".cfe")) {
-                  // non-CFS file: load boundary blocks
-                  AD2IndexInput in = e.getValue();
-                  if (!AD2IndexInput.loadBlock(in, 0)) return null;
-                  int lastIdx = in.blockOffsets.length - 2;
-                  if (lastIdx > 0 && !AD2IndexInput.loadBlock(in, lastIdx)) return null;
-                }
-              }
-              IntArrayList blockIndexes = cfsBlockIndexes.get(seg);
-              if (cfsInput != null && blockIndexes != null) {
-                for (IntCursor cursor : blockIndexes) {
-                  if (!AD2IndexInput.loadBlock(cfsInput, cursor.value)) return null;
-                }
-              }
+      // Order segments by ordinal from segments_N (best-effort; data is now cache-hot)
+      List<String> segOrder = new ArrayList<>(segToInputs.keySet());
+      if (!segmentsFiles.isEmpty() && !segOrder.isEmpty()) {
+        Map<String, Integer> segOrds = new HashMap<>();
+        for (String segmentsFile : segmentsFiles) {
+          try {
+            SegmentInfos infos = SegmentInfos.readCommit(this, segmentsFile);
+            for (int i = infos.size() - 1; i >= 0; i--) {
+              segOrds.put(infos.info(i).info.name, i);
             }
-          } finally {
+          } catch (Exception e) {
+            // best-effort; proceed with unordered segments
+          }
+        }
+        segOrder.sort(Comparator.comparingInt(s -> segOrds.getOrDefault(s, Integer.MAX_VALUE)));
+      }
+
+      // Phase 2: CFS boundary blocks (CFE already loaded inline)
+      for (String seg : segOrder) {
+        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
+          if (e.getKey().endsWith(".cfs")) {
+            AD2IndexInput in = e.getValue();
+            AD2IndexInput.loadBlock(in, 0);
+            int lastIdx = in.blockOffsets.length - 2;
+            if (lastIdx > 0) AD2IndexInput.loadBlock(in, lastIdx);
+          }
+        }
+      }
+
+      // Phase 3: all logical file boundary blocks in segment order —
+      // non-CFS files and CFS sub-files interleaved.
+      for (String seg : segOrder) {
+        List<Map.Entry<String, AD2IndexInput>> inputs = segToInputs.get(seg);
+        AD2IndexInput cfsInput = null;
+        for (Map.Entry<String, AD2IndexInput> e : inputs) {
+          String name = e.getKey();
+          if (name.endsWith(".cfs")) {
+            cfsInput = e.getValue();
+          } else if (!name.endsWith(".cfe")) {
+            // non-CFS file: load boundary blocks
+            AD2IndexInput in = e.getValue();
+            AD2IndexInput.loadBlock(in, 0);
+            int lastIdx = in.blockOffsets.length - 2;
+            if (lastIdx > 0) AD2IndexInput.loadBlock(in, lastIdx);
+          }
+        }
+        IntArrayList blockIndexes = cfsBlockIndexes.get(seg);
+        if (cfsInput != null && blockIndexes != null) {
+          for (IntCursor cursor : blockIndexes) {
+            AD2IndexInput.loadBlock(cfsInput, cursor.value);
+          }
+        }
+      }
+
+      // Defer closing inputs: wait an ample amount of time so that the main code loads its own
+      // copies of inputs and can inherit the structures we've prepopulated. If we close too
+      // early, refCount will drop to 0, triggering cleanup, and all our work is wasted!
+      ioExec.submit(
+          () -> {
             try {
-              // wait an ample amount of time so that the main code loads its own copies of
-              // inputs and can inherit the structures we've prepopulated. If we close too
-              // early, refCount will drop to 0, triggering cleanup, and all our work is
-              // wasted!
               Thread.sleep(30_000);
             } catch (InterruptedException e) {
               Thread.currentThread().interrupt();
             } finally {
               IOUtils.close(toClose);
             }
-          }
-          return null;
-        });
+            return null;
+          });
+      submitted = true;
+    } finally {
+      if (!submitted) {
+        IOUtils.close(toClose);
+      }
+    }
   }
 
   /** Stores the shared {@code accessMapped} array for {@code name}, pre-populated by the writer. */
