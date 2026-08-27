@@ -28,6 +28,7 @@ import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.cloud.ClusterPropertiesListener;
 import org.apache.solr.common.cloud.ZkStateReader;
 import org.apache.solr.common.util.Utils;
+import org.apache.solr.update.GlobalMergeSchedulerManager.Gate;
 import org.apache.zookeeper.KeeperException;
 import org.junit.After;
 import org.junit.Before;
@@ -49,31 +50,94 @@ public class GlobalMergeSchedulerManagerTest extends SolrTestCaseJ4 {
   public void setUp() throws Exception {
     super.setUp();
     GlobalMergeSchedulerManager.resetForTesting();
-    GlobalConcurrentMergeScheduler.resetForTesting();
   }
 
   @After
   @Override
   public void tearDown() throws Exception {
     GlobalMergeSchedulerManager.resetForTesting();
-    GlobalConcurrentMergeScheduler.resetForTesting();
     super.tearDown();
   }
 
   @Test
-  public void testOverrideAppliesToMatchingNode() throws Exception {
+  public void testCreateSchedulerSharesGate() throws Exception {
+    ZkController zk = mockZkController(null, NODE, null);
+    GlobalMergeSchedulerManager manager = GlobalMergeSchedulerManager.getInstance(zk);
+    GlobalConcurrentMergeScheduler a = manager.createScheduler();
+    GlobalConcurrentMergeScheduler b = manager.createScheduler();
+    assertNotSame(a, b);
+    assertSame(manager.getGate(), a.getGate());
+    assertSame(a.getGate(), b.getGate());
+  }
+
+  @Test
+  public void testGateCapsRunningMergesAcrossSchedulers() throws Exception {
+    GlobalMergeSchedulerManager manager =
+        GlobalMergeSchedulerManager.getInstance(mockZkController(null, NODE, null));
+    Gate gate = manager.getGate();
+    GlobalConcurrentMergeScheduler s1 = manager.createScheduler();
+    GlobalConcurrentMergeScheduler s2 = manager.createScheduler();
+    gate.register(s1);
+    gate.register(s2);
+    gate.setMaxRunning(1);
+
+    Object key1 = new Object();
+    Object key2 = new Object();
+    assertEquals(10.0, gate.adjustRate(s1, key1, 10.0), 0.0);
+    assertEquals(0.0, gate.adjustRate(s2, key2, 10.0), 0.0);
+    assertEquals(1, gate.getPermitCount());
+
+    // Sticky: holder keeps permit on subsequent calls.
+    assertEquals(5.0, gate.adjustRate(s1, key1, 5.0), 0.0);
+  }
+
+  @Test
+  public void testUnregisterReleasesPermitForPeer() throws Exception {
+    GlobalMergeSchedulerManager manager =
+        GlobalMergeSchedulerManager.getInstance(mockZkController(null, NODE, null));
+    Gate gate = manager.getGate();
+    GlobalConcurrentMergeScheduler s1 = manager.createScheduler();
+    GlobalConcurrentMergeScheduler s2 = manager.createScheduler();
+    gate.register(s1);
+    gate.register(s2);
+    gate.setMaxRunning(1);
+
+    Object key1 = new Object();
+    Object key2 = new Object();
+    assertEquals(10.0, gate.adjustRate(s1, key1, 10.0), 0.0);
+    assertEquals(0.0, gate.adjustRate(s2, key2, 10.0), 0.0);
+
+    gate.unregister(s1);
+    assertEquals(0, gate.getPermitCount());
+    assertEquals(10.0, gate.adjustRate(s2, key2, 10.0), 0.0);
+  }
+
+  @Test
+  public void testProposedZeroReleasesPermit() throws Exception {
+    GlobalMergeSchedulerManager manager =
+        GlobalMergeSchedulerManager.getInstance(mockZkController(null, NODE, null));
+    Gate gate = manager.getGate();
+    GlobalConcurrentMergeScheduler s1 = manager.createScheduler();
+    gate.register(s1);
+    gate.setMaxRunning(1);
+
+    Object key1 = new Object();
+    assertEquals(10.0, gate.adjustRate(s1, key1, 10.0), 0.0);
+    assertEquals(0.0, gate.adjustRate(s1, key1, 0.0), 0.0);
+    assertEquals(0, gate.getPermitCount());
+  }
+
+  @Test
+  public void testOverrideAppliesMaxRunningForMatchingNode() throws Exception {
     AtomicReference<ClusterPropertiesListener> listenerRef = new AtomicReference<>();
     GlobalMergeSchedulerManager manager =
         GlobalMergeSchedulerManager.getInstance(mockZkController(null, NODE, listenerRef));
-    GlobalConcurrentMergeScheduler cms = manager.getScheduler();
-    cms.setMaxMergesAndThreads(6, 1); // solrconfig
 
     listenerRef.get().onChange(parseJson(overrideJson(NODE)));
 
     assertTrue(manager.getWatcher().hasActiveOverride());
-    assertEquals(Integer.valueOf(8), manager.getWatcher().getOverrideMaxMergeCount());
-    assertEquals(8, cms.getMaxMergeCount());
-    assertEquals(2, cms.getMaxThreadCount());
+    assertEquals(Integer.valueOf(2), manager.getWatcher().getOverrideMaxThreadCount());
+    assertEquals(2, manager.getGate().getMaxRunning());
   }
 
   @Test
@@ -81,14 +145,11 @@ public class GlobalMergeSchedulerManagerTest extends SolrTestCaseJ4 {
     AtomicReference<ClusterPropertiesListener> listenerRef = new AtomicReference<>();
     GlobalMergeSchedulerManager manager =
         GlobalMergeSchedulerManager.getInstance(mockZkController(null, NODE, listenerRef));
-    GlobalConcurrentMergeScheduler cms = manager.getScheduler();
-    cms.setMaxMergesAndThreads(6, 1);
 
     listenerRef.get().onChange(parseJson(overrideJson("other-node:8986_solr")));
 
     assertFalse(manager.getWatcher().hasActiveOverride());
-    assertEquals(6, cms.getMaxMergeCount());
-    assertEquals(1, cms.getMaxThreadCount());
+    assertEquals(Integer.MAX_VALUE, manager.getGate().getMaxRunning());
   }
 
   @Test
@@ -97,38 +158,31 @@ public class GlobalMergeSchedulerManagerTest extends SolrTestCaseJ4 {
     String json =
         "{\n"
             + "  \"ext.globalMergeScheduler\": {\n"
-            + "    \"maxThreadCount\": 3,\n"
-            + "    \"maxMergeCount\": 5\n"
+            + "    \"maxThreadCount\": 3\n"
             + "  }\n"
             + "}";
     GlobalMergeSchedulerManager manager =
         GlobalMergeSchedulerManager.getInstance(mockZkController(null, NODE, listenerRef));
-    GlobalConcurrentMergeScheduler cms = manager.getScheduler();
-    cms.setMaxMergesAndThreads(6, 1);
 
     listenerRef.get().onChange(parseJson(json));
 
     assertTrue(manager.getWatcher().hasActiveOverride());
     assertNull(manager.getWatcher().getOverrideNodes());
-    assertEquals(5, cms.getMaxMergeCount());
-    assertEquals(3, cms.getMaxThreadCount());
+    assertEquals(3, manager.getGate().getMaxRunning());
   }
 
   @Test
-  public void testClearOverrideRevertsToPriorLimits() throws Exception {
+  public void testClearOverrideRemovesCap() throws Exception {
     AtomicReference<ClusterPropertiesListener> listenerRef = new AtomicReference<>();
     GlobalMergeSchedulerManager manager =
         GlobalMergeSchedulerManager.getInstance(mockZkController(null, NODE, listenerRef));
-    GlobalConcurrentMergeScheduler cms = manager.getScheduler();
-    cms.setMaxMergesAndThreads(6, 1);
 
     listenerRef.get().onChange(parseJson(overrideJson(NODE)));
-    assertEquals(8, cms.getMaxMergeCount());
+    assertEquals(2, manager.getGate().getMaxRunning());
 
     listenerRef.get().onChange(Map.of());
     assertFalse(manager.getWatcher().hasActiveOverride());
-    assertEquals(6, cms.getMaxMergeCount());
-    assertEquals(1, cms.getMaxThreadCount());
+    assertEquals(Integer.MAX_VALUE, manager.getGate().getMaxRunning());
   }
 
   @Test
@@ -137,29 +191,43 @@ public class GlobalMergeSchedulerManagerTest extends SolrTestCaseJ4 {
     String json =
         "{\n"
             + "  \"ext.globalMergeScheduler\": {\n"
-            + "    \"maxThreadCount\": 10,\n"
-            + "    \"maxMergeCount\": 2\n"
+            + "    \"maxThreadCount\": 0\n"
             + "  }\n"
             + "}";
     GlobalMergeSchedulerManager manager =
         GlobalMergeSchedulerManager.getInstance(mockZkController(null, NODE, listenerRef));
-    GlobalConcurrentMergeScheduler cms = manager.getScheduler();
-    cms.setMaxMergesAndThreads(6, 1);
 
     listenerRef.get().onChange(parseJson(json));
 
     assertFalse(manager.getWatcher().hasActiveOverride());
-    assertEquals(6, cms.getMaxMergeCount());
-    assertEquals(1, cms.getMaxThreadCount());
+    assertEquals(Integer.MAX_VALUE, manager.getGate().getMaxRunning());
   }
 
   @Test
-  public void testSingletonHoldsSameScheduler() throws Exception {
+  public void testMaxMergeCountAloneIgnored() throws Exception {
+    AtomicReference<ClusterPropertiesListener> listenerRef = new AtomicReference<>();
+    String json =
+        "{\n"
+            + "  \"ext.globalMergeScheduler\": {\n"
+            + "    \"maxMergeCount\": 8\n"
+            + "  }\n"
+            + "}";
+    GlobalMergeSchedulerManager manager =
+        GlobalMergeSchedulerManager.getInstance(mockZkController(null, NODE, listenerRef));
+
+    listenerRef.get().onChange(parseJson(json));
+
+    assertFalse(manager.getWatcher().hasActiveOverride());
+    assertEquals(Integer.MAX_VALUE, manager.getGate().getMaxRunning());
+  }
+
+  @Test
+  public void testSingletonManager() throws Exception {
     ZkController zk = mockZkController(null, NODE, null);
     GlobalMergeSchedulerManager a = GlobalMergeSchedulerManager.getInstance(zk);
     GlobalMergeSchedulerManager b = GlobalMergeSchedulerManager.getInstance(zk);
     assertSame(a, b);
-    assertSame(a.getScheduler(), b.getScheduler());
+    assertSame(a.getGate(), b.getGate());
   }
 
   private static String overrideJson(String node) {

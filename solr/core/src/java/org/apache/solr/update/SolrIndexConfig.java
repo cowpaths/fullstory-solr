@@ -358,7 +358,7 @@ public class SolrIndexConfig implements MapSerializable {
         mergeSchedulerInfo == null
             ? SolrIndexConfig.DEFAULT_MERGE_SCHEDULER_CLASSNAME
             : mergeSchedulerInfo.className;
-    // GlobalConcurrentMergeScheduler is a JVM singleton; newInstance would create orphans.
+    // GlobalConcurrentMergeScheduler needs the shared MergeConcurrencyGate from the manager.
     final MergeScheduler scheduler;
     if (GlobalConcurrentMergeScheduler.class.getName().equals(msClassName)) {
       ZkController zkController = resourceLoader.getCoreContainer().getZkController();
@@ -366,7 +366,7 @@ public class SolrIndexConfig implements MapSerializable {
         throw new IllegalStateException(
             "Cannot use GlobalConcurrentMergeScheduler without a ZkController");
       }
-      scheduler = GlobalMergeSchedulerManager.getInstance(zkController).getScheduler();
+      scheduler = GlobalMergeSchedulerManager.getInstance(zkController).createScheduler();
     } else {
       scheduler = resourceLoader.newInstance(msClassName, MergeScheduler.class);
     }
