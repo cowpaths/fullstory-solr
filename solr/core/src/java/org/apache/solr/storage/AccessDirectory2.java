@@ -237,6 +237,40 @@ public class AccessDirectory2 extends MMapDirectory {
       }
     }
 
+    // Load CFE boundary blocks inline and parse sub-file block indices.
+    // CFE files are small (1-2 blocks); loading them synchronously lets us
+    // know which CFS blocks to hint before the async task starts.
+    HashMap<String, IntArrayList> cfsBlockIndexes = new HashMap<>();
+    for (String segName : roughSegOrder) {
+      AD2IndexInput cfeInput = null;
+      for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+        if (e.getKey().endsWith(".cfe")) {
+          cfeInput = e.getValue();
+          break;
+        }
+      }
+      if (cfeInput != null) {
+        AD2IndexInput.loadBlock(cfeInput, 0);
+        int lastIdx = cfeInput.blockOffsets.length - 2;
+        if (lastIdx > 0) AD2IndexInput.loadBlock(cfeInput, lastIdx);
+        IntArrayList blockIndexes =
+            BlockPreloader.parseCfeBlockIndexes(cfeInput, Integer.MAX_VALUE);
+        if (!blockIndexes.isEmpty()) {
+          cfsBlockIndexes.put(segName, blockIndexes);
+          // Find the CFS input and hint all sub-file compressed ranges.
+          for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+            if (e.getKey().endsWith(".cfs")) {
+              AD2IndexInput cfsInput = e.getValue();
+              for (IntCursor cursor : blockIndexes) {
+                cfsInput.hintCompressedRange(cursor.value, cursor.value);
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+
     // Submit a single async task that preloads everything serially.
     AccessDirectory2 dir = this;
     ioExec.submit(
@@ -267,11 +301,11 @@ public class AccessDirectory2 extends MMapDirectory {
                   Comparator.comparingInt(s -> segOrds.getOrDefault(s, Integer.MAX_VALUE)));
             }
 
-            // Phase 2: CFS/CFE boundary blocks (header/footer) so CFE is parseable in phase 3
+            // Phase 2: CFS boundary blocks (CFE already loaded inline)
             for (String seg : segOrder) {
               for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
                 String name = e.getKey();
-                if (name.endsWith(".cfs") || name.endsWith(".cfe")) {
+                if (name.endsWith(".cfs")) {
                   AD2IndexInput in = e.getValue();
                   if (!AD2IndexInput.loadBlock(in, 0)) return null;
                   int lastIdx = in.blockOffsets.length - 2;
@@ -285,14 +319,11 @@ public class AccessDirectory2 extends MMapDirectory {
             for (String seg : segOrder) {
               List<Map.Entry<String, AD2IndexInput>> inputs = segToInputs.get(seg);
               AD2IndexInput cfsInput = null;
-              AD2IndexInput cfeInput = null;
               for (Map.Entry<String, AD2IndexInput> e : inputs) {
                 String name = e.getKey();
                 if (name.endsWith(".cfs")) {
                   cfsInput = e.getValue();
-                } else if (name.endsWith(".cfe")) {
-                  cfeInput = e.getValue();
-                } else {
+                } else if (!name.endsWith(".cfe")) {
                   // non-CFS file: load boundary blocks
                   AD2IndexInput in = e.getValue();
                   if (!AD2IndexInput.loadBlock(in, 0)) return null;
@@ -300,13 +331,8 @@ public class AccessDirectory2 extends MMapDirectory {
                   if (lastIdx > 0 && !AD2IndexInput.loadBlock(in, lastIdx)) return null;
                 }
               }
-              if (cfsInput != null && cfeInput != null) {
-                IntArrayList blockIndexes =
-                    BlockPreloader.parseCfeBlockIndexes(cfeInput, Integer.MAX_VALUE);
-                // Hint all CFS sub-file blocks before loading.
-                for (IntCursor cursor : blockIndexes) {
-                  cfsInput.hintCompressedRange(cursor.value, cursor.value);
-                }
+              IntArrayList blockIndexes = cfsBlockIndexes.get(seg);
+              if (cfsInput != null && blockIndexes != null) {
                 for (IntCursor cursor : blockIndexes) {
                   if (!AD2IndexInput.loadBlock(cfsInput, cursor.value)) return null;
                 }
