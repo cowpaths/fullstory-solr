@@ -40,7 +40,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLongArray;
@@ -91,7 +90,6 @@ public class AccessDirectory2 extends MMapDirectory {
   private final Path compressedPath;
   private final BlockCache cache;
   private final ExecutorService ioExec;
-  private final ArrayBlockingQueue<Runnable> preloadQueue;
 
   /**
    * Ref-counted wrapper around a shared {@code accessMapped} array. The map itself holds a +1 ref;
@@ -149,8 +147,7 @@ public class AccessDirectory2 extends MMapDirectory {
       LockFactory lockFactory,
       Path compressedPath,
       BlockCache cache,
-      ExecutorService ioExec,
-      ArrayBlockingQueue<Runnable> preloadQueue)
+      ExecutorService ioExec)
       throws IOException {
     super(path, lockFactory);
     UUID uuid = BlockCache.refIdFromCoreProperties(coreRootDirectory, compressedPath, true);
@@ -164,7 +161,6 @@ public class AccessDirectory2 extends MMapDirectory {
     this.compressedPath = compressedPath;
     this.cache = cache;
     this.ioExec = ioExec;
-    this.preloadQueue = preloadQueue;
 
     // Scan existing compressed files, open inputs, and group by segment.
     Map<String, List<Map.Entry<String, AD2IndexInput>>> segToInputs = new HashMap<>();
@@ -199,6 +195,13 @@ public class AccessDirectory2 extends MMapDirectory {
         () -> {
           try {
             // Phase 1: priority files (segments_N, .si) — all blocks (small, fully read)
+            // Hint all compressed data up front so the kernel starts I/O while we decompress.
+            for (AD2IndexInput in : priorityInputs) {
+              int blockCount = in.blockOffsets.length - 1;
+              if (blockCount > 0) {
+                in.hintCompressedRange(0, blockCount - 1);
+              }
+            }
             for (AD2IndexInput in : priorityInputs) {
               for (int idx = 0, blockCount = in.blockOffsets.length - 1; idx < blockCount; idx++) {
                 if (!AD2IndexInput.loadBlock(in, idx)) return null;
@@ -224,6 +227,18 @@ public class AccessDirectory2 extends MMapDirectory {
             }
 
             // Phase 2: CFS/CFE boundary blocks (header/footer) so CFE is parseable in phase 3
+            // Hint boundary block compressed ranges up front.
+            for (String seg : segOrder) {
+              for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
+                String name = e.getKey();
+                if (name.endsWith(".cfs") || name.endsWith(".cfe")) {
+                  AD2IndexInput in = e.getValue();
+                  in.hintCompressedRange(0, 0);
+                  int lastIdx = in.blockOffsets.length - 2;
+                  if (lastIdx > 0) in.hintCompressedRange(lastIdx, lastIdx);
+                }
+              }
+            }
             for (String seg : segOrder) {
               for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
                 String name = e.getKey();
@@ -237,7 +252,19 @@ public class AccessDirectory2 extends MMapDirectory {
             }
 
             // Phase 3: all logical file boundary blocks in segment order —
-            // non-CFS files and CFS sub-files interleaved
+            // non-CFS files and CFS sub-files interleaved.
+            // Hint non-CFS boundary blocks up front.
+            for (String seg : segOrder) {
+              for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
+                String name = e.getKey();
+                if (!name.endsWith(".cfs") && !name.endsWith(".cfe")) {
+                  AD2IndexInput in = e.getValue();
+                  in.hintCompressedRange(0, 0);
+                  int lastIdx = in.blockOffsets.length - 2;
+                  if (lastIdx > 0) in.hintCompressedRange(lastIdx, lastIdx);
+                }
+              }
+            }
             for (String seg : segOrder) {
               List<Map.Entry<String, AD2IndexInput>> inputs = segToInputs.get(seg);
               AD2IndexInput cfsInput = null;
@@ -259,6 +286,10 @@ public class AccessDirectory2 extends MMapDirectory {
               if (cfsInput != null && cfeInput != null) {
                 IntArrayList blockIndexes =
                     BlockPreloader.parseCfeBlockIndexes(cfeInput, Integer.MAX_VALUE);
+                // Hint all CFS sub-file blocks before loading.
+                for (IntCursor cursor : blockIndexes) {
+                  cfsInput.hintCompressedRange(cursor.value, cursor.value);
+                }
                 for (IntCursor cursor : blockIndexes) {
                   if (!AD2IndexInput.loadBlock(cfsInput, cursor.value)) return null;
                 }
@@ -373,9 +404,9 @@ public class AccessDirectory2 extends MMapDirectory {
   static final class AD2IndexInput extends CachedCompressedIndexInput {
 
     private final ExecutorService ioExec;
-    private final ArrayBlockingQueue<Runnable> preloadQueue;
     private final ByteBufferGuard compressedGuard;
     private final ByteBuffer[] compressed;
+    private final long[] compressedBaseAddresses;
     private final boolean isRoot;
 
     private final BlockPreloader.BlockSupplier blockSupplier;
@@ -411,9 +442,9 @@ public class AccessDirectory2 extends MMapDirectory {
     private AD2IndexInput() {
       super("done_sentinel");
       this.ioExec = null;
-      this.preloadQueue = null;
       this.compressedGuard = null;
       this.compressed = null;
+      this.compressedBaseAddresses = null;
       this.isRoot = false;
       this.blockSupplier = null;
       this.nodesEntry = null;
@@ -543,9 +574,13 @@ public class AccessDirectory2 extends MMapDirectory {
           p.accessMapped,
           logicalRoot);
       this.ioExec = dir.ioExec;
-      this.preloadQueue = dir.preloadQueue;
       this.compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
       this.compressed = p.compressed;
+      long[] addrs = new long[p.compressed.length];
+      for (int i = 0; i < addrs.length; i++) {
+        addrs[i] = dir.cache.baseAddress(p.compressed[i]);
+      }
+      this.compressedBaseAddresses = addrs;
       this.isRoot = true;
       this.nodesEntry = p.entry;
       this.supplyLock = new StampedLock();
@@ -575,12 +610,12 @@ public class AccessDirectory2 extends MMapDirectory {
           sliceLen,
           parent.logicalRoot == null ? Boolean.TRUE : Boolean.FALSE);
       this.ioExec = parent.ioExec;
-      this.preloadQueue = parent.preloadQueue;
       this.compressedGuard = parent.compressedGuard;
       this.compressed = parent.compressed;
+      this.compressedBaseAddresses = parent.compressedBaseAddresses;
       this.isRoot = false;
       this.nodesEntry = null;
-      this.supplyLock = null; // lock is captured in the blockSupplier lambda; not needed here
+      this.supplyLock = parent.supplyLock;
       blockSupplier = parent.blockSupplier;
     }
 
@@ -592,65 +627,58 @@ public class AccessDirectory2 extends MMapDirectory {
     @SuppressWarnings("ReferenceEquality")
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
-      byte[] result =
-          supplyFromBuffers(
-              compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
-      if (logicalRoot == Boolean.FALSE && blockIdx >= readAheadTo) {
+      if (logicalRoot == Boolean.FALSE && seqAccessCount > 0) {
         int batchSize = Math.min(seqAccessCount, MAX_READ_AHEAD);
-        if (batchSize > 0) {
-          int preloadTo = Math.min(blockIdx + batchSize, sliceLastBlockIdx);
-          readAheadTo = preloadTo;
-          final int fromIdx = blockIdx + 1;
-          if (fromIdx <= preloadTo) {
-            final AtomicLongArray am = accessMapped;
-            final long[] offsets = blockOffsets;
-            final BlockPreloader.BlockSupplier supplier = blockSupplier;
-            final UUID uuid = blobUUID;
-            final int seqCount = seqAccessCount;
-            preloadQueue.offer(
-                () -> {
-                  for (int idx = fromIdx; idx <= preloadTo; idx++) {
-                    long extant = am.get(idx);
-                    if (extant != BlockCache.NULL_HANDLE && pinnable(idx, extant, seqCount)) {
-                      continue;
-                    }
-                    long[] nodeHandle = new long[1];
-                    BlockCache.Val val = cache.acquireNode(nodeHandle, uuid, idx);
-                    if (val == null) return; // cache full — stop
-                    long node = nodeHandle[0];
-                    if (am.compareAndSet(idx, extant, node)) {
-                      if (val.isPopulated()) {
-                        cache.recordWarmStartHit();
-                      } else {
-                        long off = offsets[idx];
-                        int cLen = (int) (offsets[idx + 1] - off);
-                        try {
-                          BlockPreloader.populateBuf(
-                              off,
-                              cLen,
-                              idx,
-                              decompressedLenFor(idx),
-                              node,
-                              val,
-                              am,
-                              cache,
-                              supplier,
-                              uuid);
-                        } catch (IOException e) {
-                          return; // best-effort — stop on I/O error
-                        }
-                      }
-                      cache.unpin(node, false);
-                    } else {
-                      cache.recordCasRaceLoss();
-                      cache.close(node, val);
-                    }
-                  }
-                });
+        int target = Math.min(blockIdx + batchSize, sliceLastBlockIdx);
+        if (target > readAheadTo) {
+          // Expand the readahead window from readAheadTo outward.
+          // Stop at the first pinnable block (its compressed data won't be read).
+          int hintFrom = readAheadTo + 1;
+          int hintTo = -1;
+          int newReadAheadTo = target;
+          AtomicLongArray am = accessMapped;
+          for (int i = hintFrom; i <= target; i++) {
+            long extant = am.get(i);
+            if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) {
+              newReadAheadTo = i;
+              break;
+            }
+            hintTo = i;
           }
+          if (hintTo >= hintFrom) {
+            hintCompressedRange(hintFrom, hintTo);
+          }
+          readAheadTo = newReadAheadTo;
+        }
+      } else {
+        // No readahead, but still hint the current block so the kernel reads its
+        // full compressed range in one I/O rather than demand-faulting page by page.
+        hintCompressedRange(blockIdx, blockIdx);
+      }
+      return supplyFromBuffers(
+          compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
+    }
+
+    /** Issues MADV_WILLNEED on compressed data for blocks [fromIdx, toIdx] inclusive. */
+    private void hintCompressedRange(int fromIdx, int toIdx) {
+      long from = blockOffsets[fromIdx];
+      long to = blockOffsets[toIdx + 1];
+      int regionIdx = (int) (from >> MAX_MAP_SHIFT);
+      int regionEnd = (int) (to >> MAX_MAP_SHIFT);
+      if (regionIdx == regionEnd) {
+        long addr = compressedBaseAddresses[regionIdx] + (from & MAX_MAP_MASK);
+        cache.willneed(addr, to - from);
+      } else {
+        long pos = from;
+        for (int r = regionIdx; r <= regionEnd; r++) {
+          long regionStart = (long) r << MAX_MAP_SHIFT;
+          long segStart = Math.max(pos, regionStart);
+          long segEnd = Math.min(to, regionStart + MAX_MAP_SIZE);
+          long addr = compressedBaseAddresses[r] + (segStart & MAX_MAP_MASK);
+          cache.willneed(addr, segEnd - segStart);
+          pos = segEnd;
         }
       }
-      return result;
     }
 
     /**

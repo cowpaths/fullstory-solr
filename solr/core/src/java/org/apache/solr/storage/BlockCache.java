@@ -499,6 +499,20 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private final BlockCacheMapping mapping;
 
   /**
+   * Issues {@code MADV_WILLNEED} on an arbitrary native address range. Address and length need not
+   * be page-aligned; alignment is handled internally. Delegates to the backing {@link
+   * BlockCacheMapping#willneed(long, long)}.
+   */
+  int willneed(long address, long length) {
+    return mapping.willneed(address, length);
+  }
+
+  /** Returns the native base address of a direct/mapped {@link ByteBuffer}. */
+  long baseAddress(ByteBuffer buf) {
+    return mapping.baseAddress(buf);
+  }
+
+  /**
    * Maps the metadata+trailer region of the backing file, or {@code null} for ephemeral caches.
    * Layout: {@code [nBlocks × META_BYTES_PER_BLOCK bytes][TRAILER_BYTES]}.
    */
