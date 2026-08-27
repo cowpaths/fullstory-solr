@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.locks.StampedLock;
@@ -91,6 +92,7 @@ public class AccessDirectory2 extends MMapDirectory {
   private final Path compressedPath;
   private final BlockCache cache;
   private final ExecutorService ioExec;
+  private final Future<?> deferredCloseTask;
 
   /**
    * Ref-counted wrapper around a shared {@code accessMapped} array. The map itself holds a +1 ref;
@@ -360,22 +362,32 @@ public class AccessDirectory2 extends MMapDirectory {
       // Defer closing inputs: wait an ample amount of time so that the main code loads its own
       // copies of inputs and can inherit the structures we've prepopulated. If we close too
       // early, refCount will drop to 0, triggering cleanup, and all our work is wasted!
-      ioExec.submit(
-          () -> {
-            try {
-              Thread.sleep(30_000);
-            } catch (InterruptedException e) {
-              Thread.currentThread().interrupt();
-            } finally {
-              IOUtils.close(toClose);
-            }
-            return null;
-          });
+      deferredCloseTask =
+          ioExec.submit(
+              () -> {
+                try {
+                  Thread.sleep(30_000);
+                } catch (InterruptedException e) {
+                  Thread.currentThread().interrupt();
+                } finally {
+                  IOUtils.close(toClose);
+                }
+                return null;
+              });
       submitted = true;
     } finally {
       if (!submitted) {
         IOUtils.close(toClose);
       }
+    }
+  }
+
+  @Override
+  public void close() throws IOException {
+    try {
+      deferredCloseTask.cancel(true);
+    } finally {
+      super.close();
     }
   }
 
