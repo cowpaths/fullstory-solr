@@ -197,18 +197,10 @@ public class AccessDirectory2 extends MMapDirectory {
       // Issue MADV_WILLNEED hints inline so the kernel starts I/O immediately,
       // before the async preload task begins decompressing.
       // Rough segment ordering by generation (oldest first) — no file I/O needed.
-      final String[] roughSegOrder = new String[segToInputs.size()];
-      {
-        long[] segIds = new long[roughSegOrder.length];
-        int i = 0;
-        for (String seg : segToInputs.keySet()) {
-          segIds[i++] = Long.parseLong(seg.substring(1), Character.MAX_RADIX);
-        }
-        Arrays.sort(segIds);
-        for (i = segIds.length - 1; i >= 0; i--) {
-          roughSegOrder[i] = "_".concat(Long.toString(segIds[i], Character.MAX_RADIX));
-        }
-      }
+      final String[] roughSegOrder = segToInputs.keySet().toArray(new String[0]);
+      Arrays.sort(
+          roughSegOrder,
+          Comparator.comparingLong(s -> Long.parseLong(s.substring(1), Character.MAX_RADIX)));
 
       // Priority files: hint all blocks (small, fully read).
       for (AD2IndexInput in : priorityInputs) {
