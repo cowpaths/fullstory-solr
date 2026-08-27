@@ -345,11 +345,11 @@ public class AccessDirectory2 extends MMapDirectory {
             }
           } finally {
             try {
-              // wait a nominal amount of time so that the main code loads its own copies of
+              // wait an ample amount of time so that the main code loads its own copies of
               // inputs and can inherit the structures we've prepopulated. If we close too
               // early, refCount will drop to 0, triggering cleanup, and all our work is
               // wasted!
-              Thread.sleep(5000);
+              Thread.sleep(30_000);
             } catch (InterruptedException e) {
               Thread.currentThread().interrupt();
             } finally {
