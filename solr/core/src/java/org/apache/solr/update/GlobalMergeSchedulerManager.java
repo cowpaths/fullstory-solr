@@ -18,14 +18,11 @@ package org.apache.solr.update;
 
 import java.lang.invoke.MethodHandles;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.Semaphore;
 
 import org.apache.lucene.index.GlobalConcurrentMergeScheduler;
-import org.apache.lucene.index.MergePolicy;
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.cloud.ClusterProperties;
 import org.apache.solr.common.cloud.ZkStateReader;
@@ -87,13 +84,12 @@ final class GlobalMergeSchedulerManager {
   }
 
   /**
-   * Node-wide merge concurrency semaphore: sticky permits keyed by {@link MergePolicy.OneMerge}.
-   * Excess merge spawning stalls in {@link GlobalConcurrentMergeScheduler#maybeStall}.
+   * Node-wide merge concurrency semaphore. Excess merge spawning stalls in {@link
+   * GlobalConcurrentMergeScheduler#maybeStall}.
    */
   static final class ConcurrentSemaphore extends Semaphore
       implements GlobalConcurrentMergeScheduler.MergeConcurrencySemaphore {
     private final int defaultMaxRunning;
-    private final Set<MergePolicy.OneMerge> activeMerges = new HashSet<>();
     private int maxRunning;
 
     ConcurrentSemaphore(int maxRunning) {
@@ -111,28 +107,10 @@ final class GlobalMergeSchedulerManager {
       }
     }
 
+    /** Number of permits currently handed out to running merges. */
     int getActiveMergeCount() {
       synchronized (this) {
-        return activeMerges.size();
-      }
-    }
-
-    @Override
-    public synchronized boolean tryAcquire(MergePolicy.OneMerge merge) {
-      if (activeMerges.contains(merge)) { // already has permit
-        return true;
-      }
-      boolean acquired = tryAcquire();
-      if (acquired) {
-        activeMerges.add(merge);
-      }
-      return acquired;
-    }
-
-    @Override
-    public synchronized void release(MergePolicy.OneMerge merge) {
-      if (activeMerges.remove(merge)) {
-        release();
+        return maxRunning - availablePermits();
       }
     }
 

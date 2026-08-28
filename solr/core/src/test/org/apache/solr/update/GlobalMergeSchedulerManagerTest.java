@@ -23,7 +23,6 @@ import java.nio.charset.Charset;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.lucene.index.GlobalConcurrentMergeScheduler;
-import org.apache.lucene.index.MergePolicy;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.cloud.ClusterPropertiesListener;
@@ -75,40 +74,69 @@ public class GlobalMergeSchedulerManagerTest extends SolrTestCaseJ4 {
   }
 
   @Test
-  public void testSemaphoreCapsAcquiresAcrossMerges() throws Exception {
+  public void testSemaphoreCapsConcurrentAcquires() throws Exception {
     GlobalMergeSchedulerManager manager =
         GlobalMergeSchedulerManager.getInstance(
             mockZkController(null, NODE, null), defaultInitArgs());
     ConcurrentSemaphore sem = manager.getSemaphore();
     sem.setMaxRunningOverride(1);
 
-    MergePolicy.OneMerge m1 = newMerge();
-    MergePolicy.OneMerge m2 = newMerge();
-    assertTrue(sem.tryAcquire(m1));
-    assertFalse(sem.tryAcquire(m2));
+    assertTrue(sem.tryAcquire());
+    assertFalse(sem.tryAcquire());
     assertEquals(1, sem.getActiveMergeCount());
 
-    // Sticky: holder keeps permit on subsequent calls.
-    assertTrue(sem.tryAcquire(m1));
-    sem.release(m1);
+    sem.release();
     assertEquals(0, sem.getActiveMergeCount());
-    assertTrue(sem.tryAcquire(m2));
-    sem.release(m2);
+    assertTrue(sem.tryAcquire());
+    sem.release();
+    assertEquals(0, sem.getActiveMergeCount());
   }
 
   @Test
-  public void testReleaseIsIdempotent() throws Exception {
+  public void testLoweringMaxRunningShrinksAvailablePermits() throws Exception {
     GlobalMergeSchedulerManager manager =
         GlobalMergeSchedulerManager.getInstance(
             mockZkController(null, NODE, null), defaultInitArgs());
     ConcurrentSemaphore sem = manager.getSemaphore();
-    MergePolicy.OneMerge m1 = newMerge();
-    assertTrue(sem.tryAcquire(m1));
-    sem.release(m1);
-    sem.release(m1); // no-op
+
+    for (int i = 0; i < DEFAULT_MAX_GLOBAL; i++) {
+      assertTrue(sem.tryAcquire());
+    }
+    assertFalse(sem.tryAcquire());
+
+    // shrink while all permits are out: in-flight merges finish, but only 1 can be re-acquired
+    sem.setMaxRunningOverride(1);
+    assertEquals(1, sem.getMaxRunning());
+    for (int i = 0; i < DEFAULT_MAX_GLOBAL; i++) {
+      sem.release();
+    }
     assertEquals(0, sem.getActiveMergeCount());
-    assertTrue(sem.tryAcquire(m1));
-    sem.release(m1);
+    assertTrue(sem.tryAcquire());
+    assertFalse(sem.tryAcquire());
+    sem.release();
+  }
+
+  @Test
+  public void testRaisingMaxRunningGrantsMorePermits() throws Exception {
+    GlobalMergeSchedulerManager manager =
+        GlobalMergeSchedulerManager.getInstance(
+            mockZkController(null, NODE, null), defaultInitArgs());
+    ConcurrentSemaphore sem = manager.getSemaphore();
+    sem.setMaxRunningOverride(1);
+
+    assertTrue(sem.tryAcquire());
+    assertFalse(sem.tryAcquire());
+
+    sem.setMaxRunningOverride(3);
+    assertTrue(sem.tryAcquire());
+    assertTrue(sem.tryAcquire());
+    assertFalse(sem.tryAcquire());
+    assertEquals(3, sem.getActiveMergeCount());
+
+    sem.release();
+    sem.release();
+    sem.release();
+    assertEquals(0, sem.getActiveMergeCount());
   }
 
   @Test
@@ -225,10 +253,6 @@ public class GlobalMergeSchedulerManagerTest extends SolrTestCaseJ4 {
     NamedList<Object> args = new NamedList<>();
     args.add("maxGlobalThreadCount", DEFAULT_MAX_GLOBAL);
     return args;
-  }
-
-  private static MergePolicy.OneMerge newMerge() {
-    return new MergePolicy.OneMerge();
   }
 
   private static String overrideJson(String node) {
