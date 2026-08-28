@@ -358,7 +358,7 @@ public class SolrIndexConfig implements MapSerializable {
         mergeSchedulerInfo == null
             ? SolrIndexConfig.DEFAULT_MERGE_SCHEDULER_CLASSNAME
             : mergeSchedulerInfo.className;
-    // GlobalConcurrentMergeScheduler needs the shared MergeConcurrencyGate from the manager.
+    // GlobalConcurrentMergeScheduler needs the shared MergeConcurrencySemaphore from the manager.
     final MergeScheduler scheduler;
     if (GlobalConcurrentMergeScheduler.class.getName().equals(msClassName)) {
       ZkController zkController = resourceLoader.getCoreContainer().getZkController();
@@ -366,7 +366,13 @@ public class SolrIndexConfig implements MapSerializable {
         throw new IllegalStateException(
             "Cannot use GlobalConcurrentMergeScheduler without a ZkController");
       }
-      scheduler = GlobalMergeSchedulerManager.getInstance(zkController).createScheduler();
+      if (mergeSchedulerInfo == null) {
+        throw new IllegalStateException(
+            "Cannot use GlobalConcurrentMergeScheduler without configuration parameters");
+      }
+      scheduler =
+          GlobalMergeSchedulerManager.getInstance(zkController, mergeSchedulerInfo.initArgs)
+              .getScheduler();
     } else {
       scheduler = resourceLoader.newInstance(msClassName, MergeScheduler.class);
     }
@@ -376,6 +382,7 @@ public class SolrIndexConfig implements MapSerializable {
       // if someone has them configured.
       if (scheduler instanceof ConcurrentMergeScheduler) {
         NamedList<?> args = mergeSchedulerInfo.initArgs.clone();
+        args.remove("maxGlobalThreadCount"); // consumed by GlobalMergeSchedulerManager
         Integer maxMergeCount = (Integer) args.remove("maxMergeCount");
         if (maxMergeCount == null) {
           maxMergeCount = ((ConcurrentMergeScheduler) scheduler).getMaxMergeCount();

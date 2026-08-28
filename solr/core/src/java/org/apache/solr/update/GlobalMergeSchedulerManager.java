@@ -18,89 +18,67 @@ package org.apache.solr.update;
 
 import java.lang.invoke.MethodHandles;
 import java.util.Collections;
-import java.util.Iterator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.atomic.AtomicInteger;
-import org.apache.lucene.index.ConcurrentMergeScheduler;
+import java.util.concurrent.Semaphore;
+
 import org.apache.lucene.index.GlobalConcurrentMergeScheduler;
-import org.apache.lucene.index.GlobalConcurrentMergeScheduler.MergeConcurrencyGate;
+import org.apache.lucene.index.MergePolicy;
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.cloud.ClusterProperties;
 import org.apache.solr.common.cloud.ZkStateReader;
+import org.apache.solr.common.util.NamedList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/**
- * JVM singleton that owns a shared {@link MergeConcurrencyGate} and a ZK clusterprops watcher for
- * live {@code ext.globalMergeScheduler} overrides.
- *
- * <p>Each Solr core that configures {@link GlobalConcurrentMergeScheduler} gets its own CMS
- * instance via {@link #createScheduler()}, all sharing this manager's gate. The watcher only
- * updates the gate ({@code maxThreadCount} → node-wide max <em>running</em> merges); per-core
- * {@code maxThreadCount}/{@code maxMergeCount} stay in solrconfig.
- *
- * <p>Example:
- *
- * <pre>
- * {
- *   "ext.globalMergeScheduler": {
- *     "maxThreadCount": 2,
- *     "nodes": ["solr-c92-8:8986_solr"]
- *   }
- * }
- * </pre>
- */
+
 final class GlobalMergeSchedulerManager {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private static final Object INSTANCE_LOCK = new Object();
   private static GlobalMergeSchedulerManager INSTANCE;
 
-  private final Gate gate;
+  private final ConcurrentSemaphore semaphore;
   private final Watcher watcher;
 
-  static GlobalMergeSchedulerManager getInstance(ZkController zkController) {
+  static GlobalMergeSchedulerManager getInstance(ZkController zkController, NamedList<Object> initArgs) {
     synchronized (INSTANCE_LOCK) {
       if (INSTANCE == null) {
-        INSTANCE = new GlobalMergeSchedulerManager(zkController);
+        INSTANCE = new GlobalMergeSchedulerManager(zkController, initArgs);
       }
       return INSTANCE;
     }
   }
 
-  private GlobalMergeSchedulerManager(ZkController zkController) {
-    this.gate = new Gate();
-    this.watcher = new Watcher(zkController.getNodeName(), gate);
+  private GlobalMergeSchedulerManager(ZkController zkController, NamedList<Object> initArgs) {
+    Integer maxThreadCount = (Integer) initArgs.get("maxGlobalThreadCount");
+    if (maxThreadCount == null) {
+      throw new IllegalArgumentException("maxGlobalThreadCount is required for GlobalConcurrentMergeScheduler");
+    }
+    this.semaphore = new ConcurrentSemaphore(maxThreadCount);
+    this.watcher = new Watcher(zkController.getNodeName(), semaphore);
     ZkStateReader zkStateReader = zkController.getZkStateReader();
     if (zkStateReader != null) {
       watcher.startListening(zkStateReader);
     }
   }
 
-  /** Creates a new per-core scheduler bound to this manager's shared gate. */
-  GlobalConcurrentMergeScheduler createScheduler() {
-    return new GlobalConcurrentMergeScheduler(gate);
-  }
-
-  Gate getGate() {
-    return gate;
+  GlobalConcurrentMergeScheduler getScheduler() {
+    return new GlobalConcurrentMergeScheduler(semaphore);
   }
 
   /** Clears static state for unit tests. */
   static void resetForTesting() {
     synchronized (INSTANCE_LOCK) {
-      if (INSTANCE != null) {
-        INSTANCE.gate.shutdown();
-      }
       INSTANCE = null;
     }
+  }
+
+  // package-visible for tests
+  ConcurrentSemaphore getSemaphore() {
+    return semaphore;
   }
 
   // package-visible for tests
@@ -109,180 +87,93 @@ final class GlobalMergeSchedulerManager {
   }
 
   /**
-   * Node-wide merge concurrency gate: sticky permits for merge threads that are allowed to run;
-   * excess merges are paused via rate {@code 0.0}.
+   * Node-wide merge concurrency semaphore: sticky permits keyed by {@link MergePolicy.OneMerge}.
+   * Excess merge spawning stalls in {@link GlobalConcurrentMergeScheduler#maybeStall}.
    */
-  static final class Gate implements MergeConcurrencyGate {
-    private final Object lock = new Object();
-    private int maxRunning = Integer.MAX_VALUE;
-    private final Map<Object, ConcurrentMergeScheduler> permits = new ConcurrentHashMap<>();
-    private final Set<ConcurrentMergeScheduler> schedulers = ConcurrentHashMap.newKeySet();
-    private final ExecutorService rebalanceExecutor;
-    private final AtomicInteger rebalanceThreadId = new AtomicInteger();
+  static final class ConcurrentSemaphore extends Semaphore
+      implements GlobalConcurrentMergeScheduler.MergeConcurrencySemaphore {
+    private final int defaultMaxRunning;
+    private final Set<MergePolicy.OneMerge> activeMerges = new HashSet<>();
+    private int maxRunning;
 
-    Gate() {
-      ThreadFactory tf =
-          r -> {
-            Thread t =
-                new Thread(r, "merge-concurrency-gate-rebalance-" + rebalanceThreadId.incrementAndGet());
-            t.setDaemon(true);
-            return t;
-          };
-      this.rebalanceExecutor = Executors.newSingleThreadExecutor(tf);
+    ConcurrentSemaphore(int maxRunning) {
+      super(maxRunning);
+      if (maxRunning < 1) {
+        throw new IllegalArgumentException("maxRunning must be >= 1, got " + maxRunning);
+      }
+      this.defaultMaxRunning = maxRunning;
+      this.maxRunning = maxRunning;
     }
 
     int getMaxRunning() {
-      synchronized (lock) {
+      synchronized (this) {
         return maxRunning;
       }
     }
 
-    int getPermitCount() {
-      synchronized (lock) {
-        purgeDeadThreads();
-        return permits.size();
-      }
-    }
-
-    void setMaxRunning(int maxRunning) {
-      if (maxRunning < 1) {
-        throw new IllegalArgumentException("maxRunning must be >= 1, got " + maxRunning);
-      }
-      synchronized (lock) {
-        this.maxRunning = maxRunning;
-        // Revoke excess permits; peers re-acquire (or stay paused) on rebalance.
-        while (permits.size() > this.maxRunning) {
-          Iterator<Object> it = permits.keySet().iterator();
-          if (!it.hasNext()) {
-            break;
-          }
-          it.next();
-          it.remove();
-        }
-      }
-      scheduleRebalance(null);
-    }
-
-    void clearMaxRunning() {
-      synchronized (lock) {
-        this.maxRunning = Integer.MAX_VALUE;
-      }
-      scheduleRebalance(null);
-    }
-
-    @Override
-    public double adjustRate(
-        ConcurrentMergeScheduler scheduler, Object mergeKey, double proposedMBPerSec) {
-      Objects.requireNonNull(scheduler, "scheduler");
-      Objects.requireNonNull(mergeKey, "mergeKey");
-      synchronized (lock) {
-        purgeDeadThreads();
-        if (proposedMBPerSec == 0.0) {
-          permits.remove(mergeKey);
-          return 0.0;
-        }
-        ConcurrentMergeScheduler holder = permits.get(mergeKey);
-        if (holder == scheduler) {
-          return proposedMBPerSec;
-        }
-        if (holder != null) {
-          // Another scheduler somehow owns this key; do not steal.
-          return 0.0;
-        }
-        if (permits.size() < maxRunning) {
-          permits.put(mergeKey, scheduler);
-          return proposedMBPerSec;
-        }
-        return 0.0;
+    int getActiveMergeCount() {
+      synchronized (this) {
+        return activeMerges.size();
       }
     }
 
     @Override
-    public void register(ConcurrentMergeScheduler scheduler) {
-      schedulers.add(Objects.requireNonNull(scheduler));
+    public synchronized boolean tryAcquire(MergePolicy.OneMerge merge) {
+      if (activeMerges.contains(merge)) { // already has permit
+        return true;
+      }
+      boolean acquired = tryAcquire();
+      if (acquired) {
+        activeMerges.add(merge);
+      }
+      return acquired;
     }
 
     @Override
-    public void unregister(ConcurrentMergeScheduler scheduler) {
-      schedulers.remove(scheduler);
-      synchronized (lock) {
-        permits.entrySet().removeIf(e -> e.getValue() == scheduler);
+    public synchronized void release(MergePolicy.OneMerge merge) {
+      if (activeMerges.remove(merge)) {
+        release();
       }
-      scheduleRebalance(scheduler);
     }
 
-    @Override
-    public void afterUpdate(ConcurrentMergeScheduler scheduler) {
-      scheduleRebalance(scheduler);
+    void clearMaxRunningOverride() {
+      setMaxRunningOverride(defaultMaxRunning);
     }
 
-    private void purgeDeadThreads() {
-      assert Thread.holdsLock(lock);
-      permits
-          .entrySet()
-          .removeIf(
-              e -> {
-                Object key = e.getKey();
-                return key instanceof Thread && !((Thread) key).isAlive();
-              });
-    }
-
-    private void scheduleRebalance(ConcurrentMergeScheduler except) {
-      if (rebalanceExecutor.isShutdown()) {
-        return;
+    void setMaxRunningOverride(int maxRunningOverride) {
+      if (maxRunningOverride < 1) {
+        throw new IllegalArgumentException("maxRunning must be >= 1, got " + maxRunningOverride);
       }
-      for (ConcurrentMergeScheduler s : schedulers) {
-        if (s == except) {
-          continue;
+      synchronized (this) {
+        int diff = maxRunningOverride - maxRunning;
+        if (diff > 0) {
+          release(diff);
+        } else if (diff < 0) {
+          reducePermits(-diff);
         }
-        final ConcurrentMergeScheduler target = s;
-        try {
-          rebalanceExecutor.execute(() -> rebalanceOne(target));
-        } catch (RuntimeException e) {
-          // executor shut down between check and execute
-          log.debug("Skipping merge gate rebalance; executor unavailable", e);
-        }
-      }
-    }
-
-    private static void rebalanceOne(ConcurrentMergeScheduler scheduler) {
-      try {
-        if (scheduler instanceof GlobalConcurrentMergeScheduler) {
-          ((GlobalConcurrentMergeScheduler) scheduler).rebalanceMergeThreads();
-        }
-      } catch (RuntimeException e) {
-        log.warn("Merge concurrency gate rebalance failed for {}", scheduler, e);
-      }
-    }
-
-    void shutdown() {
-      rebalanceExecutor.shutdownNow();
-      synchronized (lock) {
-        permits.clear();
-        schedulers.clear();
-        maxRunning = Integer.MAX_VALUE;
+        maxRunning = maxRunningOverride;
       }
     }
   }
 
   /**
    * Watches {@code ext.globalMergeScheduler} and applies {@code maxThreadCount} as the node-wide
-   * max running merges on the shared gate.
+   * max concurrent merge threads on the shared semaphore.
    */
   final class Watcher {
     static final String GLOBAL_MERGE_SCHEDULER_KEY =
         ClusterProperties.EXT_PROPRTTY_PREFIX + "globalMergeScheduler";
 
     private final String nodeName;
-    private final Gate gate;
+    private final ConcurrentSemaphore semaphore;
 
     private volatile Integer overrideMaxThreadCount;
     /** null means apply to all nodes; empty list means apply to no nodes. */
     private volatile List<String> overrideNodes;
 
-    private Watcher(String nodeName, Gate gate) {
+    private Watcher(String nodeName, ConcurrentSemaphore semaphore) {
       this.nodeName = nodeName;
-      this.gate = gate;
+      this.semaphore = semaphore;
     }
 
     void startListening(ZkStateReader zkStateReader) {
@@ -353,6 +244,10 @@ final class GlobalMergeSchedulerManager {
       applyLimits();
     }
 
+    /**
+     * Clear the overrides stored in this watcher and apply such to the semaphore.
+     * @param reason
+     */
     private void clearOverrideAndApply(String reason) {
       boolean hadOverride = overrideMaxThreadCount != null || overrideNodes != null;
       overrideMaxThreadCount = null;
@@ -363,17 +258,23 @@ final class GlobalMergeSchedulerManager {
       applyLimits();
     }
 
+    /**
+     * Apply the new limits to the semaphore.
+     */
     private void applyLimits() {
       if (isOverrideActiveForThisNode()) {
         int maxRunning = overrideMaxThreadCount;
         log.info(
             "Applying {} override: maxRunning={}", GLOBAL_MERGE_SCHEDULER_KEY, maxRunning);
-        gate.setMaxRunning(maxRunning);
-        return;
+        semaphore.setMaxRunningOverride(maxRunning);
+      } else {
+        semaphore.clearMaxRunningOverride();
       }
-      gate.clearMaxRunning();
     }
 
+    /**
+     * @return whether an override should be applied to this node
+     */
     private boolean isOverrideActiveForThisNode() {
       if (overrideMaxThreadCount == null) {
         return false;
