@@ -482,8 +482,8 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
       return new MMapDirectory(persistentPath, lockFactory);
     } else {
       final Directory naive = super.create(path, lockFactory, dirContext);
-      IOFunction<Void, Map.Entry<String, Directory>> accessFunction =
-          unused -> {
+      IOFunction<Directory, Map.Entry<String, Directory>> accessFunction =
+          teeDir -> {
             String accessPath = getScopeName(accessDir, path);
             Path access = Path.of(accessPath);
             Directory dir;
@@ -495,7 +495,8 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
                       lockFactory,
                       persistentPath,
                       nodeLevelState.blockCache,
-                      nodeLevelState.ioExec);
+                      nodeLevelState.ioExec,
+                      teeDir::fileLength);
             } else {
               dir = new AccessDirectory(access, lockFactory, persistentPath, nodeLevelState);
             }

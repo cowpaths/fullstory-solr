@@ -63,7 +63,7 @@ public class TeeDirectory extends SizeAwareDirectory
   private volatile Directory access;
   private final ExecutorService ioExec;
   private final AutoCloseable closeLocal;
-  private final IOFunction<Void, Map.Entry<String, Directory>> accessFunction;
+  private final IOFunction<Directory, Map.Entry<String, Directory>> accessFunction;
   private final IOFunction<Directory, Map.Entry<Directory, List<String>>> persistentFunction;
   private volatile CompressingDirectory persistent;
   private final BlockingQueue<TeeDirectoryFactory.PersistentLengthVerification>
@@ -109,7 +109,7 @@ public class TeeDirectory extends SizeAwareDirectory
 
   public TeeDirectory(
       Directory naive,
-      IOFunction<Void, Map.Entry<String, Directory>> accessFunction,
+      IOFunction<Directory, Map.Entry<String, Directory>> accessFunction,
       IOFunction<Directory, Map.Entry<Directory, List<String>>> persistentFunction,
       TeeDirectoryFactory.NodeLevelTeeDirectoryState nodeLevelState)
       throws IOException {
@@ -138,7 +138,7 @@ public class TeeDirectory extends SizeAwareDirectory
         this.persistent = (CompressingDirectory) persistentEntry.getKey();
         Path persistentFSPath = ((FSDirectory) persistent).getDirectory();
         buildAssociatedPaths.addAll(persistentEntry.getValue());
-        Map.Entry<String, Directory> accessEntry = accessFunction.apply(null);
+        Map.Entry<String, Directory> accessEntry = accessFunction.apply(this);
         this.access = accessEntry.getValue();
         buildAssociatedPaths.add(accessEntry.getKey());
         associatedPaths = buildAssociatedPaths;

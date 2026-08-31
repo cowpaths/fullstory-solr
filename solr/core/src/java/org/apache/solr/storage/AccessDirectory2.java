@@ -29,7 +29,6 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
-import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.AbstractMap;
@@ -89,9 +88,15 @@ public class AccessDirectory2 extends MMapDirectory {
   private final long uuidMsb;
   private final long uuidLsb;
 
+  @FunctionalInterface
+  interface FileLengthProvider {
+    long fileLength(String name) throws IOException;
+  }
+
   private final Path compressedPath;
   private final BlockCache cache;
   private final ExecutorService ioExec;
+  private final FileLengthProvider fileLengthProvider;
   private final Future<?> deferredCloseTask;
 
   /**
@@ -150,7 +155,8 @@ public class AccessDirectory2 extends MMapDirectory {
       LockFactory lockFactory,
       Path compressedPath,
       BlockCache cache,
-      ExecutorService ioExec)
+      ExecutorService ioExec,
+      FileLengthProvider fileLengthProvider)
       throws IOException {
     super(path, lockFactory);
     UUID uuid = BlockCache.refIdFromCoreProperties(coreRootDirectory, compressedPath, true);
@@ -164,6 +170,7 @@ public class AccessDirectory2 extends MMapDirectory {
     this.compressedPath = compressedPath;
     this.cache = cache;
     this.ioExec = ioExec;
+    this.fileLengthProvider = fileLengthProvider;
 
     // Scan existing compressed files, open inputs, and group by segment.
     Map<String, List<Map.Entry<String, AD2IndexInput>>> segToInputs = new HashMap<>();
@@ -408,7 +415,7 @@ public class AccessDirectory2 extends MMapDirectory {
     if (stale != null) {
       stale.release(cache);
     }
-    if (name.endsWith(".tmp")) {
+    if (name.endsWith(".tmp") || Files.exists(getDirectory().resolve(name))) {
       super.deleteFile(name);
     }
   }
@@ -418,15 +425,15 @@ public class AccessDirectory2 extends MMapDirectory {
     synchronized (pendingNodes) {
       NodesEntry entry = pendingNodes.get(source);
       if (entry == null) {
-        throw new NoSuchFileException(source);
-      } else if (pendingNodes.putIfAbsent(dest, entry) != null) {
-        throw new FileAlreadyExistsException(dest);
-      } else if (!pendingNodes.remove(source, entry)) {
-        throw new IOException("source entry unexpectedly changed: " + source);
+        // *.tmp or files < compression block size
+        super.rename(source, dest);
+      } else {
+        if (pendingNodes.putIfAbsent(dest, entry) != null) {
+          throw new FileAlreadyExistsException(dest);
+        } else if (!pendingNodes.remove(source, entry)) {
+          throw new IOException("source entry unexpectedly changed: " + source);
+        }
       }
-    }
-    if (source.endsWith(".tmp")) {
-      super.rename(source, dest);
     }
   }
 
@@ -457,6 +464,17 @@ public class AccessDirectory2 extends MMapDirectory {
     if (name.endsWith(".tmp")) {
       return super.openInput(name, context);
     }
+    // Small files (≤ 1 decompressed block) are fully decompressed to the access directory
+    // and served via MMapDirectory, bypassing BlockCache. This avoids per-file random seeks
+    // on spinning disk for the many small metadata files per segment.
+    if (Files.exists(getDirectory().resolve(name))) {
+      return super.openInput(name, context);
+    }
+    // TODO: use fileLengthProvider or similar
+    if (fileLength(name) <= COMPRESSION_BLOCK_SIZE) {
+      mirrorSmallFile(name);
+      return super.openInput(name, context);
+    }
     NodesEntry sharedEntry;
     synchronized (pendingNodes) {
       sharedEntry = pendingNodes.get(name);
@@ -466,6 +484,29 @@ public class AccessDirectory2 extends MMapDirectory {
     }
     // TODO: if `context.mergeInfo != null` we should preload the entire contents
     return new AD2IndexInput(compressedPath.resolve(name), this, sharedEntry, pendingNodes);
+  }
+
+  /**
+   * Decompresses a small compressed file (single block) to the access directory so it can be served
+   * directly via MMapDirectory.
+   */
+  private void mirrorSmallFile(String name) throws IOException {
+    try (AD2IndexInput in =
+        new AD2IndexInput(compressedPath.resolve(name), this, null, pendingNodes)) {
+      byte[] buf = new byte[(int) in.length()];
+      in.readBytes(buf, 0, buf.length);
+      String tmpName;
+      try (IndexOutput out = super.createTempOutput(name, "mirror", IOContext.DEFAULT)) {
+        tmpName = out.getName();
+        out.writeBytes(buf, 0, buf.length);
+      }
+      try {
+        super.rename(tmpName, name);
+      } catch (FileAlreadyExistsException e) {
+        // Another thread won the race — our copy is redundant.
+        super.deleteFile(tmpName);
+      }
+    }
   }
 
   private static ByteBufferGuard.BufferCleaner unmapHack() {
@@ -934,6 +975,14 @@ public class AccessDirectory2 extends MMapDirectory {
     public void close() throws IOException {
       try (delegate) {
         if (blockBufPos > 0) {
+          if (nodeSlots.isEmpty()) {
+            // Small file (single partial block): write directly to the access directory
+            // as a mirrored file, bypassing BlockCache entirely.
+            try (IndexOutput out = dir.createOutput(name, IOContext.DEFAULT)) {
+              out.writeBytes(blockBuf, 0, blockBufPos);
+            }
+            return;
+          }
           captureBlock(blockBufPos); // partial last block
         }
         AtomicLongArray sharedAccessMapped = new AtomicLongArray(nodeSlots.size());
