@@ -173,7 +173,7 @@ public class AccessDirectory2 extends MMapDirectory {
     this.fileLengthProvider = fileLengthProvider;
 
     // Scan existing compressed files, open inputs, and group by segment.
-    Map<String, List<Map.Entry<String, AD2IndexInput>>> segToInputs = new HashMap<>();
+    Map<String, List<Map.Entry<String, IndexInput>>> segToInputs = new HashMap<>();
     List<String> segmentsFiles = new ArrayList<>();
     List<AD2IndexInput> priorityInputs = new ArrayList<>();
 
@@ -186,16 +186,20 @@ public class AccessDirectory2 extends MMapDirectory {
       if (file.endsWith(".tmp")) continue;
       if (file.startsWith("segments_")) {
         segmentsFiles.add(file);
-        AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
-        toClose.add(input);
-        priorityInputs.add(input);
+        IndexInput input = openInput(file, IOContext.DEFAULT);
+        if (input instanceof AD2IndexInput) {
+          toClose.add(input);
+          priorityInputs.add((AD2IndexInput) input);
+        } else {
+          input.close();
+        }
         continue;
       }
       if (!file.startsWith("_")) continue;
-      AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
+      IndexInput input = openInput(file, IOContext.DEFAULT);
       toClose.add(input);
-      if (file.endsWith(".si")) {
-        priorityInputs.add(input);
+      if (input instanceof AD2IndexInput && file.endsWith(".si")) {
+        priorityInputs.add((AD2IndexInput) input);
       } else {
         String segName = IndexFileNames.parseSegmentName(file);
         segToInputs
@@ -222,15 +226,16 @@ public class AccessDirectory2 extends MMapDirectory {
         }
       }
       // CFS/CFE boundary blocks, then other files' boundary blocks — in rough segment order.
+      // Only AD2IndexInput-backed files need hints; mirrored files are already on fast storage.
       for (String segName : roughSegOrder) {
-        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+        for (Map.Entry<String, IndexInput> e : segToInputs.get(segName)) {
+          if (!(e.getValue() instanceof AD2IndexInput)) continue;
+          AD2IndexInput in = (AD2IndexInput) e.getValue();
           String name = e.getKey();
           if (name.endsWith(".cfe")) {
-            AD2IndexInput in = e.getValue();
             int blockCount = in.blockOffsets.length - 1;
             if (blockCount > 0) in.hintCompressedRange(0, blockCount - 1);
           } else if (name.endsWith(".cfs")) {
-            AD2IndexInput in = e.getValue();
             int lastIdx = in.blockOffsets.length - 2;
             if (lastIdx <= 1) {
               in.hintCompressedRange(0, lastIdx);
@@ -242,10 +247,11 @@ public class AccessDirectory2 extends MMapDirectory {
         }
       }
       for (String segName : roughSegOrder) {
-        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+        for (Map.Entry<String, IndexInput> e : segToInputs.get(segName)) {
+          if (!(e.getValue() instanceof AD2IndexInput)) continue;
+          AD2IndexInput in = (AD2IndexInput) e.getValue();
           String name = e.getKey();
           if (!name.endsWith(".cfs") && !name.endsWith(".cfe")) {
-            AD2IndexInput in = e.getValue();
             int lastIdx = in.blockOffsets.length - 2;
             if (lastIdx <= 1) {
               in.hintCompressedRange(0, lastIdx);
@@ -257,31 +263,33 @@ public class AccessDirectory2 extends MMapDirectory {
         }
       }
 
-      // Load CFE boundary blocks inline and parse sub-file block indices.
-      // CFE files are small (1-2 blocks); loading them synchronously lets us
-      // know which CFS blocks to hint before the async task starts.
+      // Load CFE blocks inline and parse sub-file block indices.
+      // CFE files are small — if mirrored, parse directly; if AD2, load then parse.
       HashMap<String, IntArrayList> cfsBlockIndexes = new HashMap<>();
       for (String segName : roughSegOrder) {
-        AD2IndexInput cfeInput = null;
-        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+        IndexInput cfeInput = null;
+        for (Map.Entry<String, IndexInput> e : segToInputs.get(segName)) {
           if (e.getKey().endsWith(".cfe")) {
             cfeInput = e.getValue();
             break;
           }
         }
         if (cfeInput != null) {
-          int cfeBlockCount = cfeInput.blockOffsets.length - 1;
-          for (int i = 0; i < cfeBlockCount; i++) {
-            AD2IndexInput.loadBlock(cfeInput, i);
+          if (cfeInput instanceof AD2IndexInput) {
+            AD2IndexInput ad2Cfe = (AD2IndexInput) cfeInput;
+            int cfeBlockCount = ad2Cfe.blockOffsets.length - 1;
+            for (int i = 0; i < cfeBlockCount; i++) {
+              AD2IndexInput.loadBlock(ad2Cfe, i);
+            }
           }
           IntArrayList blockIndexes =
               BlockPreloader.parseCfeBlockIndexes(cfeInput, Integer.MAX_VALUE);
           if (!blockIndexes.isEmpty()) {
             cfsBlockIndexes.put(segName, blockIndexes);
             // Find the CFS input and hint sub-file compressed ranges, coalescing adjacent blocks.
-            for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
-              if (e.getKey().endsWith(".cfs")) {
-                AD2IndexInput cfsInput = e.getValue();
+            for (Map.Entry<String, IndexInput> e : segToInputs.get(segName)) {
+              if (e.getKey().endsWith(".cfs") && e.getValue() instanceof AD2IndexInput) {
+                AD2IndexInput cfsInput = (AD2IndexInput) e.getValue();
                 int rangeStart = blockIndexes.get(0);
                 int rangeEnd = rangeStart;
                 for (int i = 1, size = blockIndexes.size(); i < size; i++) {
@@ -328,9 +336,9 @@ public class AccessDirectory2 extends MMapDirectory {
 
       // Phase 2: CFS boundary blocks (CFE already loaded inline)
       for (String seg : segOrder) {
-        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
-          if (e.getKey().endsWith(".cfs")) {
-            AD2IndexInput in = e.getValue();
+        for (Map.Entry<String, IndexInput> e : segToInputs.get(seg)) {
+          if (e.getKey().endsWith(".cfs") && e.getValue() instanceof AD2IndexInput) {
+            AD2IndexInput in = (AD2IndexInput) e.getValue();
             AD2IndexInput.loadBlock(in, 0);
             int lastIdx = in.blockOffsets.length - 2;
             if (lastIdx > 0) AD2IndexInput.loadBlock(in, lastIdx);
@@ -341,15 +349,15 @@ public class AccessDirectory2 extends MMapDirectory {
       // Phase 3: all logical file boundary blocks in segment order —
       // non-CFS files and CFS sub-files interleaved.
       for (String seg : segOrder) {
-        List<Map.Entry<String, AD2IndexInput>> inputs = segToInputs.get(seg);
+        List<Map.Entry<String, IndexInput>> inputs = segToInputs.get(seg);
         AD2IndexInput cfsInput = null;
-        for (Map.Entry<String, AD2IndexInput> e : inputs) {
+        for (Map.Entry<String, IndexInput> e : inputs) {
           String name = e.getKey();
-          if (name.endsWith(".cfs")) {
-            cfsInput = e.getValue();
-          } else if (!name.endsWith(".cfe")) {
+          if (name.endsWith(".cfs") && e.getValue() instanceof AD2IndexInput) {
+            cfsInput = (AD2IndexInput) e.getValue();
+          } else if (!name.endsWith(".cfe") && e.getValue() instanceof AD2IndexInput) {
             // non-CFS file: load boundary blocks
-            AD2IndexInput in = e.getValue();
+            AD2IndexInput in = (AD2IndexInput) e.getValue();
             AD2IndexInput.loadBlock(in, 0);
             int lastIdx = in.blockOffsets.length - 2;
             if (lastIdx > 0) AD2IndexInput.loadBlock(in, lastIdx);
