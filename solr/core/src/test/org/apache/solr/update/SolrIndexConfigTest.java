@@ -73,6 +73,7 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
 
   @BeforeClass
   public static void beforeClass() throws Exception {
+    assumeWorkingMockito();
     compoundMergePolicySort = random().nextBoolean();
     if (compoundMergePolicySort) {
       System.setProperty("mergePolicySort", "timestamp_i_dvo desc, id asc");
@@ -168,13 +169,43 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
   }
 
   @Test
-  public void testPreferredMergePolicyFactoryCollectionsRequiresPreferredElement() {
+  public void testPreferredMergePolicyFactoryIgnoredWithoutPreferredElement() throws Exception {
+    System.setProperty("solr.usePreferredMergePolicyFactory", "true");
+    try {
+      SolrConfig solrConfig =
+          new SolrConfig(instanceDir, solrConfigFileNameTieredMergePolicyFactory);
+      SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
+      assertEquals(
+          org.apache.solr.index.TieredMergePolicyFactory.class.getName(),
+          solrIndexConfig.mergePolicyFactoryInfo.className);
+    } finally {
+      System.clearProperty("solr.usePreferredMergePolicyFactory");
+    }
+  }
+
+  @Test
+  public void testPreferredMergePolicyFactoryCollectionsIgnoredWithoutPreferredElement()
+      throws Exception {
     System.clearProperty("solr.usePreferredMergePolicyFactory");
     System.setProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS, "canary_collection");
     try {
-      expectThrows(
-          NullPointerException.class,
-          () -> new SolrConfig(instanceDir, solrConfigFileNameTieredMergePolicyFactory));
+      SolrConfig solrConfig =
+          new SolrConfig(instanceDir, solrConfigFileNameTieredMergePolicyFactory);
+      SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
+      assertEquals(
+          org.apache.solr.index.TieredMergePolicyFactory.class.getName(),
+          solrIndexConfig.mergePolicyFactoryInfo.className);
+
+      Map<String, Object> map = new LinkedHashMap<>();
+      solrIndexConfig.toMap(map);
+      assertNull(map.get("MergePolicyFactoryPerCollection"));
+
+      IndexSchema indexSchema = IndexSchemaFactory.buildIndexSchema(schemaFileName, solrConfig);
+      SolrCore canaryCore = mockCoreWithCollection("canary_collection", indexSchema, h.getCore());
+      IndexWriterConfig canaryIwc = solrIndexConfig.toIndexWriterConfig(canaryCore);
+      TieredMergePolicy canaryMp = (TieredMergePolicy) canaryIwc.getMergePolicy();
+      assertEquals(7, canaryMp.getMaxMergeAtOnce());
+      assertEquals(9, (int) canaryMp.getSegmentsPerTier());
     } finally {
       System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
     }
