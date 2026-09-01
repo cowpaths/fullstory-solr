@@ -19,6 +19,7 @@ package org.apache.solr.update;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import org.apache.lucene.index.ConcurrentMergeScheduler;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.MergePolicy;
@@ -29,8 +30,11 @@ import org.apache.lucene.search.SortField;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.MapSerializable;
 import org.apache.solr.common.SolrException;
+import org.apache.solr.core.CoreDescriptor;
 import org.apache.solr.core.DirectoryFactory;
+import org.apache.solr.core.PluginInfo;
 import org.apache.solr.core.SolrConfig;
+import org.apache.solr.core.SolrCore;
 import org.apache.solr.core.TestMergePolicyConfig;
 import org.apache.solr.index.SortingMergePolicy;
 import org.apache.solr.schema.IndexSchema;
@@ -38,6 +42,9 @@ import org.apache.solr.schema.IndexSchemaFactory;
 import org.junit.After;
 import org.junit.BeforeClass;
 import org.junit.Test;
+
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Testcase for {@link SolrIndexConfig}
@@ -59,6 +66,9 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
       "solrconfig-preferred-merge-policy-factory.xml";
   private static final String schemaFileName = "schema.xml";
 
+  private static final String SYS_PROP_PREFERRED_MPF_COLLECTIONS =
+      "solr.usePreferredMergePolicyFactoryCollections";
+
   private static boolean compoundMergePolicySort = false;
 
   @BeforeClass
@@ -75,6 +85,8 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
   public void tearDown() throws Exception {
     System.clearProperty("mergePolicySort");
     System.clearProperty("solr.tests.maxCommitMergeWait");
+    System.clearProperty("solr.usePreferredMergePolicyFactory");
+    System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
     super.tearDown();
   }
 
@@ -115,6 +127,7 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
   @Test
   public void testPreferredMergePolicyFactoryIgnoredWithoutSysprop() throws Exception {
     System.clearProperty("solr.usePreferredMergePolicyFactory");
+    System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
     SolrConfig solrConfig =
         new SolrConfig(instanceDir, solrConfigFileNamePreferredMergePolicyFactory);
     SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
@@ -122,6 +135,91 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
     assertEquals(
         org.apache.solr.index.TieredMergePolicyFactory.class.getName(),
         solrIndexConfig.mergePolicyFactoryInfo.className);
+  }
+
+  @Test
+  public void testPreferredMergePolicyFactoryCollectionsPopulatesOverrideMap() throws Exception {
+    System.clearProperty("solr.usePreferredMergePolicyFactory");
+    System.setProperty(
+        SYS_PROP_PREFERRED_MPF_COLLECTIONS, "canary_collection , baseline_collection, ,");
+    try {
+      SolrConfig solrConfig =
+          new SolrConfig(instanceDir, solrConfigFileNamePreferredMergePolicyFactory);
+      SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
+
+      // Global effective factory stays baseline when only the per-collection sysprop is set.
+      assertEquals(
+          org.apache.solr.index.TieredMergePolicyFactory.class.getName(),
+          solrIndexConfig.mergePolicyFactoryInfo.className);
+
+      Map<String, Object> map = new LinkedHashMap<>();
+      solrIndexConfig.toMap(map);
+      @SuppressWarnings("unchecked")
+      Map<String, PluginInfo> perCollection =
+          (Map<String, PluginInfo>) map.get("MergePolicyFactoryPerCollection");
+      assertNotNull(perCollection);
+      assertEquals(
+          Set.of("canary_collection", "baseline_collection"), perCollection.keySet());
+      assertEquals(
+          org.apache.solr.index.DefaultMergePolicyFactory.class.getName(),
+          perCollection.get("canary_collection").className);
+    } finally {
+      System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
+    }
+  }
+
+  @Test
+  public void testPreferredMergePolicyFactoryCollectionsRequiresPreferredElement() {
+    System.clearProperty("solr.usePreferredMergePolicyFactory");
+    System.setProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS, "canary_collection");
+    try {
+      expectThrows(
+          NullPointerException.class,
+          () -> new SolrConfig(instanceDir, solrConfigFileNameTieredMergePolicyFactory));
+    } finally {
+      System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
+    }
+  }
+
+  @Test
+  public void testPreferredMergePolicyFactoryCollectionsAppliesAtRuntime() throws Exception {
+    System.clearProperty("solr.usePreferredMergePolicyFactory");
+    System.setProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS, "canary_collection");
+    try {
+      SolrConfig solrConfig =
+          new SolrConfig(instanceDir, solrConfigFileNamePreferredMergePolicyFactory);
+      SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
+      IndexSchema indexSchema = IndexSchemaFactory.buildIndexSchema(schemaFileName, solrConfig);
+      SolrCore delegate = h.getCore();
+
+      SolrCore canaryCore =
+          mockCoreWithCollection("canary_collection", indexSchema, delegate);
+      IndexWriterConfig canaryIwc = solrIndexConfig.toIndexWriterConfig(canaryCore);
+      TieredMergePolicy canaryMp = (TieredMergePolicy) canaryIwc.getMergePolicy();
+      assertEquals(10, canaryMp.getMaxMergeAtOnce());
+      assertEquals(10, (int) canaryMp.getSegmentsPerTier());
+
+      SolrCore baselineCore =
+          mockCoreWithCollection("baseline_collection", indexSchema, delegate);
+      IndexWriterConfig baselineIwc = solrIndexConfig.toIndexWriterConfig(baselineCore);
+      TieredMergePolicy baselineMp = (TieredMergePolicy) baselineIwc.getMergePolicy();
+      assertEquals(7, baselineMp.getMaxMergeAtOnce());
+      assertEquals(9, (int) baselineMp.getSegmentsPerTier());
+    } finally {
+      System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
+    }
+  }
+
+  private static SolrCore mockCoreWithCollection(
+      String collectionName, IndexSchema schema, SolrCore delegate) {
+    SolrCore core = mock(SolrCore.class);
+    CoreDescriptor descriptor = mock(CoreDescriptor.class);
+    when(core.getCoreDescriptor()).thenReturn(descriptor);
+    when(descriptor.getCollectionName()).thenReturn(collectionName);
+    when(core.getResourceLoader()).thenReturn(delegate.getResourceLoader());
+    when(core.getLatestSchema()).thenReturn(schema);
+    when(core.getName()).thenReturn(collectionName + "_shard1_replica_n1");
+    return core;
   }
 
   @Test

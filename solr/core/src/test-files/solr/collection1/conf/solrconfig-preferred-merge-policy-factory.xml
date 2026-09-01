@@ -27,14 +27,8 @@
     <mergePolicyFactory class="org.apache.solr.index.TieredMergePolicyFactory">
       <int name="maxMergeAtOnce">7</int>
       <int name="segmentsPerTier">9</int>
-      <double name="noCFSRatio">0.1</double>
     </mergePolicyFactory>
-    <preferredMergePolicyFactory class="org.apache.solr.index.DefaultMergePolicyFactory">
-    </preferredMergePolicyFactory>
-    <mergeScheduler class="org.apache.lucene.index.ConcurrentMergeScheduler">
-      <int name="maxMergeCount">987</int>
-      <int name="maxThreadCount">42</int>
-    </mergeScheduler>
+    <preferredMergePolicyFactory class="org.apache.solr.index.DefaultMergePolicyFactory"/>
   </indexConfig>
 
   <requestHandler name="/select" class="solr.SearchHandler"></requestHandler>
