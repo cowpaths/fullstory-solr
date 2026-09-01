@@ -197,13 +197,9 @@ public class SolrIndexConfig implements MapSerializable {
       PluginInfo preferredMergePolicyFactoryInfo =
           getPluginInfo(get("preferredMergePolicyFactory"), null);
       if (preferredMergePolicyFactoryInfo != null) {
-        log.info(
-            "Using <preferredMergePolicyFactory> ({}) instead of <mergePolicyFactory> for current config set",
-            preferredMergePolicyFactoryInfo);
         mergePolicyFactoryInfo = preferredMergePolicyFactoryInfo;
       } else {
-        log.info(
-            "Ignoring solr.usePreferredMergePolicyFactory as <preferredMergePolicyFactory> is not defined for current config set");
+        // Ignoring solr.usePreferredMergePolicyFactory as <preferredMergePolicyFactory> is not defined for current config set
         mergePolicyFactoryInfo = mergePolicyFactory;
       }
     } else {
@@ -215,8 +211,7 @@ public class SolrIndexConfig implements MapSerializable {
         System.getProperty("solr.usePreferredMergePolicyFactoryCollections");
     if (StrUtils.isNotNullOrEmpty(perCollectionPreferredFactory)) {
       if (Boolean.getBoolean(
-          "solr.usePreferredMergePolicyFactory")) { // a warning, since per collection will be
-        // ignored
+          "solr.usePreferredMergePolicyFactory")) { // a warning, since per collection will be ignored
         log.warn(
             "Both solr.usePreferredMergePolicyFactory and solr.usePreferredMergePolicyFactoryCollections are enabled. <preferredMergePolicyFactory> will apply on all cores/collections, essentially ignoring solr.usePreferredMergePolicyFactoryCollections");
       }
@@ -228,15 +223,9 @@ public class SolrIndexConfig implements MapSerializable {
             .map(String::trim)
             .filter(s -> !s.isEmpty())
             .forEach(coll -> perCollectionPolicy.put(coll, preferredMergePolicyFactoryInfo));
-        Set<String> overriddenCollections = perCollectionPolicy.keySet();
-        log.info(
-            "Using <preferredMergePolicyFactory> ({}) instead of <mergePolicyFactory> for collections {}",
-            preferredMergePolicyFactoryInfo,
-            overriddenCollections);
         mergePolicyFactoryInfoPerCollection = Collections.unmodifiableMap(perCollectionPolicy);
       } else {
-        log.info(
-            "Ignoring solr.usePreferredMergePolicyFactoryCollections as <preferredMergePolicyFactory> is not defined for current config set");
+        // Ignoring solr.usePreferredMergePolicyFactoryCollections as <preferredMergePolicyFactory> is not defined for current config set
         mergePolicyFactoryInfoPerCollection = null;
       }
     } else {
