@@ -498,11 +498,6 @@ public class AccessDirectory2 extends MMapDirectory {
     if (Files.exists(getDirectory().resolve(name))) {
       return super.openInput(name, context);
     }
-    // TODO: use fileLengthProvider or similar
-    if (fileLength(name) <= COMPRESSION_BLOCK_SIZE) {
-      mirrorSmallFile(name);
-      return super.openInput(name, context);
-    }
     NodesEntry sharedEntry;
     synchronized (pendingNodes) {
       sharedEntry = pendingNodes.get(name);
@@ -511,16 +506,22 @@ public class AccessDirectory2 extends MMapDirectory {
       }
     }
     // TODO: if `context.mergeInfo != null` we should preload the entire contents
-    return new AD2IndexInput(compressedPath.resolve(name), this, sharedEntry, pendingNodes);
+    AD2IndexInput in =
+        new AD2IndexInput(compressedPath.resolve(name), this, sharedEntry, pendingNodes);
+    if (in.length() <= COMPRESSION_BLOCK_SIZE) {
+      // Small file: mirror to access directory and serve via MMapDirectory.
+      mirrorFromInput(in, name);
+      return super.openInput(name, context);
+    }
+    return in;
   }
 
   /**
    * Decompresses a small compressed file (single block) to the access directory so it can be served
-   * directly via MMapDirectory.
+   * directly via MMapDirectory. Closes the provided input after reading.
    */
-  private void mirrorSmallFile(String name) throws IOException {
-    try (AD2IndexInput in =
-        new AD2IndexInput(compressedPath.resolve(name), this, null, pendingNodes)) {
+  private void mirrorFromInput(AD2IndexInput in, String name) throws IOException {
+    try (in) {
       byte[] buf = new byte[(int) in.length()];
       in.readBytes(buf, 0, buf.length);
       String tmpName;
@@ -580,7 +581,11 @@ public class AccessDirectory2 extends MMapDirectory {
           "lazy:" + source,
           dir,
           parseRootParams(
-              source, sharedEntry, pendingNodes, dir.uuidForFile(source.getFileName().toString())),
+              source,
+              sharedEntry,
+              pendingNodes,
+              dir.uuidForFile(source.getFileName().toString()),
+              dir.cache),
           source.getFileName().toString().endsWith(".cfs") ? null : Boolean.TRUE);
     }
 
@@ -624,7 +629,8 @@ public class AccessDirectory2 extends MMapDirectory {
         Path source,
         NodesEntry sharedEntry,
         HashMap<String, NodesEntry> pendingNodes,
-        UUID blobUUID)
+        UUID blobUUID,
+        BlockCache cache)
         throws IOException {
       // Check for cached metadata — avoids reading header/footer from compressed file (disk).
       if (sharedEntry != null) {
@@ -647,6 +653,18 @@ public class AccessDirectory2 extends MMapDirectory {
         return new RootParams(0, null, compressed, null, null, null);
       }
 
+      long baseAddr = cache.baseAddress(compressed[0]);
+      if (size < ((long) COMPRESSION_BLOCK_SIZE << 1) + (4L << 10)) {
+        // Small file: hint the entire compressed file in one shot.
+        cache.willneed(baseAddr, size);
+      } else {
+        // Hint header region (header + estimated first block).
+        cache.willneed(baseAddr, COMPRESSION_BLOCK_SIZE);
+        // Hint footer region so the kernel starts paging it in before we read it.
+        long footerHintSize = Math.min(size, COMPRESSION_BLOCK_SIZE);
+        hintCompressedRegion(compressed, cache, size - footerHintSize, footerHintSize);
+      }
+
       ByteBuffer initial = compressed[0];
       long length = initial.getLong(0);
       if (length >> COMPRESSION_BLOCK_SHIFT > Integer.MAX_VALUE) {
@@ -665,13 +683,8 @@ public class AccessDirectory2 extends MMapDirectory {
       }
       byte[] footer = new byte[blockDeltaFooterSize];
       long blockDeltaFooterOffset = size - blockDeltaFooterSize;
-      // Read footer from the mmap'd compressed data
-      int footerRegion = (int) (blockDeltaFooterOffset >> MAX_MAP_SHIFT);
-      ByteBuffer footerBuf =
-          compressed[footerRegion]
-              .duplicate()
-              .position((int) (blockDeltaFooterOffset & MAX_MAP_MASK));
-      footerBuf.get(footer);
+      // Read footer from the mmap'd compressed data (may span multiple regions)
+      readFromCompressed(compressed, blockDeltaFooterOffset, footer, 0, blockDeltaFooterSize);
       ByteArrayDataInput in = new ByteArrayDataInput(footer);
 
       long blockOffset = HEADER_SIZE;
@@ -733,6 +746,45 @@ public class AccessDirectory2 extends MMapDirectory {
           limit += MAX_MAP_SIZE;
         }
         return compressed;
+      }
+    }
+
+    /** Issues MADV_WILLNEED on a byte range within the compressed mmap, handling region spans. */
+    private static void hintCompressedRegion(
+        ByteBuffer[] compressed, BlockCache cache, long offset, long length) {
+      int regionIdx = (int) (offset >> MAX_MAP_SHIFT);
+      int regionEnd = (int) ((offset + length - 1) >> MAX_MAP_SHIFT);
+      if (regionIdx == regionEnd) {
+        long addr = cache.baseAddress(compressed[regionIdx]) + (offset & MAX_MAP_MASK);
+        cache.willneed(addr, length);
+      } else {
+        long pos = offset;
+        long end = offset + length;
+        for (int r = regionIdx; r <= regionEnd; r++) {
+          long regionStart = (long) r << MAX_MAP_SHIFT;
+          long segStart = Math.max(pos, regionStart);
+          long segEnd = Math.min(end, regionStart + MAX_MAP_SIZE);
+          long addr = cache.baseAddress(compressed[r]) + (segStart & MAX_MAP_MASK);
+          cache.willneed(addr, segEnd - segStart);
+          pos = segEnd;
+        }
+      }
+    }
+
+    /** Reads bytes from the compressed mmap into dst, handling region spans. */
+    private static void readFromCompressed(
+        ByteBuffer[] compressed, long offset, byte[] dst, int dstOff, int length) {
+      int remaining = length;
+      while (remaining > 0) {
+        int region = (int) (offset >> MAX_MAP_SHIFT);
+        int regionOffset = (int) (offset & MAX_MAP_MASK);
+        ByteBuffer buf = compressed[region].duplicate().position(regionOffset);
+        int available = buf.remaining();
+        int toRead = Math.min(available, remaining);
+        buf.get(dst, dstOff, toRead);
+        offset += toRead;
+        dstOff += toRead;
+        remaining -= toRead;
       }
     }
 
