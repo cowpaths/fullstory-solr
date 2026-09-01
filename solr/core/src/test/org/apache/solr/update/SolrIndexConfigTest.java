@@ -16,6 +16,9 @@
  */
 package org.apache.solr.update;
 
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -42,9 +45,6 @@ import org.apache.solr.schema.IndexSchemaFactory;
 import org.junit.After;
 import org.junit.BeforeClass;
 import org.junit.Test;
-
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * Testcase for {@link SolrIndexConfig}
@@ -158,8 +158,7 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
       Map<String, PluginInfo> perCollection =
           (Map<String, PluginInfo>) map.get("MergePolicyFactoryPerCollection");
       assertNotNull(perCollection);
-      assertEquals(
-          Set.of("canary_collection", "baseline_collection"), perCollection.keySet());
+      assertEquals(Set.of("canary_collection", "baseline_collection"), perCollection.keySet());
       assertEquals(
           org.apache.solr.index.DefaultMergePolicyFactory.class.getName(),
           perCollection.get("canary_collection").className);
@@ -192,15 +191,13 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
       IndexSchema indexSchema = IndexSchemaFactory.buildIndexSchema(schemaFileName, solrConfig);
       SolrCore delegate = h.getCore();
 
-      SolrCore canaryCore =
-          mockCoreWithCollection("canary_collection", indexSchema, delegate);
+      SolrCore canaryCore = mockCoreWithCollection("canary_collection", indexSchema, delegate);
       IndexWriterConfig canaryIwc = solrIndexConfig.toIndexWriterConfig(canaryCore);
       TieredMergePolicy canaryMp = (TieredMergePolicy) canaryIwc.getMergePolicy();
       assertEquals(10, canaryMp.getMaxMergeAtOnce());
       assertEquals(10, (int) canaryMp.getSegmentsPerTier());
 
-      SolrCore baselineCore =
-          mockCoreWithCollection("baseline_collection", indexSchema, delegate);
+      SolrCore baselineCore = mockCoreWithCollection("baseline_collection", indexSchema, delegate);
       IndexWriterConfig baselineIwc = solrIndexConfig.toIndexWriterConfig(baselineCore);
       TieredMergePolicy baselineMp = (TieredMergePolicy) baselineIwc.getMergePolicy();
       assertEquals(7, baselineMp.getMaxMergeAtOnce());

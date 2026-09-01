@@ -25,7 +25,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
-
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.DelegatingAnalyzerWrapper;
 import org.apache.lucene.index.ConcurrentMergeScheduler;
@@ -106,8 +105,8 @@ public class SolrIndexConfig implements MapSerializable {
 
   /**
    * set if solr.usePreferredMergePolicyFactoryCollections is defined (as csv string), read the
-   * {@code <preferredMergePolicyFactory>} node and apply only to the declared collections.
-   * Ignored if solr.usePreferredMergePolicyFactory is true
+   * {@code <preferredMergePolicyFactory>} node and apply only to the declared collections. Ignored
+   * if solr.usePreferredMergePolicyFactory is true
    */
   private final Map<String, PluginInfo> mergePolicyFactoryInfoPerCollection;
 
@@ -195,36 +194,45 @@ public class SolrIndexConfig implements MapSerializable {
     // check if preferredMergePolicyFactory is set and use it if sysprop
     // solr.usePreferredMergePolicyFactory is true. This applies to all collections/cores
     if (Boolean.getBoolean("solr.usePreferredMergePolicyFactory")) {
-      PluginInfo preferredMergePolicyFactoryInfo = getPluginInfo(get("preferredMergePolicyFactory"), null);
+      PluginInfo preferredMergePolicyFactoryInfo =
+          getPluginInfo(get("preferredMergePolicyFactory"), null);
       Objects.requireNonNull(preferredMergePolicyFactoryInfo);
       log.info(
-              "Using <preferredMergePolicyFactory> ({}) instead of <mergePolicyFactory>",
-              preferredMergePolicyFactoryInfo);
+          "Using <preferredMergePolicyFactory> ({}) instead of <mergePolicyFactory>",
+          preferredMergePolicyFactoryInfo);
       mergePolicyFactoryInfo = preferredMergePolicyFactoryInfo;
     } else {
       mergePolicyFactoryInfo = mergePolicyFactory;
     }
 
-    //per collection only on preferred factory
-    String perCollectionPreferredFactory = System.getProperty("solr.usePreferredMergePolicyFactoryCollections");
+    // per collection only on preferred factory
+    String perCollectionPreferredFactory =
+        System.getProperty("solr.usePreferredMergePolicyFactoryCollections");
     if (StrUtils.isNotNullOrEmpty(perCollectionPreferredFactory)) {
-      if (Boolean.getBoolean("solr.usePreferredMergePolicyFactory")) { //a warning, since per collection will be ignored
-        log.warn("Both solr.usePreferredMergePolicyFactory and solr.usePreferredMergePolicyFactoryCollections are enabled. <preferredMergePolicyFactory> will apply on all cores/collections, essentially ignoring solr.usePreferredMergePolicyFactoryCollections");
+      if (Boolean.getBoolean(
+          "solr.usePreferredMergePolicyFactory")) { // a warning, since per collection will be
+        // ignored
+        log.warn(
+            "Both solr.usePreferredMergePolicyFactory and solr.usePreferredMergePolicyFactoryCollections are enabled. <preferredMergePolicyFactory> will apply on all cores/collections, essentially ignoring solr.usePreferredMergePolicyFactoryCollections");
       }
-      PluginInfo preferredMergePolicyFactoryInfo = getPluginInfo(get("preferredMergePolicyFactory"), null);
+      PluginInfo preferredMergePolicyFactoryInfo =
+          getPluginInfo(get("preferredMergePolicyFactory"), null);
       Objects.requireNonNull(preferredMergePolicyFactoryInfo);
       Map<String, PluginInfo> perCollectionPolicy = new HashMap<>();
-      Arrays.stream(perCollectionPreferredFactory.split(",")).map(String::trim).filter(s -> !s.isEmpty()).forEach(coll -> perCollectionPolicy.put(coll, preferredMergePolicyFactoryInfo));
+      Arrays.stream(perCollectionPreferredFactory.split(","))
+          .map(String::trim)
+          .filter(s -> !s.isEmpty())
+          .forEach(coll -> perCollectionPolicy.put(coll, preferredMergePolicyFactoryInfo));
       log.info(
-              "Using <preferredMergePolicyFactory> ({}) instead of <mergePolicyFactory> for collections {}",
-              preferredMergePolicyFactoryInfo, perCollectionPolicy.keySet());
+          "Using <preferredMergePolicyFactory> ({}) instead of <mergePolicyFactory> for collections {}",
+          preferredMergePolicyFactoryInfo,
+          perCollectionPolicy.keySet());
       mergePolicyFactoryInfoPerCollection = Collections.unmodifiableMap(perCollectionPolicy);
     } else {
       mergePolicyFactoryInfoPerCollection = null;
     }
 
-
-      assertWarnOrFail(
+    assertWarnOrFail(
         "Beginning with Solr 7.0, <mergePolicy> is no longer supported, use <mergePolicyFactory> instead.",
         get("mergePolicy").isNull(),
         true);
@@ -363,11 +371,16 @@ public class SolrIndexConfig implements MapSerializable {
     final String mpfClassName;
     final MergePolicyFactoryArgs mpfArgs;
     String collName = core.getCoreDescriptor().getCollectionName();
-    if (mergePolicyFactoryInfoPerCollection != null && collName != null && mergePolicyFactoryInfoPerCollection.containsKey(collName)) {
+    if (mergePolicyFactoryInfoPerCollection != null
+        && collName != null
+        && mergePolicyFactoryInfoPerCollection.containsKey(collName)) {
       PluginInfo override = mergePolicyFactoryInfoPerCollection.get(collName);
       mpfClassName = override.className;
       mpfArgs = new MergePolicyFactoryArgs(override.initArgs);
-      log.info("Using preferred merge policy factory {} for core {}", override.className, core.getName());
+      log.info(
+          "Using preferred merge policy factory {} for core {}",
+          override.className,
+          core.getName());
     } else {
       if (mergePolicyFactoryInfo == null) {
         mpfClassName = DEFAULT_MERGE_POLICY_FACTORY_CLASSNAME;
