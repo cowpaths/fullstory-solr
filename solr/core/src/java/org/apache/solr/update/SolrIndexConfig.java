@@ -24,7 +24,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.DelegatingAnalyzerWrapper;
 import org.apache.lucene.index.ConcurrentMergeScheduler;
@@ -199,7 +198,8 @@ public class SolrIndexConfig implements MapSerializable {
       if (preferredMergePolicyFactoryInfo != null) {
         mergePolicyFactoryInfo = preferredMergePolicyFactoryInfo;
       } else {
-        // Ignoring solr.usePreferredMergePolicyFactory as <preferredMergePolicyFactory> is not defined for current config set
+        // Ignoring solr.usePreferredMergePolicyFactory as <preferredMergePolicyFactory> is not
+        // defined for current config set
         mergePolicyFactoryInfo = mergePolicyFactory;
       }
     } else {
@@ -211,7 +211,8 @@ public class SolrIndexConfig implements MapSerializable {
         System.getProperty("solr.usePreferredMergePolicyFactoryCollections");
     if (StrUtils.isNotNullOrEmpty(perCollectionPreferredFactory)) {
       if (Boolean.getBoolean(
-          "solr.usePreferredMergePolicyFactory")) { // a warning, since per collection will be ignored
+          "solr.usePreferredMergePolicyFactory")) { // a warning, since per collection will be
+        // ignored
         log.warn(
             "Both solr.usePreferredMergePolicyFactory and solr.usePreferredMergePolicyFactoryCollections are enabled. <preferredMergePolicyFactory> will apply on all cores/collections, essentially ignoring solr.usePreferredMergePolicyFactoryCollections");
       }
@@ -225,7 +226,8 @@ public class SolrIndexConfig implements MapSerializable {
             .forEach(coll -> perCollectionPolicy.put(coll, preferredMergePolicyFactoryInfo));
         mergePolicyFactoryInfoPerCollection = Collections.unmodifiableMap(perCollectionPolicy);
       } else {
-        // Ignoring solr.usePreferredMergePolicyFactoryCollections as <preferredMergePolicyFactory> is not defined for current config set
+        // Ignoring solr.usePreferredMergePolicyFactoryCollections as <preferredMergePolicyFactory>
+        // is not defined for current config set
         mergePolicyFactoryInfoPerCollection = null;
       }
     } else {
