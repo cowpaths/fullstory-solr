@@ -45,6 +45,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.locks.StampedLock;
+import java.util.function.LongConsumer;
 import java.util.zip.CRC32;
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.SegmentInfos;
@@ -109,8 +110,14 @@ public class AccessDirectory2 extends MMapDirectory {
     private final AtomicLongArray nodes;
     private final AtomicInteger refCount = new AtomicInteger(1); // +1 for pendingNodes map itself
 
-    NodesEntry(AtomicLongArray nodes) {
+    // Cached file metadata — avoids reading header/footer from compressed file on subsequent opens.
+    private final long cachedLength;
+    private final long[] cachedBlockOffsets;
+
+    NodesEntry(AtomicLongArray nodes, long cachedLength, long[] cachedBlockOffsets) {
       this.nodes = nodes;
+      this.cachedLength = cachedLength;
+      this.cachedBlockOffsets = cachedBlockOffsets;
     }
 
     void acquire() {
@@ -404,10 +411,12 @@ public class AccessDirectory2 extends MMapDirectory {
   }
 
   /** Stores the shared {@code accessMapped} array for {@code name}, pre-populated by the writer. */
-  void storeNodes(String name, AtomicLongArray sharedAccessMapped) {
+  void storeNodes(
+      String name, AtomicLongArray sharedAccessMapped, long length, long[] blockOffsets) {
     NodesEntry extant;
     synchronized (pendingNodes) {
-      extant = pendingNodes.putIfAbsent(name, new NodesEntry(sharedAccessMapped));
+      extant =
+          pendingNodes.putIfAbsent(name, new NodesEntry(sharedAccessMapped, length, blockOffsets));
     }
     if (extant != null) {
       log.warn("unexpected extant `accessMapped` entry");
@@ -461,10 +470,21 @@ public class AccessDirectory2 extends MMapDirectory {
   public long fileLength(String name) throws IOException {
     if (name.endsWith(".tmp")) {
       return super.fileLength(name);
-    } else {
-      ensureOpen();
-      return readLengthFromHeader(compressedPath.resolve(name));
     }
+    ensureOpen();
+    // Check for mirrored file on access directory
+    Path accessFile = getDirectory().resolve(name);
+    if (Files.exists(accessFile)) {
+      return Files.size(accessFile);
+    }
+    // Check cached metadata
+    synchronized (pendingNodes) {
+      NodesEntry entry = pendingNodes.get(name);
+      if (entry != null && entry.cachedBlockOffsets != null) {
+        return entry.cachedLength;
+      }
+    }
+    return readLengthFromHeader(compressedPath.resolve(name));
   }
 
   @Override
@@ -606,8 +626,102 @@ public class AccessDirectory2 extends MMapDirectory {
         HashMap<String, NodesEntry> pendingNodes,
         UUID blobUUID)
         throws IOException {
+      // Check for cached metadata — avoids reading header/footer from compressed file (disk).
+      if (sharedEntry != null) {
+        long[] cached = sharedEntry.cachedBlockOffsets;
+        if (cached != null) {
+          long length = sharedEntry.cachedLength;
+          ByteBuffer[] compressed = mmapCompressedFile(source);
+          return new RootParams(
+              length, cached, compressed, sharedEntry.nodes, sharedEntry, blobUUID);
+        }
+      }
+
+      ByteBuffer[] compressed = mmapCompressedFile(source);
+      long size =
+          compressed.length == 0
+              ? 0
+              : compressed[compressed.length - 1].limit()
+                  + ((long) (compressed.length - 1) << MAX_MAP_SHIFT);
+      if (size == 0) {
+        return new RootParams(0, null, compressed, null, null, null);
+      }
+
+      ByteBuffer initial = compressed[0];
+      long length = initial.getLong(0);
+      if (length >> COMPRESSION_BLOCK_SHIFT > Integer.MAX_VALUE) {
+        throw new IllegalArgumentException(
+            "file too long " + Long.toHexString(length) + ", " + source);
+      }
+      int blockDeltaFooterSize = initial.getInt(Long.BYTES);
+      int cBlockTypeId = initial.get(HEADER_SIZE - Integer.BYTES) & 0xff;
+      if (cBlockTypeId != CompressingDirectory.COMPRESSION_BLOCK_TYPE.id) {
+        throw new IllegalArgumentException(
+            "unrecognized compression block type id: " + cBlockTypeId);
+      }
+      int cTypeId = initial.get(HEADER_SIZE - Integer.BYTES + 1) & 0xff;
+      if (cTypeId != CompressingDirectory.COMPRESSION_TYPE.id) {
+        throw new IllegalArgumentException("unrecognized compression type id: " + cTypeId);
+      }
+      byte[] footer = new byte[blockDeltaFooterSize];
+      long blockDeltaFooterOffset = size - blockDeltaFooterSize;
+      // Read footer from the mmap'd compressed data
+      int footerRegion = (int) (blockDeltaFooterOffset >> MAX_MAP_SHIFT);
+      ByteBuffer footerBuf =
+          compressed[footerRegion]
+              .duplicate()
+              .position((int) (blockDeltaFooterOffset & MAX_MAP_MASK));
+      footerBuf.get(footer);
+      ByteArrayDataInput in = new ByteArrayDataInput(footer);
+
+      long blockOffset = HEADER_SIZE;
+      int lastBlockSize = BLOCK_SIZE_ESTIMATE;
+      int blockCount = (int) (((length - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
+      long[] blockOffsets = new long[blockCount + 1];
+      blockOffsets[0] = blockOffset;
+      for (int i = 1; i < blockCount; i++) {
+        int delta = in.readZInt();
+        int nextBlockSize = lastBlockSize + delta;
+        blockOffset += nextBlockSize;
+        blockOffsets[i] = blockOffset;
+        lastBlockSize = nextBlockSize;
+      }
+      blockOffsets[blockCount] = blockDeltaFooterOffset;
+
+      NodesEntry entry;
+      if (sharedEntry != null) {
+        // refCount already incremented by openInput before the constructor call
+        if (sharedEntry.nodes.length() != blockCount) {
+          throw new IllegalArgumentException("block count mismatch");
+        }
+        entry = sharedEntry;
+      } else {
+        // sharedEntry==null: either no pendingNodes entry, or a race — putIfAbsent decides winner
+        AtomicLongArray localAccessMapped = new AtomicLongArray(blockCount);
+        NodesEntry newEntry =
+            new NodesEntry(localAccessMapped, length, blockOffsets); // refCount=1 (for map)
+        NodesEntry existing;
+        synchronized (pendingNodes) {
+          existing = pendingNodes.putIfAbsent(source.getFileName().toString(), newEntry);
+        }
+        if (existing == null) {
+          newEntry.acquire(); // +1 for this reader
+          entry = newEntry;
+        } else {
+          existing.acquire(); // +1 for this reader
+          entry = existing;
+        }
+      }
+
+      return new RootParams(length, blockOffsets, compressed, entry.nodes, entry, blobUUID);
+    }
+
+    private static ByteBuffer[] mmapCompressedFile(Path source) throws IOException {
       try (FileChannel channel = FileChannel.open(source, StandardOpenOption.READ)) {
         long compressedFileSize = channel.size();
+        if (compressedFileSize == 0) {
+          return new ByteBuffer[0];
+        }
         ByteBuffer[] compressed =
             new ByteBuffer[Math.toIntExact(((compressedFileSize - 1) >> MAX_MAP_SHIFT) + 1)];
         long pos = 0;
@@ -618,72 +732,7 @@ public class AccessDirectory2 extends MMapDirectory {
           pos = limit;
           limit += MAX_MAP_SIZE;
         }
-
-        long size = channel.size();
-        if (size == 0) {
-          return new RootParams(0, null, compressed, null, null, null);
-        }
-
-        ByteBuffer initial = compressed[0];
-        long length = initial.getLong(0);
-        if (length >> COMPRESSION_BLOCK_SHIFT > Integer.MAX_VALUE) {
-          throw new IllegalArgumentException(
-              "file too long " + Long.toHexString(length) + ", " + source);
-        }
-        int blockDeltaFooterSize = initial.getInt(Long.BYTES);
-        int cBlockTypeId = initial.get(HEADER_SIZE - Integer.BYTES) & 0xff;
-        if (cBlockTypeId != CompressingDirectory.COMPRESSION_BLOCK_TYPE.id) {
-          throw new IllegalArgumentException(
-              "unrecognized compression block type id: " + cBlockTypeId);
-        }
-        int cTypeId = initial.get(HEADER_SIZE - Integer.BYTES + 1) & 0xff;
-        if (cTypeId != CompressingDirectory.COMPRESSION_TYPE.id) {
-          throw new IllegalArgumentException("unrecognized compression type id: " + cTypeId);
-        }
-        byte[] footer = new byte[blockDeltaFooterSize];
-        long blockDeltaFooterOffset = size - blockDeltaFooterSize;
-        channel.read(ByteBuffer.wrap(footer), blockDeltaFooterOffset);
-        ByteArrayDataInput in = new ByteArrayDataInput(footer);
-
-        long blockOffset = HEADER_SIZE;
-        int lastBlockSize = BLOCK_SIZE_ESTIMATE;
-        int blockCount = (int) (((length - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-        long[] blockOffsets = new long[blockCount + 1];
-        blockOffsets[0] = blockOffset;
-        for (int i = 1; i < blockCount; i++) {
-          int delta = in.readZInt();
-          int nextBlockSize = lastBlockSize + delta;
-          blockOffset += nextBlockSize;
-          blockOffsets[i] = blockOffset;
-          lastBlockSize = nextBlockSize;
-        }
-        blockOffsets[blockCount] = blockDeltaFooterOffset;
-
-        NodesEntry entry;
-        if (sharedEntry != null) {
-          // refCount already incremented by openInput before the constructor call
-          if (sharedEntry.nodes.length() != blockCount) {
-            throw new IllegalArgumentException("block count mismatch");
-          }
-          entry = sharedEntry;
-        } else {
-          // sharedEntry==null: either no pendingNodes entry, or a race — putIfAbsent decides winner
-          AtomicLongArray localAccessMapped = new AtomicLongArray(blockCount);
-          NodesEntry newEntry = new NodesEntry(localAccessMapped); // refCount=1 (for map)
-          NodesEntry existing;
-          synchronized (pendingNodes) {
-            existing = pendingNodes.putIfAbsent(source.getFileName().toString(), newEntry);
-          }
-          if (existing == null) {
-            newEntry.acquire(); // +1 for this reader
-            entry = newEntry;
-          } else {
-            existing.acquire(); // +1 for this reader
-            entry = existing;
-          }
-        }
-
-        return new RootParams(length, blockOffsets, compressed, entry.nodes, entry, blobUUID);
+        return compressed;
       }
     }
 
@@ -907,7 +956,7 @@ public class AccessDirectory2 extends MMapDirectory {
    *
    * <p>This avoids writing an uncompressed copy to the access-path {@link MMapDirectory}.
    */
-  static final class WriteThroughOutput extends IndexOutput {
+  static final class WriteThroughOutput extends IndexOutput implements LongConsumer {
 
     private final IndexOutput delegate;
     private final AccessDirectory2 dir;
@@ -915,13 +964,22 @@ public class AccessDirectory2 extends MMapDirectory {
     private final byte[] blockBuf = new byte[COMPRESSION_BLOCK_SIZE];
     private int blockBufPos = 0;
     private final LongArrayList nodeSlots = new LongArrayList();
+    private final LongArrayList blockOffsets = new LongArrayList();
     private final CRC32 crc = new CRC32();
 
     WriteThroughOutput(String name, IndexOutput delegate, AccessDirectory2 dir) {
       super("WriteThroughOutput(" + name + ")", name);
       this.delegate = delegate;
+      if (delegate instanceof CompressingDirectory.ChunkedOutput) {
+        ((CompressingDirectory.ChunkedOutput) delegate).setChunkCallback(this);
+      }
       this.dir = dir;
       this.name = name;
+    }
+
+    @Override
+    public void accept(long value) {
+      blockOffsets.add(value);
     }
 
     @Override
@@ -981,6 +1039,7 @@ public class AccessDirectory2 extends MMapDirectory {
 
     @Override
     public void close() throws IOException {
+      long length;
       try (delegate) {
         if (blockBufPos > 0) {
           if (nodeSlots.isEmpty()) {
@@ -993,12 +1052,25 @@ public class AccessDirectory2 extends MMapDirectory {
           }
           captureBlock(blockBufPos); // partial last block
         }
-        AtomicLongArray sharedAccessMapped = new AtomicLongArray(nodeSlots.size());
-        for (int i = 0; i < nodeSlots.size(); i++) {
-          sharedAccessMapped.set(i, nodeSlots.get(i));
-        }
-        dir.storeNodes(name, sharedAccessMapped);
+        length = delegate.getFilePointer();
       }
+      int blockCount = nodeSlots.size();
+      AtomicLongArray sharedAccessMapped = new AtomicLongArray(blockCount);
+      for (int i = 0; i < blockCount; i++) {
+        sharedAccessMapped.set(i, nodeSlots.get(i));
+      }
+
+      // Build blockOffsets from the cumulative bytesWritten reported by the callback.
+      // bytesWritten already includes HEADER_SIZE, so callback values are absolute file offsets.
+      // blockOffsets[0] = HEADER_SIZE; blockOffsets[i+1] = callback[i].
+      // blockOffsets[blockCount] = footer offset.
+      long[] offsets = new long[blockCount + 1];
+      offsets[0] = HEADER_SIZE;
+      for (int i = 0; i < blockOffsets.size(); i++) {
+        offsets[i + 1] = blockOffsets.get(i);
+      }
+
+      dir.storeNodes(name, sharedAccessMapped, length, offsets);
     }
   }
 }

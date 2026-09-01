@@ -29,6 +29,7 @@ import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.function.LongConsumer;
 import org.apache.lucene.store.DataInput;
 import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.store.FSLockFactory;
@@ -254,7 +255,12 @@ public class CompressingDirectory extends MMapDirectory
     long getBytesWritten();
   }
 
-  static final class DirectIOIndexOutput extends IndexOutput implements SizeReportingIndexOutput {
+  interface ChunkedOutput {
+    void setChunkCallback(LongConsumer chunkCallback);
+  }
+
+  static final class DirectIOIndexOutput extends IndexOutput
+      implements SizeReportingIndexOutput, ChunkedOutput {
     private final byte[] compressBuffer = new byte[COMPRESSION_BLOCK_SIZE];
     private final LZ4.FastCompressionHashTable ht = new LZ4.FastCompressionHashTable();
     private final ByteBuffer preBuffer;
@@ -355,6 +361,9 @@ public class CompressingDirectory extends MMapDirectory
       int nextBlockSize = out.resetSize();
       bytesWritten += nextBlockSize;
       blockDeltas.writeZInt(nextBlockSize - prevBlockSize);
+      if (chunkCallback != null) {
+        chunkCallback.accept(bytesWritten);
+      }
       prevBlockSize = nextBlockSize;
       filePos += COMPRESSION_BLOCK_SIZE;
 
@@ -367,6 +376,10 @@ public class CompressingDirectory extends MMapDirectory
       if (preBufferRemaining > 0) {
         filePos += preBufferRemaining;
         LZ4.compressWithDictionary(compressBuffer, 0, 0, preBufferRemaining, out, ht);
+        bytesWritten += out.resetSize();
+        if (chunkCallback != null) {
+          chunkCallback.accept(bytesWritten);
+        }
       }
       int blockMapFooterSize = blockDeltas.transferTo(out);
       bytesWritten += out.resetSize();
@@ -435,6 +448,16 @@ public class CompressingDirectory extends MMapDirectory
           initialBlockBufferPool.release(initialBlock);
         }
       }
+    }
+
+    private LongConsumer chunkCallback;
+
+    @Override
+    public void setChunkCallback(LongConsumer chunkCallback) {
+      if (bytesWritten > HEADER_SIZE || !isOpen) {
+        throw new IllegalStateException();
+      }
+      this.chunkCallback = chunkCallback;
     }
 
     private class SizeTrackingDataOutput extends DataOutput {
