@@ -380,7 +380,7 @@ public class SolrIndexConfig implements MapSerializable {
       mpfClassName = override.className;
       mpfArgs = new MergePolicyFactoryArgs(override.initArgs);
       String coreName = core.getName();
-      log.info("Using preferred merge policy factory {} for core {}", override.className, coreName);
+      log.info("Using preferred merge policy factory {} for core {}", override, coreName);
     } else {
       if (mergePolicyFactoryInfo == null) {
         mpfClassName = DEFAULT_MERGE_POLICY_FACTORY_CLASSNAME;
