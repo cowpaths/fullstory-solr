@@ -24,6 +24,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.DelegatingAnalyzerWrapper;
 import org.apache.lucene.index.ConcurrentMergeScheduler;
@@ -227,10 +228,11 @@ public class SolrIndexConfig implements MapSerializable {
             .map(String::trim)
             .filter(s -> !s.isEmpty())
             .forEach(coll -> perCollectionPolicy.put(coll, preferredMergePolicyFactoryInfo));
+        Set<String> overriddenCollections = perCollectionPolicy.keySet();
         log.info(
             "Using <preferredMergePolicyFactory> ({}) instead of <mergePolicyFactory> for collections {}",
             preferredMergePolicyFactoryInfo,
-            perCollectionPolicy.keySet());
+            overriddenCollections);
         mergePolicyFactoryInfoPerCollection = Collections.unmodifiableMap(perCollectionPolicy);
       } else {
         log.info(
@@ -386,10 +388,8 @@ public class SolrIndexConfig implements MapSerializable {
       PluginInfo override = mergePolicyFactoryInfoPerCollection.get(collName);
       mpfClassName = override.className;
       mpfArgs = new MergePolicyFactoryArgs(override.initArgs);
-      log.info(
-          "Using preferred merge policy factory {} for core {}",
-          override.className,
-          core.getName());
+      String coreName = core.getName();
+      log.info("Using preferred merge policy factory {} for core {}", override.className, coreName);
     } else {
       if (mergePolicyFactoryInfo == null) {
         mpfClassName = DEFAULT_MERGE_POLICY_FACTORY_CLASSNAME;
