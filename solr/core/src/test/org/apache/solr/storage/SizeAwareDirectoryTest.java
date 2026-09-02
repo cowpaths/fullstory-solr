@@ -8,6 +8,7 @@ import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.solr.SolrTestCaseJ4;
@@ -67,6 +68,34 @@ public class SizeAwareDirectoryTest extends SolrTestCaseJ4 {
       } finally {
         dirFac.release(dir);
       }
+    }
+  }
+
+  @Test
+  public void testSizeTracksWritesThroughSizeAwareDirectoryAfterEmptyScan() throws Exception {
+    Directory backing = FSDirectory.open(Paths.get(path));
+    try (Directory dir = new SizeAwareDirectory(backing, 0)) {
+      assertEquals(0, DirectoryFactory.sizeOfDirectory(dir));
+
+      try (IndexOutput file = dir.createOutput("test_file", IOContext.DEFAULT)) {
+        file.writeInt(42);
+      }
+
+      assertEquals(Files.size(Paths.get(path, "test_file")), DirectoryFactory.sizeOfDirectory(dir));
+    }
+  }
+
+  @Test
+  public void testEmptyScanDoesNotLatchZeroWhenFilesAppearOnDisk() throws Exception {
+    Directory backing = FSDirectory.open(Paths.get(path));
+    try (Directory dir = new SizeAwareDirectory(backing, 0)) {
+      assertEquals(0, DirectoryFactory.sizeOfDirectory(dir));
+
+      // Core load / index install can populate the directory after the first size()
+      // saw no files. Do not latch initialized on that empty scan.
+      Files.write(Paths.get(path, "copied"), new byte[128]);
+
+      assertEquals(128, DirectoryFactory.sizeOfDirectory(dir));
     }
   }
 
