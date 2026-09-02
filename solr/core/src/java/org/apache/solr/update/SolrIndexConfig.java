@@ -208,9 +208,12 @@ public class SolrIndexConfig implements MapSerializable {
     }
 
     // per collection only on preferred factory
-    String perCollectionPreferredFactory = EnvUtils.getProperty("solr.usePreferredMergePolicyFactoryCollections");
+    String perCollectionPreferredFactory =
+        EnvUtils.getProperty("solr.usePreferredMergePolicyFactoryCollections");
     if (StrUtils.isNotNullOrEmpty(perCollectionPreferredFactory)) {
-      if (EnvUtils.getPropertyAsBool("solr.usePreferredMergePolicyFactory", false)) { // a warning, since per collection will be
+      if (EnvUtils.getPropertyAsBool(
+          "solr.usePreferredMergePolicyFactory",
+          false)) { // a warning, since per collection will be
         // ignored
         log.warn(
             "Both solr.usePreferredMergePolicyFactory and solr.usePreferredMergePolicyFactoryCollections are enabled. <preferredMergePolicyFactory> will apply on all cores/collections, essentially ignoring solr.usePreferredMergePolicyFactoryCollections");
