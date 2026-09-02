@@ -8,6 +8,7 @@ import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.solr.SolrTestCaseJ4;
@@ -67,6 +68,22 @@ public class SizeAwareDirectoryTest extends SolrTestCaseJ4 {
       } finally {
         dirFac.release(dir);
       }
+    }
+  }
+
+  @Test
+  public void testSizeReconcilesAfterEmptyInitialization() throws Exception {
+    Directory backing = FSDirectory.open(Paths.get(path));
+    try (Directory dir = new SizeAwareDirectory(backing, 0)) {
+      assertEquals(0, DirectoryFactory.sizeOfDirectory(dir));
+
+      // Simulate an index restore adding files through the backing directory after the
+      // SizeAwareDirectory initialized its cached size.
+      try (IndexOutput file = backing.createOutput("test_file", IOContext.DEFAULT)) {
+        file.writeInt(42);
+      }
+
+      assertEquals(Files.size(Paths.get(path, "test_file")), DirectoryFactory.sizeOfDirectory(dir));
     }
   }
 

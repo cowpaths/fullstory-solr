@@ -143,10 +143,12 @@ public class SizeAwareDirectory extends FilterDirectory
   @Override
   public long size() throws IOException {
     Integer reconcileThreshold = CoreAdminHandler.getReconcileThreshold();
+    long trackedSize = size.sum();
     if (initialized
+        && trackedSize > 0
         && (reconcileThreshold == null
             || System.nanoTime() - reconciledTimeNanos < reconcileTTLNanos)) {
-      return size.sum();
+      return trackedSize;
     }
     return initSize().size;
   }
@@ -235,7 +237,11 @@ public class SizeAwareDirectory extends FilterDirectory
       long diff = extant.size - ret.size;
       long onDiskDiff = extant.onDiskSize - ret.onDiskSize;
       boolean initializing = !initialized;
+      // Files may appear outside this wrapper after an empty initialization, for example while a
+      // core is being restored. In that case the cached counter cannot be authoritative.
+      boolean invalidTrackedSize = extant.size <= 0 && ret.size > 0;
       if (!initializing
+          && !invalidTrackedSize
           && (reconcileThreshold == null
               || (Math.abs(diff) < reconcileThreshold
                   && Math.abs(onDiskDiff) < reconcileThreshold))) {
