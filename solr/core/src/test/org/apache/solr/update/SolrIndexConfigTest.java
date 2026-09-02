@@ -203,7 +203,14 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
       IndexSchema indexSchema = IndexSchemaFactory.buildIndexSchema(schemaFileName, solrConfig);
       SolrCore canaryCore = mockCoreWithCollection("canary_collection", indexSchema, h.getCore());
       IndexWriterConfig canaryIwc = solrIndexConfig.toIndexWriterConfig(canaryCore);
-      TieredMergePolicy canaryMp = (TieredMergePolicy) canaryIwc.getMergePolicy();
+      MergePolicy canaryMergePolicy = canaryIwc.getMergePolicy();
+      assertNotNull("null mergePolicy", canaryMergePolicy);
+      assertEquals(
+          "expected TieredMergePolicy (baseline factory) for canary when preferred element is absent",
+          TieredMergePolicy.class.getName(),
+          canaryMergePolicy.getClass().getName());
+      TieredMergePolicy canaryMp = (TieredMergePolicy) canaryMergePolicy;
+      // Baseline TieredMergePolicyFactory params from solrconfig-tieredmergepolicyfactory.xml
       assertEquals(7, canaryMp.getMaxMergeAtOnce());
       assertEquals(9, (int) canaryMp.getSegmentsPerTier());
     } finally {
@@ -224,13 +231,27 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
 
       SolrCore canaryCore = mockCoreWithCollection("canary_collection", indexSchema, delegate);
       IndexWriterConfig canaryIwc = solrIndexConfig.toIndexWriterConfig(canaryCore);
-      TieredMergePolicy canaryMp = (TieredMergePolicy) canaryIwc.getMergePolicy();
+      MergePolicy canaryMergePolicy = canaryIwc.getMergePolicy();
+      assertNotNull("null mergePolicy", canaryMergePolicy);
+      assertEquals(
+          "expected TieredMergePolicy from DefaultMergePolicyFactory for canary_collection",
+          TieredMergePolicy.class.getName(),
+          canaryMergePolicy.getClass().getName());
+      TieredMergePolicy canaryMp = (TieredMergePolicy) canaryMergePolicy;
+      // DefaultMergePolicyFactory → Lucene TieredMergePolicy defaults (10/10)
       assertEquals(10, canaryMp.getMaxMergeAtOnce());
       assertEquals(10, (int) canaryMp.getSegmentsPerTier());
 
       SolrCore baselineCore = mockCoreWithCollection("baseline_collection", indexSchema, delegate);
       IndexWriterConfig baselineIwc = solrIndexConfig.toIndexWriterConfig(baselineCore);
-      TieredMergePolicy baselineMp = (TieredMergePolicy) baselineIwc.getMergePolicy();
+      MergePolicy baselineMergePolicy = baselineIwc.getMergePolicy();
+      assertNotNull("null mergePolicy", baselineMergePolicy);
+      assertEquals(
+          "expected TieredMergePolicy from configured TieredMergePolicyFactory for baseline_collection",
+          TieredMergePolicy.class.getName(),
+          baselineMergePolicy.getClass().getName());
+      TieredMergePolicy baselineMp = (TieredMergePolicy) baselineMergePolicy;
+      // TieredMergePolicyFactory params from solrconfig-preferred-merge-policy-factory.xml
       assertEquals(7, baselineMp.getMaxMergeAtOnce());
       assertEquals(9, (int) baselineMp.getSegmentsPerTier());
     } finally {
