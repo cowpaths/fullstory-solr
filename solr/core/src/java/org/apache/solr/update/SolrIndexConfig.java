@@ -27,12 +27,14 @@ import java.util.Map;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.DelegatingAnalyzerWrapper;
 import org.apache.lucene.index.ConcurrentMergeScheduler;
+import org.apache.lucene.index.GlobalConcurrentMergeScheduler;
 import org.apache.lucene.index.IndexWriter.IndexReaderWarmer;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.MergePolicy;
 import org.apache.lucene.index.MergeScheduler;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.util.InfoStream;
+import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.ConfigNode;
 import org.apache.solr.common.MapSerializable;
 import org.apache.solr.common.util.EnvUtils;
@@ -411,13 +413,31 @@ public class SolrIndexConfig implements MapSerializable {
         mergeSchedulerInfo == null
             ? SolrIndexConfig.DEFAULT_MERGE_SCHEDULER_CLASSNAME
             : mergeSchedulerInfo.className;
-    MergeScheduler scheduler = resourceLoader.newInstance(msClassName, MergeScheduler.class);
+    // GlobalConcurrentMergeScheduler needs the shared MergeConcurrencySemaphore from the manager.
+    final MergeScheduler scheduler;
+    if (GlobalConcurrentMergeScheduler.class.getName().equals(msClassName)) {
+      ZkController zkController = resourceLoader.getCoreContainer().getZkController();
+      if (zkController == null) {
+        throw new IllegalStateException(
+            "Cannot use GlobalConcurrentMergeScheduler without a ZkController");
+      }
+      if (mergeSchedulerInfo == null) {
+        throw new IllegalStateException(
+            "Cannot use GlobalConcurrentMergeScheduler without configuration parameters");
+      }
+      scheduler =
+          GlobalMergeSchedulerManager.getInstance(zkController, mergeSchedulerInfo.initArgs)
+              .getScheduler();
+    } else {
+      scheduler = resourceLoader.newInstance(msClassName, MergeScheduler.class);
+    }
 
     if (mergeSchedulerInfo != null) {
       // LUCENE-5080: these two setters are removed, so we have to invoke setMaxMergesAndThreads
       // if someone has them configured.
       if (scheduler instanceof ConcurrentMergeScheduler) {
         NamedList<?> args = mergeSchedulerInfo.initArgs.clone();
+        args.remove("maxGlobalThreadCount"); // consumed by GlobalMergeSchedulerManager
         Integer maxMergeCount = (Integer) args.remove("maxMergeCount");
         if (maxMergeCount == null) {
           maxMergeCount = ((ConcurrentMergeScheduler) scheduler).getMaxMergeCount();
