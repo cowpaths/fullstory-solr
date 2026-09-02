@@ -851,38 +851,58 @@ public class AccessDirectory2 extends MMapDirectory {
 
     @Override
     @SuppressWarnings("ReferenceEquality")
+    protected void onCacheHit(int blockIdx, BlockCache.Val val, int seqAccessCount) {
+      super.onCacheHit(blockIdx, val, seqAccessCount);
+      if (logicalRoot == Boolean.FALSE && seqAccessCount > 0) {
+        // Start past current block — it's a hit, so its compressed data isn't needed.
+        expandCompressedReadahead(blockIdx, blockIdx + 1, seqAccessCount);
+      }
+    }
+
+    @Override
+    @SuppressWarnings("ReferenceEquality")
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
       if (logicalRoot == Boolean.FALSE && seqAccessCount > 0) {
-        int batchSize = Math.min(seqAccessCount, MAX_READ_AHEAD);
-        int target = Math.min(blockIdx + batchSize, sliceLastBlockIdx);
-        if (target > readAheadTo) {
-          // Expand the readahead window from readAheadTo outward.
-          // Stop at the first pinnable block (its compressed data won't be read).
-          int hintFrom = readAheadTo + 1;
-          int hintTo = -1;
-          int newReadAheadTo = target;
-          AtomicLongArray am = accessMapped;
-          for (int i = hintFrom; i <= target; i++) {
-            long extant = am.get(i);
-            if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) {
-              newReadAheadTo = i;
-              break;
-            }
-            hintTo = i;
-          }
-          if (hintTo >= hintFrom) {
-            hintCompressedRange(hintFrom, hintTo);
-          }
-          readAheadTo = newReadAheadTo;
-        }
+        // Include current block — it's a miss, its compressed data needs to be paged in.
+        expandCompressedReadahead(blockIdx, blockIdx, seqAccessCount);
       } else {
         // No readahead, but still hint the current block so the kernel reads its
         // full compressed range in one I/O rather than demand-faulting page by page.
         hintCompressedRange(blockIdx, blockIdx);
+        readAheadTo = blockIdx;
       }
       return supplyFromBuffers(
           compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
+    }
+
+    /**
+     * Expands the compressed file readahead window toward {@code blockIdx + batchSize}. Scans from
+     * {@code hintFromMin} (or {@code readAheadTo + 1}, whichever is further) and hints unpinnable
+     * blocks. Called on both cache hits and misses so the compressed data is paged in before the
+     * next miss needs it.
+     */
+    private void expandCompressedReadahead(int blockIdx, int hintFromMin, int seqAccessCount) {
+      int batchSize = Math.min(seqAccessCount, MAX_READ_AHEAD);
+      int target = Math.min(blockIdx + batchSize, sliceLastBlockIdx);
+      if (target > readAheadTo) {
+        int hintFrom = Math.max(readAheadTo + 1, hintFromMin);
+        int hintTo = -1;
+        int newReadAheadTo = target;
+        AtomicLongArray am = accessMapped;
+        for (int i = hintFrom; i <= target; i++) {
+          long extant = am.get(i);
+          if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) {
+            newReadAheadTo = i;
+            break;
+          }
+          hintTo = i;
+        }
+        if (hintTo >= hintFrom) {
+          hintCompressedRange(hintFrom, hintTo);
+        }
+        readAheadTo = newReadAheadTo;
+      }
     }
 
     /** Issues MADV_WILLNEED on compressed data for blocks [fromIdx, toIdx] inclusive. */

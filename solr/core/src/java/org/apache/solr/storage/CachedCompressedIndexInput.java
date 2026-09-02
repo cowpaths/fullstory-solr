@@ -478,8 +478,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     seqAccessCount = nodeRef().setCurrentNode(node, blockIdx, cache);
     if (seqAccessCount == -1) {
       readAheadTo = sliceFirstBlockIdx;
-    } else if (blockIdx > readAheadTo) {
-      readAheadTo = blockIdx;
     }
     if (type == 0) {
       onCacheHit(blockIdx, val, seqAccessCount);
