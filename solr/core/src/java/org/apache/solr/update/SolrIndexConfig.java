@@ -35,6 +35,7 @@ import org.apache.lucene.search.Sort;
 import org.apache.lucene.util.InfoStream;
 import org.apache.solr.common.ConfigNode;
 import org.apache.solr.common.MapSerializable;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.StrUtils;
 import org.apache.solr.core.DirectoryFactory;
@@ -192,7 +193,7 @@ public class SolrIndexConfig implements MapSerializable {
 
     // check if preferredMergePolicyFactory is set and use it if sysprop
     // solr.usePreferredMergePolicyFactory is true. This applies to all collections/cores
-    if (Boolean.getBoolean("solr.usePreferredMergePolicyFactory")) {
+    if (EnvUtils.getPropertyAsBool("solr.usePreferredMergePolicyFactory", false)) {
       PluginInfo preferredMergePolicyFactoryInfo =
           getPluginInfo(get("preferredMergePolicyFactory"), null);
       if (preferredMergePolicyFactoryInfo != null) {
@@ -207,11 +208,9 @@ public class SolrIndexConfig implements MapSerializable {
     }
 
     // per collection only on preferred factory
-    String perCollectionPreferredFactory =
-        System.getProperty("solr.usePreferredMergePolicyFactoryCollections");
+    String perCollectionPreferredFactory = EnvUtils.getProperty("solr.usePreferredMergePolicyFactoryCollections");
     if (StrUtils.isNotNullOrEmpty(perCollectionPreferredFactory)) {
-      if (Boolean.getBoolean(
-          "solr.usePreferredMergePolicyFactory")) { // a warning, since per collection will be
+      if (EnvUtils.getPropertyAsBool("solr.usePreferredMergePolicyFactory", false)) { // a warning, since per collection will be
         // ignored
         log.warn(
             "Both solr.usePreferredMergePolicyFactory and solr.usePreferredMergePolicyFactoryCollections are enabled. <preferredMergePolicyFactory> will apply on all cores/collections, essentially ignoring solr.usePreferredMergePolicyFactoryCollections");
