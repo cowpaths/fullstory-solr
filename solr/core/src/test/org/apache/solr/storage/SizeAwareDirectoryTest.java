@@ -72,18 +72,30 @@ public class SizeAwareDirectoryTest extends SolrTestCaseJ4 {
   }
 
   @Test
-  public void testSizeReconcilesAfterEmptyInitialization() throws Exception {
+  public void testSizeTracksWritesThroughSizeAwareDirectoryAfterEmptyScan() throws Exception {
     Directory backing = FSDirectory.open(Paths.get(path));
     try (Directory dir = new SizeAwareDirectory(backing, 0)) {
       assertEquals(0, DirectoryFactory.sizeOfDirectory(dir));
 
-      // Simulate an index restore adding files through the backing directory after the
-      // SizeAwareDirectory initialized its cached size.
-      try (IndexOutput file = backing.createOutput("test_file", IOContext.DEFAULT)) {
+      try (IndexOutput file = dir.createOutput("test_file", IOContext.DEFAULT)) {
         file.writeInt(42);
       }
 
       assertEquals(Files.size(Paths.get(path, "test_file")), DirectoryFactory.sizeOfDirectory(dir));
+    }
+  }
+
+  @Test
+  public void testEmptyScanDoesNotLatchZeroWhenFilesAppearOnDisk() throws Exception {
+    Directory backing = FSDirectory.open(Paths.get(path));
+    try (Directory dir = new SizeAwareDirectory(backing, 0)) {
+      assertEquals(0, DirectoryFactory.sizeOfDirectory(dir));
+
+      // Core load / index install can populate the directory after the first size()
+      // saw no files. Do not latch initialized on that empty scan.
+      Files.write(Paths.get(path, "copied"), new byte[128]);
+
+      assertEquals(128, DirectoryFactory.sizeOfDirectory(dir));
     }
   }
 

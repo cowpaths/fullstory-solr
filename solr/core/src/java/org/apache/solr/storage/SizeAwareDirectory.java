@@ -172,6 +172,7 @@ public class SizeAwareDirectory extends FilterDirectory
       theyCompute = computingSize[0];
       if (theyCompute == null) {
         weCompute = new CompletableFuture<>();
+        computingSize[0] = weCompute;
       } else {
         weCompute = null;
       }
@@ -272,12 +273,16 @@ public class SizeAwareDirectory extends FilterDirectory
         }
         reconciledTimeNanos = System.nanoTime();
         if (initializing) {
-          initialized = true;
-          if (log.isInfoEnabled()) {
-            log.info(
-                "initialized heap-tracked size {} (overhead: {})",
-                RamUsageEstimator.humanReadableUnits(ret.size),
-                RamUsageEstimator.humanReadableUnits(ramBytesUsed()));
+          // An empty first scan must not latch. STATUS/metrics can run while the
+          // index dir is still being populated; a later scan should see the files.
+          if (ret.size > 0) {
+            initialized = true;
+            if (log.isInfoEnabled()) {
+              log.info(
+                  "initialized heap-tracked size {} (overhead: {})",
+                  RamUsageEstimator.humanReadableUnits(ret.size),
+                  RamUsageEstimator.humanReadableUnits(ramBytesUsed()));
+            }
           }
         } else {
           double ratio = (double) extant.size / ret.size;
@@ -296,6 +301,12 @@ public class SizeAwareDirectory extends FilterDirectory
       weCompute.complete(ret);
 
       return ret;
+    } catch (IOException e) {
+      weCompute.completeExceptionally(e);
+      throw e;
+    } catch (RuntimeException e) {
+      weCompute.completeExceptionally(e);
+      throw e;
     } finally {
       synchronized (computingSize) {
         computingSize[0] = null;
