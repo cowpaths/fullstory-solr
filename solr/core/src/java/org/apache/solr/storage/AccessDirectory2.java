@@ -26,6 +26,7 @@ import static org.apache.solr.storage.CompressingDirectory.readLengthFromHeader;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
@@ -180,7 +181,7 @@ public class AccessDirectory2 extends MMapDirectory {
     this.fileLengthProvider = fileLengthProvider;
 
     // Scan existing compressed files, open inputs, and group by segment.
-    Map<String, List<Map.Entry<String, IndexInput>>> segToInputs = new HashMap<>();
+    Map<String, List<Map.Entry<String, AD2IndexInput>>> segToInputs = new HashMap<>();
     List<String> segmentsFiles = new ArrayList<>();
     List<AD2IndexInput> priorityInputs = new ArrayList<>();
 
@@ -193,20 +194,20 @@ public class AccessDirectory2 extends MMapDirectory {
       if (file.endsWith(".tmp")) continue;
       if (file.startsWith("segments_")) {
         segmentsFiles.add(file);
-        IndexInput input = openInput(file, IOContext.DEFAULT);
-        if (input instanceof AD2IndexInput) {
+        AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
+        if (input.blockOffsets != null) {
           toClose.add(input);
-          priorityInputs.add((AD2IndexInput) input);
+          priorityInputs.add(input);
         } else {
           input.close();
         }
         continue;
       }
       if (!file.startsWith("_")) continue;
-      IndexInput input = openInput(file, IOContext.DEFAULT);
+      AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
       toClose.add(input);
-      if (input instanceof AD2IndexInput && file.endsWith(".si")) {
-        priorityInputs.add((AD2IndexInput) input);
+      if (input.blockOffsets != null && file.endsWith(".si")) {
+        priorityInputs.add(input);
       } else {
         String segName = IndexFileNames.parseSegmentName(file);
         segToInputs
@@ -235,9 +236,9 @@ public class AccessDirectory2 extends MMapDirectory {
       // CFS/CFE boundary blocks, then other files' boundary blocks — in rough segment order.
       // Only AD2IndexInput-backed files need hints; mirrored files are already on fast storage.
       for (String segName : roughSegOrder) {
-        for (Map.Entry<String, IndexInput> e : segToInputs.get(segName)) {
-          if (!(e.getValue() instanceof AD2IndexInput)) continue;
-          AD2IndexInput in = (AD2IndexInput) e.getValue();
+        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+          AD2IndexInput in = e.getValue();
+          if (in.blockOffsets == null) continue;
           String name = e.getKey();
           if (name.endsWith(".cfe")) {
             int blockCount = in.blockOffsets.length - 1;
@@ -254,9 +255,9 @@ public class AccessDirectory2 extends MMapDirectory {
         }
       }
       for (String segName : roughSegOrder) {
-        for (Map.Entry<String, IndexInput> e : segToInputs.get(segName)) {
-          if (!(e.getValue() instanceof AD2IndexInput)) continue;
-          AD2IndexInput in = (AD2IndexInput) e.getValue();
+        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+          AD2IndexInput in = e.getValue();
+          if (in.blockOffsets == null) continue;
           String name = e.getKey();
           if (!name.endsWith(".cfs") && !name.endsWith(".cfe")) {
             int lastIdx = in.blockOffsets.length - 2;
@@ -274,19 +275,18 @@ public class AccessDirectory2 extends MMapDirectory {
       // CFE files are small — if mirrored, parse directly; if AD2, load then parse.
       HashMap<String, IntArrayList> cfsBlockIndexes = new HashMap<>();
       for (String segName : roughSegOrder) {
-        IndexInput cfeInput = null;
-        for (Map.Entry<String, IndexInput> e : segToInputs.get(segName)) {
+        AD2IndexInput cfeInput = null;
+        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
           if (e.getKey().endsWith(".cfe")) {
             cfeInput = e.getValue();
             break;
           }
         }
         if (cfeInput != null) {
-          if (cfeInput instanceof AD2IndexInput) {
-            AD2IndexInput ad2Cfe = (AD2IndexInput) cfeInput;
-            int cfeBlockCount = ad2Cfe.blockOffsets.length - 1;
+          if (cfeInput.blockOffsets != null) {
+            int cfeBlockCount = cfeInput.blockOffsets.length - 1;
             for (int i = 0; i < cfeBlockCount; i++) {
-              AD2IndexInput.loadBlock(ad2Cfe, i);
+              AD2IndexInput.loadBlock(cfeInput, i);
             }
           }
           IntArrayList blockIndexes =
@@ -294,9 +294,9 @@ public class AccessDirectory2 extends MMapDirectory {
           if (!blockIndexes.isEmpty()) {
             cfsBlockIndexes.put(segName, blockIndexes);
             // Find the CFS input and hint sub-file compressed ranges, coalescing adjacent blocks.
-            for (Map.Entry<String, IndexInput> e : segToInputs.get(segName)) {
-              if (e.getKey().endsWith(".cfs") && e.getValue() instanceof AD2IndexInput) {
-                AD2IndexInput cfsInput = (AD2IndexInput) e.getValue();
+            for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+              AD2IndexInput cfsInput;
+              if (e.getKey().endsWith(".cfs") && (cfsInput = e.getValue()).blockOffsets != null) {
                 int rangeStart = blockIndexes.get(0);
                 int rangeEnd = rangeStart;
                 for (int i = 1, size = blockIndexes.size(); i < size; i++) {
@@ -343,9 +343,9 @@ public class AccessDirectory2 extends MMapDirectory {
 
       // Phase 2: CFS boundary blocks (CFE already loaded inline)
       for (String seg : segOrder) {
-        for (Map.Entry<String, IndexInput> e : segToInputs.get(seg)) {
-          if (e.getKey().endsWith(".cfs") && e.getValue() instanceof AD2IndexInput) {
-            AD2IndexInput in = (AD2IndexInput) e.getValue();
+        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
+          AD2IndexInput in;
+          if (e.getKey().endsWith(".cfs") && (in = e.getValue()).blockOffsets != null) {
             AD2IndexInput.loadBlock(in, 0);
             int lastIdx = in.blockOffsets.length - 2;
             if (lastIdx > 0) AD2IndexInput.loadBlock(in, lastIdx);
@@ -356,15 +356,15 @@ public class AccessDirectory2 extends MMapDirectory {
       // Phase 3: all logical file boundary blocks in segment order —
       // non-CFS files and CFS sub-files interleaved.
       for (String seg : segOrder) {
-        List<Map.Entry<String, IndexInput>> inputs = segToInputs.get(seg);
+        List<Map.Entry<String, AD2IndexInput>> inputs = segToInputs.get(seg);
         AD2IndexInput cfsInput = null;
-        for (Map.Entry<String, IndexInput> e : inputs) {
+        for (Map.Entry<String, AD2IndexInput> e : inputs) {
           String name = e.getKey();
-          if (name.endsWith(".cfs") && e.getValue() instanceof AD2IndexInput) {
-            cfsInput = (AD2IndexInput) e.getValue();
-          } else if (!name.endsWith(".cfe") && e.getValue() instanceof AD2IndexInput) {
+          if (name.endsWith(".cfs") && e.getValue().blockOffsets != null) {
+            cfsInput = e.getValue();
+          } else if (!name.endsWith(".cfe") && e.getValue().blockOffsets != null) {
             // non-CFS file: load boundary blocks
-            AD2IndexInput in = (AD2IndexInput) e.getValue();
+            AD2IndexInput in = e.getValue();
             AD2IndexInput.loadBlock(in, 0);
             int lastIdx = in.blockOffsets.length - 2;
             if (lastIdx > 0) AD2IndexInput.loadBlock(in, lastIdx);
@@ -493,10 +493,12 @@ public class AccessDirectory2 extends MMapDirectory {
       return super.openInput(name, context);
     }
     // Small files (≤ 1 decompressed block) are fully decompressed to the access directory
-    // and served via MMapDirectory, bypassing BlockCache. This avoids per-file random seeks
-    // on spinning disk for the many small metadata files per segment.
-    if (Files.exists(getDirectory().resolve(name))) {
-      return super.openInput(name, context);
+    // and served via ownedBufferFor, bypassing BlockCache. This avoids per-file random seeks
+    // on spinning disk and preserves monomorphic IndexInput dispatch for JIT optimization.
+    Path accessFile = getDirectory().resolve(name);
+    if (Files.exists(accessFile)) {
+      // Pre-existing mirrored file: mmap and serve directly — no compressed file parsing.
+      return new AD2IndexInput(name, this, accessFile);
     }
     NodesEntry sharedEntry;
     synchronized (pendingNodes) {
@@ -509,9 +511,9 @@ public class AccessDirectory2 extends MMapDirectory {
     AD2IndexInput in =
         new AD2IndexInput(compressedPath.resolve(name), this, sharedEntry, pendingNodes);
     if (in.length() <= COMPRESSION_BLOCK_SIZE) {
-      // Small file: mirror to access directory and serve via MMapDirectory.
+      // Small file: mirror to access directory, mmap, and serve via ownedBufferFor.
       mirrorFromInput(in, name);
-      return super.openInput(name, context);
+      return new AD2IndexInput(name, this, accessFile);
     }
     return in;
   }
@@ -554,6 +556,46 @@ public class AccessDirectory2 extends MMapDirectory {
     private final ByteBuffer[] compressed;
     private final long[] compressedBaseAddresses;
     private final boolean isRoot;
+
+    // Non-null for single-block (small) files: mmap'd decompressed data from the access directory.
+    // Served via ownedBufferFor(0), bypassing BlockCache entirely.
+    private final ByteBuffer ownedBlock;
+
+    /**
+     * Constructs a lightweight AD2IndexInput for a pre-mirrored small file. The decompressed data
+     * is served entirely from the mmap'd access-directory file via {@link #ownedBufferFor}; no
+     * compressed file parsing or BlockCache involvement.
+     */
+    private AD2IndexInput(String name, AccessDirectory2 dir, Path accessFile) throws IOException {
+      this(name, dir, mmapSingleFile(accessFile));
+    }
+
+    private static ByteBuffer mmapSingleFile(Path path) throws IOException {
+      try (FileChannel ch = FileChannel.open(path, StandardOpenOption.READ)) {
+        return ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size());
+      }
+    }
+
+    private AD2IndexInput(String name, AccessDirectory2 dir, ByteBuffer ownedBlock) {
+      super(
+          name,
+          dir.cache,
+          null /*blobUUID — not needed for owned-buffer-only inputs*/,
+          ownedBlock.capacity(),
+          null /*blockOffsets*/,
+          new ByteBufferGuard("ad2-owned", unmapHack()),
+          new AtomicLongArray(0) /*accessMapped — empty, ownedBufferFor handles all blocks*/,
+          Boolean.TRUE /*logicalRoot — not eligible for range preload*/);
+      this.ioExec = dir.ioExec;
+      this.compressedGuard = null;
+      this.compressed = null;
+      this.compressedBaseAddresses = null;
+      this.isRoot = true;
+      this.blockSupplier = null;
+      this.nodesEntry = null;
+      this.supplyLock = null;
+      this.ownedBlock = ownedBlock;
+    }
 
     private final BlockPreloader.BlockSupplier blockSupplier;
 
@@ -599,6 +641,7 @@ public class AccessDirectory2 extends MMapDirectory {
       this.blockSupplier = null;
       this.nodesEntry = null;
       this.supplyLock = null;
+      this.ownedBlock = null;
     }
 
     private static final class RootParams {
@@ -821,6 +864,7 @@ public class AccessDirectory2 extends MMapDirectory {
               supplyLock.unlockRead(stamp);
             }
           };
+      this.ownedBlock = null;
     }
 
     // -------------------------------------------------------------------------
@@ -843,11 +887,20 @@ public class AccessDirectory2 extends MMapDirectory {
       this.nodesEntry = null;
       this.supplyLock = parent.supplyLock;
       blockSupplier = parent.blockSupplier;
+      this.ownedBlock = parent.ownedBlock;
     }
 
     // -------------------------------------------------------------------------
     // CachedCompressedIndexInput abstract method implementations
     // -------------------------------------------------------------------------
+
+    @Override
+    protected ByteBuffer ownedBufferFor(int blockIdx) {
+      if (ownedBlock != null && blockIdx == 0) {
+        return ownedBlock.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+      }
+      return null;
+    }
 
     @Override
     @SuppressWarnings("ReferenceEquality")
@@ -1004,6 +1057,10 @@ public class AccessDirectory2 extends MMapDirectory {
     @Override
     protected ByteBuffer doClose() throws IOException {
       if (!isRoot) return null;
+      if (ownedBlock != null) {
+        // Owned-buffer-only input: return the mmap'd buffer for unmapping by CCII.close().
+        return ownedBlock;
+      }
       if (nodesEntry != null) {
         nodesEntry.release(cache);
       }
