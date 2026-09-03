@@ -26,6 +26,7 @@ import static org.apache.solr.storage.CompressingDirectory.readLengthFromHeader;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
@@ -493,10 +494,12 @@ public class AccessDirectory2 extends MMapDirectory {
       return super.openInput(name, context);
     }
     // Small files (≤ 1 decompressed block) are fully decompressed to the access directory
-    // and served via MMapDirectory, bypassing BlockCache. This avoids per-file random seeks
-    // on spinning disk for the many small metadata files per segment.
-    if (Files.exists(getDirectory().resolve(name))) {
-      return super.openInput(name, context);
+    // and served via ownedBufferFor, bypassing BlockCache. This avoids per-file random seeks
+    // on spinning disk and preserves monomorphic IndexInput dispatch for JIT optimization.
+    Path accessFile = getDirectory().resolve(name);
+    if (Files.exists(accessFile)) {
+      // Pre-existing mirrored file: mmap and serve directly — no compressed file parsing.
+      return new AD2IndexInput(name, this, accessFile);
     }
     NodesEntry sharedEntry;
     synchronized (pendingNodes) {
@@ -509,9 +512,9 @@ public class AccessDirectory2 extends MMapDirectory {
     AD2IndexInput in =
         new AD2IndexInput(compressedPath.resolve(name), this, sharedEntry, pendingNodes);
     if (in.length() <= COMPRESSION_BLOCK_SIZE) {
-      // Small file: mirror to access directory and serve via MMapDirectory.
+      // Small file: mirror to access directory, mmap, and serve via ownedBufferFor.
       mirrorFromInput(in, name);
-      return super.openInput(name, context);
+      return new AD2IndexInput(name, this, accessFile);
     }
     return in;
   }
@@ -554,6 +557,46 @@ public class AccessDirectory2 extends MMapDirectory {
     private final ByteBuffer[] compressed;
     private final long[] compressedBaseAddresses;
     private final boolean isRoot;
+
+    // Non-null for single-block (small) files: mmap'd decompressed data from the access directory.
+    // Served via ownedBufferFor(0), bypassing BlockCache entirely.
+    private final ByteBuffer ownedBlock;
+
+    /**
+     * Constructs a lightweight AD2IndexInput for a pre-mirrored small file. The decompressed data
+     * is served entirely from the mmap'd access-directory file via {@link #ownedBufferFor}; no
+     * compressed file parsing or BlockCache involvement.
+     */
+    private AD2IndexInput(String name, AccessDirectory2 dir, Path accessFile) throws IOException {
+      this(name, dir, mmapSingleFile(accessFile));
+    }
+
+    private static ByteBuffer mmapSingleFile(Path path) throws IOException {
+      try (FileChannel ch = FileChannel.open(path, StandardOpenOption.READ)) {
+        return ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size());
+      }
+    }
+
+    private AD2IndexInput(String name, AccessDirectory2 dir, ByteBuffer ownedBlock) {
+      super(
+          name,
+          dir.cache,
+          null /*blobUUID — not needed for owned-buffer-only inputs*/,
+          ownedBlock.capacity(),
+          null /*blockOffsets*/,
+          new ByteBufferGuard("ad2-owned", unmapHack()),
+          new AtomicLongArray(0) /*accessMapped — empty, ownedBufferFor handles all blocks*/,
+          Boolean.TRUE /*logicalRoot — not eligible for range preload*/);
+      this.ioExec = dir.ioExec;
+      this.compressedGuard = null;
+      this.compressed = null;
+      this.compressedBaseAddresses = null;
+      this.isRoot = true;
+      this.blockSupplier = null;
+      this.nodesEntry = null;
+      this.supplyLock = null;
+      this.ownedBlock = ownedBlock;
+    }
 
     private final BlockPreloader.BlockSupplier blockSupplier;
 
@@ -599,6 +642,7 @@ public class AccessDirectory2 extends MMapDirectory {
       this.blockSupplier = null;
       this.nodesEntry = null;
       this.supplyLock = null;
+      this.ownedBlock = null;
     }
 
     private static final class RootParams {
@@ -821,6 +865,7 @@ public class AccessDirectory2 extends MMapDirectory {
               supplyLock.unlockRead(stamp);
             }
           };
+      this.ownedBlock = null;
     }
 
     // -------------------------------------------------------------------------
@@ -843,11 +888,20 @@ public class AccessDirectory2 extends MMapDirectory {
       this.nodesEntry = null;
       this.supplyLock = parent.supplyLock;
       blockSupplier = parent.blockSupplier;
+      this.ownedBlock = parent.ownedBlock;
     }
 
     // -------------------------------------------------------------------------
     // CachedCompressedIndexInput abstract method implementations
     // -------------------------------------------------------------------------
+
+    @Override
+    protected ByteBuffer ownedBufferFor(int blockIdx) {
+      if (ownedBlock != null && blockIdx == 0) {
+        return ownedBlock.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+      }
+      return null;
+    }
 
     @Override
     @SuppressWarnings("ReferenceEquality")
@@ -1004,6 +1058,10 @@ public class AccessDirectory2 extends MMapDirectory {
     @Override
     protected ByteBuffer doClose() throws IOException {
       if (!isRoot) return null;
+      if (ownedBlock != null) {
+        // Owned-buffer-only input: return the mmap'd buffer for unmapping by CCII.close().
+        return ownedBlock;
+      }
       if (nodesEntry != null) {
         nodesEntry.release(cache);
       }
