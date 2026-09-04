@@ -906,7 +906,7 @@ public class AccessDirectory2 extends MMapDirectory {
     @SuppressWarnings("ReferenceEquality")
     protected void onCacheHit(int blockIdx, BlockCache.Val val, int seqAccessCount) {
       super.onCacheHit(blockIdx, val, seqAccessCount);
-      if (logicalRoot == Boolean.FALSE && seqAccessCount > 0) {
+      if (HINT_ON_CACHE_HIT && logicalRoot == Boolean.FALSE && seqAccessCount > 0) {
         // Start past current block — it's a hit, so its compressed data isn't needed.
         expandCompressedReadahead(blockIdx, blockIdx + 1, seqAccessCount);
       }
@@ -916,9 +916,9 @@ public class AccessDirectory2 extends MMapDirectory {
     @SuppressWarnings("ReferenceEquality")
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
-      if (logicalRoot == Boolean.FALSE && seqAccessCount > 0) {
+      if (logicalRoot == Boolean.FALSE && (MIN_READ_AHEAD > 0 || seqAccessCount > 0)) {
         // Include current block — it's a miss, its compressed data needs to be paged in.
-        expandCompressedReadahead(blockIdx, blockIdx, seqAccessCount);
+        expandCompressedReadahead(blockIdx, blockIdx, Math.max(MIN_READ_AHEAD, seqAccessCount));
       } else {
         // No readahead, but still hint the current block so the kernel reads its
         // full compressed range in one I/O rather than demand-faulting page by page.
