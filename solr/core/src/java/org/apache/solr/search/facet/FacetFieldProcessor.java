@@ -37,10 +37,12 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.PriorityQueue;
 import org.apache.solr.common.SolrException;
+import org.apache.solr.common.cloud.ClusterProperties;
 import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.schema.FieldType;
 import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.DocSet;
+import org.apache.solr.search.WrappedQuery;
 import org.apache.solr.search.facet.SlotAcc.SlotContext;
 import org.apache.solr.search.facet.SlotAcc.SweepableSlotAcc;
 import org.apache.solr.search.facet.SlotAcc.SweepingCountSlotAcc;
@@ -60,6 +62,13 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
   final FacetRequest.FacetSort resort; // typically null (unless the user specified a prelim_sort)
 
   final Map<String, AggValueSource> deferredAggs = new HashMap<String, AggValueSource>();
+
+  final int skipFilterCacheSubDomainSlotThreshold;
+  private static final String CLUSTER_PROP_SKIP_FILTER_CACHE_SUBDOMAIN =
+      ClusterProperties.EXT_PROPRTTY_PREFIX + "facet.skipFilterCacheSubDomain";
+  private static final String CLUSTER_PROP_FILTER_COLLECTIONS = "collections";
+  private static final String CLUSTER_PROP_FILTER_NODES = "nodes";
+  private static final String CLUSTER_PROP_SLOT_THRESHOLD = "slotThreshold";
 
   // TODO: push any of this down to base class?
 
@@ -117,7 +126,94 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
         }
       }
     }
+
+    skipFilterCacheSubDomainSlotThreshold = resolveSkipFilterCacheSubDomainSlotThreshold(fcontext);
+
     assert null != this.sort;
+  }
+
+  private static int resolveSkipFilterCacheSubDomainSlotThreshold(FacetContext fcontext) {
+    if (fcontext == null || fcontext.req == null) {
+      return -1;
+    }
+    if (fcontext.req.getCore() == null
+        || fcontext.req.getCore().getCoreContainer() == null
+        || fcontext.req.getCore().getCoreContainer().getZkController() == null) {
+      return -1;
+    }
+    Object propValue =
+        fcontext
+            .req
+            .getCore()
+            .getCoreContainer()
+            .getZkController()
+            .zkStateReader
+            .getClusterProperty(CLUSTER_PROP_SKIP_FILTER_CACHE_SUBDOMAIN, null);
+    return resolveSlotThreshold(propValue, fcontext);
+  }
+
+  private static int resolveSlotThreshold(Object propValue, FacetContext fcontext) {
+    if (propValue == null) {
+      return -1;
+    }
+    if (propValue instanceof Number) {
+      return ((Number) propValue).intValue();
+    }
+    if (!(propValue instanceof Map)) {
+      try {
+        return Integer.parseInt(propValue.toString());
+      } catch (NumberFormatException e) {
+        return -1;
+      }
+    }
+
+    @SuppressWarnings("unchecked")
+    Map<String, Object> config = (Map<String, Object>) propValue;
+    Object slotThresholdVal = config.get(CLUSTER_PROP_SLOT_THRESHOLD);
+    if (slotThresholdVal == null) {
+      return -1;
+    }
+    String collection = fcontext.req.getCore().getCoreDescriptor().getCollectionName();
+    String nodeName = fcontext.req.getCore().getCoreContainer().getZkController().getNodeName();
+
+    if (!matchesFilterList(config.get(CLUSTER_PROP_FILTER_COLLECTIONS), collection)) {
+      return -1;
+    }
+    if (!matchesFilterList(config.get(CLUSTER_PROP_FILTER_NODES), nodeName)) {
+      return -1;
+    }
+    if (slotThresholdVal instanceof Number) {
+      return ((Number) slotThresholdVal).intValue();
+    }
+    try {
+      return Integer.parseInt(slotThresholdVal.toString());
+    } catch (NumberFormatException e) {
+      return -1;
+    }
+  }
+
+  private static boolean matchesFilterList(Object filterValue, String value) {
+    if (filterValue == null) {
+      return true;
+    }
+    if (filterValue instanceof List) {
+      @SuppressWarnings("unchecked")
+      List<Object> list = (List<Object>) filterValue;
+      for (Object entry : list) {
+        if (entry != null && entry.toString().equals(value)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    return filterValue.toString().equals(value);
+  }
+
+  private boolean shouldSkipFilterCacheSubDomain(int slotCount) {
+    if (skipFilterCacheSubDomainSlotThreshold < 0) { // -1 means no changes - do not skip
+      return false;
+    }
+    return slotCount > skipFilterCacheSubDomainSlotThreshold;
   }
 
   /** This is used to create accs for second phase (or to create accs for all aggs) */
@@ -514,7 +610,7 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
       SimpleOrderedMap<Object> bucket = new SimpleOrderedMap<>();
       bucket.add("val", slot.bucketVal);
 
-      fillBucketFromSlot(bucket, slot, resortAccForFill);
+      fillBucketFromSlot(bucket, slot, resortAccForFill, sortedSlots.length);
 
       bucketList.add(bucket);
     }
@@ -579,7 +675,8 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
   }
 
   /** Helper method used solely when looping over buckets to be returned in findTopSlots */
-  private void fillBucketFromSlot(SimpleOrderedMap<Object> target, Slot slot, SlotAcc resortAcc)
+  private void fillBucketFromSlot(
+      SimpleOrderedMap<Object> target, Slot slot, SlotAcc resortAcc, int slotCount)
       throws IOException {
     final int slotOrd = slot.slot;
     countAcc.setValues(target, slotOrd);
@@ -592,7 +689,11 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
     if (otherAccs == null && freq.subFacets.isEmpty()) return;
 
     assert null != slot.bucketFilter;
-    final Query filter = slot.bucketFilter;
+    final Query filter =
+        shouldSkipFilterCacheSubDomain(slotCount)
+            ? getWrappedNonCacheFilter(slot.bucketFilter)
+            : slot.bucketFilter;
+
     final DocSet subDomain = fcontext.searcher.getDocSet(filter, fcontext.base);
 
     // if no subFacets, we only need a DocSet
@@ -623,6 +724,12 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
     }
 
     processSubs(target, filter, subDomain, false, null);
+  }
+
+  private Query getWrappedNonCacheFilter(Query bucketFilter) {
+    WrappedQuery wq = new WrappedQuery(bucketFilter);
+    wq.setCache(false);
+    return wq;
   }
 
   /**
@@ -709,12 +816,17 @@ abstract class FacetFieldProcessor extends FacetProcessor<FacetField> {
 
       assert null != slot.bucketFilter : "null filter for slot=" + slot.bucketVal;
 
-      final DocSet subDomain = fcontext.searcher.getDocSet(slot.bucketFilter, fcontext.base);
+      final Query bucketFilter =
+          shouldSkipFilterCacheSubDomain(slots.length)
+              ? getWrappedNonCacheFilter(slot.bucketFilter)
+              : slot.bucketFilter;
+
+      final DocSet subDomain = fcontext.searcher.getDocSet(bucketFilter, fcontext.base);
       acc.collect(
           subDomain,
           slotNum,
           s -> {
-            return new SlotContext(slot.bucketFilter);
+            return new SlotContext(bucketFilter);
           });
     }
 
