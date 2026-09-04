@@ -19,6 +19,7 @@ package org.apache.solr.storage;
 
 import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZE;
 
+import com.codahale.metrics.Timer;
 import java.io.BufferedReader;
 import java.io.Closeable;
 import java.io.IOException;
@@ -807,6 +808,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // Synchronous (demand) decompressions: supply() called on the read path in cacheMiss(), meaning
   // the reader had to wait for the block to be fetched and decompressed.
   private final LongAdder blocksDecompressedDemand = new LongAdder();
+  // Latency of demand block loads (see blocksDecompressedDemand); a bare Timer beforehand so tests and
+  // other pre-registration callers of recordDecompressionDemand() still work.
+  private volatile Timer blocksDecompressedDemandTime = new Timer();
   // Asynchronous (readahead) decompressions: supply() called from BlockPreloader on the ioExec
   // thread pool, ahead of any reader request.
   private final LongAdder blocksDecompressedReadahead = new LongAdder();
@@ -1297,9 +1301,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   /**
    * Records one synchronous (demand) block decompression: the reader stalled waiting for the fetch.
+   * {@code nanos} is the elapsed time of the load (fetch + decompress, plus {@code populate()} into
+   * the cache buffer where applicable).
    */
-  void recordDecompressionDemand() {
+  void recordDecompressionDemand(long nanos) {
     blocksDecompressedDemand.increment();
+    blocksDecompressedDemandTime.update(nanos, TimeUnit.NANOSECONDS);
   }
 
   /**
@@ -1342,6 +1349,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     solrMetricsContext = parentContext.getChildContext(this);
     MetricsMap mm = new MetricsMap(this::writeMetrics);
     solrMetricsContext.gauge(mm, true, scope, SolrInfoBean.Category.DIRECTORY.toString());
+    blocksDecompressedDemandTime =
+        solrMetricsContext.timer(
+            "blocksDecompressedDemandTime", SolrInfoBean.Category.DIRECTORY.toString(), scope);
   }
 
   @Override

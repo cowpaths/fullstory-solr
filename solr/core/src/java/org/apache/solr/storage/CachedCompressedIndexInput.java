@@ -431,7 +431,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     if (blockIdx > lastBlockIdx) throw new EOFException();
     ByteBuffer owned = ownedBufferFor(blockIdx);
     if (owned != null) {
-      setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, -1, 0);
+      setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, -1);
       postBuffer = owned;
       postBufferBaseline = 0;
       longViews = null;
@@ -456,16 +456,13 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private void cacheHit(int blockIdx, long cached, BlockCache.Val cachedVal, int type)
       throws IOException {
     ByteBuffer buf;
-    long loadNanos;
     try {
-      // long start = System.nanoTime();
       buf = cachedVal.join(cache);
-      loadNanos = 0; // /System.nanoTime() - start;
     } catch (CompletionException e) {
       cache.unpin(cached);
       throw unwrapException(e.getCause());
     }
-    setCurrentNode(cached, blockIdx, cachedVal, type, loadNanos);
+    setCurrentNode(cached, blockIdx, cachedVal, type);
     postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
     postBufferBaseline = 0;
     longViews = null;
@@ -473,8 +470,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     floatViews = null;
   }
 
-  private void setCurrentNode(
-      long node, int blockIdx, BlockCache.Val val, int type, long loadNanos) {
+  private void setCurrentNode(long node, int blockIdx, BlockCache.Val val, int type) {
     seqAccessCount = nodeRef().setCurrentNode(node, blockIdx, cache);
     if (seqAccessCount == -1) {
       readAheadTo = sliceFirstBlockIdx;
@@ -532,8 +528,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
           buf = nodeVal.join(cache);
         } else {
           // We won the race: fetch from backend and populate the node.
-          // long start = System.nanoTime();
-          cache.recordDecompressionDemand();
           if (VERBOSE && log.isInfoEnabled()) {
             log.info(
                 "demand {} of {}/{}/{} {} [{}]",
@@ -544,6 +538,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
                 this,
                 stackTraceId());
           }
+          long start = System.nanoTime();
           try {
             byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
             buf = nodeVal.populate(heapBuf, 0, decompressedLen, blobUUID, blockIdx, cache);
@@ -553,9 +548,11 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
             cache.unpin(node);
             cache.close(node);
             throw unwrapException(t);
+          } finally {
+            cache.recordDecompressionDemand(System.nanoTime() - start);
           }
         }
-        setCurrentNode(node, blockIdx, null, 2, 0 /* System.nanoTime() - start */);
+        setCurrentNode(node, blockIdx, null, 2);
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
         postBufferBaseline = 0;
         longViews = null;
@@ -574,8 +571,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       }
     }
     // Serve uncached (cache full or node race lost with no cached result).
-    // long start = System.nanoTime();
-    cache.recordDecompressionDemand();
     if (VERBOSE && log.isInfoEnabled()) {
       log.info(
           "demand HEAP {} of {}/{}/{} {} [{}]",
@@ -586,10 +581,17 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
           this,
           stackTraceId());
     }
-    ByteBuffer heapBuf =
-        ByteBuffer.wrap(
-            supply(blockIdx, blockOffset, compressedLen, decompressedLen), 0, decompressedLen);
-    setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, 3, 0 /* System.nanoTime() - start */);
+    // No populate() on this path (bytes stay on heap, never enter the cache buffer), so only
+    // fetch + decompress is timed.
+    long start = System.nanoTime();
+    byte[] supplied;
+    try {
+      supplied = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
+    } finally {
+      cache.recordDecompressionDemand(System.nanoTime() - start);
+    }
+    ByteBuffer heapBuf = ByteBuffer.wrap(supplied, 0, decompressedLen);
+    setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, 3);
     postBuffer = heapBuf;
     postBufferBaseline = heapBuf.position();
     heapBuf.order(ByteOrder.LITTLE_ENDIAN);
