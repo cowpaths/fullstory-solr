@@ -919,7 +919,7 @@ public class AccessDirectory2 extends MMapDirectory {
       if (logicalRoot == Boolean.FALSE && (MIN_READ_AHEAD > 0 || seqAccessCount > 0)) {
         // Include current block — it's a miss, its compressed data needs to be paged in.
         expandCompressedReadahead(blockIdx, blockIdx, Math.max(MIN_READ_AHEAD, seqAccessCount));
-      } else {
+      } else if (ALWAYS_HINT_CURRENT_BLOCK) {
         // No readahead, but still hint the current block so the kernel reads its
         // full compressed range in one I/O rather than demand-faulting page by page.
         hintCompressedRange(blockIdx, blockIdx);
