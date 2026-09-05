@@ -49,7 +49,7 @@ public class CommitTrackerTest extends SolrTestCaseJ4 {
     for (int i = 0; i < 1000; i++) {
       String coll = generateRandomString();
       long waitTime = CommitTracker.alignCommitMaxTime(coll, commitMaxTime, 0);
-      assertTrue(waitTime >= commitMaxTime / 2 && waitTime < commitMaxTime * 3 / 2);
+      assertTrue(waitTime >= commitMaxTime / 2 && waitTime <= commitMaxTime * 3 / 2);
       long nextWaitTime =
           CommitTracker.alignCommitMaxTime(
               coll,

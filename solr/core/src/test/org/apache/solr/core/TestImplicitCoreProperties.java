@@ -28,6 +28,11 @@ public class TestImplicitCoreProperties extends SolrTestCaseJ4 {
 
   @BeforeClass
   public static void setupContainer() {
+    // When a filesystem directory factory is configured (e.g. MMapDirectoryFactory), the data
+    // directory must be writable. solr.data.home causes DirectoryFactory to resolve relative
+    // dataDirs under a temp dir, while the CoreDescriptor CORE_DATADIR value stays "data" so
+    // that ${solr.core.dataDir} substitution still returns "data".
+    System.setProperty("solr.data.home", createTempDir("implicit-props-data").toString());
     cc =
         createCoreContainer(
             "collection1", "data", "solrconfig-implicitproperties.xml", "schema.xml");
@@ -39,6 +44,7 @@ public class TestImplicitCoreProperties extends SolrTestCaseJ4 {
       cc.shutdown();
     }
     cc = null;
+    System.clearProperty("solr.data.home");
   }
 
   @Test

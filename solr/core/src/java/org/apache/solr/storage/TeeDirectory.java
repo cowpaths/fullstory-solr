@@ -39,7 +39,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import org.apache.commons.io.file.PathUtils;
 import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.store.BaseDirectory;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.FilterDirectory;
@@ -56,14 +55,15 @@ import org.apache.solr.util.IOFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDiskSizeDirectory {
+public class TeeDirectory extends SizeAwareDirectory
+    implements DirectoryFactory.OnDiskSizeDirectory {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private volatile Directory access;
   private final ExecutorService ioExec;
   private final AutoCloseable closeLocal;
-  private final IOFunction<Void, Map.Entry<String, Directory>> accessFunction;
+  private final IOFunction<Directory, Map.Entry<String, Directory>> accessFunction;
   private final IOFunction<Directory, Map.Entry<Directory, List<String>>> persistentFunction;
   private volatile CompressingDirectory persistent;
   private final BlockingQueue<TeeDirectoryFactory.PersistentLengthVerification>
@@ -74,9 +74,9 @@ public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDi
    * MockDirectoryFactory.
    */
   public TeeDirectory(Path path, LockFactory lockFactory) throws IOException {
-    super(TEE_LOCK_FACTORY);
+    super(path, TEE_LOCK_FACTORY, 0);
     TeeDirectoryFactory.NodeLevelTeeDirectoryState ownState =
-        new TeeDirectoryFactory.NodeLevelTeeDirectoryState(64);
+        new TeeDirectoryFactory.NodeLevelTeeDirectoryState(64, null); // null = AccessDirectory mode
     this.ioExec = ownState.ioExec;
     this.persistentLengthVerificationQueue = ownState.persistentLengthVerificationQueue;
     Directory naive = new MMapDirectory(path, lockFactory, MMapDirectory.DEFAULT_MAX_CHUNK_SIZE);
@@ -109,10 +109,11 @@ public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDi
 
   public TeeDirectory(
       Directory naive,
-      IOFunction<Void, Map.Entry<String, Directory>> accessFunction,
+      IOFunction<Directory, Map.Entry<String, Directory>> accessFunction,
       IOFunction<Directory, Map.Entry<Directory, List<String>>> persistentFunction,
-      TeeDirectoryFactory.NodeLevelTeeDirectoryState nodeLevelState) {
-    super(TEE_LOCK_FACTORY);
+      TeeDirectoryFactory.NodeLevelTeeDirectoryState nodeLevelState)
+      throws IOException {
+    super(((FSDirectory) naive).getDirectory(), TEE_LOCK_FACTORY, 0);
     this.accessFunction = accessFunction;
     this.persistentFunction = persistentFunction;
     this.access = naive;
@@ -123,6 +124,12 @@ public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDi
 
   private List<String> associatedPaths;
 
+  // TODO: init() is triggered only by a pending_segments_* write, which implicitly distinguishes
+  // index directories (where IndexWriter always writes pending_segments_* first) from non-index
+  // directories (snapshot_metadata, tlog, etc.) that are also opened via the factory. When
+  // persistent == null, all file operations fall back to access (naive MMapDirectory), which is
+  // correct for non-index directories but relies on an unenforced convention. A cleaner fix would
+  // be to detect non-index directories at factory time and return a plain MMapDirectory instead.
   private void init() throws IOException {
     synchronized (persistentFunction) {
       if (this.persistent == null) {
@@ -131,7 +138,7 @@ public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDi
         this.persistent = (CompressingDirectory) persistentEntry.getKey();
         Path persistentFSPath = ((FSDirectory) persistent).getDirectory();
         buildAssociatedPaths.addAll(persistentEntry.getValue());
-        Map.Entry<String, Directory> accessEntry = accessFunction.apply(null);
+        Map.Entry<String, Directory> accessEntry = accessFunction.apply(this);
         this.access = accessEntry.getValue();
         buildAssociatedPaths.add(accessEntry.getKey());
         associatedPaths = buildAssociatedPaths;
@@ -326,7 +333,7 @@ public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDi
   }
 
   @Override
-  public void deleteFile(String name) throws IOException {
+  protected void deleteFile0(String name) throws IOException {
     Throwable th = null;
     try {
       if (persistent != null && !name.endsWith(".tmp")) {
@@ -368,23 +375,33 @@ public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDi
   }
 
   @Override
-  public long fileLength(String name) throws IOException {
+  protected long fileLength0(String name) throws IOException {
     return access.fileLength(name);
   }
 
   @Override
-  public long onDiskFileLength(String name) throws IOException {
-    return persistent.onDiskFileLength(name);
+  protected long onDiskFileLength0(String name) throws IOException {
+    if (name.endsWith(".tmp") || persistent == null) {
+      return access.fileLength(name);
+    } else {
+      return persistent.onDiskFileLength(name);
+    }
   }
 
   @Override
   @SuppressWarnings("try")
-  public IndexOutput createOutput(String name, IOContext context) throws IOException {
+  protected IndexOutput createOutput0(String name, IOContext context) throws IOException {
     if (name.startsWith("pending_segments_")) {
       init();
     }
     if (persistent == null) {
       return access.createOutput(name, context);
+    }
+    // In AccessDirectory2 mode, write only to persistent and capture uncompressed blocks into the
+    // BlockCache as they are written, so that the first openInput call finds a warm cache.
+    if (access instanceof AccessDirectory2) {
+      return new AccessDirectory2.WriteThroughOutput(
+          name, persistent.createOutput(name, context), (AccessDirectory2) access);
     }
     IndexOutput a = null;
     IndexOutput b = null;
@@ -469,7 +486,7 @@ public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDi
   }
 
   @Override
-  public IndexOutput createTempOutput(String prefix, String suffix, IOContext context)
+  protected IndexOutput createTempOutput0(String prefix, String suffix, IOContext context)
       throws IOException {
     return access.createTempOutput(prefix, suffix, context);
   }
@@ -545,7 +562,7 @@ public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDi
   }
 
   @Override
-  public void rename(String source, String dest) throws IOException {
+  protected void rename0(String source, String dest) throws IOException {
     Throwable th = null;
     try {
       if (persistent != null) {
@@ -613,19 +630,18 @@ public class TeeDirectory extends BaseDirectory implements DirectoryFactory.OnDi
 
   @Override
   @SuppressWarnings("try")
-  public void close() throws IOException {
+  public synchronized void close() throws IOException {
     try (closeLocal;
-        Closeable a = access) {
-      if (persistent != null) {
-        persistent.close();
-      }
+        Closeable a = access;
+        Closeable b = persistent) {
+      super.close();
     } catch (Exception e) {
       throw IOUtils.rethrowAlways(e);
     }
   }
 
   @Override
-  public Set<String> getPendingDeletions() throws IOException {
+  public synchronized Set<String> getPendingDeletions() throws IOException {
     Set<String> a = access.getPendingDeletions();
     if (persistent == null) {
       return a;

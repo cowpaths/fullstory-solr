@@ -29,19 +29,20 @@ import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.function.LongConsumer;
 import org.apache.lucene.store.DataInput;
 import org.apache.lucene.store.DataOutput;
-import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.FSLockFactory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.OutputStreamDataOutput;
 import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.compress.LZ4;
 import org.apache.solr.core.DirectoryFactory;
 
-public class CompressingDirectory extends FSDirectory
+public class CompressingDirectory extends MMapDirectory
     implements DirectoryFactory.OnDiskSizeDirectory {
 
   /**
@@ -254,7 +255,12 @@ public class CompressingDirectory extends FSDirectory
     long getBytesWritten();
   }
 
-  static final class DirectIOIndexOutput extends IndexOutput implements SizeReportingIndexOutput {
+  interface ChunkedOutput {
+    void setChunkCallback(LongConsumer chunkCallback);
+  }
+
+  static final class DirectIOIndexOutput extends IndexOutput
+      implements SizeReportingIndexOutput, ChunkedOutput {
     private final byte[] compressBuffer = new byte[COMPRESSION_BLOCK_SIZE];
     private final LZ4.FastCompressionHashTable ht = new LZ4.FastCompressionHashTable();
     private final ByteBuffer preBuffer;
@@ -355,6 +361,9 @@ public class CompressingDirectory extends FSDirectory
       int nextBlockSize = out.resetSize();
       bytesWritten += nextBlockSize;
       blockDeltas.writeZInt(nextBlockSize - prevBlockSize);
+      if (chunkCallback != null) {
+        chunkCallback.accept(bytesWritten);
+      }
       prevBlockSize = nextBlockSize;
       filePos += COMPRESSION_BLOCK_SIZE;
 
@@ -367,6 +376,10 @@ public class CompressingDirectory extends FSDirectory
       if (preBufferRemaining > 0) {
         filePos += preBufferRemaining;
         LZ4.compressWithDictionary(compressBuffer, 0, 0, preBufferRemaining, out, ht);
+        bytesWritten += out.resetSize();
+        if (chunkCallback != null) {
+          chunkCallback.accept(bytesWritten);
+        }
       }
       int blockMapFooterSize = blockDeltas.transferTo(out);
       bytesWritten += out.resetSize();
@@ -437,6 +450,16 @@ public class CompressingDirectory extends FSDirectory
       }
     }
 
+    private LongConsumer chunkCallback;
+
+    @Override
+    public void setChunkCallback(LongConsumer chunkCallback) {
+      if (bytesWritten > HEADER_SIZE || !isOpen) {
+        throw new IllegalStateException();
+      }
+      this.chunkCallback = chunkCallback;
+    }
+
     private class SizeTrackingDataOutput extends DataOutput {
       private int size = 0;
 
@@ -487,7 +510,14 @@ public class CompressingDirectory extends FSDirectory
   }
 
   enum CompressionBlockType {
-    SIZE_256K(0, 18);
+    SIZE_1K(7, 10),
+    SIZE_2K(6, 11),
+    SIZE_4K(5, 12),
+    SIZE_8K(4, 13),
+    SIZE_16K(3, 14),
+    SIZE_32K(2, 15),
+    SIZE_64K(1, 16),
+    SIZE_256K(0, 18); // 0 is the legacy/default value
 
     CompressionBlockType(int id, int blockShift) {
       this.id = id;
@@ -502,10 +532,21 @@ public class CompressingDirectory extends FSDirectory
     final int blockSize;
     final int blockMaskLow;
     final int blockSizeEstimate;
+
+    static CompressionBlockType forKilobytes(int kb) {
+      for (CompressionBlockType t : values()) {
+        if (t.blockSize == kb * 1024) return t;
+      }
+      throw new IllegalArgumentException(
+          "unsupported solr.compressionBlockKilobytes: "
+              + kb
+              + " (supported: 1, 2, 4, 8, 16, 32, 64, 256)");
+    }
   }
 
   static final CompressionType COMPRESSION_TYPE = CompressionType.LZ4;
-  static final CompressionBlockType COMPRESSION_BLOCK_TYPE = CompressionBlockType.SIZE_256K;
+  static final CompressionBlockType COMPRESSION_BLOCK_TYPE =
+      CompressionBlockType.forKilobytes(Integer.getInteger("solr.compressionBlockKilobytes", 256));
   public static final int COMPRESSION_BLOCK_SHIFT = COMPRESSION_BLOCK_TYPE.blockShift;
   public static final int COMPRESSION_BLOCK_SIZE = COMPRESSION_BLOCK_TYPE.blockSize;
   public static final int COMPRESSION_BLOCK_MASK_LOW = COMPRESSION_BLOCK_TYPE.blockMaskLow;

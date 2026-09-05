@@ -21,6 +21,7 @@ import com.codahale.metrics.Meter;
 import java.io.Closeable;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.ref.WeakReference;
 import java.nio.file.Files;
@@ -67,12 +68,20 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private NodeLevelTeeDirectoryState nodeLevelState;
   private NodeLevelTeeDirectoryState ownNodeLevelState;
+
+  /** Non-null only when this instance owns (and must close) the node-level BlockCache. */
+  private BlockCache ownBlockCache;
+
   private WeakReference<CoreContainer> cc;
 
   private boolean isDataNode = true;
   private String accessDir;
   private boolean useAsyncIO;
   private boolean useDirectIO;
+
+  /** Whether to enable AccessDirectory2 (BlockCache) mode; must be set via sysprop. */
+  private static final boolean USE_BLOCK_CACHE =
+      Boolean.getBoolean("solr.teeDirectory.useBlockCache");
 
   @Override
   public void initCoreContainer(CoreContainer cc) {
@@ -89,76 +98,113 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
     final ExecutorService ioExec = ExecutorUtil.newMDCAwareCachedThreadPool("teeIOExec");
     private final Future<?> lengthVerificationTask;
     final BlockingQueue<PersistentLengthVerification> persistentLengthVerificationQueue;
+
+    // ---------------------------------------------------------------------------
+    // AccessDirectory2 mode (blockCache != null)
+    // ---------------------------------------------------------------------------
+    final BlockCache blockCache;
+
+    // ---------------------------------------------------------------------------
+    // AccessDirectory mode (blockCache == null)
+    // ---------------------------------------------------------------------------
     private final Future<?> activationTask;
-    final LinkedBlockingQueue<AccessDirectory.LazyEntry> activationQueue =
-        new LinkedBlockingQueue<>();
-    final ConcurrentHashMap<AccessDirectory.ConcurrentIntSet, Boolean> priorityActivate =
-        new ConcurrentHashMap<>();
+    final LinkedBlockingQueue<AccessDirectory.LazyEntry> activationQueue;
+    final ConcurrentHashMap<AccessDirectory.ConcurrentIntSet, Boolean> priorityActivate;
+    final LongAdder rawCt;
+    final LongAdder loadedCt;
+    final LongAdder populatedCt;
+    final LongAdder lazyCt;
+    final LongAdder lazyMapSize;
+    final LongAdder lazyMapDiskUsage;
+    final LongAdder lazyLoadedBlockBytes;
+    final Meter priorityActivateMeter;
+    final Meter activateMeter;
 
     private SolrMetricsContext solrMetricsContext;
-    final LongAdder rawCt = new LongAdder();
-    final LongAdder loadedCt = new LongAdder();
-    final LongAdder populatedCt = new LongAdder();
-    final LongAdder lazyCt = new LongAdder();
-    final LongAdder lazyMapSize = new LongAdder();
-    final LongAdder lazyMapDiskUsage = new LongAdder();
-    final LongAdder lazyLoadedBlockBytes = new LongAdder();
-    final Meter priorityActivateMeter = new Meter();
-    final Meter activateMeter = new Meter();
 
-    public NodeLevelTeeDirectoryState(int lengthVerificationQueueSize) {
+    /**
+     * @param blockCache non-null to use {@link AccessDirectory2} (BlockCache mode); {@code null} to
+     *     use {@link AccessDirectory} (lazy-activation mode).
+     */
+    public NodeLevelTeeDirectoryState(int lengthVerificationQueueSize, BlockCache blockCache) {
+      this.blockCache = blockCache;
       persistentLengthVerificationQueue = new ArrayBlockingQueue<>(lengthVerificationQueueSize);
-      activationTask =
-          ioExec.submit(
-              () -> {
-                Thread t = Thread.currentThread();
-                int idleCount = 0; // allow a longer poll interval when nothing's happening
-                AccessDirectory.LazyEntry lazyEntry = null;
-                while (!t.isInterrupted()) {
-                  try {
-                    if (!priorityActivate.isEmpty()) {
-                      idleCount = 0;
-                      Iterator<AccessDirectory.ConcurrentIntSet> iter =
-                          priorityActivate.keySet().iterator();
-                      while (iter.hasNext()) {
-                        priorityActivateMeter.mark(iter.next().call());
-                        iter.remove();
-                      }
-                    } else {
-                      if (lazyEntry == null) {
-                        lazyEntry = activationQueue.poll(idleCount * 200L, TimeUnit.MILLISECONDS);
-                      }
-                      if (lazyEntry != null) {
-                        // we load background activation in multiple passes, in order to
-                        // periodically give `priorityActivate` a crack at running. Otherwise,
-                        // a single monolithic large file could block IO for a long time,
-                        // depriving us of the ability to benefit from signals about specific
-                        // file areas that should be loaded earlier.
-                        int blocksLoadedCount = lazyEntry.load();
-                        if (blocksLoadedCount < 0) {
-                          blocksLoadedCount = ~blocksLoadedCount;
-                          lazyEntry = null;
-                        }
-                        activateMeter.mark(blocksLoadedCount);
+
+      if (blockCache != null) {
+        // AccessDirectory2 mode: no lazy-activation machinery needed.
+        activationQueue = null;
+        priorityActivate = null;
+        rawCt = null;
+        loadedCt = null;
+        populatedCt = null;
+        lazyCt = null;
+        lazyMapSize = null;
+        lazyMapDiskUsage = null;
+        lazyLoadedBlockBytes = null;
+        priorityActivateMeter = null;
+        activateMeter = null;
+        activationTask = null;
+      } else {
+        // AccessDirectory mode: full lazy-activation machinery.
+        activationQueue = new LinkedBlockingQueue<>();
+        priorityActivate = new ConcurrentHashMap<>();
+        rawCt = new LongAdder();
+        loadedCt = new LongAdder();
+        populatedCt = new LongAdder();
+        lazyCt = new LongAdder();
+        lazyMapSize = new LongAdder();
+        lazyMapDiskUsage = new LongAdder();
+        lazyLoadedBlockBytes = new LongAdder();
+        priorityActivateMeter = new Meter();
+        activateMeter = new Meter();
+        activationTask =
+            ioExec.submit(
+                () -> {
+                  Thread t = Thread.currentThread();
+                  int idleCount = 0;
+                  AccessDirectory.LazyEntry lazyEntry = null;
+                  while (!t.isInterrupted()) {
+                    try {
+                      if (!priorityActivate.isEmpty()) {
                         idleCount = 0;
-                      } else if (idleCount < 5) {
-                        idleCount++;
+                        Iterator<AccessDirectory.ConcurrentIntSet> iter =
+                            priorityActivate.keySet().iterator();
+                        while (iter.hasNext()) {
+                          priorityActivateMeter.mark(iter.next().call());
+                          iter.remove();
+                        }
+                      } else {
+                        if (lazyEntry == null) {
+                          lazyEntry = activationQueue.poll(idleCount * 200L, TimeUnit.MILLISECONDS);
+                        }
+                        if (lazyEntry != null) {
+                          int blocksLoadedCount = lazyEntry.load();
+                          if (blocksLoadedCount < 0) {
+                            blocksLoadedCount = ~blocksLoadedCount;
+                            lazyEntry = null;
+                          }
+                          activateMeter.mark(blocksLoadedCount);
+                          idleCount = 0;
+                        } else if (idleCount < 5) {
+                          idleCount++;
+                        }
                       }
+                    } catch (InterruptedException ex) {
+                      t.interrupt();
+                      return null;
+                    } catch (IOException ex) {
+                      lazyEntry = null;
+                      String logMsg = ex.toString();
+                      log.warn("swallowed exception while activating input: {}", logMsg);
+                    } catch (Throwable ex) {
+                      lazyEntry = null;
+                      log.warn("swallowed unexpected exception while activating input", ex);
                     }
-                  } catch (InterruptedException ex) {
-                    t.interrupt();
-                    return null;
-                  } catch (IOException ex) {
-                    lazyEntry = null;
-                    String logMsg = ex.toString();
-                    log.warn("swallowed exception while activating input: {}", logMsg);
-                  } catch (Throwable ex) {
-                    lazyEntry = null;
-                    log.warn("swallowed unexpected exception while activating input", ex);
                   }
-                }
-                return null;
-              });
+                  return null;
+                });
+      }
+
       lengthVerificationTask =
           ioExec.submit(
               () -> {
@@ -181,7 +227,11 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
     @Override
     public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
       solrMetricsContext = parentContext.getChildContext(this);
-      MetricsMap mm =
+      if (blockCache != null) {
+        blockCache.initializeMetrics(parentContext, "blockCache");
+        return;
+      }
+      final MetricsMap mm =
           new MetricsMap(
               (writer) -> {
                 writer.put("rawCt", rawCt.sum());
@@ -234,7 +284,9 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
         try {
           lengthVerificationTask.cancel(true);
         } finally {
-          activationTask.cancel(true);
+          if (activationTask != null) {
+            activationTask.cancel(true);
+          }
         }
       }
     }
@@ -330,27 +382,51 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
 
   @Override
   public void init(NamedList<?> args) {
+    if (!isDataNode) {
+      // no setup necessary; `create()` delegates directly to MMapDirectory
+      return;
+    }
+    SolrParams params = args.toSolrParams();
     if (this.cc != null) {
       CoreContainer cc = this.cc.get();
       this.cc = null;
       assert cc != null;
+      BlockCache blockCache =
+          USE_BLOCK_CACHE
+              ? BlockCache.coreContainerSingleton(
+                  cc,
+                  "nodeBlockCache",
+                  BlockCache.class,
+                  k -> {
+                    try {
+                      return BlockCache.buildFromProperties();
+                    } catch (IOException e) {
+                      throw new UncheckedIOException(e);
+                    }
+                  })
+              : null;
       nodeLevelState =
-          cc.getObjectCache()
-              .computeIfAbsent(
-                  "nodeLevelTeeDirectoryState",
-                  NodeLevelTeeDirectoryState.class,
-                  (k) -> {
-                    NodeLevelTeeDirectoryState ret = new NodeLevelTeeDirectoryState(4096);
-                    ret.initializeMetrics(
-                        cc.getMetricsHandler().getSolrMetricsContext(), "teeDirectory");
-                    return ret;
-                  });
+          BlockCache.coreContainerSingleton(
+              cc,
+              "nodeLevelTeeDirectoryState",
+              NodeLevelTeeDirectoryState.class,
+              (k) -> {
+                NodeLevelTeeDirectoryState ret = new NodeLevelTeeDirectoryState(4096, blockCache);
+                ret.initializeMetrics(
+                    cc.getMetricsHandler().getSolrMetricsContext(), "teeDirectory");
+                return ret;
+              });
     } else {
-      nodeLevelState = new NodeLevelTeeDirectoryState(64);
+      try {
+        BlockCache cache = USE_BLOCK_CACHE ? BlockCache.buildFromProperties() : null;
+        nodeLevelState = new NodeLevelTeeDirectoryState(64, cache);
+        ownBlockCache = cache;
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
       ownNodeLevelState = nodeLevelState;
     }
     super.init(args);
-    SolrParams params = args.toSolrParams();
     accessDir =
         params.get(
             "accessDir",
@@ -401,18 +477,29 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
   @Override
   public Directory create(String path, LockFactory lockFactory, DirContext dirContext)
       throws IOException {
-    Directory backing;
+    Path persistentPath = Path.of(path);
     if (!isDataNode) {
-      backing = new MMapDirectory(Path.of(path), lockFactory);
+      return new MMapDirectory(persistentPath, lockFactory);
     } else {
-      Directory naive = super.create(path, lockFactory, dirContext);
-      Path compressedPath = Path.of(path);
-      IOFunction<Void, Map.Entry<String, Directory>> accessFunction =
-          unused -> {
+      final Directory naive = super.create(path, lockFactory, dirContext);
+      IOFunction<Directory, Map.Entry<String, Directory>> accessFunction =
+          teeDir -> {
             String accessPath = getScopeName(accessDir, path);
-            Directory dir =
-                new AccessDirectory(
-                    Path.of(accessPath), lockFactory, compressedPath, nodeLevelState);
+            Path access = Path.of(accessPath);
+            Directory dir;
+            if (nodeLevelState.blockCache != null) {
+              dir =
+                  new AccessDirectory2(
+                      coreContainer.getCoreRootDirectory(),
+                      access,
+                      lockFactory,
+                      persistentPath,
+                      nodeLevelState.blockCache,
+                      nodeLevelState.ioExec,
+                      teeDir::fileLength);
+            } else {
+              dir = new AccessDirectory(access, lockFactory, persistentPath, nodeLevelState);
+            }
             return new AbstractMap.SimpleImmutableEntry<>(accessPath, dir);
           };
       IOFunction<Directory, Map.Entry<Directory, List<String>>> persistentFunction =
@@ -420,12 +507,11 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
             assert content == naive;
             content.close();
             content =
-                new CompressingDirectory(compressedPath, nodeLevelState, useAsyncIO, useDirectIO);
+                new CompressingDirectory(persistentPath, nodeLevelState, useAsyncIO, useDirectIO);
             return new AbstractMap.SimpleImmutableEntry<>(content, Collections.emptyList());
           };
-      backing = new TeeDirectory(naive, accessFunction, persistentFunction, nodeLevelState);
+      return new TeeDirectory(naive, accessFunction, persistentFunction, nodeLevelState);
     }
-    return new SizeAwareDirectory(backing, 0);
   }
 
   @Override
@@ -446,7 +532,8 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
   @Override
   @SuppressWarnings("try")
   public void close() throws IOException {
-    try (NodeLevelTeeDirectoryState close = ownNodeLevelState) {
+    try (BlockCache bc = ownBlockCache;
+        NodeLevelTeeDirectoryState close = ownNodeLevelState) {
       super.close();
     }
   }
