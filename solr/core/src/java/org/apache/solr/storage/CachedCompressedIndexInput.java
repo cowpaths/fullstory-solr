@@ -592,8 +592,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
           this,
           stackTraceId());
     }
-    // No populate() on this path (bytes stay on heap, never enter the cache buffer), so only
-    // fetch + decompress is timed.
     long start = System.nanoTime();
     byte[] supplied;
     try {
