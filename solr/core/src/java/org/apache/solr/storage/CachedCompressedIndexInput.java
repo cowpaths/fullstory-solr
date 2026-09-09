@@ -300,6 +300,13 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   private static final NodeRefStruct UNINITIALIZED = new NodeRefStruct(null, null, null, -2L);
 
+  /** Singleton for owned-buffer-only inputs (single block at index 0). No cache registration. */
+  private static final NodeRefStruct OWNED_BLOCK_ZERO = new NodeRefStruct(null, null, null, -2L);
+
+  static {
+    OWNED_BLOCK_ZERO.currentBlockIdx = 0;
+  }
+
   /**
    * Slice/clone constructor: shares immutable state from parent without owning the backend mapping.
    */
@@ -442,7 +449,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     if (blockIdx > lastBlockIdx) throw new EOFException();
     ByteBuffer owned = ownedBufferFor(blockIdx);
     if (owned != null) {
-      setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, -1);
+      currentNodeRef = OWNED_BLOCK_ZERO;
       postBuffer = owned;
       postBufferBaseline = 0;
       longViews = null;
