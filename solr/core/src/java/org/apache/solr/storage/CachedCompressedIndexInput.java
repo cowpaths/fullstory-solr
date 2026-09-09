@@ -121,6 +121,17 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   static final int MAX_READ_AHEAD =
       EnvUtils.getPropertyAsInteger("solr.compressingDirectory.maxReadAhead", 16);
 
+  static final int MIN_READ_AHEAD =
+      Math.min(
+          MAX_READ_AHEAD,
+          EnvUtils.getPropertyAsInteger("solr.compressingDirectory.minReadAhead", 0));
+
+  static final boolean HINT_ON_CACHE_HIT =
+      EnvUtils.getPropertyAsBool("solr.compressingDirectory.hintOnCacheHit", false);
+
+  static final boolean ALWAYS_HINT_CURRENT_BLOCK =
+      EnvUtils.getPropertyAsBool("solr.compressingDirectory.alwaysHintCurrentBlock", true);
+
   private static final int PROSPECTIVE_READAHEAD_THRESHOLD;
 
   static {
