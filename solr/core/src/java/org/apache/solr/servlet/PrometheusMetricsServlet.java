@@ -1492,6 +1492,31 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
           "block_cache_close_skipped_pinned",
           PrometheusMetricType.COUNTER,
           "cumulative block cache close() calls skipped because node was still pinned by a reader (potential phantom-block accumulation)");
+      JsonNode dt =
+          metricsNode.path("solr.node").path("DIRECTORY.blockCache.blocksDecompressedDemandTime");
+      if (!dt.isMissingNode()) {
+        add(
+            results,
+            dt,
+            "median_ms",
+            "block_cache_blocks_decompressed_demand_duration_p50",
+            PrometheusMetricType.GAUGE,
+            "p50 latency in ms of demand block loads (fetch + decompress, plus populate into the cache buffer where applicable)");
+        add(
+            results,
+            dt,
+            "p95_ms",
+            "block_cache_blocks_decompressed_demand_duration_p95",
+            PrometheusMetricType.GAUGE,
+            "p95 latency in ms of demand block loads (fetch + decompress, plus populate into the cache buffer where applicable)");
+        add(
+            results,
+            dt,
+            "p99_ms",
+            "block_cache_blocks_decompressed_demand_duration_p99",
+            PrometheusMetricType.GAUGE,
+            "p99 latency in ms of demand block loads (fetch + decompress, plus populate into the cache buffer where applicable)");
+      }
     }
 
     private static void add(
