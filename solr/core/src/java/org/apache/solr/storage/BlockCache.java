@@ -808,8 +808,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // Synchronous (demand) decompressions: supply() called on the read path in cacheMiss(), meaning
   // the reader had to wait for the block to be fetched and decompressed.
   private final LongAdder blocksDecompressedDemand = new LongAdder();
-  // Latency of demand block loads (see blocksDecompressedDemand); a bare Timer beforehand so tests and
-  // other pre-registration callers of recordDecompressionDemand() still work.
+  // Latency of demand block loads (see blocksDecompressedDemand); a bare Timer beforehand so tests
+  // and other pre-registration callers of recordDecompressionDemand() still work.
   private volatile Timer blocksDecompressedDemandTime = new Timer();
   // Asynchronous (readahead) decompressions: supply() called from BlockPreloader on the ioExec
   // thread pool, ahead of any reader request.
