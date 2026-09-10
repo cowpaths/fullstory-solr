@@ -468,9 +468,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     @Override
     public void onRequestClose() {
       long cacheMissLatencyNanos = missLatencyNanos.sum();
-      this.perRequestDemandTime.update(cacheMissLatencyNanos, TimeUnit.NANOSECONDS);
-      if (LOG_MISS_LATENCY && cacheMissLatencyNanos > 0 && log.isInfoEnabled()) {
-        log.info("miss latency millis: {}", TimeUnit.NANOSECONDS.toMillis(cacheMissLatencyNanos));
+      if (cacheMissLatencyNanos > 0) {
+        this.perRequestDemandTime.update(cacheMissLatencyNanos, TimeUnit.NANOSECONDS);
+        if (LOG_MISS_LATENCY && log.isInfoEnabled()) {
+          log.info("miss latency millis: {}", TimeUnit.NANOSECONDS.toMillis(cacheMissLatencyNanos));
+        }
       }
     }
   }

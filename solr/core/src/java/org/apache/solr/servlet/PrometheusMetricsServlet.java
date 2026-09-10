@@ -1523,24 +1523,24 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         add(
             results,
             prt,
+            "median_ms",
+            "block_cache_per_request_demand_duration_p50",
+            PrometheusMetricType.GAUGE,
+            "p50 per-request aggregate demand block load latency in ms");
+        add(
+            results,
+            prt,
             "p95_ms",
             "block_cache_per_request_demand_duration_p95",
             PrometheusMetricType.GAUGE,
-            "p95 per-request aggregate cache miss latency in ms (total demand decompress time across all cache misses within a single request)");
+            "p95 per-request aggregate demand block load latency in ms");
         add(
             results,
             prt,
             "p99_ms",
             "block_cache_per_request_demand_duration_p99",
             PrometheusMetricType.GAUGE,
-            "p99 per-request aggregate cache miss latency in ms");
-        add(
-            results,
-            prt,
-            "p999_ms",
-            "block_cache_per_request_demand_duration_p999",
-            PrometheusMetricType.GAUGE,
-            "p999 per-request aggregate cache miss latency in ms");
+            "p99 per-request aggregate demand block load latency in ms");
       }
     }
 
