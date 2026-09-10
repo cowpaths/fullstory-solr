@@ -96,7 +96,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       cache.unpin(n2);
 
       // Explicitly close n2 — should push its buffer to the tail (highest eviction priority).
-      ByteBuffer n2Buf = v2.join(cache);
+      ByteBuffer n2Buf = v2.join(cache, null);
       cache.close(n2);
 
       // Next acquisition should reclaim n2's buffer from the tail.
@@ -104,7 +104,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       long n3 = h[0];
       assertNotNull(v3);
       ByteBuffer n3Buf = v3.populate(dummy, 0, 0, null, 0, cache);
-      assertSame(n3Buf, v3.join(cache));
+      assertSame(n3Buf, v3.join(cache, null));
       assertNotSame(n2Buf, n3Buf);
       byte[] rtx = new byte[COMPRESSION_BLOCK_SIZE];
       n3Buf.clear().get(rtx);
@@ -127,7 +127,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       long n1 = h[0];
       assertNotNull(v1);
       ByteBuffer n1Buf = v1.populate(dummy, 0, COMPRESSION_BLOCK_SIZE, null, 0, cache);
-      assertSame(n1Buf, v1.join(cache));
+      assertSame(n1Buf, v1.join(cache, null));
       cache.unpin(n1); // now evictable
 
       // Evict n1 by acquiring the only block.
@@ -135,7 +135,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       long n2 = h[0];
       assertNotNull(v2);
       ByteBuffer n2Buf = v2.populate(new byte[0], 0, 0, null, 0, cache);
-      assertSame(n2Buf, v2.join(cache));
+      assertSame(n2Buf, v2.join(cache, null));
       assertNotSame(n1Buf, n2Buf); // different wrappers
       byte[] rtx = new byte[COMPRESSION_BLOCK_SIZE];
       n2Buf.clear().get(rtx);
@@ -210,7 +210,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                       long handle = handles.get(idx);
                       BlockCache.Val v;
                       if (handle != BlockCache.NULL_HANDLE && (v = cache.pin(handle)) != null) {
-                        ByteBuffer join = v.join(cache);
+                        ByteBuffer join = v.join(cache, null);
                         assertEquals(idx, join.getInt(0));
                         cache.unpin(handle);
                       } else {
@@ -220,7 +220,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                           if (extant == handle) {
                             handle = h[0];
                             if (v.isPopulated()) {
-                              ByteBuffer join = v.join(cache);
+                              ByteBuffer join = v.join(cache, null);
                               assertEquals(idx, join.getInt(0));
                             } else {
                               byte[] arr =
@@ -234,7 +234,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                               continue; // whatever
                             }
                             handle = extant;
-                            ByteBuffer join = v.join(cache);
+                            ByteBuffer join = v.join(cache, null);
                             assertEquals(idx, join.getInt(0));
                           }
                           cache.unpin(handle);
@@ -333,7 +333,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                           && (existingVal = cache.pin(existing)) != null) {
                         hits.increment();
                         // Verify that the sentinel written at acquire time is intact.
-                        assertEquals(slotIdx, existingVal.join(cache).getInt(0));
+                        assertEquals(slotIdx, existingVal.join(cache, null).getInt(0));
                         if (r.nextInt(8) == 0) {
                           // Explicit close: unpin, vacate slot, close.
                           cache.unpin(existing);

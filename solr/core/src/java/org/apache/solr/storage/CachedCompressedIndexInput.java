@@ -47,6 +47,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
@@ -111,7 +112,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private ByteBuffer postBuffer = ByteBuffer.allocate(0);
   private int postBufferBaseline;
   private NodeRefStruct currentNodeRef = UNINITIALIZED;
-  private Object batchReferrent;
+  private LongAdder batchReferrent;
 
   private LongBuffer[] longViews;
   private IntBuffer[] intViews;
@@ -361,7 +362,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  void setBatchReferrent(Object batchReferrent) {
+  void setBatchReferrent(LongAdder batchReferrent) {
     this.batchReferrent = batchReferrent;
   }
 
@@ -471,16 +472,24 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
+  private final long[] cacheHitBlockNanos = new long[1];
+
   private void cacheHit(int blockIdx, long cached, BlockCache.Val cachedVal, int type)
       throws IOException {
     ByteBuffer buf;
+    long waitNanos;
+    cacheHitBlockNanos[0] = 0;
     try {
-      buf = cachedVal.join(cache);
+      buf = cachedVal.join(cache, cacheHitBlockNanos);
+      waitNanos = cacheHitBlockNanos[0];
     } catch (CompletionException e) {
       cache.unpin(cached);
       throw unwrapException(e.getCause());
     }
     setCurrentNode(cached, blockIdx, cachedVal, type);
+    if (waitNanos > 0 && batchReferrent != null) {
+      batchReferrent.add(waitNanos);
+    }
     postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
     postBufferBaseline = 0;
     longViews = null;
@@ -540,10 +549,11 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long extant = accessMapped.compareAndExchange(blockIdx, cached, node);
       if (extant == cached) {
         ByteBuffer buf;
+        long elapsedNanos = -1L;
         if (nodeVal.isPopulated()) {
           // Warm-start hit: pool buffer already holds valid data from a previous run.
           cache.recordWarmStartHit();
-          buf = nodeVal.join(cache);
+          buf = nodeVal.join(cache, null);
         } else {
           // We won the race: fetch from backend and populate the node.
           if (VERBOSE && log.isInfoEnabled()) {
@@ -567,10 +577,14 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
             cache.close(node);
             throw unwrapException(t);
           } finally {
-            cache.recordDecompressionDemand(System.nanoTime() - start);
+            elapsedNanos = System.nanoTime() - start;
+            cache.recordDecompressionDemand(elapsedNanos);
           }
         }
         setCurrentNode(node, blockIdx, null, 2);
+        if (elapsedNanos != -1L && batchReferrent != null) {
+          batchReferrent.add(elapsedNanos);
+        }
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
         postBufferBaseline = 0;
         longViews = null;
@@ -599,15 +613,20 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
           this,
           stackTraceId());
     }
-    long start = System.nanoTime();
     byte[] supplied;
+    long elapsedNanos;
+    long start = System.nanoTime();
     try {
       supplied = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
     } finally {
-      cache.recordDecompressionDemand(System.nanoTime() - start);
+      elapsedNanos = System.nanoTime() - start;
+      cache.recordDecompressionDemand(elapsedNanos);
     }
     ByteBuffer heapBuf = ByteBuffer.wrap(supplied, 0, decompressedLen);
     setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, 3);
+    if (batchReferrent != null) {
+      batchReferrent.add(elapsedNanos);
+    }
     postBuffer = heapBuf;
     postBufferBaseline = heapBuf.position();
     heapBuf.order(ByteOrder.LITTLE_ENDIAN);

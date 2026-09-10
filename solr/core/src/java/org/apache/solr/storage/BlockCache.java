@@ -451,11 +451,36 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
   }
 
-  private final Function<Object, Map.Entry<Object, Batch>> batchInitFunction =
-      this::batchInitFunction;
+  private static final boolean LOG_MISS_LATENCY =
+      EnvUtils.getPropertyAsBool("solr.blockCache.logMissLatency", false);
 
-  private Map.Entry<Object, Batch> batchInitFunction(Object k) {
-    Object referent = new Object();
+  private static final class BatchEntry implements SolrQueryRequest.RequestCloseAware {
+    private final LongAdder missLatencyNanos;
+    private final Batch batch;
+    private final Timer perRequestDemandTime;
+
+    private BatchEntry(LongAdder missLatencyNanos, Batch batch, Timer perRequestDemandTime) {
+      this.missLatencyNanos = missLatencyNanos;
+      this.batch = batch;
+      this.perRequestDemandTime = perRequestDemandTime;
+    }
+
+    @Override
+    public void onRequestClose() {
+      long cacheMissLatencyNanos = missLatencyNanos.sum();
+      if (cacheMissLatencyNanos > 0) {
+        this.perRequestDemandTime.update(cacheMissLatencyNanos, TimeUnit.NANOSECONDS);
+        if (LOG_MISS_LATENCY && log.isInfoEnabled()) {
+          log.info("miss latency millis: {}", TimeUnit.NANOSECONDS.toMillis(cacheMissLatencyNanos));
+        }
+      }
+    }
+  }
+
+  private final Function<Object, BatchEntry> batchInitFunction = this::batchInitFunction;
+
+  private BatchEntry batchInitFunction(Object k) {
+    LongAdder referent = new LongAdder();
     int partIdx = tlrIndex();
     Cache3<HoldRef> p = holdRefs3[partIdx];
     int slot = p.acquire();
@@ -470,7 +495,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       ret = (Batch) n.getPayload();
     }
     outstandingHoldRefs.increment();
-    return new AbstractMap.SimpleImmutableEntry<>(referent, ret);
+    return new BatchEntry(referent, ret, perRequestDemandTime);
   }
 
   private static final long CACHE_VALIDATION_MAGIC =
@@ -536,7 +561,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * by it and remove the strong ref to the {@link WeakReference}, thereby pruning pointless
    * references.
    */
-  @SuppressWarnings("unchecked")
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
     SolrRequestInfo sri;
@@ -544,13 +568,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     if ((sri = SolrRequestInfo.getRequestInfo()) != null && (req = sri.getReq()) != null) {
       // dummy referent for batching cleanup.
       Map<Object, Object> ctx = req.getContext();
-      Map.Entry<Object, Batch> b;
+      BatchEntry b;
       synchronized (ctx) {
-        b = (Map.Entry<Object, Batch>) ctx.computeIfAbsent(referentKey, batchInitFunction);
+        b = (BatchEntry) ctx.computeIfAbsent(referentKey, batchInitFunction);
       }
-      in.setBatchReferrent(b.getKey());
+      in.setBatchReferrent(b.missLatencyNanos);
       nrs = new NodeRefStruct();
-      List<NodeRefStruct> toClose = b.getValue().toClose;
+      List<NodeRefStruct> toClose = b.batch.toClose;
       synchronized (toClose) {
         toClose.add(nrs);
       }
@@ -695,7 +719,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
      * @throws CompletionException if population failed
      */
     @SuppressWarnings("ReferenceEquality")
-    public ByteBuffer join(BlockCache c) {
+    public ByteBuffer join(BlockCache c, long[] waitNanos) {
       if (cacheBlockOrd == -1) {
         // tail buffer, always populated, already read-only
         return cached;
@@ -718,6 +742,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
               throw new ThreadInterruptedException(e);
             }
           }
+        }
+        if (waitNanos != null) {
+          waitNanos[0] = System.nanoTime() - startNanos;
         }
       }
       ByteBuffer ret = cached;
@@ -811,6 +838,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // Latency of demand block loads (see blocksDecompressedDemand); a bare Timer beforehand so tests
   // and other pre-registration callers of recordDecompressionDemand() still work.
   private volatile Timer blocksDecompressedDemandTime = new Timer();
+  // where applicable. analogous to `blocksDecompressedDemandTime`, but batched per request.
+  private volatile Timer perRequestDemandTime = new Timer();
   // Asynchronous (readahead) decompressions: supply() called from BlockPreloader on the ioExec
   // thread pool, ahead of any reader request.
   private final LongAdder blocksDecompressedReadahead = new LongAdder();
@@ -1352,6 +1381,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     blocksDecompressedDemandTime =
         solrMetricsContext.timer(
             "blocksDecompressedDemandTime", SolrInfoBean.Category.DIRECTORY.toString(), scope);
+    perRequestDemandTime =
+        solrMetricsContext.timer(
+            "perRequestDemandTime", SolrInfoBean.Category.DIRECTORY.toString(), scope);
   }
 
   @Override
