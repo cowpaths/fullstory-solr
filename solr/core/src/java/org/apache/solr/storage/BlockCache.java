@@ -719,7 +719,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
      * @throws CompletionException if population failed
      */
     @SuppressWarnings("ReferenceEquality")
-    public ByteBuffer join(BlockCache c) {
+    public ByteBuffer join(BlockCache c, long[] waitNanos) {
       if (cacheBlockOrd == -1) {
         // tail buffer, always populated, already read-only
         return cached;
@@ -742,6 +742,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
               throw new ThreadInterruptedException(e);
             }
           }
+        }
+        if (waitNanos != null) {
+          waitNanos[0] = System.nanoTime() - startNanos;
         }
       }
       ByteBuffer ret = cached;

@@ -472,16 +472,24 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
+  private final long[] cacheHitBlockNanos = new long[1];
+
   private void cacheHit(int blockIdx, long cached, BlockCache.Val cachedVal, int type)
       throws IOException {
     ByteBuffer buf;
+    long waitNanos;
+    cacheHitBlockNanos[0] = 0;
     try {
-      buf = cachedVal.join(cache);
+      buf = cachedVal.join(cache, cacheHitBlockNanos);
+      waitNanos = cacheHitBlockNanos[0];
     } catch (CompletionException e) {
       cache.unpin(cached);
       throw unwrapException(e.getCause());
     }
     setCurrentNode(cached, blockIdx, cachedVal, type);
+    if (waitNanos > 0 && batchReferrent != null) {
+      batchReferrent.add(waitNanos);
+    }
     postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
     postBufferBaseline = 0;
     longViews = null;
@@ -545,7 +553,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         if (nodeVal.isPopulated()) {
           // Warm-start hit: pool buffer already holds valid data from a previous run.
           cache.recordWarmStartHit();
-          buf = nodeVal.join(cache);
+          buf = nodeVal.join(cache, null);
         } else {
           // We won the race: fetch from backend and populate the node.
           if (VERBOSE && log.isInfoEnabled()) {
