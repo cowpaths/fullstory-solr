@@ -35,7 +35,6 @@ import org.apache.solr.common.MapSerializable;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.core.CoreDescriptor;
 import org.apache.solr.core.DirectoryFactory;
-import org.apache.solr.core.PluginInfo;
 import org.apache.solr.core.SolrConfig;
 import org.apache.solr.core.SolrCore;
 import org.apache.solr.core.TestMergePolicyConfig;
@@ -68,6 +67,8 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
 
   private static final String SYS_PROP_PREFERRED_MPF_COLLECTIONS =
       "solr.usePreferredMergePolicyFactoryCollections";
+  private static final String SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT =
+      "solr.usePreferredMergePolicyFactoryRolloutPct";
 
   private static boolean compoundMergePolicySort = false;
 
@@ -88,6 +89,7 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
     System.clearProperty("solr.tests.maxCommitMergeWait");
     System.clearProperty("solr.usePreferredMergePolicyFactory");
     System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
+    System.clearProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT);
     super.tearDown();
   }
 
@@ -129,6 +131,7 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
   public void testPreferredMergePolicyFactoryIgnoredWithoutSysprop() throws Exception {
     System.clearProperty("solr.usePreferredMergePolicyFactory");
     System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
+    System.clearProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT);
     SolrConfig solrConfig =
         new SolrConfig(instanceDir, solrConfigFileNamePreferredMergePolicyFactory);
     SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
@@ -141,6 +144,7 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
   @Test
   public void testPreferredMergePolicyFactoryCollectionsPopulatesOverrideMap() throws Exception {
     System.clearProperty("solr.usePreferredMergePolicyFactory");
+    System.clearProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT);
     System.setProperty(
         SYS_PROP_PREFERRED_MPF_COLLECTIONS, "canary_collection , baseline_collection, ,");
     try {
@@ -156,13 +160,12 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
       Map<String, Object> map = new LinkedHashMap<>();
       solrIndexConfig.toMap(map);
       @SuppressWarnings("unchecked")
-      Map<String, PluginInfo> perCollection =
-          (Map<String, PluginInfo>) map.get("MergePolicyFactoryPerCollection");
+      Map<String, Boolean> perCollection =
+          (Map<String, Boolean>) map.get("MergePolicyFactoryPerCollection");
       assertNotNull(perCollection);
       assertEquals(Set.of("canary_collection", "baseline_collection"), perCollection.keySet());
-      assertEquals(
-          org.apache.solr.index.DefaultMergePolicyFactory.class.getName(),
-          perCollection.get("canary_collection").className);
+      assertEquals(Boolean.TRUE, perCollection.get("canary_collection"));
+      assertEquals(Boolean.TRUE, perCollection.get("baseline_collection"));
     } finally {
       System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
     }
@@ -187,6 +190,7 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
   public void testPreferredMergePolicyFactoryCollectionsIgnoredWithoutPreferredElement()
       throws Exception {
     System.clearProperty("solr.usePreferredMergePolicyFactory");
+    System.clearProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT);
     System.setProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS, "canary_collection");
     try {
       SolrConfig solrConfig =
@@ -221,6 +225,7 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
   @Test
   public void testPreferredMergePolicyFactoryCollectionsAppliesAtRuntime() throws Exception {
     System.clearProperty("solr.usePreferredMergePolicyFactory");
+    System.clearProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT);
     System.setProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS, "canary_collection");
     try {
       SolrConfig solrConfig =
@@ -257,6 +262,148 @@ public class SolrIndexConfigTest extends SolrTestCaseJ4 {
     } finally {
       System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
     }
+  }
+
+  @Test
+  public void testPreferredMergePolicyFactoryRolloutPctAppliesAtRuntime() throws Exception {
+    System.clearProperty("solr.usePreferredMergePolicyFactory");
+    System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
+    final int rolloutPct = 30;
+    System.setProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT, Integer.toString(rolloutPct));
+    String inRollout = collectionWithRolloutBucket(true, rolloutPct);
+    String outOfRollout = collectionWithRolloutBucket(false, rolloutPct);
+    try {
+      SolrConfig solrConfig =
+          new SolrConfig(instanceDir, solrConfigFileNamePreferredMergePolicyFactory);
+      SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
+      IndexSchema indexSchema = IndexSchemaFactory.buildIndexSchema(schemaFileName, solrConfig);
+      SolrCore delegate = h.getCore();
+
+      Map<String, Object> map = new LinkedHashMap<>();
+      solrIndexConfig.toMap(map);
+      @SuppressWarnings("unchecked")
+      Map<String, Boolean> perCollection =
+          (Map<String, Boolean>) map.get("MergePolicyFactoryPerCollection");
+      assertNotNull(perCollection);
+      assertTrue(perCollection.isEmpty());
+
+      // Collection selected by floorMod(hash, 100) < rolloutPct → preferred defaults (10/10)
+      assertPreferredDefaults(
+          solrIndexConfig.toIndexWriterConfig(mockCoreWithCollection(inRollout, indexSchema, delegate)));
+
+      // Collection outside rollout bucket → baseline Tiered config (7/9)
+      assertBaselineTieredParams(
+          solrIndexConfig.toIndexWriterConfig(
+              mockCoreWithCollection(outOfRollout, indexSchema, delegate)));
+    } finally {
+      System.clearProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT);
+    }
+  }
+
+  @Test
+  public void testPreferredMergePolicyFactoryRolloutPct100AppliesToAll() throws Exception {
+    System.clearProperty("solr.usePreferredMergePolicyFactory");
+    System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
+    System.setProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT, "100");
+    try {
+      SolrConfig solrConfig =
+          new SolrConfig(instanceDir, solrConfigFileNamePreferredMergePolicyFactory);
+      SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
+      IndexSchema indexSchema = IndexSchemaFactory.buildIndexSchema(schemaFileName, solrConfig);
+
+      assertPreferredDefaults(
+          solrIndexConfig.toIndexWriterConfig(
+              mockCoreWithCollection("any_collection", indexSchema, h.getCore())));
+    } finally {
+      System.clearProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT);
+    }
+  }
+
+  @Test
+  public void testPreferredMergePolicyFactoryCollectionsOverridesRolloutPct() throws Exception {
+    System.clearProperty("solr.usePreferredMergePolicyFactory");
+    final int rolloutPct = 30;
+    String outOfRollout = collectionWithRolloutBucket(false, rolloutPct);
+    System.setProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT, Integer.toString(rolloutPct));
+    // Explicit CSV list wins even when collection is outside the rollout bucket.
+    System.setProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS, outOfRollout);
+    try {
+      SolrConfig solrConfig =
+          new SolrConfig(instanceDir, solrConfigFileNamePreferredMergePolicyFactory);
+      SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
+      IndexSchema indexSchema = IndexSchemaFactory.buildIndexSchema(schemaFileName, solrConfig);
+
+      assertPreferredDefaults(
+          solrIndexConfig.toIndexWriterConfig(
+              mockCoreWithCollection(outOfRollout, indexSchema, h.getCore())));
+    } finally {
+      System.clearProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT);
+      System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
+    }
+  }
+
+  @Test
+  public void testPreferredMergePolicyFactoryRolloutPctIgnoredWithoutPreferredElement()
+      throws Exception {
+    System.clearProperty("solr.usePreferredMergePolicyFactory");
+    System.clearProperty(SYS_PROP_PREFERRED_MPF_COLLECTIONS);
+    System.setProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT, "100");
+    try {
+      SolrConfig solrConfig =
+          new SolrConfig(instanceDir, solrConfigFileNameTieredMergePolicyFactory);
+      SolrIndexConfig solrIndexConfig = new SolrIndexConfig(solrConfig, null);
+
+      Map<String, Object> map = new LinkedHashMap<>();
+      solrIndexConfig.toMap(map);
+      assertNull(map.get("MergePolicyFactoryPerCollection"));
+
+      assertBaselineTieredParams(
+          solrIndexConfig.toIndexWriterConfig(
+              mockCoreWithCollection("any_collection", indexSchemaFor(solrConfig), h.getCore())));
+    } finally {
+      System.clearProperty(SYS_PROP_PREFERRED_MPF_ROLLOUT_PCT);
+    }
+  }
+
+  private IndexSchema indexSchemaFor(SolrConfig solrConfig) {
+    return IndexSchemaFactory.buildIndexSchema(schemaFileName, solrConfig);
+  }
+
+  /** Find a collection name whose floorMod(hash, 100) is inside or outside the rollout bucket. */
+  private static String collectionWithRolloutBucket(boolean inBucket, int rolloutPct) {
+    for (int i = 0; i < 10000; i++) {
+      String name = "rollout_coll_" + i;
+      boolean selected = Math.floorMod(name.hashCode(), 100) < rolloutPct;
+      if (selected == inBucket) {
+        return name;
+      }
+    }
+    fail("could not find collection name for inBucket=" + inBucket + " rolloutPct=" + rolloutPct);
+    return null;
+  }
+
+  private static void assertPreferredDefaults(IndexWriterConfig iwc) {
+    MergePolicy mergePolicy = iwc.getMergePolicy();
+    assertNotNull("null mergePolicy", mergePolicy);
+    assertEquals(
+        "expected TieredMergePolicy from DefaultMergePolicyFactory",
+        TieredMergePolicy.class.getName(),
+        mergePolicy.getClass().getName());
+    TieredMergePolicy mp = (TieredMergePolicy) mergePolicy;
+    assertEquals(10, mp.getMaxMergeAtOnce());
+    assertEquals(10, (int) mp.getSegmentsPerTier());
+  }
+
+  private static void assertBaselineTieredParams(IndexWriterConfig iwc) {
+    MergePolicy mergePolicy = iwc.getMergePolicy();
+    assertNotNull("null mergePolicy", mergePolicy);
+    assertEquals(
+        "expected TieredMergePolicy from configured TieredMergePolicyFactory",
+        TieredMergePolicy.class.getName(),
+        mergePolicy.getClass().getName());
+    TieredMergePolicy mp = (TieredMergePolicy) mergePolicy;
+    assertEquals(7, mp.getMaxMergeAtOnce());
+    assertEquals(9, (int) mp.getSegmentsPerTier());
   }
 
   private static SolrCore mockCoreWithCollection(
