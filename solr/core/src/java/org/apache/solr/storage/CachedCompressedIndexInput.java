@@ -47,6 +47,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
@@ -111,7 +112,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private ByteBuffer postBuffer = ByteBuffer.allocate(0);
   private int postBufferBaseline;
   private NodeRefStruct currentNodeRef = UNINITIALIZED;
-  private Object batchReferrent;
+  private LongAdder batchReferrent;
 
   private LongBuffer[] longViews;
   private IntBuffer[] intViews;
@@ -361,7 +362,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  void setBatchReferrent(Object batchReferrent) {
+  void setBatchReferrent(LongAdder batchReferrent) {
     this.batchReferrent = batchReferrent;
   }
 
@@ -567,7 +568,11 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
             cache.close(node);
             throw unwrapException(t);
           } finally {
-            cache.recordDecompressionDemand(System.nanoTime() - start);
+            long elapsedNanos = System.nanoTime() - start;
+            if (batchReferrent != null) {
+              batchReferrent.add(elapsedNanos);
+            }
+            cache.recordDecompressionDemand(elapsedNanos);
           }
         }
         setCurrentNode(node, blockIdx, null, 2);
@@ -604,7 +609,11 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     try {
       supplied = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
     } finally {
-      cache.recordDecompressionDemand(System.nanoTime() - start);
+      long elapsedNanos = System.nanoTime() - start;
+      if (batchReferrent != null) {
+        batchReferrent.add(elapsedNanos);
+      }
+      cache.recordDecompressionDemand(elapsedNanos);
     }
     ByteBuffer heapBuf = ByteBuffer.wrap(supplied, 0, decompressedLen);
     setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, 3);

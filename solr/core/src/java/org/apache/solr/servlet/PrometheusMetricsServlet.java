@@ -1517,6 +1517,31 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
             PrometheusMetricType.GAUGE,
             "p99 latency in ms of demand block loads (fetch + decompress, plus populate into the cache buffer where applicable)");
       }
+      JsonNode prt =
+          metricsNode.path("solr.node").path("DIRECTORY.blockCache.perRequestDemandTime");
+      if (!prt.isMissingNode()) {
+        add(
+            results,
+            prt,
+            "p95_ms",
+            "block_cache_per_request_demand_duration_p95",
+            PrometheusMetricType.GAUGE,
+            "p95 per-request aggregate cache miss latency in ms (total demand decompress time across all cache misses within a single request)");
+        add(
+            results,
+            prt,
+            "p99_ms",
+            "block_cache_per_request_demand_duration_p99",
+            PrometheusMetricType.GAUGE,
+            "p99 per-request aggregate cache miss latency in ms");
+        add(
+            results,
+            prt,
+            "p999_ms",
+            "block_cache_per_request_demand_duration_p999",
+            PrometheusMetricType.GAUGE,
+            "p999 per-request aggregate cache miss latency in ms");
+      }
     }
 
     private static void add(
