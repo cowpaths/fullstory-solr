@@ -69,8 +69,10 @@ public interface SolrQueryRequest extends AutoCloseable {
    * necessarily being closed for correct application behavior.
    */
   interface RequestCloseAware {
-    void onRequestClose() throws IOException;
+    void onRequestClose(long startNanos) throws IOException;
   }
+
+  default void beforeRequestClose(long startNanos) {}
 
   /** Generic information associated with this request that may be both read and updated. */
   Map<Object, Object> getContext();
