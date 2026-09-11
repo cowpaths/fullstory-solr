@@ -183,6 +183,21 @@ public abstract class SolrQueryRequestBase implements SolrQueryRequest, Closeabl
     schema = core.getLatestSchema();
   }
 
+  @Override
+  public void beforeRequestClose(long startNanos) {
+    if (context != null) {
+      for (Object v : context.values()) {
+        if (v instanceof RequestCloseAware) {
+          try {
+            ((RequestCloseAware) v).onRequestClose(startNanos);
+          } catch (Exception ex) {
+            log.warn("exception closing request context item {}", v, ex);
+          }
+        }
+      }
+    }
+  }
+
   /**
    * Frees resources associated with this request, this method <b>must</b> be called when the object
    * is no longer in use.
@@ -193,17 +208,6 @@ public abstract class SolrQueryRequestBase implements SolrQueryRequest, Closeabl
       assert ObjectReleaseTracker.release(this);
       searcherHolder.decref();
       searcherHolder = null;
-    }
-    if (context != null) {
-      for (Object v : context.values()) {
-        if (v instanceof RequestCloseAware) {
-          try {
-            ((RequestCloseAware) v).onRequestClose();
-          } catch (Exception ex) {
-            log.warn("exception closing request context item {}", v, ex);
-          }
-        }
-      }
     }
   }
 

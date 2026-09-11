@@ -50,6 +50,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -66,6 +67,7 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.StampedLock;
 import java.util.function.BiFunction;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import org.apache.lucene.internal.hppc.BitMixer;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.BlockCacheMapping;
@@ -74,8 +76,11 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
+import org.apache.solr.common.params.ModifiableSolrParams;
+import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.ObjectCache;
 import org.apache.solr.common.util.SolrNamedThreadFactory;
 import org.apache.solr.core.CoreContainer;
@@ -85,6 +90,7 @@ import org.apache.solr.metrics.SolrMetricProducer;
 import org.apache.solr.metrics.SolrMetricsContext;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.request.SolrRequestInfo;
+import org.apache.solr.response.SolrQueryResponse;
 import org.apache.solr.storage.CachedCompressedIndexInput.NodeRefStruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -451,8 +457,29 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
   }
 
-  private static final boolean LOG_MISS_LATENCY =
-      EnvUtils.getPropertyAsBool("solr.blockCache.logMissLatency", false);
+  private static final String LOG_MISS_LATENCY_PROPNAME = "solr.blockCache.logMissLatency";
+  private static final Set<String> LOG_MISS_LATENCY;
+
+  static {
+    String tmp = EnvUtils.getProperty(LOG_MISS_LATENCY_PROPNAME);
+    if (tmp == null || tmp.isEmpty() || "false".equals(tmp)) {
+      LOG_MISS_LATENCY = null;
+    } else if ("true".equals(tmp)) {
+      LOG_MISS_LATENCY = Set.of();
+    } else {
+      Set<String> trimmed =
+          Arrays.stream(tmp.split(","))
+              .map(String::trim)
+              .filter((v) -> !v.isBlank())
+              .collect(Collectors.toUnmodifiableSet());
+      if (trimmed.isEmpty()) {
+        log.warn("bad spec for {}: {}", LOG_MISS_LATENCY_PROPNAME, tmp);
+        LOG_MISS_LATENCY = null;
+      } else {
+        LOG_MISS_LATENCY = trimmed;
+      }
+    }
+  }
 
   private static final class BatchEntry implements SolrQueryRequest.RequestCloseAware {
     private final LongAdder missLatencyNanos;
@@ -466,12 +493,44 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
 
     @Override
-    public void onRequestClose() {
+    public void onRequestClose(long startNanos) {
       long cacheMissLatencyNanos = missLatencyNanos.sum();
       if (cacheMissLatencyNanos > 0) {
         this.perRequestDemandTime.update(cacheMissLatencyNanos, TimeUnit.NANOSECONDS);
-        if (LOG_MISS_LATENCY && log.isInfoEnabled()) {
-          log.info("miss latency millis: {}", TimeUnit.NANOSECONDS.toMillis(cacheMissLatencyNanos));
+        SolrRequestInfo sri;
+        if (LOG_MISS_LATENCY != null
+            && log.isInfoEnabled()
+            && (sri = SolrRequestInfo.getRequestInfo()) != null) {
+          SolrQueryRequest req = sri.getReq();
+          SolrQueryResponse rsp;
+          NamedList<Object> header;
+          Object qTime;
+          SolrParams origParams;
+          if (req != null
+              && (rsp = sri.getRsp()) != null
+              && (header = rsp.getResponseHeader()) != null
+              && (qTime = header.get("QTime")) != null
+              && (origParams = req.getOriginalParams()) != null) {
+            String paramsString;
+            if (LOG_MISS_LATENCY.isEmpty()) {
+              paramsString = "";
+            } else {
+              ModifiableSolrParams includeParams = ModifiableSolrParams.of(origParams);
+              Iterator<String> iter = includeParams.getParameterNamesIterator();
+              while (iter.hasNext()) {
+                if (!LOG_MISS_LATENCY.contains(iter.next())) {
+                  iter.remove();
+                }
+              }
+              paramsString = includeParams.toString();
+            }
+            log.info(
+                "elapsed={} QTime={} miss_latency={} params={{}}",
+                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos),
+                qTime,
+                TimeUnit.NANOSECONDS.toMillis(cacheMissLatencyNanos),
+                paramsString);
+          }
         }
       }
     }
