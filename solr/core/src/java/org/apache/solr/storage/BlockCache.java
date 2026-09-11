@@ -458,13 +458,37 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   private static final String LOG_MISS_LATENCY_PROPNAME = "solr.blockCache.logMissLatency";
+
+  /**
+   * Controls per-request cache miss latency logging. Parsed from {@link #LOG_MISS_LATENCY_PROPNAME}
+   * ({@code solr.blockCache.logMissLatency}):
+   *
+   * <ul>
+   *   <li>{@code null} (default, or {@code "false"}): logging disabled.
+   *   <li>Empty set ({@code "true"}): log elapsed, QTime, and miss_latency, but no query params.
+   *   <li>Non-empty set (comma-separated param names, e.g. {@code "query_id,iteration"}): log the
+   *       above plus the specified query parameters. Only the named params are included, to avoid
+   *       logging sensitive or high-cardinality values.
+   * </ul>
+   *
+   * <p>Logging occurs in {@link BatchEntry#onRequestClose(long)}, which fires at the end of each
+   * request that had at least one cache miss. The log line includes total request elapsed time
+   * (including response serialization), QTime (query processing only), and aggregate cache miss
+   * latency — enabling correlation between cache misses and user-visible latency.
+   *
+   * <p>Logging of specific query params is provided as a convenience for log parsing and analysis,
+   * to facilitate linking on query param keys (analogous to rid, but general-purpose). Particularly
+   * useful e.g. in a performance testing context.
+   */
   private static final Set<String> LOG_MISS_LATENCY;
 
   static {
     String tmp = EnvUtils.getProperty(LOG_MISS_LATENCY_PROPNAME);
     if (tmp == null || tmp.isEmpty() || "false".equals(tmp)) {
+      // disable logging
       LOG_MISS_LATENCY = null;
     } else if ("true".equals(tmp)) {
+      // log, but don't include any query params
       LOG_MISS_LATENCY = Set.of();
     } else {
       Set<String> trimmed =
@@ -473,9 +497,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
               .filter((v) -> !v.isBlank())
               .collect(Collectors.toUnmodifiableSet());
       if (trimmed.isEmpty()) {
+        // warn and disable logging
         log.warn("bad spec for {}: {}", LOG_MISS_LATENCY_PROPNAME, tmp);
         LOG_MISS_LATENCY = null;
       } else {
+        // list of query params to be included in log output
         LOG_MISS_LATENCY = trimmed;
       }
     }
