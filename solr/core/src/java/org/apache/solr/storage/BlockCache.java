@@ -437,9 +437,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     abstract void doCloseFor(BlockCache cache);
   }
 
-  private static final class Batch extends RetainedRef<Object> {
+  static final class Batch extends RetainedRef<Object>
+      implements SolrQueryRequest.RequestCloseAware {
 
+    private final long threadId;
     private final List<NodeRefStruct> toClose = new ArrayList<>();
+    private volatile boolean associatedRequestClosed = false;
 
     private Batch(
         Object referrent,
@@ -447,12 +450,26 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         Cache.Node<?> remove,
         long cache3Handle) {
       super(referrent, q, remove, cache3Handle);
+      this.threadId = Thread.currentThread().getId();
     }
 
     @Override
     void doCloseFor(BlockCache cache) {
       for (NodeRefStruct nrs : toClose) {
         nrs.closeFor(cache);
+      }
+    }
+
+    @Override
+    public void onRequestClose(long startNanos) {
+      associatedRequestClosed = true;
+    }
+
+    Object getLiveReferent(long threadId) {
+      if (associatedRequestClosed || (threadId >= 0 && threadId != this.threadId)) {
+        return null;
+      } else {
+        return get();
       }
     }
   }
@@ -520,6 +537,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     @Override
     public void onRequestClose(long startNanos) {
+      cachedBatch.remove();
+      batch.onRequestClose(startNanos);
       long cacheMissLatencyNanos = missLatencyNanos.sum();
       if (cacheMissLatencyNanos > 0) {
         this.perRequestDemandTime.update(cacheMissLatencyNanos, TimeUnit.NANOSECONDS);
@@ -646,37 +665,59 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * by it and remove the strong ref to the {@link WeakReference}, thereby pruning pointless
    * references.
    */
+  private static final ThreadLocal<Batch> cachedBatch = new ThreadLocal<>();
+
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
     int partIdx = tlrIndex();
-    SolrRequestInfo sri;
-    SolrQueryRequest req;
-    if ((sri = SolrRequestInfo.getRequestInfo()) != null && (req = sri.getReq()) != null) {
-      // dummy referent for batching cleanup.
-      Map<Object, Object> ctx = req.getContext();
-      BatchEntry b;
-      synchronized (ctx) {
-        b = (BatchEntry) ctx.computeIfAbsent(referentKey, batchInitFunction);
-      }
-      in.setBatchReferrent(b.missLatencyNanos);
+    Object referent;
+    Batch batch = in.getInheritedBatch();
+    if (batch != null && batch.getLiveReferent(Thread.currentThread().getId()) != null) {
+      // Fastest path: reuse cached batch if still associated with a live request.
       nrs = new NodeRefStruct();
-      List<NodeRefStruct> toClose = b.batch.toClose;
-      synchronized (toClose) {
-        toClose.add(nrs);
+      synchronized (batch.toClose) {
+        batch.toClose.add(nrs);
+      }
+    } else if ((batch = cachedBatch.get()) != null
+        && (referent = batch.getLiveReferent(-1L)) != null) {
+      // Fast path: reuse ThreadLocal cached batch if still associated with a live request.
+      in.setBatchReferrent((LongAdder) referent, batch);
+      nrs = new NodeRefStruct();
+      synchronized (batch.toClose) {
+        batch.toClose.add(nrs);
       }
     } else {
-      Cache3<HoldRef> p = holdRefs3[partIdx];
-      int slot = p.acquire();
-      if (slot != Cache3.NULL_SLOT) {
-        nrs = new NodeRefStruct(in, collected, null, (long) partIdx << 32 | slot);
-        p.getPayload(slot).ref = nrs;
-      } else {
-        // Pool exhausted: fall back to heap-allocated Cache.Node.
-        Cache.Node<WeakReference<Object>> n = new Cache.Node<>(createNrs, in);
-        holdRefs[partIdx].add(n);
-        nrs = (NodeRefStruct) n.getPayload();
+      if (batch != null) {
+        cachedBatch.remove();
       }
-      outstandingHoldRefs.incrementAndGet(partIdx);
+      SolrRequestInfo sri;
+      SolrQueryRequest req;
+      if ((sri = SolrRequestInfo.getRequestInfo()) != null && (req = sri.getReq()) != null) {
+        Map<Object, Object> ctx = req.getContext();
+        BatchEntry b;
+        synchronized (ctx) {
+          b = (BatchEntry) ctx.computeIfAbsent(referentKey, batchInitFunction);
+        }
+        in.setBatchReferrent(b.missLatencyNanos, b.batch);
+        nrs = new NodeRefStruct();
+        synchronized (b.batch.toClose) {
+          b.batch.toClose.add(nrs);
+        }
+        cachedBatch.set(b.batch);
+      } else {
+        Cache3<HoldRef> p = holdRefs3[partIdx];
+        int slot = p.acquire();
+        if (slot != Cache3.NULL_SLOT) {
+          nrs = new NodeRefStruct(in, collected, null, (long) partIdx << 32 | slot);
+          p.getPayload(slot).ref = nrs;
+        } else {
+          // Pool exhausted: fall back to heap-allocated Cache.Node.
+          Cache.Node<WeakReference<Object>> n = new Cache.Node<>(createNrs, in);
+          holdRefs[partIdx].add(n);
+          nrs = (NodeRefStruct) n.getPayload();
+        }
+        outstandingHoldRefs.incrementAndGet(partIdx);
+      }
     }
     refsCreated.incrementAndGet(partIdx);
     return nrs;
