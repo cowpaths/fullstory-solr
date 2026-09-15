@@ -493,9 +493,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     try {
       buf = cachedVal.join(cache, cacheHitBlockNanos);
       waitNanos = cacheHitBlockNanos[0];
-    } catch (CompletionException e) {
+    } catch (Throwable e) {
       cache.unpin(cached);
-      throw unwrapException(e.getCause());
+      if (e instanceof CompletionException) {
+        throw unwrapException(e.getCause());
+      }
+      throw e;
     }
     setCurrentNode(cached, blockIdx, cachedVal, type);
     if (waitNanos > 0 && batchReferrent != null) {
