@@ -459,16 +459,27 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       return;
     }
     long cached = accessMapped.get(blockIdx);
-    boolean uninitialized;
-    BlockCache.Val cachedVal = null;
-    if ((uninitialized = cached == BlockCache.NULL_HANDLE)
-        || (cachedVal = cache.pin(cached)) == null) {
-      if (!uninitialized) {
-        cache.recordFailedPin();
-      }
+    if (cached == BlockCache.NULL_HANDLE) {
       cacheMiss(cached, blockIdx);
     } else {
-      cacheHit(blockIdx, cached, cachedVal, 0);
+      // Try pinSwap if we have a currently pinned node; fall back to plain pin.
+      NodeRefStruct ref = nodeRef();
+      long oldNode = ref.currentNode;
+      BlockCache.Val cachedVal;
+      if (oldNode != BlockCache.NULL_HANDLE) {
+        cachedVal = cache.pinSwap(cached, oldNode);
+        if (cachedVal != null) {
+          ref.currentNode = BlockCache.NULL_HANDLE; // unpin already done by pinSwap
+        }
+      } else {
+        cachedVal = cache.pin(cached);
+      }
+      if (cachedVal == null) {
+        cache.recordFailedPin();
+        cacheMiss(cached, blockIdx);
+      } else {
+        cacheHit(blockIdx, cached, cachedVal, 0);
+      }
     }
   }
 
@@ -1166,7 +1177,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       super(referrent, q, remove, cache3Handle);
     }
 
-    /** Updates the current cached block. */
+    /** Updates the current cached block, unpinning the previous one. */
     private int setCurrentNode(long node, int blockIdx, BlockCache cache) {
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
       long toUnpin = currentNode;
