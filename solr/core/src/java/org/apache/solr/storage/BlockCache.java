@@ -886,6 +886,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // ---------------------------------------------------------------------------
 
   private static final class Partition extends Cache2.DualQueueCache<Val> {
+    private final AtomicLong pinnedCount = new AtomicLong();
+    private final AtomicLong hotUnpinned = new AtomicLong();
+    private final AtomicLong hits = new AtomicLong();
+
     Partition(int capacity, Iterable<BlockCache.Val> pool) {
       super(capacity, pool);
     }
@@ -906,7 +910,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private final AtomicLong prepareWriteFailures = new AtomicLong();
   private final LongAdder acquisitions = new LongAdder();
   private final LongAdder poolExhausted = new LongAdder();
-  private final LongAdder pinnedCount = new LongAdder();
   private final LongAdder closedCount = new LongAdder();
   // close(node, false) skipped because the node was already dead (payload null or refCount=-1,
   // meaning it was already evicted by acquireTail before we could explicitly close it).
@@ -914,9 +917,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // close(node, false) skipped because the node was pinned (refCount>0 or in UNPIN_SENTINEL
   // transition). The node will be recycled naturally once all readers unpin it.
   private final LongAdder closeSkippedPinned = new LongAdder();
-  private final LongAdder hits = new LongAdder();
   private final LongAdder hotAcquisitions = new LongAdder();
-  private final LongAdder hotUnpinned = new LongAdder();
   // Synchronous (demand) decompressions: supply() called on the read path in cacheMiss(), meaning
   // the reader had to wait for the block to be fetched and decompressed.
   private final LongAdder blocksDecompressedDemand = new LongAdder();
@@ -1226,10 +1227,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
     Val v = p.getPayload(handle);
     if (rc > 0) {
-      pinnedCount.increment();
-      if (v.fromHot()) hotUnpinned.decrement();
+      p.pinnedCount.incrementAndGet();
+      if (v.fromHot()) p.hotUnpinned.decrementAndGet();
     }
-    hits.increment();
+    p.hits.incrementAndGet();
     return v;
   }
 
@@ -1265,10 +1266,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     Partition p = partitions[partOf(handle)];
     switch (p.unpin(handle, recordAccess)) {
       case 1:
-        hotUnpinned.increment();
+        p.hotUnpinned.incrementAndGet();
         // fallthrough
       case 0:
-        pinnedCount.decrement();
+        p.pinnedCount.decrementAndGet();
         // on last unpin, null out the cached ByteBuffer. recreating is cheap.
         Val v = p.getPayload(handle);
         ByteBuffer cur = v.cached;
@@ -1295,10 +1296,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     Val v = p.acquireNode(outHandle);
     if (v != null) {
       acquisitions.increment();
-      pinnedCount.increment();
+      p.pinnedCount.incrementAndGet();
       if (v.fromHot()) {
         hotAcquisitions.increment();
-        hotUnpinned.decrement();
+        p.hotUnpinned.decrementAndGet();
       }
       if (alwaysPrepareWrite || (outHandle[0] >>> 32) > 1) {
         int ret = mapping.prepareWrite(v.cacheBlockOrd);
@@ -1378,11 +1379,16 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   public void writeMetrics(MapWriter.EntryWriter ew) throws IOException {
     long prep = prepopulated.sum();
-    long pinnedBytes = pinnedCount.sum() * COMPRESSION_BLOCK_SIZE;
-    long h = hits.sum();
+    long pinned = 0, hotUnpin = 0, h = 0;
+    for (Partition p : partitions) {
+      pinned += p.pinnedCount.get();
+      hotUnpin += p.hotUnpinned.get();
+      h += p.hits.get();
+    }
+    long pinnedBytes = pinned * COMPRESSION_BLOCK_SIZE;
     long acq = acquisitions.sum();
     long misses = acq - prep;
-    long hotUnpinnedBytes = hotUnpinned.sum() * COMPRESSION_BLOCK_SIZE;
+    long hotUnpinnedBytes = hotUnpin * COMPRESSION_BLOCK_SIZE;
     ew.put("outstandingHoldRefs", outstandingHoldRefs.sum());
     ew.put("outstandingRefs", outstandingRefs.sum());
     ew.put("refsCreated", refsCreated.sum());
@@ -1495,7 +1501,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       boolean fromHot = v.fromHot();
       switch (p.close(handle)) {
         case 0:
-          if (fromHot) hotUnpinned.decrement();
+          if (fromHot) p.hotUnpinned.decrementAndGet();
           break;
         case -1:
           closeSkippedDead.increment();
@@ -1509,7 +1515,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       closeSkippedPinned.increment();
       return false;
     } else {
-      pinnedCount.decrement();
+      p.pinnedCount.decrementAndGet();
       p.closeUnconditional(handle);
     }
     closedCount.increment();
