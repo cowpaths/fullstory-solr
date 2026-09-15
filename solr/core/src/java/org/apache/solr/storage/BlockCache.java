@@ -213,7 +213,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final ByteBuffer EXCEPTION_SENTINEL = ByteBuffer.allocate(0);
 
   public void decrementOutstandingRefs() {
-    outstandingRefs.decrement();
+    refsCollected.incrementAndGet(tlrIndex());
   }
 
   /**
@@ -429,7 +429,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       if (claimed) {
         doCloseFor(cache);
         if (snapshot != -3) {
-          cache.outstandingHoldRefs.decrement();
+          cache.outstandingHoldRefs.decrementAndGet(cache.tlrIndex());
         }
       }
     }
@@ -579,7 +579,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       holdRefs[partIdx].add(n);
       ret = (Batch) n.getPayload();
     }
-    outstandingHoldRefs.increment();
+    outstandingHoldRefs.incrementAndGet(partIdx);
     return new BatchEntry(referent, ret, perRequestDemandTime);
   }
 
@@ -648,6 +648,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
+    int partIdx = tlrIndex();
     SolrRequestInfo sri;
     SolrQueryRequest req;
     if ((sri = SolrRequestInfo.getRequestInfo()) != null && (req = sri.getReq()) != null) {
@@ -664,7 +665,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         toClose.add(nrs);
       }
     } else {
-      int partIdx = tlrIndex();
       Cache3<HoldRef> p = holdRefs3[partIdx];
       int slot = p.acquire();
       if (slot != Cache3.NULL_SLOT) {
@@ -676,10 +676,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         holdRefs[partIdx].add(n);
         nrs = (NodeRefStruct) n.getPayload();
       }
-      outstandingHoldRefs.increment();
+      outstandingHoldRefs.incrementAndGet(partIdx);
     }
-    outstandingRefs.increment();
-    refsCreated.increment();
+    refsCreated.incrementAndGet(partIdx);
     return nrs;
   }
 
@@ -886,6 +885,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // ---------------------------------------------------------------------------
 
   private static final class Partition extends Cache2.DualQueueCache<Val> {
+    // These counters are striped across partitions purely to reduce contention — they are NOT
+    // per-partition metrics. Only the global sum across all partitions is meaningful. Individual
+    // partitions may go negative (e.g. when pinSwap applies both a pin delta and an unpin delta
+    // from different partitions to a single partition). Reads in writeMetrics sum all partitions.
+    private final AtomicLong pinnedCount = new AtomicLong();
+    private final AtomicLong hotUnpinned = new AtomicLong();
+    private final AtomicLong hits = new AtomicLong();
+
     Partition(int capacity, Iterable<BlockCache.Val> pool) {
       super(capacity, pool);
     }
@@ -906,7 +913,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private final AtomicLong prepareWriteFailures = new AtomicLong();
   private final LongAdder acquisitions = new LongAdder();
   private final LongAdder poolExhausted = new LongAdder();
-  private final LongAdder pinnedCount = new LongAdder();
   private final LongAdder closedCount = new LongAdder();
   // close(node, false) skipped because the node was already dead (payload null or refCount=-1,
   // meaning it was already evicted by acquireTail before we could explicitly close it).
@@ -914,9 +920,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // close(node, false) skipped because the node was pinned (refCount>0 or in UNPIN_SENTINEL
   // transition). The node will be recycled naturally once all readers unpin it.
   private final LongAdder closeSkippedPinned = new LongAdder();
-  private final LongAdder hits = new LongAdder();
   private final LongAdder hotAcquisitions = new LongAdder();
-  private final LongAdder hotUnpinned = new LongAdder();
   // Synchronous (demand) decompressions: supply() called on the read path in cacheMiss(), meaning
   // the reader had to wait for the block to be fetched and decompressed.
   private final LongAdder blocksDecompressedDemand = new LongAdder();
@@ -939,9 +943,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // successfully pinned it (generation still 0). The caller skips fetch+decompress entirely.
   private final LongAdder warmStartHits = new LongAdder();
 
-  private final LongAdder outstandingHoldRefs = new LongAdder();
-  private final LongAdder outstandingRefs = new LongAdder();
-  private final LongAdder refsCreated = new LongAdder();
+  private final AtomicLongArray outstandingHoldRefs;
+  private final AtomicLongArray refsCollected;
+  private final AtomicLongArray refsCreated;
 
   private volatile SolrMetricsContext solrMetricsContext;
 
@@ -984,6 +988,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         initHoldRefs3(
             nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
     this.holdRefs = initHoldRefs(nPartitions);
+    this.outstandingHoldRefs = new AtomicLongArray(nPartitions);
+    this.refsCollected = new AtomicLongArray(nPartitions);
+    this.refsCreated = new AtomicLongArray(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     this.drainTask = drainExec.submit(this::drain);
     log.info(
@@ -1052,6 +1059,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         initHoldRefs3(
             nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
     this.holdRefs = initHoldRefs(nPartitions);
+    this.outstandingHoldRefs = new AtomicLongArray(nPartitions);
+    this.refsCollected = new AtomicLongArray(nPartitions);
+    this.refsCreated = new AtomicLongArray(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     this.drainTask = drainExec.submit(this::drain);
     log.info(
@@ -1226,10 +1236,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
     Val v = p.getPayload(handle);
     if (rc > 0) {
-      pinnedCount.increment();
-      if (v.fromHot()) hotUnpinned.decrement();
+      p.pinnedCount.incrementAndGet();
+      if (v.fromHot()) p.hotUnpinned.decrementAndGet();
     }
-    hits.increment();
+    p.hits.incrementAndGet();
     return v;
   }
 
@@ -1255,6 +1265,52 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
   }
 
+  /**
+   * Pins {@code newHandle} and unpins {@code oldHandle} in a single operation. Since the pinned
+   * count is net-zero (+1 pin, -1 unpin), the {@code pinnedCount} updates are skipped entirely.
+   * Returns the pinned {@link Val} for the new handle, or {@code null} if the new handle is dead
+   * (the old handle is NOT unpinned in that case — caller retains ownership).
+   */
+  @SuppressWarnings({"ReferenceEquality", "fallthrough"})
+  Val pinSwap(long newHandle, long oldHandle) {
+    // Pin the new handle.
+    Partition np = partitions[partOf(newHandle)];
+    final int rc = np.pin(newHandle);
+    if (rc < 0) {
+      // New handle is dead; caller retains ownership of oldHandle and will unpin it.
+      return null;
+    }
+    int pinnedDelta = 0;
+    int hotUnpinnedDelta = 0;
+    Val v = np.getPayload(newHandle);
+    if (rc > 0) {
+      pinnedDelta++;
+      if (v.fromHot()) hotUnpinnedDelta--;
+    }
+    np.hits.incrementAndGet();
+    // Unpin the old handle, skipping pinnedCount (net zero with the pin above).
+    Partition op = partitions[partOf(oldHandle)];
+    switch (op.unpin(oldHandle, true)) {
+      case 1:
+        hotUnpinnedDelta++;
+        // fallthrough
+      case 0:
+        pinnedDelta--;
+        Val ov = op.getPayload(oldHandle);
+        ByteBuffer cur = ov.cached;
+        if (cur != null && cur != EXCEPTION_SENTINEL) {
+          Val.CACHED.compareAndSet(ov, cur, null);
+        }
+    }
+    if (pinnedDelta != 0) {
+      np.pinnedCount.addAndGet(pinnedDelta);
+    }
+    if (hotUnpinnedDelta != 0) {
+      np.hotUnpinned.addAndGet(hotUnpinnedDelta);
+    }
+    return v;
+  }
+
   /** Releases a pin on the slot identified by {@code handle}. */
   void unpin(long handle) {
     unpin(handle, true);
@@ -1265,10 +1321,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     Partition p = partitions[partOf(handle)];
     switch (p.unpin(handle, recordAccess)) {
       case 1:
-        hotUnpinned.increment();
+        p.hotUnpinned.incrementAndGet();
         // fallthrough
       case 0:
-        pinnedCount.decrement();
+        p.pinnedCount.decrementAndGet();
         // on last unpin, null out the cached ByteBuffer. recreating is cheap.
         Val v = p.getPayload(handle);
         ByteBuffer cur = v.cached;
@@ -1295,10 +1351,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     Val v = p.acquireNode(outHandle);
     if (v != null) {
       acquisitions.increment();
-      pinnedCount.increment();
+      p.pinnedCount.incrementAndGet();
       if (v.fromHot()) {
         hotAcquisitions.increment();
-        hotUnpinned.decrement();
+        p.hotUnpinned.decrementAndGet();
       }
       if (alwaysPrepareWrite || (outHandle[0] >>> 32) > 1) {
         int ret = mapping.prepareWrite(v.cacheBlockOrd);
@@ -1378,14 +1434,21 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   public void writeMetrics(MapWriter.EntryWriter ew) throws IOException {
     long prep = prepopulated.sum();
-    long pinnedBytes = pinnedCount.sum() * COMPRESSION_BLOCK_SIZE;
-    long h = hits.sum();
+    long pinned = 0, hotUnpin = 0, h = 0;
+    for (Partition p : partitions) {
+      pinned += p.pinnedCount.get();
+      hotUnpin += p.hotUnpinned.get();
+      h += p.hits.get();
+    }
+    long refsCreatedSnapshot = sumArray(refsCreated);
+    long outstandingRefs = refsCreatedSnapshot - sumArray(refsCollected);
+    long pinnedBytes = pinned * COMPRESSION_BLOCK_SIZE;
     long acq = acquisitions.sum();
     long misses = acq - prep;
-    long hotUnpinnedBytes = hotUnpinned.sum() * COMPRESSION_BLOCK_SIZE;
-    ew.put("outstandingHoldRefs", outstandingHoldRefs.sum());
-    ew.put("outstandingRefs", outstandingRefs.sum());
-    ew.put("refsCreated", refsCreated.sum());
+    long hotUnpinnedBytes = hotUnpin * COMPRESSION_BLOCK_SIZE;
+    ew.put("outstandingHoldRefs", sumArray(outstandingHoldRefs));
+    ew.put("outstandingRefs", outstandingRefs);
+    ew.put("refsCreated", refsCreatedSnapshot);
     ew.put("totalBytes", totalBytes);
     ew.put("closedCount", closedCount.sum());
     ew.put("closeSkippedDead", closeSkippedDead.sum());
@@ -1495,7 +1558,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       boolean fromHot = v.fromHot();
       switch (p.close(handle)) {
         case 0:
-          if (fromHot) hotUnpinned.decrement();
+          if (fromHot) p.hotUnpinned.decrementAndGet();
           break;
         case -1:
           closeSkippedDead.increment();
@@ -1509,7 +1572,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       closeSkippedPinned.increment();
       return false;
     } else {
-      pinnedCount.decrement();
+      p.pinnedCount.decrementAndGet();
       p.closeUnconditional(handle);
     }
     closedCount.increment();
@@ -1518,6 +1581,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private int tlrIndex() {
     return ThreadLocalRandom.current().nextInt(nPartitions);
+  }
+
+  private static long sumArray(AtomicLongArray a) {
+    long sum = 0;
+    for (int i = 0, len = a.length(); i < len; i++) {
+      sum += a.get(i);
+    }
+    return sum;
   }
 
   /**

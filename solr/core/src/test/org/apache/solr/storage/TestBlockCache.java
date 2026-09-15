@@ -323,14 +323,24 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                   try {
                     byte[] sentinelBuf = new byte[Integer.BYTES];
                     long[] nodeHandle = new long[1];
+                    long prevHandle = BlockCache.NULL_HANDLE;
                     while (!finished.get()) {
                       int slotIdx = r.nextInt(nSlots);
 
                       // --- Cache hit path: try to pin the existing node ---
                       long existing = slots.get(slotIdx);
                       BlockCache.Val existingVal = null;
-                      if (existing != BlockCache.NULL_HANDLE
-                          && (existingVal = cache.pin(existing)) != null) {
+                      if (existing != BlockCache.NULL_HANDLE) {
+                        // Use pinSwap when we have a previously pinned handle; plain pin otherwise.
+                        if (prevHandle != BlockCache.NULL_HANDLE) {
+                          existingVal = cache.pinSwap(existing, prevHandle);
+                          if (existingVal == null) cache.unpin(prevHandle);
+                          prevHandle = BlockCache.NULL_HANDLE;
+                        } else {
+                          existingVal = cache.pin(existing);
+                        }
+                      }
+                      if (existingVal != null) {
                         hits.increment();
                         // Verify that the sentinel written at acquire time is intact.
                         assertEquals(slotIdx, existingVal.join(cache, null).getInt(0));
@@ -342,10 +352,16 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                             closed.increment();
                           }
                           // If CAS lost the race, another thread updated the slot; just move on.
+                        } else if (r.nextBoolean()) {
+                          // Defer unpin: hold pin until next iteration's pinSwap.
+                          prevHandle = existing;
                         } else {
                           cache.unpin(existing);
                         }
                         continue;
+                      }
+                      if (existing != BlockCache.NULL_HANDLE) {
+                        // pin or pinSwap failed (stale handle); prevHandle already cleared above.
                       }
 
                       // --- Cache miss path: acquire a new node (evicts LRU if needed) ---
@@ -365,6 +381,10 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                       if (prev != BlockCache.NULL_HANDLE) {
                         misses.increment();
                       }
+                    }
+                    // Clean up any deferred pin.
+                    if (prevHandle != BlockCache.NULL_HANDLE) {
+                      cache.unpin(prevHandle);
                     }
                   } catch (Throwable t) {
                     failed.set(true);
