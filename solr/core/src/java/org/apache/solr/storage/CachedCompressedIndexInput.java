@@ -450,7 +450,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     if (blockIdx > lastBlockIdx) throw new EOFException();
     ByteBuffer owned = ownedBufferFor(blockIdx);
     if (owned != null) {
-      currentNodeRef = OWNED_BLOCK_ZERO;
+      if (lastBlockIdx == 0) {
+        // Single-block file: skip registration, use singleton.
+        currentNodeRef = OWNED_BLOCK_ZERO;
+      } else {
+        setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, -1);
+      }
       postBuffer = owned;
       postBufferBaseline = 0;
       longViews = null;
