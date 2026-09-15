@@ -96,7 +96,8 @@ public class DistribJoinFromCollectionTest extends SolrCloudTestCase {
     toDocId = indexDoc(toColl, 1001, "a", null, "b");
     indexDoc(fromColl, 2001, "a", "c", null);
 
-    Thread.sleep(1000); // so the commits fire
+    cluster.getSolrClient().commit(toColl);
+    cluster.getSolrClient().commit(fromColl);
   }
 
   @Test

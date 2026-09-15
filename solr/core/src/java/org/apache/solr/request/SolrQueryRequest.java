@@ -20,6 +20,8 @@ import io.opentracing.Span;
 import io.opentracing.Tracer;
 import io.opentracing.noop.NoopSpan;
 import io.opentracing.util.GlobalTracer;
+import java.io.Closeable;
+import java.io.IOException;
 import java.security.Principal;
 import java.util.Collections;
 import java.util.List;
@@ -59,6 +61,18 @@ public interface SolrQueryRequest extends AutoCloseable {
    * it's more suitable for logging.
    */
   SolrParams getOriginalParams();
+
+  /**
+   * Values inserted in the map returned from {@link #getContext()} may implement this interface to
+   * receive a callback upon request close. NOTE: this does not extend {@link Closeable} or similar,
+   * because this is intended to be a "best effort" callback. Implementers should not rely on this
+   * necessarily being closed for correct application behavior.
+   */
+  interface RequestCloseAware {
+    void onRequestClose(long startNanos) throws IOException;
+  }
+
+  default void beforeRequestClose(long startNanos) {}
 
   /** Generic information associated with this request that may be both read and updated. */
   Map<Object, Object> getContext();
