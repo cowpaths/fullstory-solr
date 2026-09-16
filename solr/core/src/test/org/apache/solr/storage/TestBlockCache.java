@@ -19,6 +19,7 @@ package org.apache.solr.storage;
 import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZE;
 
 import java.io.IOException;
+import org.apache.lucene.store.AlreadyClosedException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
@@ -156,7 +157,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
    */
   public void testWarmStartStress() throws Exception {
     final int nBlocks = 4;
-    final int N = 8;
+    final int N = 12;
     final int ITERS = 1000;
 
     Path tmpDir = createTempDir();
@@ -204,42 +205,49 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                   BlockCache cache;
                   p.arriveAndAwaitAdvance();
                   while ((cache = c.get()) != null) {
-                    for (int iter = 0; iter < 128; iter++) {
-                      int idx = r.nextInt(valCount);
-                      UUID uuid = new UUID(0, idx);
-                      long handle = handles.get(idx);
-                      BlockCache.Val v;
-                      if (handle != BlockCache.NULL_HANDLE && (v = cache.pin(handle)) != null) {
-                        ByteBuffer join = v.join(cache, null);
-                        assertEquals(idx, join.getInt(0));
-                        cache.unpin(handle);
-                      } else {
-                        v = cache.acquireNode(h, uuid, 0);
-                        if (v != null) {
-                          long extant = handles.compareAndExchange(idx, handle, h[0]);
-                          if (extant == handle) {
-                            handle = h[0];
-                            if (v.isPopulated()) {
+                    try {
+                      for (int iter = 0; iter < 128; iter++) {
+                        int idx = r.nextInt(valCount);
+                        UUID uuid = new UUID(0, idx);
+                        long handle = handles.get(idx);
+                        BlockCache.Val v;
+                        if (handle != BlockCache.NULL_HANDLE && (v = cache.pin(handle)) != null) {
+                          ByteBuffer join = v.join(cache, null);
+                          assertEquals(idx, join.getInt(0));
+                          cache.unpin(handle);
+                        } else {
+                          v = cache.acquireNode(h, uuid, 0);
+                          if (v != null) {
+                            long extant = handles.compareAndExchange(idx, handle, h[0]);
+                            if (extant == handle) {
+                              handle = h[0];
+                              if (v.isPopulated()) {
+                                ByteBuffer join = v.join(cache, null);
+                                assertEquals(idx, join.getInt(0));
+                              } else {
+                                byte[] arr =
+                                    ByteBuffer.allocate(Integer.BYTES).putInt(0, idx).array();
+                                v.populate(arr, 0, Integer.BYTES, uuid, 0, cache);
+                              }
+                            } else {
+                              cache.close(h[0], v);
+                              v = cache.pin(extant);
+                              if (v == null) {
+                                continue; // whatever
+                              }
+                              handle = extant;
                               ByteBuffer join = v.join(cache, null);
                               assertEquals(idx, join.getInt(0));
-                            } else {
-                              byte[] arr =
-                                  ByteBuffer.allocate(Integer.BYTES).putInt(0, idx).array();
-                              v.populate(arr, 0, Integer.BYTES, uuid, 0, cache);
                             }
-                          } else {
-                            cache.close(h[0], v);
-                            v = cache.pin(extant);
-                            if (v == null) {
-                              continue; // whatever
-                            }
-                            handle = extant;
-                            ByteBuffer join = v.join(cache, null);
-                            assertEquals(idx, join.getInt(0));
+                            cache.unpin(handle);
                           }
-                          cache.unpin(handle);
                         }
                       }
+                    } catch (AlreadyClosedException e) {
+                      // Main thread closed the cache between c.get() and our operation.
+                      // benign, and in fact expected, because we're repeatedly closing
+                      // these caches out-of-band.
+                      throw e;
                     }
                     p.arriveAndAwaitAdvance();
                     p.arriveAndAwaitAdvance();
@@ -267,7 +275,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
           handles.set(k, BlockCache.NULL_HANDLE);
         }
         c.set(new BlockCache(cachePath));
-        p.arrive();
+        p.arriveAndAwaitAdvance();
       }
     }
     for (Future<?> f : futures) {
