@@ -447,7 +447,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     private static final int MAX_BATCH_SIZE = 10_000;
     private final long threadId;
     private final List<NodeRefStruct> toClose = new ArrayList<>();
-    private volatile boolean associatedRequestClosed = false;
+
+    /**
+     * NOTE: non-volatile, best-effort is fine, and for many common cases we're already protected
+     * by thread id checks, so this field mainly protects against same-thread access anyway, where
+     * volatile doesn't even matter.
+     */
+    private boolean associatedRequestClosed = false;
 
     private Batch(
         Object referrent,
