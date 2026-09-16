@@ -679,14 +679,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     int partIdx = tlrIndex();
     Object referent;
     Batch batch = in.getInheritedBatch();
-    if (batch != null && batch.getLiveReferent(Thread.currentThread().getId()) != null) {
-      // Fastest path: reuse cached batch if still associated with a live request.
-      nrs = new NodeRefStruct();
-      synchronized (batch.toClose) {
-        batch.toClose.add(nrs);
-      }
-    } else if ((batch = cachedBatch.get()) != null
-        && (referent = batch.getLiveReferent(-1L)) != null) {
+    if ((batch != null
+            && (referent = batch.getLiveReferent(Thread.currentThread().getId())) != null)
+        || ((batch = cachedBatch.get()) != null
+            && (referent = batch.getLiveReferent(-1L)) != null)) {
       // Fast path: reuse ThreadLocal cached batch if still associated with a live request.
       in.setBatchReferrent((LongAdder) referent, batch);
       nrs = new NodeRefStruct();
