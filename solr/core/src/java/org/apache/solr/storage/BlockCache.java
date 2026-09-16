@@ -1337,7 +1337,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       if (v.fromHot()) hotUnpinnedDelta--;
     }
     np.hits.incrementAndGet();
-    // Unpin the old handle, skipping pinnedCount (net zero with the pin above).
+    // Unpin the old handle
     Partition op = partitions[partOf(oldHandle)];
     switch (op.unpin(oldHandle, true)) {
       case 1:
