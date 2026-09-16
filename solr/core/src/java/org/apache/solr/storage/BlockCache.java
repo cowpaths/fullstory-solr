@@ -938,9 +938,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     // per-partition metrics. Only the global sum across all partitions is meaningful. Individual
     // partitions may go negative (e.g. when pinSwap applies both a pin delta and an unpin delta
     // from different partitions to a single partition). Reads in writeMetrics sum all partitions.
-    private final AtomicLong pinnedCount = new AtomicLong();
-    private final AtomicLong hotUnpinned = new AtomicLong();
-    private final AtomicLong hits = new AtomicLong();
+    private final LongAdder pinnedCount = new LongAdder();
+    private final LongAdder hotUnpinned = new LongAdder();
+    private final LongAdder hits = new LongAdder();
 
     Partition(int capacity, Iterable<BlockCache.Val> pool) {
       super(capacity, pool);
@@ -1285,10 +1285,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
     Val v = p.getPayload(handle);
     if (rc > 0) {
-      p.pinnedCount.incrementAndGet();
-      if (v.fromHot()) p.hotUnpinned.decrementAndGet();
+      p.pinnedCount.increment();
+      if (v.fromHot()) p.hotUnpinned.decrement();
     }
-    p.hits.incrementAndGet();
+    p.hits.increment();
     return v;
   }
 
@@ -1336,7 +1336,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       pinnedDelta++;
       if (v.fromHot()) hotUnpinnedDelta--;
     }
-    np.hits.incrementAndGet();
+    np.hits.increment();
     // Unpin the old handle
     Partition op = partitions[partOf(oldHandle)];
     switch (op.unpin(oldHandle, true)) {
@@ -1352,10 +1352,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         }
     }
     if (pinnedDelta != 0) {
-      np.pinnedCount.addAndGet(pinnedDelta);
+      np.pinnedCount.add(pinnedDelta);
     }
     if (hotUnpinnedDelta != 0) {
-      np.hotUnpinned.addAndGet(hotUnpinnedDelta);
+      np.hotUnpinned.add(hotUnpinnedDelta);
     }
     return v;
   }
@@ -1370,10 +1370,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     Partition p = partitions[partOf(handle)];
     switch (p.unpin(handle, recordAccess)) {
       case 1:
-        p.hotUnpinned.incrementAndGet();
+        p.hotUnpinned.increment();
         // fallthrough
       case 0:
-        p.pinnedCount.decrementAndGet();
+        p.pinnedCount.decrement();
         // on last unpin, null out the cached ByteBuffer. recreating is cheap.
         Val v = p.getPayload(handle);
         ByteBuffer cur = v.cached;
@@ -1400,10 +1400,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     Val v = p.acquireNode(outHandle);
     if (v != null) {
       acquisitions.increment();
-      p.pinnedCount.incrementAndGet();
+      p.pinnedCount.increment();
       if (v.fromHot()) {
         hotAcquisitions.increment();
-        p.hotUnpinned.decrementAndGet();
+        p.hotUnpinned.decrement();
       }
       if (alwaysPrepareWrite || (outHandle[0] >>> 32) > 1) {
         int ret = mapping.prepareWrite(v.cacheBlockOrd);
@@ -1485,9 +1485,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     long prep = prepopulated.sum();
     long pinned = 0, hotUnpin = 0, h = 0;
     for (Partition p : partitions) {
-      pinned += p.pinnedCount.get();
-      hotUnpin += p.hotUnpinned.get();
-      h += p.hits.get();
+      pinned += p.pinnedCount.sum();
+      hotUnpin += p.hotUnpinned.sum();
+      h += p.hits.sum();
     }
     long refsCreatedSnapshot = sumArray(refsCreated);
     long outstandingRefs = refsCreatedSnapshot - sumArray(refsCollected);
@@ -1607,7 +1607,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       boolean fromHot = v.fromHot();
       switch (p.close(handle)) {
         case 0:
-          if (fromHot) p.hotUnpinned.decrementAndGet();
+          if (fromHot) p.hotUnpinned.decrement();
           break;
         case -1:
           closeSkippedDead.increment();
@@ -1621,7 +1621,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       closeSkippedPinned.increment();
       return false;
     } else {
-      p.pinnedCount.decrementAndGet();
+      p.pinnedCount.decrement();
       p.closeUnconditional(handle);
     }
     closedCount.increment();
