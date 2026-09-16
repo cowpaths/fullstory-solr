@@ -470,8 +470,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       associatedRequestClosed = true;
     }
 
-    Object getLiveReferent(long threadId) {
-      if (associatedRequestClosed || (threadId >= 0 && threadId != this.threadId)) {
+    Object getLiveReferent(boolean checkThread) {
+      if (associatedRequestClosed || (checkThread && Thread.currentThread().getId() != this.threadId)) {
         return null;
       } else if (toClose.size() > MAX_BATCH_SIZE) {
         // mark the request as closed. This is probably semantically true anyway, but
@@ -685,9 +685,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     Object referent;
     Batch batch = in.getInheritedBatch();
     if ((batch != null
-            && (referent = batch.getLiveReferent(Thread.currentThread().getId())) != null)
+            && (referent = batch.getLiveReferent(true)) != null)
         || ((batch = cachedBatch.get()) != null
-            && (referent = batch.getLiveReferent(-1L)) != null)) {
+            && (referent = batch.getLiveReferent(false)) != null)) {
       // Fast path: reuse ThreadLocal cached batch if still associated with a live request.
       in.setBatchReferrent((LongAdder) referent, batch);
       nrs = new NodeRefStruct();
@@ -695,9 +695,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         batch.toClose.add(nrs);
       }
     } else {
-      if (batch != null) {
-        cachedBatch.remove();
-      }
       SolrRequestInfo sri;
       SolrQueryRequest req;
       if ((sri = SolrRequestInfo.getRequestInfo()) != null && (req = sri.getReq()) != null) {
@@ -713,6 +710,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         }
         cachedBatch.set(b.batch);
       } else {
+        if (batch != null) {
+          cachedBatch.remove();
+        }
         Cache3<HoldRef> p = holdRefs3[partIdx];
         int slot = p.acquire();
         if (slot != Cache3.NULL_SLOT) {
