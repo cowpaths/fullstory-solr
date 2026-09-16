@@ -471,9 +471,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
 
     Object getLiveReferent(long threadId) {
-      if (associatedRequestClosed
-          || (threadId >= 0 && threadId != this.threadId)
-          || toClose.size() > MAX_BATCH_SIZE) {
+      if (associatedRequestClosed || (threadId >= 0 && threadId != this.threadId)) {
+        return null;
+      } else if (toClose.size() > MAX_BATCH_SIZE) {
+        // mark the request as closed. This is probably semantically true anyway, but
+        // practically it also limits logging below, and shortcircuits any subsequent
+        // calls to `getLiveReferent()`.
+        associatedRequestClosed = true;
+        log.warn("Batch exceeded MAX_BATCH_SIZE ({}); likely leaked request", MAX_BATCH_SIZE);
         return null;
       } else {
         return get();

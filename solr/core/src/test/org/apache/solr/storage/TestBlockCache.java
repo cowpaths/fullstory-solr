@@ -19,7 +19,6 @@ package org.apache.solr.storage;
 import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZE;
 
 import java.io.IOException;
-import org.apache.lucene.store.AlreadyClosedException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
@@ -35,6 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
+import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.util.IOUtils;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.util.ExecutorUtil;
