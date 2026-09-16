@@ -449,8 +449,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     private final List<NodeRefStruct> toClose = new ArrayList<>();
 
     /**
-     * NOTE: non-volatile, best-effort is fine, and for many common cases we're already protected
-     * by thread id checks, so this field mainly protects against same-thread access anyway, where
+     * NOTE: non-volatile, best-effort is fine, and for many common cases we're already protected by
+     * thread id checks, so this field mainly protects against same-thread access anyway, where
      * volatile doesn't even matter.
      */
     private boolean associatedRequestClosed = false;
@@ -477,7 +477,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
 
     Object getLiveReferent(boolean checkThread) {
-      if (associatedRequestClosed || (checkThread && Thread.currentThread().getId() != this.threadId)) {
+      if (associatedRequestClosed
+          || (checkThread && Thread.currentThread().getId() != this.threadId)) {
         return null;
       } else if (toClose.size() > MAX_BATCH_SIZE) {
         // mark the request as closed. This is probably semantically true anyway, but
@@ -690,8 +691,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     int partIdx = tlrIndex();
     Object referent;
     Batch batch = in.getInheritedBatch();
-    if ((batch != null
-            && (referent = batch.getLiveReferent(true)) != null)
+    if ((batch != null && (referent = batch.getLiveReferent(true)) != null)
         || ((batch = cachedBatch.get()) != null
             && (referent = batch.getLiveReferent(false)) != null)) {
       // Fast path: reuse ThreadLocal cached batch if still associated with a live request.
