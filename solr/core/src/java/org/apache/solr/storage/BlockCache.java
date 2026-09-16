@@ -440,6 +440,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   static final class Batch extends RetainedRef<Object>
       implements SolrQueryRequest.RequestCloseAware {
 
+    // Failsafe: if onRequestClose() never fires (request leak), the cached batch paths
+    // (ThreadLocal and inherited) could feed registrations from subsequent requests into this
+    // batch's toClose list indefinitely. Cap the size so getLiveReferent() returns null and
+    // falls through to the full SolrRequestInfo lookup path.
+    private static final int MAX_BATCH_SIZE = 10_000;
     private final long threadId;
     private final List<NodeRefStruct> toClose = new ArrayList<>();
     private volatile boolean associatedRequestClosed = false;
@@ -466,7 +471,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
 
     Object getLiveReferent(long threadId) {
-      if (associatedRequestClosed || (threadId >= 0 && threadId != this.threadId)) {
+      if (associatedRequestClosed
+          || (threadId >= 0 && threadId != this.threadId)
+          || toClose.size() > MAX_BATCH_SIZE) {
         return null;
       } else {
         return get();
