@@ -556,7 +556,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     @Override
     public void onRequestClose(long startNanos) {
-      if (USE_CACHED_BATCH) cachedBatch.remove();
+      cachedBatch.remove();
       batch.onRequestClose(startNanos);
       long cacheMissLatencyNanos = missLatencyNanos.sum();
       if (cacheMissLatencyNanos > 0) {
@@ -675,9 +675,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   private final long[] extantMap;
 
-  private static final boolean USE_CACHED_BATCH =
-      EnvUtils.getPropertyAsBool("solr.blockCache.useCachedBatch", true);
-
   /**
    * Registers a {@link WeakReference} to the specified {@link IndexInput}. The {@link
    * WeakReference} carries a strong reference to the associated specified {@link NodeRefStruct},
@@ -687,24 +684,24 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * by it and remove the strong ref to the {@link WeakReference}, thereby pruning pointless
    * references.
    */
-  private static final ThreadLocal<Batch> cachedBatch =
-      USE_CACHED_BATCH ? new ThreadLocal<>() : null;
+  private static final ThreadLocal<Batch> cachedBatch = new ThreadLocal<>();
 
   // Diagnostic counters for register() path frequency.
-  private final LongAdder registerFastPath = new LongAdder();
+  private final LongAdder registerInherited = new LongAdder();
+  private final LongAdder registerCachedBatch = new LongAdder();
   private final LongAdder registerSlowPath = new LongAdder();
   private final LongAdder registerNoRequest = new LongAdder();
 
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
-    Object referent;
+    Object referent = null;
     Batch batch = in.getInheritedBatch();
-    if ((batch != null && (referent = batch.getLiveReferent(true)) != null)
-        || (USE_CACHED_BATCH
-            && (batch = cachedBatch.get()) != null
+    boolean inherited;
+    if ((inherited = (batch != null && (referent = batch.getLiveReferent(true)) != null))
+        || ((batch = cachedBatch.get()) != null
             && (referent = batch.getLiveReferent(false)) != null)) {
       // Fast path: reuse cached batch if still associated with a live request.
-      registerFastPath.increment();
+      (inherited ? registerInherited : registerCachedBatch).increment();
       in.setBatchReferrent((LongAdder) referent, batch);
       nrs = new NodeRefStruct();
       synchronized (batch.toClose) {
@@ -725,10 +722,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         synchronized (b.batch.toClose) {
           b.batch.toClose.add(nrs);
         }
-        if (USE_CACHED_BATCH) cachedBatch.set(b.batch);
+        cachedBatch.set(b.batch);
       } else {
         registerNoRequest.increment();
-        if (USE_CACHED_BATCH && batch != null) {
+        if (batch != null) {
           cachedBatch.remove();
         }
         int partIdx = tlrIndex();
@@ -1465,7 +1462,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     ew.put("outstandingHoldRefs", outstandingHoldRefs.sum());
     ew.put("outstandingRefs", outstandingRefs);
     ew.put("refsCreated", refsCreatedSnapshot);
-    ew.put("registerFastPath", registerFastPath.sum());
+    ew.put("registerInherited", registerInherited.sum());
+    ew.put("registerCachedBatch", registerCachedBatch.sum());
     ew.put("registerSlowPath", registerSlowPath.sum());
     ew.put("registerNoRequest", registerNoRequest.sum());
     ew.put("totalBytes", totalBytes);
