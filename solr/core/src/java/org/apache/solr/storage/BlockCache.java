@@ -693,7 +693,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     if ((batch != null && (referent = batch.getLiveReferent(true)) != null)
         || ((batch = cachedBatch.get()) != null
             && (referent = batch.getLiveReferent(false)) != null)) {
-      // Fast path: reuse ThreadLocal cached batch if still associated with a live request.
+      // Fast path: reuse cached batch if still associated with a live request.
       in.setBatchReferrent((LongAdder) referent, batch);
       nrs = new NodeRefStruct();
       synchronized (batch.toClose) {
@@ -1312,52 +1312,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       v.maybeLoadHint(this, loadHintLen);
       return true;
     }
-  }
-
-  /**
-   * Pins {@code newHandle} and unpins {@code oldHandle} in a single operation. Since the pinned
-   * count is net-zero (+1 pin, -1 unpin), the {@code pinnedCount} updates are skipped entirely.
-   * Returns the pinned {@link Val} for the new handle, or {@code null} if the new handle is dead
-   * (the old handle is NOT unpinned in that case — caller retains ownership).
-   */
-  @SuppressWarnings({"ReferenceEquality", "fallthrough"})
-  Val pinSwap(long newHandle, long oldHandle) {
-    // Pin the new handle.
-    Partition np = partitions[partOf(newHandle)];
-    final int rc = np.pin(newHandle);
-    if (rc < 0) {
-      // New handle is dead; caller retains ownership of oldHandle and will unpin it.
-      return null;
-    }
-    int pinnedDelta = 0;
-    int hotUnpinnedDelta = 0;
-    Val v = np.getPayload(newHandle);
-    if (rc > 0) {
-      pinnedDelta++;
-      if (v.fromHot()) hotUnpinnedDelta--;
-    }
-    np.hits.increment();
-    // Unpin the old handle
-    Partition op = partitions[partOf(oldHandle)];
-    switch (op.unpin(oldHandle, true)) {
-      case 1:
-        hotUnpinnedDelta++;
-        // fallthrough
-      case 0:
-        pinnedDelta--;
-        Val ov = op.getPayload(oldHandle);
-        ByteBuffer cur = ov.cached;
-        if (cur != null && cur != EXCEPTION_SENTINEL) {
-          Val.CACHED.compareAndSet(ov, cur, null);
-        }
-    }
-    if (pinnedDelta != 0) {
-      np.pinnedCount.add(pinnedDelta);
-    }
-    if (hotUnpinnedDelta != 0) {
-      np.hotUnpinned.add(hotUnpinnedDelta);
-    }
-    return v;
   }
 
   /** Releases a pin on the slot identified by {@code handle}. */

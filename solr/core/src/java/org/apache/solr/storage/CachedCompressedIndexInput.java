@@ -471,27 +471,16 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       return;
     }
     long cached = accessMapped.get(blockIdx);
-    if (cached == BlockCache.NULL_HANDLE) {
+    boolean uninitialized;
+    BlockCache.Val cachedVal;
+    if ((uninitialized = cached == BlockCache.NULL_HANDLE)
+        || (cachedVal = cache.pin(cached)) == null) {
+      if (!uninitialized) {
+        cache.recordFailedPin();
+      }
       cacheMiss(cached, blockIdx);
     } else {
-      // Try pinSwap if we have a currently pinned node; fall back to plain pin.
-      NodeRefStruct ref = nodeRef();
-      long oldNode = ref.currentNode;
-      BlockCache.Val cachedVal;
-      if (oldNode != BlockCache.NULL_HANDLE) {
-        cachedVal = cache.pinSwap(cached, oldNode);
-        if (cachedVal != null) {
-          ref.currentNode = BlockCache.NULL_HANDLE; // unpin already done by pinSwap
-        }
-      } else {
-        cachedVal = cache.pin(cached);
-      }
-      if (cachedVal == null) {
-        cache.recordFailedPin();
-        cacheMiss(cached, blockIdx);
-      } else {
-        cacheHit(blockIdx, cached, cachedVal, 0);
-      }
+      cacheHit(blockIdx, cached, cachedVal, 0);
     }
   }
 
