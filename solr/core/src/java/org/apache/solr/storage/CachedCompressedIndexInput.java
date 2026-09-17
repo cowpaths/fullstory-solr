@@ -113,7 +113,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private int postBufferBaseline;
   private NodeRefStruct currentNodeRef = UNINITIALIZED;
   private LongAdder batchReferrent;
-  private BlockCache.Batch inheritedBatch;
 
   private LongBuffer[] longViews;
   private IntBuffer[] intViews;
@@ -339,7 +338,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
             ? sliceFirstBlockIdx
             : Math.toIntExact((this.offset + sliceLen - 1) >> COMPRESSION_BLOCK_SHIFT);
     this.logicalRoot = logicalRoot;
-    this.inheritedBatch = parent.inheritedBatch;
   }
 
   // ---------------------------------------------------------------------------
@@ -364,13 +362,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  void setBatchReferrent(LongAdder batchReferrent, BlockCache.Batch batch) {
+  void setBatchReferrent(LongAdder batchReferrent) {
     this.batchReferrent = batchReferrent;
-    this.inheritedBatch = batch;
-  }
-
-  BlockCache.Batch getInheritedBatch() {
-    return inheritedBatch;
   }
 
   private NodeRefStruct nodeRef() {

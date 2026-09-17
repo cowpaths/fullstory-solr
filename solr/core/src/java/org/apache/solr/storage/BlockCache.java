@@ -437,15 +437,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     abstract void doCloseFor(BlockCache cache);
   }
 
-  static final class Batch extends RetainedRef<Object>
+  private static final class Batch extends RetainedRef<Object>
       implements SolrQueryRequest.RequestCloseAware {
 
-    // Failsafe: if onRequestClose() never fires (request leak), the cached batch paths
-    // (ThreadLocal and inherited) could feed registrations from subsequent requests into this
-    // batch's toClose list indefinitely. Cap the size so getLiveReferent() returns null and
-    // falls through to the full SolrRequestInfo lookup path.
+    // Failsafe: if onRequestClose() never fires (request leak), the cached ThreadLocal batch
+    // could feed registrations from subsequent requests into this batch's toClose list
+    // indefinitely. Cap the size so getLiveReferent() returns null and falls through to the
+    // full SolrRequestInfo lookup path.
     private static final int MAX_BATCH_SIZE = 10_000;
-    private final long threadId;
     private final List<NodeRefStruct> toClose = new ArrayList<>();
 
     /**
@@ -461,7 +460,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         Cache.Node<?> remove,
         long cache3Handle) {
       super(referrent, q, remove, cache3Handle);
-      this.threadId = Thread.currentThread().getId();
     }
 
     @Override
@@ -476,9 +474,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       associatedRequestClosed = true;
     }
 
-    Object getLiveReferent(boolean checkThread) {
-      if (associatedRequestClosed
-          || (checkThread && Thread.currentThread().getId() != this.threadId)) {
+    Object getLiveReferent() {
+      if (associatedRequestClosed) {
         return null;
       } else if (toClose.size() > MAX_BATCH_SIZE) {
         // mark the request as closed. This is probably semantically true anyway, but
@@ -686,23 +683,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   private static final ThreadLocal<Batch> cachedBatch = new ThreadLocal<>();
 
-  // Diagnostic counters for register() path frequency.
-  private final LongAdder registerInherited = new LongAdder();
-  private final LongAdder registerCachedBatch = new LongAdder();
-  private final LongAdder registerSlowPath = new LongAdder();
-  private final LongAdder registerNoRequest = new LongAdder();
-
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
-    Object referent = null;
-    Batch batch = in.getInheritedBatch();
-    boolean inherited;
-    if ((inherited = (batch != null && (referent = batch.getLiveReferent(true)) != null))
-        || ((batch = cachedBatch.get()) != null
-            && (referent = batch.getLiveReferent(false)) != null)) {
+    Object referent;
+    Batch batch = cachedBatch.get();
+    if (batch != null && (referent = batch.getLiveReferent()) != null) {
       // Fast path: reuse cached batch if still associated with a live request.
-      (inherited ? registerInherited : registerCachedBatch).increment();
-      in.setBatchReferrent((LongAdder) referent, batch);
+      in.setBatchReferrent((LongAdder) referent);
       nrs = new NodeRefStruct();
       synchronized (batch.toClose) {
         batch.toClose.add(nrs);
@@ -711,20 +698,18 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       SolrRequestInfo sri;
       SolrQueryRequest req;
       if ((sri = SolrRequestInfo.getRequestInfo()) != null && (req = sri.getReq()) != null) {
-        registerSlowPath.increment();
         Map<Object, Object> ctx = req.getContext();
         BatchEntry b;
         synchronized (ctx) {
           b = (BatchEntry) ctx.computeIfAbsent(referentKey, batchInitFunction);
         }
-        in.setBatchReferrent(b.missLatencyNanos, b.batch);
+        in.setBatchReferrent(b.missLatencyNanos);
         nrs = new NodeRefStruct();
         synchronized (b.batch.toClose) {
           b.batch.toClose.add(nrs);
         }
         cachedBatch.set(b.batch);
       } else {
-        registerNoRequest.increment();
         if (batch != null) {
           cachedBatch.remove();
         }
@@ -1462,10 +1447,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     ew.put("outstandingHoldRefs", outstandingHoldRefs.sum());
     ew.put("outstandingRefs", outstandingRefs);
     ew.put("refsCreated", refsCreatedSnapshot);
-    ew.put("registerInherited", registerInherited.sum());
-    ew.put("registerCachedBatch", registerCachedBatch.sum());
-    ew.put("registerSlowPath", registerSlowPath.sum());
-    ew.put("registerNoRequest", registerNoRequest.sum());
     ew.put("totalBytes", totalBytes);
     ew.put("closedCount", closedCount.sum());
     ew.put("closeSkippedDead", closeSkippedDead.sum());
