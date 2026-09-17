@@ -213,7 +213,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final ByteBuffer EXCEPTION_SENTINEL = ByteBuffer.allocate(0);
 
   public void decrementOutstandingRefs() {
-    refsCollected.incrementAndGet(tlrIndex());
+    refsCollected.increment();
   }
 
   /**
@@ -429,7 +429,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       if (claimed) {
         doCloseFor(cache);
         if (snapshot != -3) {
-          cache.outstandingHoldRefs.decrementAndGet(cache.tlrIndex());
+          cache.outstandingHoldRefs.decrement();
         }
       }
     }
@@ -617,7 +617,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       holdRefs[partIdx].add(n);
       ret = (Batch) n.getPayload();
     }
-    outstandingHoldRefs.incrementAndGet(partIdx);
+    outstandingHoldRefs.increment();
     return new BatchEntry(referent, ret, perRequestDemandTime);
   }
 
@@ -688,7 +688,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
-    int partIdx = tlrIndex();
     Object referent;
     Batch batch = in.getInheritedBatch();
     if ((batch != null && (referent = batch.getLiveReferent(true)) != null)
@@ -719,6 +718,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         if (batch != null) {
           cachedBatch.remove();
         }
+        int partIdx = tlrIndex();
         Cache3<HoldRef> p = holdRefs3[partIdx];
         int slot = p.acquire();
         if (slot != Cache3.NULL_SLOT) {
@@ -730,10 +730,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           holdRefs[partIdx].add(n);
           nrs = (NodeRefStruct) n.getPayload();
         }
-        outstandingHoldRefs.incrementAndGet(partIdx);
+        outstandingHoldRefs.increment();
       }
     }
-    refsCreated.incrementAndGet(partIdx);
+    refsCreated.increment();
     return nrs;
   }
 
@@ -998,9 +998,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // successfully pinned it (generation still 0). The caller skips fetch+decompress entirely.
   private final LongAdder warmStartHits = new LongAdder();
 
-  private final AtomicLongArray outstandingHoldRefs;
-  private final AtomicLongArray refsCollected;
-  private final AtomicLongArray refsCreated;
+  private final LongAdder outstandingHoldRefs = new LongAdder();
+  private final LongAdder refsCollected = new LongAdder();
+  private final LongAdder refsCreated = new LongAdder();
 
   private volatile SolrMetricsContext solrMetricsContext;
 
@@ -1043,9 +1043,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         initHoldRefs3(
             nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
     this.holdRefs = initHoldRefs(nPartitions);
-    this.outstandingHoldRefs = new AtomicLongArray(nPartitions);
-    this.refsCollected = new AtomicLongArray(nPartitions);
-    this.refsCreated = new AtomicLongArray(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     this.drainTask = drainExec.submit(this::drain);
     log.info(
@@ -1114,9 +1111,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         initHoldRefs3(
             nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
     this.holdRefs = initHoldRefs(nPartitions);
-    this.outstandingHoldRefs = new AtomicLongArray(nPartitions);
-    this.refsCollected = new AtomicLongArray(nPartitions);
-    this.refsCreated = new AtomicLongArray(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     this.drainTask = drainExec.submit(this::drain);
     log.info(
@@ -1495,13 +1489,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       hotUnpin += p.hotUnpinned.sum();
       h += p.hits.sum();
     }
-    long refsCreatedSnapshot = sumArray(refsCreated);
-    long outstandingRefs = refsCreatedSnapshot - sumArray(refsCollected);
+    long refsCreatedSnapshot = refsCreated.sum();
+    long outstandingRefs = refsCreatedSnapshot - refsCollected.sum();
     long pinnedBytes = pinned * COMPRESSION_BLOCK_SIZE;
     long acq = acquisitions.sum();
     long misses = acq - prep;
     long hotUnpinnedBytes = hotUnpin * COMPRESSION_BLOCK_SIZE;
-    ew.put("outstandingHoldRefs", sumArray(outstandingHoldRefs));
+    ew.put("outstandingHoldRefs", outstandingHoldRefs.sum());
     ew.put("outstandingRefs", outstandingRefs);
     ew.put("refsCreated", refsCreatedSnapshot);
     ew.put("totalBytes", totalBytes);
@@ -1636,14 +1630,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private int tlrIndex() {
     return ThreadLocalRandom.current().nextInt(nPartitions);
-  }
-
-  private static long sumArray(AtomicLongArray a) {
-    long sum = 0;
-    for (int i = 0, len = a.length(); i < len; i++) {
-      sum += a.get(i);
-    }
-    return sum;
   }
 
   /**
