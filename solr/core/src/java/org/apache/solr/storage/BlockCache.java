@@ -462,7 +462,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         Cache.Node<?> remove,
         long cache3Handle) {
       super(referent, q, remove, cache3Handle);
-      this.strongRef = referent;
+      this.strongRef = USE_CACHED_BATCH ? referent : null;
     }
 
     @Override
@@ -484,7 +484,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       strongRef = null;
     }
 
-    Object getLiveReferent() {
+    private Object getLiveReferent() {
       Object candidate = strongRef;
       if (candidate == null) {
         return null;
@@ -564,8 +564,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     @Override
     public void onRequestClose(long startNanos) {
-      cachedBatch.remove();
-      batch.onRequestClose(startNanos);
+      if (USE_CACHED_BATCH) {
+        cachedBatch.remove();
+        batch.onRequestClose(startNanos);
+      }
       long cacheMissLatencyNanos = missLatencyNanos.sum();
       if (cacheMissLatencyNanos > 0) {
         this.perRequestDemandTime.update(cacheMissLatencyNanos, TimeUnit.NANOSECONDS);
@@ -692,13 +694,19 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * by it and remove the strong ref to the {@link WeakReference}, thereby pruning pointless
    * references.
    */
-  private static final ThreadLocal<Batch> cachedBatch = new ThreadLocal<>();
+  private static final boolean USE_CACHED_BATCH =
+      EnvUtils.getPropertyAsBool("solr.blockCache.useCachedBatch", false);
+
+  private static final ThreadLocal<Batch> cachedBatch =
+      USE_CACHED_BATCH ? new ThreadLocal<>() : null;
 
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
     Object referent;
-    Batch batch = cachedBatch.get();
-    if (batch != null && (referent = batch.getLiveReferent()) != null) {
+    Batch batch = null;
+    if (USE_CACHED_BATCH
+        && (batch = cachedBatch.get()) != null
+        && (referent = batch.getLiveReferent()) != null) {
       // Fast path: reuse cached batch if still associated with a live request.
       in.setBatchReferrent((LongAdder) referent);
       nrs = new NodeRefStruct();
@@ -719,9 +727,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         synchronized (b.batch.toClose) {
           b.batch.toClose.add(nrs);
         }
-        cachedBatch.set(b.batch);
+        if (USE_CACHED_BATCH) cachedBatch.set(b.batch);
       } else {
-        if (batch != null) {
+        if (USE_CACHED_BATCH && batch != null) {
           cachedBatch.remove();
         }
         int partIdx = tlrIndex();
