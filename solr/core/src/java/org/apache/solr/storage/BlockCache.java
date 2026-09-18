@@ -470,7 +470,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       for (NodeRefStruct nrs : toClose) {
         nrs.closeFor(cache);
       }
+      int size = toClose.size();
+      long extantMax = MAX_SIZE.getAndUpdate((v) -> size > v ? size : v);
+      if (size > extantMax) {
+        log.info("increased actual max batch size: {} -> {}", extantMax, size);
+      }
     }
+
+    private static final AtomicLong MAX_SIZE = new AtomicLong();
 
     @Override
     public void onRequestClose(long startNanos) {
