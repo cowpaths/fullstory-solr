@@ -447,19 +447,22 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     private static final int MAX_BATCH_SIZE = 10_000;
     private final List<NodeRefStruct> toClose = new ArrayList<>();
 
-    /**
-     * NOTE: non-volatile, best-effort is fine, and for many common cases we're already protected by
-     * thread id checks, so this field mainly protects against same-thread access anyway, where
-     * volatile doesn't even matter.
-     */
-    private boolean associatedRequestClosed = false;
+    // Strong reference to the same object as the WeakReference referent. Returned directly by
+    // getLiveReferent() to avoid the GC load barrier of WeakReference.get(), which at high call
+    // frequency can delay reference-queue processing and interfere with doCloseFor() cleanup.
+    // Nulled by onRequestClose() as the primary liveness signal; the WeakReference is retained
+    // solely for GC-based doCloseFor() on leaked requests.
+    // Non-volatile: onRequestClose() fires after the query is complete, so there is no true
+    // concurrent access with getLiveReferent() in the common case.
+    private Object strongRef;
 
     private Batch(
-        Object referrent,
+        Object referent,
         ReferenceQueue<? super Object> q,
         Cache.Node<?> remove,
         long cache3Handle) {
-      super(referrent, q, remove, cache3Handle);
+      super(referent, q, remove, cache3Handle);
+      this.strongRef = referent;
     }
 
     @Override
@@ -471,21 +474,22 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     @Override
     public void onRequestClose(long startNanos) {
-      associatedRequestClosed = true;
+      strongRef = null;
     }
 
     Object getLiveReferent() {
-      if (associatedRequestClosed) {
+      Object candidate = strongRef;
+      if (candidate == null) {
         return null;
       } else if (toClose.size() > MAX_BATCH_SIZE) {
         // mark the request as closed. This is probably semantically true anyway, but
         // practically it also limits logging below, and shortcircuits any subsequent
         // calls to `getLiveReferent()`.
-        associatedRequestClosed = true;
+        strongRef = null;
         log.warn("Batch exceeded MAX_BATCH_SIZE ({}); likely leaked request", MAX_BATCH_SIZE);
         return null;
       } else {
-        return get();
+        return candidate;
       }
     }
   }
