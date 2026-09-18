@@ -95,13 +95,13 @@ import org.apache.solr.handler.admin.api.CoreReplicationAPI;
 import org.apache.solr.handler.admin.api.SnapshotBackupAPI;
 import org.apache.solr.handler.api.V2ApiUtils;
 import org.apache.solr.jersey.APIConfigProvider;
-import org.apache.solr.jersey.APIConfigProvider.APIConfig;
 import org.apache.solr.metrics.MetricsMap;
 import org.apache.solr.metrics.SolrMetricsContext;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.response.SolrQueryResponse;
 import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.security.AuthorizationContext;
+import org.apache.solr.storage.GCSDirectory;
 import org.apache.solr.update.SolrIndexWriter;
 import org.apache.solr.util.NumberUtils;
 import org.apache.solr.util.PropertiesInputStream;
@@ -1622,6 +1622,7 @@ public class ReplicationHandler extends RequestHandlerBase
         initWrite();
 
         Directory dir = core.withSearcher(searcher -> searcher.getIndexReader().directory());
+        dir = GCSDirectory.rawDirectoryView(dir);
         in = dir.openInput(fileName, IOContext.READONCE);
         // if offset is mentioned move the pointer to that point
         if (offset != -1) in.seek(offset);
