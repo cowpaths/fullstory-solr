@@ -1276,19 +1276,17 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   Val pin(long handle) {
     Partition p = partitions[partOf(handle)];
-    int rc = p.pin(handle);
-    if (rc < 0) {
-      return null;
+    switch (p.pin(handle)) {
+      case -1:
+        return null;
+      case 0:
+        p.repinHits.increment();
+        return p.getPayload(handle);
+      default:
+        Val v = p.getPayload(handle);
+        (v.fromHot() ? p.pinnedFromHot : p.pinnedFromCold).increment();
+        return v;
     }
-    Val v = p.getPayload(handle);
-    if (rc == 0) {
-      p.repinHits.increment();
-    } else if (v.fromHot()) {
-      p.pinnedFromHot.increment();
-    } else {
-      p.pinnedFromCold.increment();
-    }
-    return v;
   }
 
   /**
