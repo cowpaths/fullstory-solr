@@ -444,7 +444,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     // could feed registrations from subsequent requests into this batch's toClose list
     // indefinitely. Cap the size so getLiveReferent() returns null and falls through to the
     // full SolrRequestInfo lookup path.
-    private static final int MAX_BATCH_SIZE = 10_000;
+    private static final int MAX_BATCH_SIZE = 20_000;
     private final List<NodeRefStruct> toClose = new ArrayList<>();
 
     // Strong reference to the same object as the WeakReference referent. Returned directly by
@@ -470,14 +470,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       for (NodeRefStruct nrs : toClose) {
         nrs.closeFor(cache);
       }
-      int size = toClose.size();
-      long extantMax = MAX_SIZE.getAndUpdate((v) -> size > v ? size : v);
-      if (size > extantMax) {
-        log.info("increased actual max batch size: {} -> {}", extantMax, size);
-      }
     }
-
-    private static final AtomicLong MAX_SIZE = new AtomicLong();
 
     @Override
     public void onRequestClose(long startNanos) {
