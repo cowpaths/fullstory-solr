@@ -447,7 +447,30 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     // indefinitely. Cap the size so getLiveReferent() returns null and falls through to the
     // full SolrRequestInfo lookup path.
     private static final int MAX_BATCH_SIZE = 20_000;
-    private final List<NodeRefStruct> toClose = new ArrayList<>();
+
+    // Treiber stack: lock-free LIFO list of NodeRefStructs to close. Each node's nextInBatch
+    // forms the chain. batchSize is a non-atomic approximate count — MAX_BATCH_SIZE is a loose
+    // failsafe, so slight undercounting under concurrent pushes is acceptable.
+    private volatile NodeRefStruct batchHead;
+    private int batchSize;
+    private static final VarHandle BATCH_HEAD;
+
+    static {
+      try {
+        BATCH_HEAD =
+            MethodHandles.lookup().findVarHandle(Batch.class, "batchHead", NodeRefStruct.class);
+      } catch (ReflectiveOperationException e) {
+        throw new Error(e);
+      }
+    }
+
+    void addToClose(NodeRefStruct nrs) {
+      NodeRefStruct head;
+      do {
+        nrs.nextInBatch = head = batchHead;
+      } while (!BATCH_HEAD.compareAndSet(this, head, nrs));
+      batchSize++;
+    }
 
     // Strong reference to the same object as the PhantomReference referent. Returned directly by
     // getLiveReferent() to avoid the GC load barrier of PhantomReference.get(), which at high call
@@ -469,8 +492,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     @Override
     void doCloseFor(BlockCache cache) {
-      for (NodeRefStruct nrs : toClose) {
+      NodeRefStruct nrs = batchHead;
+      while (nrs != null) {
         nrs.closeFor(cache);
+        nrs = nrs.nextInBatch;
       }
     }
 
@@ -483,7 +508,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       Object candidate = strongRef;
       if (candidate == null) {
         return null;
-      } else if (toClose.size() > MAX_BATCH_SIZE) {
+      } else if (batchSize > MAX_BATCH_SIZE) {
         // mark the request as closed. This is probably semantically true anyway, but
         // practically it also limits logging below, and shortcircuits any subsequent
         // calls to `getLiveReferent()`.
@@ -705,9 +730,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       // Fast path: reuse cached batch if still associated with a live request.
       in.setBatchReferrent((LongAdder) referent);
       nrs = new NodeRefStruct();
-      synchronized (batch.toClose) {
-        batch.toClose.add(nrs);
-      }
+      batch.addToClose(nrs);
     } else {
       SolrRequestInfo sri;
       SolrQueryRequest req;
@@ -719,9 +742,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         }
         in.setBatchReferrent(b.missLatencyNanos);
         nrs = new NodeRefStruct();
-        synchronized (b.batch.toClose) {
-          b.batch.toClose.add(nrs);
-        }
+        b.batch.addToClose(nrs);
         if (USE_CACHED_BATCH) cachedBatch.set(b.batch);
       } else {
         if (USE_CACHED_BATCH && batch != null) {

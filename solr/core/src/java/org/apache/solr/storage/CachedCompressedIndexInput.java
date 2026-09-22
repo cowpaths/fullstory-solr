@@ -1160,6 +1160,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    */
   static final class NodeRefStruct extends BlockCache.RetainedRef<Object> {
 
+    // Treiber stack link for BlockCache.Batch.toClose. Plain (not volatile): visibility is
+    // established by the CAS on Batch.BATCH_HEAD that publishes this node to other threads.
+    NodeRefStruct nextInBatch;
+
     private long currentNode = BlockCache.NULL_HANDLE;
     // Positive = current block index; negative (~idx) = block index with no live pin.
     private int currentBlockIdx = -1;
