@@ -857,7 +857,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       return ret;
     }
 
-    private static final long JOIN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(30);
+    private static final long JOIN_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(30);
 
     /**
      * Waits for this node's buffer to be populated, blocking if necessary.
@@ -873,19 +873,25 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       if (!populated) {
         waiting = true;
         long startNanos = System.nanoTime();
+        long remainingMillis = JOIN_TIMEOUT_MILLIS;
         synchronized (this) {
-          while (!populated) {
-            long elapsedNanos = System.nanoTime() - startNanos;
-            if (elapsedNanos >= JOIN_TIMEOUT_NANOS) {
-              throw new IllegalStateException(
-                  "join() timed out: Val was never populated (possible populate() caller crash)");
-            }
-            long remainingNanos = JOIN_TIMEOUT_NANOS - elapsedNanos;
-            try {
-              wait(remainingNanos / 1_000_000, (int) (remainingNanos % 1_000_000));
-            } catch (InterruptedException e) {
-              Thread.currentThread().interrupt();
-              throw new ThreadInterruptedException(e);
+          if (!populated) {
+            for (; ; ) {
+              try {
+                wait(remainingMillis);
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new ThreadInterruptedException(e);
+              }
+              if (populated) {
+                break;
+              }
+              remainingMillis =
+                  JOIN_TIMEOUT_MILLIS - ((System.nanoTime() - startNanos) / 1_000_000);
+              if (remainingMillis < 1) {
+                throw new IllegalStateException(
+                    "join() timed out: Val was never populated (possible populate() caller crash)");
+              }
             }
           }
         }
