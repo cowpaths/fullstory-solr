@@ -720,9 +720,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final ThreadLocal<Batch> cachedBatch =
       USE_CACHED_BATCH ? new ThreadLocal<>() : null;
 
-  private static final ConcurrentHashMap<Integer, AtomicLong> NON_BATCHED_CALLERS =
-      new ConcurrentHashMap<>();
-
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
     Object referent;
@@ -748,28 +745,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         b.batch.addToClose(nrs);
         if (USE_CACHED_BATCH) cachedBatch.set(b.batch);
       } else {
-        StackTraceElement[] trace = new Exception().getStackTrace();
-        int traceHashCode = Arrays.asList(trace).hashCode();
-        long callCount =
-            NON_BATCHED_CALLERS
-                .computeIfAbsent(traceHashCode, (k) -> new AtomicLong())
-                .incrementAndGet();
-        if (Long.bitCount(callCount) == 1) {
-          new Exception(
-              "XXX "
-                  + traceHashCode
-                  + "call count: "
-                  + callCount
-                  + " ("
-                  + Thread.currentThread().getName()
-                  + ")") {
-            @Override
-            public synchronized Throwable fillInStackTrace() {
-              setStackTrace(trace);
-              return this;
-            }
-          }.printStackTrace(System.err);
-        }
         if (USE_CACHED_BATCH && batch != null) {
           cachedBatch.remove();
         }
