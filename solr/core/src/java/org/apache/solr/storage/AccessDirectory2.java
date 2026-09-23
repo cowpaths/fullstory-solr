@@ -23,6 +23,7 @@ import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZ
 import static org.apache.solr.storage.CompressingDirectory.DirectIOIndexOutput.HEADER_SIZE;
 import static org.apache.solr.storage.CompressingDirectory.readLengthFromHeader;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.nio.ByteBuffer;
@@ -72,7 +73,7 @@ import org.slf4j.LoggerFactory;
  * cached in the shared {@link BlockCache}; cached blocks are pinned for the duration of each read
  * and evicted by the LRU when the pool is exhausted.
  */
-public class AccessDirectory2 extends MMapDirectory {
+public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchScope {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -97,6 +98,12 @@ public class AccessDirectory2 extends MMapDirectory {
 
   private final Path compressedPath;
   private final BlockCache cache;
+
+  @Override
+  public Closeable openBatchScope() {
+    return cache.openBatchScope();
+  }
+
   private final ExecutorService ioExec;
   private final FileLengthProvider fileLengthProvider;
   private final Future<?> deferredCloseTask;

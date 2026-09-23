@@ -56,7 +56,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class TeeDirectory extends SizeAwareDirectory
-    implements DirectoryFactory.OnDiskSizeDirectory {
+    implements DirectoryFactory.OnDiskSizeDirectory, BlockCacheBatchScope {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -612,6 +612,15 @@ public class TeeDirectory extends SizeAwareDirectory
     if (th != null) {
       throw IOUtils.rethrowAlways(th);
     }
+  }
+
+  @Override
+  public Closeable openBatchScope() {
+    Directory a = access;
+    if (a instanceof BlockCacheBatchScope) {
+      return ((BlockCacheBatchScope) a).openBatchScope();
+    }
+    return null;
   }
 
   @Override

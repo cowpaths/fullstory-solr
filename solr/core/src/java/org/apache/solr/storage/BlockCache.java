@@ -720,14 +720,45 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final ThreadLocal<Batch> cachedBatch =
       USE_CACHED_BATCH ? new ThreadLocal<>() : null;
 
+  // Operation-level batch (e.g. merges, commits, core load): groups NodeRefStruct registrations
+  // on the current thread into a single Batch, reducing PhantomReference count. Opened via
+  // openBatchScope(). Static ThreadLocal: assumes one BlockCache per JVM (true in this deployment).
+  private static final ThreadLocal<Batch> operationBatch = new ThreadLocal<>();
+
+  Closeable openBatchScope() {
+    LongAdder referent = new LongAdder();
+    int partIdx = tlrIndex();
+    Cache3<HoldRef> p = holdRefs3[partIdx];
+    int slot = p.acquire();
+    Batch batch;
+    if (slot != Cache3.NULL_SLOT) {
+      batch = new Batch(referent, collected, null, (long) partIdx << 32 | slot);
+      p.getPayload(slot).ref = batch;
+    } else {
+      // Pool exhausted: fall back to heap-allocated Cache.Node.
+      Cache.Node<PhantomReference<Object>> n = new Cache.Node<>(createBatch, referent);
+      holdRefs[partIdx].add(n);
+      batch = (Batch) n.getPayload();
+    }
+    outstandingHoldRefs.increment();
+    batch.strongRef = referent;
+    operationBatch.set(batch);
+    return () -> {
+      batch.strongRef = null;
+      operationBatch.remove();
+    };
+  }
+
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
     Object referent;
-    Batch batch = null;
-    if (USE_CACHED_BATCH
-        && (batch = cachedBatch.get()) != null
-        && (referent = batch.getLiveReferent()) != null) {
-      // Fast path: reuse cached batch if still associated with a live request.
+    Batch batch;
+    if ((USE_CACHED_BATCH
+            && (batch = cachedBatch.get()) != null
+            && (referent = batch.getLiveReferent()) != null)
+        || ((batch = operationBatch.get()) != null
+            && (referent = batch.getLiveReferent()) != null)) {
+      // Fast path: reuse cached batch (request or operation scope) on this thread.
       in.setBatchReferrent((LongAdder) referent);
       nrs = new NodeRefStruct();
       batch.addToClose(nrs);
