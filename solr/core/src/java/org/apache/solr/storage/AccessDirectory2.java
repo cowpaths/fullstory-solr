@@ -100,8 +100,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
   private final BlockCache cache;
 
   @Override
-  public Closeable openBatchScope() {
-    return cache.openBatchScope();
+  public Closeable openBatchScope(boolean segmentScoped) {
+    return cache.openBatchScope(segmentScoped);
   }
 
   private final ExecutorService ioExec;
@@ -591,6 +591,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           ownedBlock.capacity(),
           null /*blockOffsets*/,
           new ByteBufferGuard("ad2-owned", unmapHack()),
+          CachedCompressedIndexInput.parseSegId(name),
           new AtomicLongArray(0) /*accessMapped — empty, ownedBufferFor handles all blocks*/,
           Boolean.TRUE /*logicalRoot — not eligible for range preload*/);
       this.ioExec = dir.ioExec;
@@ -658,6 +659,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       final AtomicLongArray accessMapped;
       final NodesEntry entry; // null for empty files
       final UUID blobUUID;
+      final long segId;
 
       RootParams(
           long length,
@@ -665,6 +667,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           ByteBuffer[] compressed,
           AtomicLongArray accessMapped,
           NodesEntry entry,
+          long segId,
           UUID blobUUID) {
         this.length = length;
         this.blockOffsets = blockOffsets;
@@ -672,6 +675,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         this.accessMapped = accessMapped;
         this.entry = entry;
         this.blobUUID = blobUUID;
+        this.segId = segId;
       }
     }
 
@@ -682,6 +686,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         UUID blobUUID,
         BlockCache cache)
         throws IOException {
+      long segId = parseSegId(source.getFileName().toString());
       // Check for cached metadata — avoids reading header/footer from compressed file (disk).
       if (sharedEntry != null) {
         long[] cached = sharedEntry.cachedBlockOffsets;
@@ -689,7 +694,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           long length = sharedEntry.cachedLength;
           ByteBuffer[] compressed = mmapCompressedFile(source);
           return new RootParams(
-              length, cached, compressed, sharedEntry.nodes, sharedEntry, blobUUID);
+              length, cached, compressed, sharedEntry.nodes, sharedEntry, segId, blobUUID);
         }
       }
 
@@ -700,7 +705,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
               : compressed[compressed.length - 1].limit()
                   + ((long) (compressed.length - 1) << MAX_MAP_SHIFT);
       if (size == 0) {
-        return new RootParams(0, null, compressed, null, null, null);
+        return new RootParams(0, null, compressed, null, null, segId, null);
       }
 
       long baseAddr = cache.baseAddress(compressed[0]);
@@ -776,7 +781,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         }
       }
 
-      return new RootParams(length, blockOffsets, compressed, entry.nodes, entry, blobUUID);
+      return new RootParams(length, blockOffsets, compressed, entry.nodes, entry, segId, blobUUID);
     }
 
     private static ByteBuffer[] mmapCompressedFile(Path source) throws IOException {
@@ -847,6 +852,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           p.length,
           p.blockOffsets,
           new ByteBufferGuard("ad2-decompressed", unmapHack()),
+          p.segId,
           p.accessMapped,
           logicalRoot);
       this.ioExec = dir.ioExec;

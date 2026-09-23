@@ -1764,12 +1764,14 @@ public class GCSDirectory extends SizeAwareDirectory {
       final Boolean logicalRoot;
       final ByteBuffer[] ownedBlocks;
       final int ownedBlocksOffset;
+      final long segId;
 
       RootParams(
           UUID blobUUID,
           UUID segUUID,
           long length,
           BlocksStruct bs,
+          long segId,
           Boolean logicalRoot,
           ByteBuffer[] ownedBlocks,
           int ownedBlocksOffset) {
@@ -1777,6 +1779,7 @@ public class GCSDirectory extends SizeAwareDirectory {
         this.segUUID = segUUID;
         this.length = length;
         this.bs = bs;
+        this.segId = segId;
         this.logicalRoot = logicalRoot;
         this.ownedBlocks = ownedBlocks;
         this.ownedBlocksOffset = ownedBlocksOffset;
@@ -1809,7 +1812,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       int blockCount = (int) (((length - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
       int gcsBlockCount = hasTail ? blockCount - 1 : blockCount;
 
-      String segName = IndexFileNames.parseSegmentName(offsetFile.getFileName().toString());
+      String fileName = offsetFile.getFileName().toString();
+      String segName = IndexFileNames.parseSegmentName(fileName);
       int[] winType = new int[1];
       BlocksStruct bs =
           dir.pendingNodes.compute(
@@ -1910,7 +1914,9 @@ public class GCSDirectory extends SizeAwareDirectory {
 
       Boolean logicalRoot =
           offsetFile.getFileName().toString().endsWith(".cfs") ? null : Boolean.TRUE;
-      return new RootParams(blobUUID, segUUID, length, bs, logicalRoot, ownedBlocks, gcsBlockCount);
+      long segId = CachedCompressedIndexInput.parseSegId(fileName);
+      return new RootParams(
+          blobUUID, segUUID, length, bs, segId, logicalRoot, ownedBlocks, gcsBlockCount);
     }
 
     private GCSIndexInput(String resourceDescription, GCSDirectory dir, RootParams p) {
@@ -1921,6 +1927,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           p.length,
           p.bs.blockOffsets,
           p.bs.guard,
+          p.segId,
           p.bs.accessMapped,
           p.logicalRoot);
       this.dir = dir;
@@ -1986,6 +1993,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           p.length,
           null /*blockOffsets — never accessed for always-mapped*/,
           p.bs.guard,
+          -1L,
           new AtomicLongArray(0),
           null /*logicalRoot — always-mapped: no GCS fetching, no preload*/);
       this.dir = dir;

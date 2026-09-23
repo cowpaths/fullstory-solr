@@ -615,10 +615,10 @@ public class TeeDirectory extends SizeAwareDirectory
   }
 
   @Override
-  public Closeable openBatchScope() {
+  public Closeable openBatchScope(boolean segmentScoped) {
     Directory a = access;
     if (a instanceof BlockCacheBatchScope) {
-      return ((BlockCacheBatchScope) a).openBatchScope();
+      return ((BlockCacheBatchScope) a).openBatchScope(segmentScoped);
     }
     return null;
   }

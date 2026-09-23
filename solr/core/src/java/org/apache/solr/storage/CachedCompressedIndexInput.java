@@ -48,6 +48,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAdder;
+import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
@@ -93,6 +94,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // Guard for unmap; shared across all slices/clones so root.close() invalidates all in-flight
   // reads.
   private final ByteBufferGuard guard;
+  final long segId;
   // Shared per-file array; null'd on close.
   protected AtomicLongArray accessMapped;
 
@@ -259,6 +261,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     this.sliceFirstBlockIdx = -1;
     this.sliceLastBlockIdx = -1;
     this.logicalRoot = null;
+    this.segId = -1L;
   }
 
   /**
@@ -274,6 +277,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long length,
       long[] blockOffsets,
       ByteBufferGuard guard,
+      long segId,
       AtomicLongArray accessMapped,
       Boolean logicalRoot) {
     super(resourceDescription);
@@ -292,6 +296,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     this.sliceLength = length;
     this.sliceFirstBlockIdx = 0;
     this.sliceLastBlockIdx = lastBlockIdx;
+    this.segId = segId;
     this.logicalRoot = logicalRoot;
   }
 
@@ -306,6 +311,20 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   static {
     OWNED_BLOCK_ZERO.currentBlockIdx = 0;
+  }
+
+  @SuppressWarnings("ReferenceEquality")
+  static long parseSegId(String name) {
+    String segName = IndexFileNames.parseSegmentName(name);
+    if (segName == name) {
+      return -1L;
+    } else {
+      try {
+        return Long.parseLong(segName, 1, segName.length(), Character.MAX_RADIX);
+      } catch (Exception e) {
+        return -1L;
+      }
+    }
   }
 
   /**
@@ -337,6 +356,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         sliceLen == 0
             ? sliceFirstBlockIdx
             : Math.toIntExact((this.offset + sliceLen - 1) >> COMPRESSION_BLOCK_SHIFT);
+    this.segId = parent.segId;
     this.logicalRoot = logicalRoot;
   }
 

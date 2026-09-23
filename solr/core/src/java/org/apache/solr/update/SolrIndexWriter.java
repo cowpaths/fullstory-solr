@@ -287,7 +287,7 @@ public class SolrIndexWriter extends IndexWriter {
     Directory dir = FilterDirectory.unwrap(getDirectory());
     try (Closeable scope =
         dir instanceof BlockCacheBatchScope
-            ? ((BlockCacheBatchScope) dir).openBatchScope()
+            ? ((BlockCacheBatchScope) dir).openBatchScope(false)
             : null) {
       merge0(merge);
     }

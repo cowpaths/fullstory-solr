@@ -69,6 +69,7 @@ import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.lucene.internal.hppc.BitMixer;
+import org.apache.lucene.internal.hppc.LongObjectHashMap;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.BlockCacheMapping;
 import org.apache.lucene.store.BlockCacheMmapProvider;
@@ -723,9 +724,52 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // Operation-level batch (e.g. merges, commits, core load): groups NodeRefStruct registrations
   // on the current thread into a single Batch, reducing PhantomReference count. Opened via
   // openBatchScope(). Static ThreadLocal: assumes one BlockCache per JVM (true in this deployment).
-  private static final ThreadLocal<Batch> operationBatch = new ThreadLocal<>();
+  private static final ThreadLocal<SegmentScopedBatch> operationBatch = new ThreadLocal<>();
 
-  Closeable openBatchScope() {
+  private interface SegmentScopedBatch {
+    Batch getBatch(long segmentId);
+  }
+
+  Closeable openBatchScope(boolean segmentScoped) {
+    return segmentScoped ? openBatchScopePerSegment() : openBatchScopePlain();
+  }
+
+  private Closeable openBatchScopePerSegment() {
+    // thread-local, so plain map is fine
+    LongObjectHashMap<Batch> segMap = new LongObjectHashMap<>();
+    operationBatch.set(
+        (segId) -> {
+          int idx = segMap.indexOf(segId);
+          Batch ret;
+          if (idx >= 0) {
+            ret = segMap.indexGet(idx);
+          } else {
+            ret = registerNewBatch();
+            segMap.indexInsert(idx, segId, ret);
+          }
+          return ret;
+        });
+    return () -> {
+      try {
+        for (LongObjectHashMap.LongObjectCursor<Batch> c : segMap) {
+          c.value.strongRef = null;
+        }
+      } finally {
+        operationBatch.remove();
+      }
+    };
+  }
+
+  private Closeable openBatchScopePlain() {
+    Batch batch = registerNewBatch();
+    operationBatch.set((segId) -> batch);
+    return () -> {
+      batch.strongRef = null;
+      operationBatch.remove();
+    };
+  }
+
+  private Batch registerNewBatch() {
     LongAdder referent = new LongAdder();
     int partIdx = tlrIndex();
     Cache3<HoldRef> p = holdRefs3[partIdx];
@@ -742,21 +786,19 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
     outstandingHoldRefs.increment();
     batch.strongRef = referent;
-    operationBatch.set(batch);
-    return () -> {
-      batch.strongRef = null;
-      operationBatch.remove();
-    };
+    return batch;
   }
 
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
     Object referent;
-    Batch batch;
+    SegmentScopedBatch scopedBatch;
+    Batch batch = null;
     if ((USE_CACHED_BATCH
             && (batch = cachedBatch.get()) != null
             && (referent = batch.getLiveReferent()) != null)
-        || ((batch = operationBatch.get()) != null
+        || ((scopedBatch = operationBatch.get()) != null
+            && (batch = scopedBatch.getBatch(in.segId)) != null
             && (referent = batch.getLiveReferent()) != null)) {
       // Fast path: reuse cached batch (request or operation scope) on this thread.
       in.setBatchReferrent((LongAdder) referent);

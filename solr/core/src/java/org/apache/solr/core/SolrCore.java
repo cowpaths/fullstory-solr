@@ -2397,7 +2397,7 @@ public class SolrCore implements SolrInfoBean, Closeable {
         Directory dir = writer == null ? null : FilterDirectory.unwrap(writer.get().getDirectory());
         try (Closeable scope =
             BATCH_SEARCHER_OPEN && dir instanceof BlockCacheBatchScope
-                ? ((BlockCacheBatchScope) dir).openBatchScope()
+                ? ((BlockCacheBatchScope) dir).openBatchScope(true)
                 : null) {
           if (writer != null) {
             // if in NRT mode, open from the writer
@@ -2479,7 +2479,7 @@ public class SolrCore implements SolrInfoBean, Closeable {
             Directory dir = FilterDirectory.unwrap(writer.get().getDirectory());
             try (Closeable scope =
                 BATCH_SEARCHER_OPEN && dir instanceof BlockCacheBatchScope
-                    ? ((BlockCacheBatchScope) dir).openBatchScope()
+                    ? ((BlockCacheBatchScope) dir).openBatchScope(true)
                     : null) {
               newReader = indexReaderFactory.newReader(writer.get(), this);
             }
