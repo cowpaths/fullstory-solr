@@ -1492,6 +1492,20 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
           "block_cache_close_skipped_pinned",
           PrometheusMetricType.COUNTER,
           "cumulative block cache close() calls skipped because node was still pinned by a reader (potential phantom-block accumulation)");
+      add(
+          results,
+          bc,
+          "outstandingHoldRefs",
+          "block_cache_outstanding_hold_refs",
+          PrometheusMetricType.GAUGE,
+          "current number of PhantomReferences tracked by GC pending cleanup");
+      add(
+          results,
+          bc,
+          "outstandingRefs",
+          "block_cache_outstanding_refs",
+          PrometheusMetricType.GAUGE,
+          "current number of unreclaimed cache node references");
       JsonNode dt =
           metricsNode.path("solr.node").path("DIRECTORY.blockCache.blocksDecompressedDemandTime");
       if (!dt.isMissingNode()) {
