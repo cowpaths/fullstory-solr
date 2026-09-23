@@ -96,6 +96,7 @@ import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.CommonParams.EchoParamStyle;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.params.UpdateParams;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.IOUtils;
 import org.apache.solr.common.util.NamedList;
@@ -2395,7 +2396,7 @@ public class SolrCore implements SolrInfoBean, Closeable {
 
         Directory dir = writer == null ? null : FilterDirectory.unwrap(writer.get().getDirectory());
         try (Closeable scope =
-            dir instanceof BlockCacheBatchScope
+            BATCH_SEARCHER_OPEN && dir instanceof BlockCacheBatchScope
                 ? ((BlockCacheBatchScope) dir).openBatchScope()
                 : null) {
           if (writer != null) {
@@ -2477,7 +2478,7 @@ public class SolrCore implements SolrInfoBean, Closeable {
           try {
             Directory dir = FilterDirectory.unwrap(writer.get().getDirectory());
             try (Closeable scope =
-                dir instanceof BlockCacheBatchScope
+                BATCH_SEARCHER_OPEN && dir instanceof BlockCacheBatchScope
                     ? ((BlockCacheBatchScope) dir).openBatchScope()
                     : null) {
               newReader = indexReaderFactory.newReader(writer.get(), this);
@@ -2535,6 +2536,9 @@ public class SolrCore implements SolrInfoBean, Closeable {
       }
     }
   }
+
+  private static final boolean BATCH_SEARCHER_OPEN =
+      EnvUtils.getPropertyAsBool("solr.core.batchSearcherOpen", false);
 
   /**
    * Get a {@link SolrIndexSearcher} or start the process of creating a new one.
