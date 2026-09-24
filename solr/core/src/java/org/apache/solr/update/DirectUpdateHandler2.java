@@ -100,10 +100,10 @@ public class DirectUpdateHandler2 extends UpdateHandler
   Meter rollbackCommands;
   Meter hardAutoCommitCounts;
   Meter softAutoCommitCounts;
-  /** Per-{@link CommitReason} hard autoCommit meters (Dropwizard path = commitReason tag). */
-  final Map<CommitReason, Meter> hardAutoCommitCountsByReason = new EnumMap<>(CommitReason.class);
-  /** Per-{@link CommitReason} soft autoCommit meters. */
-  final Map<CommitReason, Meter> softAutoCommitCountsByReason = new EnumMap<>(CommitReason.class);
+  /** Per-{@link CommitTracker.CommitReason} hard autoCommit meters (Dropwizard path = commitReason tag). */
+  final Map<CommitTracker.CommitReason, Meter> hardAutoCommitCountsByReason = new EnumMap<>(CommitTracker.CommitReason.class);
+  /** Per-{@link CommitTracker.CommitReason} soft autoCommit meters. */
+  final Map<CommitTracker.CommitReason, Meter> softAutoCommitCountsByReason = new EnumMap<>(CommitTracker.CommitReason.class);
   LongAdder numDocsPending = new LongAdder();
   LongAdder numErrors = new LongAdder();
   Meter numErrorsCumulative;
@@ -232,7 +232,7 @@ public class DirectUpdateHandler2 extends UpdateHandler
     hardAutoCommitCounts = solrMetricsContext.meter("autoCommits", getCategory().toString(), scope);
     softAutoCommitCounts =
         solrMetricsContext.meter("softAutoCommits", getCategory().toString(), scope);
-    for (CommitReason reason : CommitReason.values()) {
+    for (CommitTracker.CommitReason reason : CommitTracker.CommitReason.values()) {
       hardAutoCommitCountsByReason.put(
           reason,
           solrMetricsContext.meter(

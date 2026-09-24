@@ -127,7 +127,7 @@ public class MaxSizeAutoCommitTest extends SolrTestCaseJ4 {
 
     assertTrue(
         "maxSize-triggered autoCommits should be counted under commitReason=MAX_SIZE",
-        updateHandler.hardAutoCommitCountsByReason.get(CommitReason.MAX_SIZE).getCount() > 0);
+        updateHandler.hardAutoCommitCountsByReason.get(CommitTracker.CommitReason.MAX_SIZE).getCount() > 0);
   }
 
   @Test

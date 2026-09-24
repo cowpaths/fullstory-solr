@@ -410,4 +410,14 @@ public final class CommitTracker {
   public boolean hasPending() {
     return (null != pending && !pending.isDone());
   }
+
+  /** Why an autoCommit was scheduled by {@link CommitTracker}. */
+  public enum CommitReason {
+    /** Transaction log size exceeded {@code autoCommit/maxSize}. */
+    MAX_SIZE,
+    /** Uncommitted docs exceeded {@code autoCommit/maxDocs}. */
+    MAX_DOCS,
+    /** Time-based: {@code autoCommit/maxTime} or {@code commitWithin}. */
+    COMMIT_WITHIN
+  }
 }

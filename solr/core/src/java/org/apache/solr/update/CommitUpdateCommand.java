@@ -32,9 +32,9 @@ public class CommitUpdateCommand extends UpdateCommand {
   /**
    * Why this autoCommit was scheduled, or {@code null} for explicit / unattributed commits.
    *
-   * @see CommitReason
+   * @see CommitTracker.CommitReason
    */
-  public final CommitReason reason;
+  public final CommitTracker.CommitReason reason;
 
   /**
    * User provided commit data. Can be let to null if there is none. It is possible to commit this
@@ -54,7 +54,7 @@ public class CommitUpdateCommand extends UpdateCommand {
     this(req, optimize, null);
   }
 
-  public CommitUpdateCommand(SolrQueryRequest req, boolean optimize, CommitReason reason) {
+  public CommitUpdateCommand(SolrQueryRequest req, boolean optimize, CommitTracker.CommitReason reason) {
     super(req);
     this.optimize = optimize;
     this.reason = reason;
