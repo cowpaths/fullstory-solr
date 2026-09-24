@@ -803,13 +803,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     Object referent;
     Batch batch = null;
     SegmentScopedBatch scopedBatch; // scopedBatch takes precedence!
-    if ((in.segId != -1L
-            && (scopedBatch = operationBatch.get()) != null
-            && (batch = scopedBatch.getBatch(in.segId, in.readOnce)) != null
-            && (referent = batch.getLiveReferent()) != null)
-        || (USE_CACHED_BATCH
-            && (batch = cachedBatch.get()) != null
-            && (referent = batch.getLiveReferent()) != null)) {
+    if (in.segId != -1L
+        && (((scopedBatch = operationBatch.get()) != null
+                && (batch = scopedBatch.getBatch(in.segId, in.readOnce)) != null
+                && (referent = batch.getLiveReferent()) != null)
+            || (USE_CACHED_BATCH
+                && (batch = cachedBatch.get()) != null
+                && (referent = batch.getLiveReferent()) != null))) {
       // Fast path: reuse cached batch (request or operation scope) on this thread.
       in.setBatchReferrent((LongAdder) referent);
       nrs = new NodeRefStruct();
@@ -817,7 +817,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     } else {
       SolrRequestInfo sri;
       SolrQueryRequest req;
-      if ((sri = SolrRequestInfo.getRequestInfo()) != null && (req = sri.getReq()) != null) {
+      if (in.segId != -1L
+          && (sri = SolrRequestInfo.getRequestInfo()) != null
+          && (req = sri.getReq()) != null) {
         Map<Object, Object> ctx = req.getContext();
         BatchEntry b;
         synchronized (ctx) {
