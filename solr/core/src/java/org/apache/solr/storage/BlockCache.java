@@ -792,13 +792,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
     Object referent;
-    SegmentScopedBatch scopedBatch;
     Batch batch = null;
-    if ((USE_CACHED_BATCH
-            && (batch = cachedBatch.get()) != null
-            && (referent = batch.getLiveReferent()) != null)
-        || ((scopedBatch = operationBatch.get()) != null
+    SegmentScopedBatch scopedBatch = operationBatch.get(); // operationBatch takes precedence!
+    if ((scopedBatch != null
             && (batch = scopedBatch.getBatch(in.segId)) != null
+            && (referent = batch.getLiveReferent()) != null)
+        || (USE_CACHED_BATCH
+            && (batch = cachedBatch.get()) != null
             && (referent = batch.getLiveReferent()) != null)) {
       // Fast path: reuse cached batch (request or operation scope) on this thread.
       in.setBatchReferrent((LongAdder) referent);
