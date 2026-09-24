@@ -471,13 +471,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       batchSize++;
     }
 
-    // Strong reference to the same object as the WeakReference referent. Returned directly by
-    // getLiveReferent() to avoid the GC load barrier of WeakReference.get(), which at high call
-    // frequency can delay reference-queue processing and interfere with doCloseFor() cleanup.
-    // Nulled by onRequestClose() as the primary liveness signal; the WeakReference is retained
-    // solely for GC-based doCloseFor() on leaked requests.
-    // Non-volatile: onRequestClose() fires after the query is complete, so there is no true
-    // concurrent access with getLiveReferent() in the common case.
+    // Three-state liveness field for getLiveReferent():
+    //   null          — request batch; fall through to WeakReference.get() for GC-based liveness
+    //   CLOSED_SENTINEL — explicitly closed (onRequestClose, scope close, or MAX_BATCH_SIZE)
+    //   other non-null  — operation batch; strongRef IS the referent, kept alive for scope duration
+    // Non-volatile: reads/writes are on the owning thread in common cases; cross-thread access
+    // (onRequestClose from HTTP thread) is best-effort and safe to be non-atomic here.
     private Object strongRef;
 
     private Batch(
