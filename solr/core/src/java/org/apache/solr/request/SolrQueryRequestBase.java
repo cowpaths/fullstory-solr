@@ -183,19 +183,11 @@ public abstract class SolrQueryRequestBase implements SolrQueryRequest, Closeabl
     schema = core.getLatestSchema();
   }
 
+  private long requestStartNanos = -1L;
+
   @Override
   public void beforeRequestClose(long startNanos) {
-    if (context != null) {
-      for (Object v : context.values()) {
-        if (v instanceof RequestCloseAware) {
-          try {
-            ((RequestCloseAware) v).onRequestClose(startNanos);
-          } catch (Exception ex) {
-            log.warn("exception closing request context item {}", v, ex);
-          }
-        }
-      }
-    }
+    this.requestStartNanos = startNanos;
   }
 
   /**
@@ -204,10 +196,24 @@ public abstract class SolrQueryRequestBase implements SolrQueryRequest, Closeabl
    */
   @Override
   public void close() {
-    if (searcherHolder != null) {
-      assert ObjectReleaseTracker.release(this);
-      searcherHolder.decref();
-      searcherHolder = null;
+    try {
+      if (context != null) {
+        for (Object v : context.values()) {
+          if (v instanceof RequestCloseAware) {
+            try {
+              ((RequestCloseAware) v).onRequestClose(requestStartNanos);
+            } catch (Exception ex) {
+              log.warn("exception closing request context item {}", v, ex);
+            }
+          }
+        }
+      }
+    } finally {
+      if (searcherHolder != null) {
+        assert ObjectReleaseTracker.release(this);
+        searcherHolder.decref();
+        searcherHolder = null;
+      }
     }
   }
 

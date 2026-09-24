@@ -621,7 +621,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
             }
             log.info(
                 "elapsed={} QTime={} miss_latency={} params={{}}",
-                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos),
+                startNanos == -1L
+                    ? -1L
+                    : TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos),
                 qTime,
                 TimeUnit.NANOSECONDS.toMillis(cacheMissLatencyNanos),
                 paramsString);
