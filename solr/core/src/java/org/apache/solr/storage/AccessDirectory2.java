@@ -516,7 +516,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
     }
     // TODO: if `context.mergeInfo != null` we should preload the entire contents
     AD2IndexInput in =
-        new AD2IndexInput(compressedPath.resolve(name), this, sharedEntry, pendingNodes);
+        new AD2IndexInput(
+            compressedPath.resolve(name), this, sharedEntry, context.readOnce, pendingNodes);
     if (in.length() <= COMPRESSION_BLOCK_SIZE) {
       // Small file: mirror to access directory, mmap, and serve via ownedBufferFor.
       mirrorFromInput(in, name);
@@ -574,7 +575,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
      * compressed file parsing or BlockCache involvement.
      */
     private AD2IndexInput(String name, AccessDirectory2 dir, Path accessFile) throws IOException {
-      this(name, dir, mmapSingleFile(accessFile));
+      this(name, dir, mmapSingleFile(accessFile), false);
     }
 
     private static ByteBuffer mmapSingleFile(Path path) throws IOException {
@@ -583,7 +584,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       }
     }
 
-    private AD2IndexInput(String name, AccessDirectory2 dir, ByteBuffer ownedBlock) {
+    private AD2IndexInput(
+        String name, AccessDirectory2 dir, ByteBuffer ownedBlock, boolean readOnce) {
       super(
           name,
           dir.cache,
@@ -592,6 +594,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           null /*blockOffsets*/,
           new ByteBufferGuard("ad2-owned", unmapHack()),
           CachedCompressedIndexInput.parseSegId(name),
+          readOnce,
           new AtomicLongArray(0) /*accessMapped — empty, ownedBufferFor handles all blocks*/,
           Boolean.TRUE /*logicalRoot — not eligible for range preload*/);
       this.ioExec = dir.ioExec;
@@ -625,6 +628,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         Path source,
         AccessDirectory2 dir,
         NodesEntry sharedEntry,
+        boolean readOnce,
         HashMap<String, NodesEntry> pendingNodes)
         throws IOException {
       this(
@@ -636,7 +640,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
               pendingNodes,
               dir.uuidForFile(source.getFileName().toString()),
               dir.cache),
-          source.getFileName().toString().endsWith(".cfs") ? null : Boolean.TRUE);
+          source.getFileName().toString().endsWith(".cfs") ? null : Boolean.TRUE,
+          readOnce);
     }
 
     private AD2IndexInput() {
@@ -844,7 +849,11 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
     }
 
     private AD2IndexInput(
-        String description, AccessDirectory2 dir, RootParams p, Boolean logicalRoot) {
+        String description,
+        AccessDirectory2 dir,
+        RootParams p,
+        Boolean logicalRoot,
+        boolean readOnce) {
       super(
           description,
           dir.cache,
@@ -853,6 +862,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           p.blockOffsets,
           new ByteBufferGuard("ad2-decompressed", unmapHack()),
           p.segId,
+          readOnce,
           p.accessMapped,
           logicalRoot);
       this.ioExec = dir.ioExec;

@@ -415,7 +415,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                 return struct;
               }
             });
-        toClose.add(new GCSIndexInput("gcs:" + file, this, path, header));
+        toClose.add(new GCSIndexInput("gcs:" + file, this, path, header, true));
       }
       if (!batched.isEmpty()) {
         registerBatches(ioExec, blobCoordinator);
@@ -896,7 +896,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     byte[] header = readOffsetFileHeader(offsetFile);
     if (header != null) {
       // TODO: if `context.mergeInfo != null` we should preload the entire contents
-      return new GCSIndexInput("gcs:" + name, this, offsetFile, header);
+      return new GCSIndexInput("gcs:" + name, this, offsetFile, header, context.readOnce);
     }
     if (!Files.exists(offsetFile)) {
       throw new NoSuchFileException(name);
@@ -1752,9 +1752,14 @@ public class GCSDirectory extends SizeAwareDirectory {
     // Root constructor (GCS-backed file)
     // -------------------------------------------------------------------------
 
-    GCSIndexInput(String resourceDescription, GCSDirectory dir, Path offsetFile, byte[] trailer)
+    GCSIndexInput(
+        String resourceDescription,
+        GCSDirectory dir,
+        Path offsetFile,
+        byte[] trailer,
+        boolean readOnce)
         throws IOException {
-      this(resourceDescription, dir, parseRootParams(dir, offsetFile, trailer));
+      this(resourceDescription, dir, parseRootParams(dir, offsetFile, trailer), readOnce);
     }
 
     private static final class RootParams {
@@ -1919,7 +1924,8 @@ public class GCSDirectory extends SizeAwareDirectory {
           blobUUID, segUUID, length, bs, segId, logicalRoot, ownedBlocks, gcsBlockCount);
     }
 
-    private GCSIndexInput(String resourceDescription, GCSDirectory dir, RootParams p) {
+    private GCSIndexInput(
+        String resourceDescription, GCSDirectory dir, RootParams p, boolean readOnce) {
       super(
           resourceDescription,
           dir.cache,
@@ -1928,6 +1934,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           p.bs.blockOffsets,
           p.bs.guard,
           p.segId,
+          readOnce,
           p.bs.accessMapped,
           p.logicalRoot);
       this.dir = dir;
@@ -1951,7 +1958,7 @@ public class GCSDirectory extends SizeAwareDirectory {
      */
     static GCSIndexInput ofMapped(
         String resourceDescription, GCSDirectory dir, ByteBuffer content) {
-      return new GCSIndexInput(resourceDescription, dir, makeAlwaysMappedParams(content));
+      return new GCSIndexInput(resourceDescription, dir, makeAlwaysMappedParams(content), false);
     }
 
     private static final class AlwaysMappedParams {
@@ -1985,7 +1992,8 @@ public class GCSDirectory extends SizeAwareDirectory {
       return new AlwaysMappedParams(len, bs, ownedBlocks);
     }
 
-    private GCSIndexInput(String resourceDescription, GCSDirectory dir, AlwaysMappedParams p) {
+    private GCSIndexInput(
+        String resourceDescription, GCSDirectory dir, AlwaysMappedParams p, boolean readOnce) {
       super(
           resourceDescription,
           dir.cache,
@@ -1994,6 +2002,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           null /*blockOffsets — never accessed for always-mapped*/,
           p.bs.guard,
           -1L,
+          readOnce,
           new AtomicLongArray(0),
           null /*logicalRoot — always-mapped: no GCS fetching, no preload*/);
       this.dir = dir;

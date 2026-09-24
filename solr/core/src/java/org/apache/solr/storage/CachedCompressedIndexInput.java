@@ -95,6 +95,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // reads.
   private final ByteBufferGuard guard;
   final long segId;
+  final boolean readOnce;
   // Shared per-file array; null'd on close.
   protected AtomicLongArray accessMapped;
 
@@ -262,6 +263,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     this.sliceLastBlockIdx = -1;
     this.logicalRoot = null;
     this.segId = -1L;
+    this.readOnce = false;
   }
 
   /**
@@ -278,6 +280,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long[] blockOffsets,
       ByteBufferGuard guard,
       long segId,
+      boolean readOnce,
       AtomicLongArray accessMapped,
       Boolean logicalRoot) {
     super(resourceDescription);
@@ -297,6 +300,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     this.sliceFirstBlockIdx = 0;
     this.sliceLastBlockIdx = lastBlockIdx;
     this.segId = segId;
+    this.readOnce = readOnce;
     this.logicalRoot = logicalRoot;
   }
 
@@ -357,6 +361,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
             ? sliceFirstBlockIdx
             : Math.toIntExact((this.offset + sliceLen - 1) >> COMPRESSION_BLOCK_SHIFT);
     this.segId = parent.segId;
+    this.readOnce = false; // we can't assume slices/clones inherit
     this.logicalRoot = logicalRoot;
   }
 
