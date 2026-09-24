@@ -26,8 +26,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
-import java.lang.ref.PhantomReference;
 import java.lang.ref.ReferenceQueue;
+import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.MappedByteBuffer;
@@ -301,7 +301,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   static final class HoldRef extends Cache3.Val {
 
-    private PhantomReference<Object> ref; // cleared by reset() when slot is released
+    private WeakReference<Object> ref; // cleared by reset() when slot is released
 
     HoldRef() {
       super(0);
@@ -323,7 +323,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       Integer.getInteger("solr.blockCache.holdRefPoolSize", 1 << 20);
 
   private final Cache3<HoldRef>[] holdRefs3; // primary: fixed-size pool; no per-registration alloc
-  private final Cache<PhantomReference<Object>>[] holdRefs; // fallback: when pool is exhausted
+  private final Cache<WeakReference<Object>>[] holdRefs; // fallback: when pool is exhausted
 
   private final ReferenceQueue<Object> collected = new ReferenceQueue<>();
 
@@ -354,8 +354,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   @SuppressWarnings({"unchecked", "rawtypes"})
-  private static Cache<PhantomReference<Object>>[] initHoldRefs(int length) {
-    Cache<PhantomReference<Object>>[] ret = new Cache[length];
+  private static Cache<WeakReference<Object>>[] initHoldRefs(int length) {
+    Cache<WeakReference<Object>>[] ret = new Cache[length];
     for (int i = length - 1; i >= 0; i--) {
       ret[i] = new Cache<>();
     }
@@ -363,26 +363,24 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   private NodeRefStruct createNrs(
-      CachedCompressedIndexInput in, Cache.Node<PhantomReference<Object>> n) {
+      CachedCompressedIndexInput in, Cache.Node<WeakReference<Object>> n) {
     return new NodeRefStruct(in, collected, n, -1L);
   }
 
   private final BiFunction<
-          CachedCompressedIndexInput,
-          Cache.Node<PhantomReference<Object>>,
-          PhantomReference<Object>>
+          CachedCompressedIndexInput, Cache.Node<WeakReference<Object>>, WeakReference<Object>>
       createNrs = this::createNrs;
 
-  private Batch createBatch(Object referrent, Cache.Node<PhantomReference<Object>> n) {
+  private Batch createBatch(Object referrent, Cache.Node<WeakReference<Object>> n) {
     return new Batch(referrent, collected, n, -1L);
   }
 
-  private final BiFunction<Object, Cache.Node<PhantomReference<Object>>, PhantomReference<Object>>
+  private final BiFunction<Object, Cache.Node<WeakReference<Object>>, WeakReference<Object>>
       createBatch = this::createBatch;
 
   private final Object referentKey = new Object();
 
-  abstract static class RetainedRef<V> extends PhantomReference<V> {
+  abstract static class RetainedRef<V> extends WeakReference<V> {
 
     private static final VarHandle CACHE3_HANDLE;
 
@@ -473,10 +471,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       batchSize++;
     }
 
-    // Strong reference to the same object as the PhantomReference referent. Returned directly by
-    // getLiveReferent() to avoid the GC load barrier of PhantomReference.get(), which at high call
+    // Strong reference to the same object as the WeakReference referent. Returned directly by
+    // getLiveReferent() to avoid the GC load barrier of WeakReference.get(), which at high call
     // frequency can delay reference-queue processing and interfere with doCloseFor() cleanup.
-    // Nulled by onRequestClose() as the primary liveness signal; the PhantomReference is retained
+    // Nulled by onRequestClose() as the primary liveness signal; the WeakReference is retained
     // solely for GC-based doCloseFor() on leaked requests.
     // Non-volatile: onRequestClose() fires after the query is complete, so there is no true
     // concurrent access with getLiveReferent() in the common case.
@@ -646,7 +644,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       p.getPayload(slot).ref = ret;
     } else {
       // Pool exhausted: fall back to heap-allocated Cache.Node.
-      Cache.Node<PhantomReference<Object>> n = new Cache.Node<>(createBatch, referent);
+      Cache.Node<WeakReference<Object>> n = new Cache.Node<>(createBatch, referent);
       holdRefs[partIdx].add(n);
       ret = (Batch) n.getPayload();
     }
@@ -709,12 +707,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private final long[] extantMap;
 
   /**
-   * Registers a {@link PhantomReference} to the specified {@link IndexInput}. The {@link
-   * PhantomReference} carries a strong reference to the associated specified {@link NodeRefStruct},
+   * Registers a {@link WeakReference} to the specified {@link IndexInput}. The {@link
+   * WeakReference} carries a strong reference to the associated specified {@link NodeRefStruct},
    * which is used to unpin any pinned cache nodes upon GC of the {@link IndexInput}.
    *
    * <p>Callers may use the returned {@link NodeRefStruct} to explicitly unpin any node referenced
-   * by it and remove the strong ref to the {@link PhantomReference}, thereby pruning pointless
+   * by it and remove the strong ref to the {@link WeakReference}, thereby pruning pointless
    * references.
    */
   private static final boolean USE_CACHED_BATCH =
@@ -782,7 +780,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       p.getPayload(slot).ref = batch;
     } else {
       // Pool exhausted: fall back to heap-allocated Cache.Node.
-      Cache.Node<PhantomReference<Object>> n = new Cache.Node<>(createBatch, referent);
+      Cache.Node<WeakReference<Object>> n = new Cache.Node<>(createBatch, referent);
       holdRefs[partIdx].add(n);
       batch = (Batch) n.getPayload();
     }
@@ -831,7 +829,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           p.getPayload(slot).ref = nrs;
         } else {
           // Pool exhausted: fall back to heap-allocated Cache.Node.
-          Cache.Node<PhantomReference<Object>> n = new Cache.Node<>(createNrs, in);
+          Cache.Node<WeakReference<Object>> n = new Cache.Node<>(createNrs, in);
           holdRefs[partIdx].add(n);
           nrs = (NodeRefStruct) n.getPayload();
         }
