@@ -719,7 +719,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final ThreadLocal<SegmentScopedBatch> operationBatch = new ThreadLocal<>();
 
   private interface SegmentScopedBatch {
-    Batch getBatch(long segmentId);
+    Batch getBatch(long segmentId, boolean readOnce);
   }
 
   Closeable openBatchScope(boolean segmentScoped) {
@@ -730,34 +730,45 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     // thread-local, so plain map is fine
     LongObjectHashMap<Batch> segMap = new LongObjectHashMap<>();
     operationBatch.set(
-        (segId) -> {
-          int idx = segMap.indexOf(segId);
+        (segId, readOnce) -> {
+          long key = readOnce ? segId : (segId | Long.MIN_VALUE);
+          int idx = segMap.indexOf(key);
           Batch ret;
           if (idx >= 0) {
             ret = segMap.indexGet(idx);
           } else {
             ret = registerNewBatch();
-            segMap.indexInsert(idx, segId, ret);
+            segMap.indexInsert(idx, key, ret);
           }
           return ret;
         });
     return () -> {
-      try {
-        for (LongObjectHashMap.LongObjectCursor<Batch> c : segMap) {
-          c.value.strongRef = CLOSED_SENTINEL;
-        }
-      } finally {
-        operationBatch.remove();
+      operationBatch.remove();
+      for (LongObjectHashMap.LongObjectCursor<Batch> c : segMap) {
+        c.value.strongRef = CLOSED_SENTINEL;
       }
     };
   }
 
   private Closeable openBatchScopePlain() {
-    Batch batch = registerNewBatch();
-    operationBatch.set((segId) -> batch);
+    Batch[] batches = new Batch[2];
+    operationBatch.set(
+        (segId, readOnce) -> {
+          int idx = readOnce ? 0 : 1;
+          Batch ret = batches[idx];
+          if (ret == null) {
+            ret = registerNewBatch();
+            batches[idx] = ret;
+          }
+          return ret;
+        });
     return () -> {
-      batch.strongRef = CLOSED_SENTINEL;
       operationBatch.remove();
+      for (Batch b : batches) {
+        if (b != null) {
+          b.strongRef = CLOSED_SENTINEL;
+        }
+      }
     };
   }
 
