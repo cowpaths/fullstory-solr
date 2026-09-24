@@ -2397,7 +2397,7 @@ public class SolrCore implements SolrInfoBean, Closeable {
         Directory dir = writer == null ? null : FilterDirectory.unwrap(writer.get().getDirectory());
         try (Closeable scope =
             BATCH_SEARCHER_OPEN && dir instanceof BlockCacheBatchScope
-                ? ((BlockCacheBatchScope) dir).openBatchScope(true)
+                ? ((BlockCacheBatchScope) dir).openBatchScope(BATCH_SEARCHER_SEGMENT_SCOPED)
                 : null) {
           if (writer != null) {
             // if in NRT mode, open from the writer
@@ -2479,7 +2479,7 @@ public class SolrCore implements SolrInfoBean, Closeable {
             Directory dir = FilterDirectory.unwrap(writer.get().getDirectory());
             try (Closeable scope =
                 BATCH_SEARCHER_OPEN && dir instanceof BlockCacheBatchScope
-                    ? ((BlockCacheBatchScope) dir).openBatchScope(true)
+                    ? ((BlockCacheBatchScope) dir).openBatchScope(BATCH_SEARCHER_SEGMENT_SCOPED)
                     : null) {
               newReader = indexReaderFactory.newReader(writer.get(), this);
             }
@@ -2539,6 +2539,9 @@ public class SolrCore implements SolrInfoBean, Closeable {
 
   private static final boolean BATCH_SEARCHER_OPEN =
       EnvUtils.getPropertyAsBool("solr.core.batchSearcherOpen", false);
+
+  private static final boolean BATCH_SEARCHER_SEGMENT_SCOPED =
+      EnvUtils.getPropertyAsBool("solr.core.batchSearcherSegmentScoped", true);
 
   /**
    * Get a {@link SolrIndexSearcher} or start the process of creating a new one.
