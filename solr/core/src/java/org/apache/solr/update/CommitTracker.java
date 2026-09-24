@@ -46,7 +46,7 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Public for tests.
  */
-public final class CommitTracker implements Runnable {
+public final class CommitTracker {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   // scheduler delay for maxDoc-triggered autocommits
@@ -116,7 +116,7 @@ public final class CommitTracker implements Runnable {
 
   /** schedule individual commits */
   public void scheduleCommitWithin(long commitMaxTime) {
-    _scheduleCommitWithin(commitMaxTime, true);
+    _scheduleCommitWithin(commitMaxTime, true, CommitReason.COMMIT_WITHIN);
   }
 
   public void cancelPendingCommit() {
@@ -134,7 +134,7 @@ public final class CommitTracker implements Runnable {
     long ctime = (commitWithin > 0) ? commitWithin : timeUpperBound;
 
     if (ctime > 0) {
-      _scheduleCommitWithin(ctime, true);
+      _scheduleCommitWithin(ctime, true, CommitReason.COMMIT_WITHIN);
     }
   }
 
@@ -149,7 +149,8 @@ public final class CommitTracker implements Runnable {
     return alignCommitTime;
   }
 
-  private void _scheduleCommitWithin(long commitMaxTime, boolean allowAlign) {
+  private void _scheduleCommitWithin(
+      long commitMaxTime, boolean allowAlign, CommitReason reason) {
     if (commitMaxTime <= 0) return;
     synchronized (this) {
       if (allowAlign && shouldAlignCommitTime()) {
@@ -183,8 +184,10 @@ public final class CommitTracker implements Runnable {
 
       // log.info("###scheduling for " + commitMaxTime);
 
-      // schedule our new commit
-      pending = scheduler.schedule(this, commitMaxTime, TimeUnit.MILLISECONDS);
+      // Capture reason on the scheduled task (command is built later when the delay fires).
+      pending =
+          scheduler.schedule(
+              () -> doAutoCommit(reason), commitMaxTime, TimeUnit.MILLISECONDS);
     }
   }
 
@@ -261,7 +264,7 @@ public final class CommitTracker implements Runnable {
       if (docs == docsUpperBound + 1) {
         // reset the count here instead of run() so we don't miss other documents being added
         docsSinceCommit.set(0);
-        _scheduleCommitWithin(DOC_COMMIT_DELAY_MS, false);
+        _scheduleCommitWithin(DOC_COMMIT_DELAY_MS, false, CommitReason.MAX_DOCS);
       }
     }
   }
@@ -290,7 +293,7 @@ public final class CommitTracker implements Runnable {
   private void _scheduleMaxSizeTriggeredCommitIfNeeded(LongSupplier currentTlogSize) {
     if (tLogFileSizeUpperBound > 0 && currentTlogSize.getAsLong() > tLogFileSizeUpperBound) {
       docsSinceCommit.set(0);
-      _scheduleCommitWithin(SIZE_COMMIT_DELAY_MS, false);
+      _scheduleCommitWithin(SIZE_COMMIT_DELAY_MS, false, CommitReason.MAX_SIZE);
     }
   }
 
@@ -308,9 +311,7 @@ public final class CommitTracker implements Runnable {
     }
   }
 
-  /** This is the worker part for the ScheduledFuture * */
-  @Override
-  public void run() {
+  private void doAutoCommit(CommitReason reason) {
     synchronized (this) {
       // log.info("###start commit. pending=null");
       pending = null; // allow a new commit to be scheduled
@@ -319,7 +320,7 @@ public final class CommitTracker implements Runnable {
     MDCLoggingContext.setCore(core);
     RTimer timer = timeUpperBound > 0 ? new RTimer() : null;
     try (SolrQueryRequest req = new LocalSolrQueryRequest(core, new ModifiableSolrParams())) {
-      CommitUpdateCommand command = new CommitUpdateCommand(req, false);
+      CommitUpdateCommand command = new CommitUpdateCommand(req, false, reason);
       command.openSearcher = openSearcher;
       command.waitSearcher = WAIT_SEARCHER;
       command.softCommit = softCommit;
@@ -408,5 +409,15 @@ public final class CommitTracker implements Runnable {
   // only for testing - not thread safe
   public boolean hasPending() {
     return (null != pending && !pending.isDone());
+  }
+
+  /** Why an autoCommit was scheduled by {@link CommitTracker}. */
+  public enum CommitReason {
+    /** Transaction log size exceeded {@code autoCommit/maxSize}. */
+    MAX_SIZE,
+    /** Uncommitted docs exceeded {@code autoCommit/maxDocs}. */
+    MAX_DOCS,
+    /** Time-based: {@code autoCommit/maxTime} or {@code commitWithin}. */
+    COMMIT_WITHIN
   }
 }
