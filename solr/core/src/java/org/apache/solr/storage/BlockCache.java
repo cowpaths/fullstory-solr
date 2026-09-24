@@ -486,7 +486,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         Cache.Node<?> remove,
         long cache3Handle) {
       super(referent, q, remove, cache3Handle);
-      this.strongRef = USE_CACHED_BATCH ? referent : null;
     }
 
     @Override
@@ -500,18 +499,23 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     @Override
     public void onRequestClose(long startNanos) {
-      strongRef = null;
+      strongRef = CLOSED_SENTINEL;
     }
 
     private Object getLiveReferent() {
       Object candidate = strongRef;
-      if (candidate == null) {
+      if (candidate == CLOSED_SENTINEL) {
+        return null;
+      } else if (candidate != null) {
+        return candidate;
+      } else if ((candidate = get()) == null) {
+        strongRef = CLOSED_SENTINEL;
         return null;
       } else if (batchSize > MAX_BATCH_SIZE) {
         // mark the request as closed. This is probably semantically true anyway, but
         // practically it also limits logging below, and shortcircuits any subsequent
         // calls to `getLiveReferent()`.
-        strongRef = null;
+        strongRef = CLOSED_SENTINEL;
         log.warn("Batch exceeded MAX_BATCH_SIZE ({}); likely leaked request", MAX_BATCH_SIZE);
         return null;
       } else {
@@ -519,6 +523,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       }
     }
   }
+
+  private static final Object CLOSED_SENTINEL = new Object();
 
   private static final String LOG_MISS_LATENCY_PROPNAME = "solr.blockCache.logMissLatency";
 
@@ -635,20 +641,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private BatchEntry batchInitFunction(Object k) {
     LongAdder referent = new LongAdder();
-    int partIdx = tlrIndex();
-    Cache3<HoldRef> p = holdRefs3[partIdx];
-    int slot = p.acquire();
-    Batch ret;
-    if (slot != Cache3.NULL_SLOT) {
-      ret = new Batch(referent, collected, null, (long) partIdx << 32 | slot);
-      p.getPayload(slot).ref = ret;
-    } else {
-      // Pool exhausted: fall back to heap-allocated Cache.Node.
-      Cache.Node<WeakReference<Object>> n = new Cache.Node<>(createBatch, referent);
-      holdRefs[partIdx].add(n);
-      ret = (Batch) n.getPayload();
-    }
-    outstandingHoldRefs.increment();
+    Batch ret = newBatchForReferent(referent);
     return new BatchEntry(referent, ret, perRequestDemandTime);
   }
 
@@ -752,7 +745,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     return () -> {
       try {
         for (LongObjectHashMap.LongObjectCursor<Batch> c : segMap) {
-          c.value.strongRef = null;
+          c.value.strongRef = CLOSED_SENTINEL;
         }
       } finally {
         operationBatch.remove();
@@ -764,13 +757,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     Batch batch = registerNewBatch();
     operationBatch.set((segId) -> batch);
     return () -> {
-      batch.strongRef = null;
+      batch.strongRef = CLOSED_SENTINEL;
       operationBatch.remove();
     };
   }
 
-  private Batch registerNewBatch() {
-    LongAdder referent = new LongAdder();
+  private Batch newBatchForReferent(LongAdder referent) {
     int partIdx = tlrIndex();
     Cache3<HoldRef> p = holdRefs3[partIdx];
     int slot = p.acquire();
@@ -785,6 +777,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       batch = (Batch) n.getPayload();
     }
     outstandingHoldRefs.increment();
+    return batch;
+  }
+
+  private Batch registerNewBatch() {
+    LongAdder referent = new LongAdder();
+    Batch batch = newBatchForReferent(referent);
+    // we need a strong referent to prevent collection outside a BatchEntry context
     batch.strongRef = referent;
     return batch;
   }
