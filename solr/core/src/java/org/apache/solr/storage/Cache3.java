@@ -218,7 +218,6 @@ class Cache3<V extends Cache3.Val> {
         if (!removeFromList(candidate)) {
           throw new IllegalStateException();
         }
-        p.reset();
         // Volatile write: publishing step; marks slot as held.
         p.refCount = 1;
         return candidate;
