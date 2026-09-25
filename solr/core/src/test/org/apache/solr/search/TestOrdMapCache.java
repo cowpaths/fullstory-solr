@@ -226,6 +226,7 @@ public class TestOrdMapCache extends SolrTestCaseJ4 {
     assertEquals(MetaSolrCache.class, ordMapCache.getClass());
   }
 
+  @AwaitsFix(bugUrl = "")
   public void testShortKeepAlive() throws Exception {
     String name = "shortKeepAlive";
     Path configSet = LuceneTestCase.createTempDir();

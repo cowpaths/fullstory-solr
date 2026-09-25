@@ -75,6 +75,7 @@ import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
@@ -95,6 +96,7 @@ import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.CommonParams.EchoParamStyle;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.params.UpdateParams;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.IOUtils;
 import org.apache.solr.common.util.NamedList;
@@ -156,6 +158,7 @@ import org.apache.solr.search.facet.FacetParser;
 import org.apache.solr.search.facet.FacetParserFactory;
 import org.apache.solr.search.stats.LocalStatsCache;
 import org.apache.solr.search.stats.StatsCache;
+import org.apache.solr.storage.BlockCacheBatchScope;
 import org.apache.solr.update.DefaultSolrCoreState;
 import org.apache.solr.update.DirectUpdateHandler2;
 import org.apache.solr.update.IndexFingerprint;
@@ -2352,6 +2355,7 @@ public class SolrCore implements SolrInfoBean, Closeable {
    *
    * <p>This method acquires openSearcherLock - do not call with searchLock held!
    */
+  @SuppressWarnings("try")
   public RefCounted<SolrIndexSearcher> openNewSearcher(
       boolean updateHandlerReopens, boolean realtime) {
     if (isClosed()) { // catch some errors quicker
@@ -2390,7 +2394,11 @@ public class SolrCore implements SolrInfoBean, Closeable {
 
         RefCounted<IndexWriter> writer = getSolrCoreState().getIndexWriter(null);
 
-        try {
+        Directory dir = writer == null ? null : FilterDirectory.unwrap(writer.get().getDirectory());
+        try (Closeable scope =
+            BATCH_SEARCHER_OPEN && dir instanceof BlockCacheBatchScope
+                ? ((BlockCacheBatchScope) dir).openBatchScope(BATCH_SEARCHER_SEGMENT_SCOPED)
+                : null) {
           if (writer != null) {
             // if in NRT mode, open from the writer
             newReader = DirectoryReader.openIfChanged(currentReader, writer.get(), true);
@@ -2468,7 +2476,13 @@ public class SolrCore implements SolrInfoBean, Closeable {
           RefCounted<IndexWriter> writer = getSolrCoreState().getIndexWriter(this);
           DirectoryReader newReader = null;
           try {
-            newReader = indexReaderFactory.newReader(writer.get(), this);
+            Directory dir = FilterDirectory.unwrap(writer.get().getDirectory());
+            try (Closeable scope =
+                BATCH_SEARCHER_OPEN && dir instanceof BlockCacheBatchScope
+                    ? ((BlockCacheBatchScope) dir).openBatchScope(BATCH_SEARCHER_SEGMENT_SCOPED)
+                    : null) {
+              newReader = indexReaderFactory.newReader(writer.get(), this);
+            }
           } finally {
             writer.decref();
           }
@@ -2522,6 +2536,12 @@ public class SolrCore implements SolrInfoBean, Closeable {
       }
     }
   }
+
+  private static final boolean BATCH_SEARCHER_OPEN =
+      EnvUtils.getPropertyAsBool("solr.core.batchSearcherOpen", false);
+
+  private static final boolean BATCH_SEARCHER_SEGMENT_SCOPED =
+      EnvUtils.getPropertyAsBool("solr.core.batchSearcherSegmentScoped", true);
 
   /**
    * Get a {@link SolrIndexSearcher} or start the process of creating a new one.

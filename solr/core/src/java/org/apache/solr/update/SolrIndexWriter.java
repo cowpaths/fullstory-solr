@@ -19,6 +19,7 @@ package org.apache.solr.update;
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.Timer;
+import java.io.Closeable;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.util.Collections;
@@ -34,7 +35,9 @@ import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.MergePolicy;
 import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.util.InfoStream;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.IOUtils;
 import org.apache.solr.common.util.SuppressForbidden;
 import org.apache.solr.core.DirectoryFactory;
@@ -46,6 +49,7 @@ import org.apache.solr.metrics.SolrMetricManager;
 import org.apache.solr.metrics.SolrMetricProducer;
 import org.apache.solr.metrics.SolrMetricsContext;
 import org.apache.solr.schema.IndexSchema;
+import org.apache.solr.storage.BlockCacheBatchScope;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -277,9 +281,26 @@ public class SolrIndexWriter extends IndexWriter {
     this.directoryFactory = factory;
   }
 
+  private static final boolean BATCH_MERGE =
+      EnvUtils.getPropertyAsBool("solr.writer.batchMerge", true);
+
+  private static final boolean BATCH_MERGE_SEGMENT_SCOPED =
+      EnvUtils.getPropertyAsBool("solr.writer.batchMergeSegmentScoped", false);
+
   // we override this method to collect metrics for merges.
   @Override
+  @SuppressWarnings("try")
   protected void merge(MergePolicy.OneMerge merge) throws IOException {
+    Directory dir = FilterDirectory.unwrap(getDirectory());
+    try (Closeable scope =
+        BATCH_MERGE && dir instanceof BlockCacheBatchScope
+            ? ((BlockCacheBatchScope) dir).openBatchScope(BATCH_MERGE_SEGMENT_SCOPED)
+            : null) {
+      merge0(merge);
+    }
+  }
+
+  private void merge0(MergePolicy.OneMerge merge) throws IOException {
     String segString = merge.segString();
     long totalNumDocs = merge.totalNumDocs();
     runningMerges.put(segString, totalNumDocs);
