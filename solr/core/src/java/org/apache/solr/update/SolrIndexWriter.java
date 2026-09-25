@@ -37,6 +37,7 @@ import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.util.InfoStream;
+import org.apache.solr.common.util.EnvUtils;
 import org.apache.solr.common.util.IOUtils;
 import org.apache.solr.common.util.SuppressForbidden;
 import org.apache.solr.core.DirectoryFactory;
@@ -280,14 +281,20 @@ public class SolrIndexWriter extends IndexWriter {
     this.directoryFactory = factory;
   }
 
+  private static final boolean BATCH_MERGE =
+      EnvUtils.getPropertyAsBool("solr.writer.batchMerge", true);
+
+  private static final boolean BATCH_MERGE_SEGMENT_SCOPED =
+      EnvUtils.getPropertyAsBool("solr.writer.batchMergeSegmentScoped", false);
+
   // we override this method to collect metrics for merges.
   @Override
   @SuppressWarnings("try")
   protected void merge(MergePolicy.OneMerge merge) throws IOException {
     Directory dir = FilterDirectory.unwrap(getDirectory());
     try (Closeable scope =
-        dir instanceof BlockCacheBatchScope
-            ? ((BlockCacheBatchScope) dir).openBatchScope(false)
+        BATCH_MERGE && dir instanceof BlockCacheBatchScope
+            ? ((BlockCacheBatchScope) dir).openBatchScope(BATCH_MERGE_SEGMENT_SCOPED)
             : null) {
       merge0(merge);
     }

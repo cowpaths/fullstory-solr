@@ -731,7 +731,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     LongObjectHashMap<Batch> segMap = new LongObjectHashMap<>();
     operationBatch.set(
         (segId, readOnce) -> {
-          long key = readOnce ? segId : (segId | Long.MIN_VALUE);
+          long key = readOnce ? 0 : segId;
           int idx = segMap.indexOf(key);
           Batch ret;
           if (idx >= 0) {
