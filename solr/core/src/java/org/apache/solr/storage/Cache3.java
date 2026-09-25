@@ -44,15 +44,15 @@ class Cache3<V extends Cache3.Val> {
      * 0 = free (in free list), 1 = held (not in list), -1 = transitional (being claimed or
      * recycled).
      */
-    volatile int refCount;
+    private volatile int refCount;
 
     /**
      * Doubly-linked free-list successor (toward the head) and predecessor (toward the tail).
      * Accessed atomically via {@link Cache3#NEXT_VH} and {@link Cache3#PREV_VH}.
      */
-    int next;
+    private int next;
 
-    int prev;
+    private int prev;
 
     Val(int initialRefCount) {
       this.refCount = initialRefCount;
@@ -66,8 +66,8 @@ class Cache3<V extends Cache3.Val> {
   }
 
   private static final VarHandle REF_COUNT;
-  static final VarHandle NEXT_VH;
-  static final VarHandle PREV_VH;
+  private static final VarHandle NEXT_VH;
+  private static final VarHandle PREV_VH;
 
   static {
     try {
@@ -105,7 +105,7 @@ class Cache3<V extends Cache3.Val> {
    * Payload for all slot indices. Slot 0 is reserved (never allocated). Real slots are 1..capacity.
    * HEAD and TAIL sentinels occupy the remaining two indices.
    */
-  final Val[] payload;
+  private final Val[] payload;
 
   // ---------------------------------------------------------------------------
   // Constructor
@@ -132,7 +132,7 @@ class Cache3<V extends Cache3.Val> {
       if (slot > capacity) throw new IllegalArgumentException("too many initial values");
       payload[slot] = v;
       payload[prevIdx].next = slot;
-      v.prev = prevIdx;
+      ((Val) v).prev = prevIdx;
       prevIdx = slot++;
     }
     payload[prevIdx].next = TAIL;

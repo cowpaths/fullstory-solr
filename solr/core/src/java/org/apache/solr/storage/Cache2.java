@@ -90,8 +90,8 @@ class Cache2<V extends Cache2.Val> {
   }
 
   private static final VarHandle REF_COUNT;
-  static final VarHandle NEXT_VH;
-  static final VarHandle PREV_VH;
+  private static final VarHandle NEXT_VH;
+  private static final VarHandle PREV_VH;
 
   static {
     try {
