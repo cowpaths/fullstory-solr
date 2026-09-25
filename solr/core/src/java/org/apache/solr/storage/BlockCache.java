@@ -490,9 +490,18 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     @Override
     void doCloseFor(BlockCache cache) {
       NodeRefStruct nrs = batchHead;
-      while (nrs != null) {
-        nrs.closeFor(cache);
-        nrs = nrs.nextInBatch;
+      if (nrs != null) {
+        batchHead = null;
+        for (; ; ) {
+          nrs.closeFor(cache);
+          NodeRefStruct next = nrs.nextInBatch;
+          if (next == null) {
+            return;
+          } else {
+            nrs.nextInBatch = null;
+            nrs = next;
+          }
+        }
       }
     }
 
