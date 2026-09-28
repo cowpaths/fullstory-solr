@@ -751,9 +751,16 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           }
           return ret;
         });
+    long start = System.nanoTime();
     return () -> {
       operationBatch.remove();
+      long millisElapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
       for (LongObjectHashMap.LongObjectCursor<Batch> c : segMap) {
+        log.info(
+            "close op batch per-segment readOnce={}: {} refs, {} millis",
+            c.key == 0L,
+            c.value.batchSize,
+            millisElapsed);
         c.value.strongRef = CLOSED_SENTINEL;
       }
     };
@@ -771,12 +778,21 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           }
           return ret;
         });
+    long start = System.nanoTime();
     return () -> {
       operationBatch.remove();
+      long millisElapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+      int idx = 0;
       for (Batch b : batches) {
         if (b != null) {
+          log.info(
+              "close op core batch readOnce={} {} refs, {} millis",
+              idx == 0,
+              b.batchSize,
+              millisElapsed);
           b.strongRef = CLOSED_SENTINEL;
         }
+        idx++;
       }
     };
   }
