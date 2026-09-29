@@ -800,7 +800,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private Closeable openBatchScopePerSegment() {
     // thread-local, so plain map is fine
     LongObjectHashMap<Batch> segMap = new LongObjectHashMap<>();
-    boolean[] warned = new boolean[1];
     operationBatch.set(
         (segId, readOnce) -> {
           long key = readOnce ? 0 : segId;
@@ -808,11 +807,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           Batch ret;
           if (idx >= 0) {
             ret = segMap.indexGet(idx);
-            if (ret.batchSize >= BATCH_ROLLOVER && !warned[0]) {
-              // in practice we generally see only a handful per entry here, so this should
-              // literally never happen.
-              warned[0] = true;
-              log.warn("unexpectedly exceeded ref batch rollover threshold {}", BATCH_ROLLOVER);
+            if (ret.batchSize >= BATCH_ROLLOVER) {
+              // In practice we generally see only a handful per entry here, so this should be
+              // rare -- but merge workflows may share this per-segment path for some inputs, so
+              // rolling over (rather than just warning) costs us nothing and covers that case too.
+              ret.strongRef = CLOSED_SENTINEL;
+              ret = registerNewBatch();
+              segMap.indexReplace(idx, ret);
             }
           } else {
             ret = registerNewBatch();
@@ -829,15 +830,15 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   /**
-   * Batch-size threshold at which {@link #openBatchScopePlain()} retires the current batch and
-   * starts a fresh one.
+   * Batch-size threshold at which an operation-scoped batch ({@link #openBatchScopePlain()} or
+   * {@link #openBatchScopePerSegment()}) retires the current batch and starts a fresh one.
    *
    * <p>{@code openBatchScopePlain()} (merge scopes) uses a single rolling batch for both readOnce
-   * and non-readOnce registrations, unlike {@link #openBatchScopePerSegment()}. That's safe because
-   * nothing registered during a merge outlives the merge -- "non-readOnce" here just means "alive
-   * for the merge's duration," not indefinitely alive like a searcher-held SegmentCoreReaders input
-   * -- so there's no long-lived registration to protect from being trapped alongside short-lived
-   * ones.
+   * and non-readOnce registrations, unlike {@link #openBatchScopePerSegment()}'s per-segment
+   * batches. That's safe because nothing registered during a merge outlives the merge --
+   * "non-readOnce" here just means "alive for the merge's duration," not indefinitely alive like a
+   * searcher-held SegmentCoreReaders input -- so there's no long-lived registration to protect from
+   * being trapped alongside short-lived ones.
    *
    * <p>Still, a single merge can register a large, slowly-accumulating number of NodeRefStructs
    * (observed up to ~48,000 over ~26 seconds for one large merge). Without rollover, all of them --
@@ -845,6 +846,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * batchHead} until the whole merge finishes. Rolling over at this threshold bounds that
    * dead-weight accumulation and lets retired chunks become collectible while the merge is still
    * running.
+   *
+   * <p>{@code openBatchScopePerSegment()} (searcher opens) is expected to register only a handful
+   * of inputs per segment, so this threshold should essentially never be hit there. It rolls over
+   * anyway rather than just warning: merge workflows may share this per-segment path for some
+   * inputs, and rolling over costs nothing in the expected case while covering that one too.
    *
    * <p>1024 is well below {@code Batch.MAX_BATCH_SIZE} (a leaked-request failsafe, not expected to
    * matter here since operation-scoped batches close deterministically via try-with-resources) and
