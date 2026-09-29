@@ -390,8 +390,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         unsetBuffers();
       }
     } finally {
-      // TODO: probably unnecessary (closeFor()/doCloseFor() are CAS-protected against
-      // concurrent/duplicate invocation); revisit removal.
+      // TODO: probably unnecessary. The trailing unsetBuffers() call above already touches
+      //  `this` after doClose()/unmap, so no bytecode-liveness gap precedes this fence; revisit
+      //  removal.
       Reference.reachabilityFence(this);
     }
   }
