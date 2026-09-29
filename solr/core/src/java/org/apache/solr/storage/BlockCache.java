@@ -591,7 +591,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private static final class BatchEntry implements SolrQueryRequest.RequestCloseAware {
 
-    private static final Map.Entry<LongAdder, Batch> CLOSED_ENTRY =
+    // Sentinel pair marking the request as closed. The dummy Batch's batchSize is set to
+    // Integer.MAX_VALUE so the (redundant, defensive) size check in getBatch() also naturally
+    // rejects it, regardless of check ordering.
+    private static final Map.Entry<Object, Batch> CLOSED_ENTRY =
         new AbstractMap.SimpleImmutableEntry<>(null, new Batch(null, null, null, -1L));
 
     static {
@@ -609,24 +612,35 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       }
     }
 
-    private volatile Map.Entry<LongAdder, Batch> batchEntry;
+    // Never rotated: the single per-request miss-latency accumulator, shared by every chunk
+    // (rolled-over Batch) this request ever registers against. Decoupling this from the rotating
+    // per-chunk anchor means no recorded latency can ever be stranded on an abandoned chunk.
+    private final LongAdder missLatencyNanos;
+    // (anchor, Batch) pair, rotated together on rollover. This field -- not Batch.strongRef/
+    // getLiveReferent(), which depends on onRequestClose() firing reliably (not guaranteed) -- is
+    // what keeps the *current* chunk's anchor strongly reachable: BatchEntry itself is reachable
+    // for exactly as long as the request/context is reachable, independent of any close callback.
+    // Once superseded by rollover, the old pair's anchor is no longer referenced here and the old
+    // chunk's fate reverts to depending purely on its own registered CCIIs, as intended.
+    private volatile Map.Entry<Object, Batch> batchEntry;
     private final Timer perRequestDemandTime;
 
-    private BatchEntry(LongAdder missLatencyNanos, Batch batch, Timer perRequestDemandTime) {
-      this.batchEntry = new AbstractMap.SimpleImmutableEntry<>(missLatencyNanos, batch);
+    private BatchEntry(
+        LongAdder missLatencyNanos, Object anchor, Batch batch, Timer perRequestDemandTime) {
+      this.missLatencyNanos = missLatencyNanos;
+      this.batchEntry = new AbstractMap.SimpleImmutableEntry<>(anchor, batch);
       this.perRequestDemandTime = perRequestDemandTime;
     }
 
     @Override
     public void onRequestClose(long startNanos) {
       @SuppressWarnings("unchecked")
-      Map.Entry<LongAdder, Batch> extant =
-          (Map.Entry<LongAdder, Batch>) BATCH_ENTRY.getAndSet(this, CLOSED_ENTRY);
+      Map.Entry<Object, Batch> extant =
+          (Map.Entry<Object, Batch>) BATCH_ENTRY.getAndSet(this, CLOSED_ENTRY);
       if (extant == CLOSED_ENTRY) {
         log.warn("already closed");
         return;
       }
-      LongAdder missLatencyNanos = extant.getKey();
       extant.getValue().onRequestClose(startNanos);
       long cacheMissLatencyNanos = missLatencyNanos.sum();
       if (cacheMissLatencyNanos > 0) {
@@ -671,23 +685,22 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       }
     }
 
-    public Map.Entry<LongAdder, Batch> getBatch(BlockCache c) {
-      Map.Entry<LongAdder, Batch> extant = batchEntry;
+    public Map.Entry<Object, Batch> getBatch(BlockCache c) {
+      Map.Entry<Object, Batch> extant = batchEntry;
       for (; ; ) {
         if (extant.getValue().batchSize < BATCH_ROLLOVER) {
           return extant;
         } else if (extant == CLOSED_ENTRY) {
           return null;
         }
-        LongAdder newReferent = new LongAdder();
-        Map.Entry<LongAdder, Batch> replacementCandidate =
-            new AbstractMap.SimpleImmutableEntry<>(newReferent, c.newBatchForReferent(newReferent));
+        Object newAnchor = new Object();
+        Map.Entry<Object, Batch> replacementCandidate =
+            new AbstractMap.SimpleImmutableEntry<>(newAnchor, c.newBatchForReferent(newAnchor));
         @SuppressWarnings("unchecked")
-        Map.Entry<LongAdder, Batch> witness =
-            (Map.Entry<LongAdder, Batch>)
+        Map.Entry<Object, Batch> witness =
+            (Map.Entry<Object, Batch>)
                 BATCH_ENTRY.compareAndExchange(this, extant, replacementCandidate);
         if (witness == extant) {
-          newReferent.add(extant.getKey().sum());
           return replacementCandidate;
         } else {
           extant = witness;
@@ -699,9 +712,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private final Function<Object, BatchEntry> batchInitFunction = this::batchInitFunction;
 
   private BatchEntry batchInitFunction(Object k) {
-    LongAdder referent = new LongAdder();
-    Batch ret = newBatchForReferent(referent);
-    return new BatchEntry(referent, ret, perRequestDemandTime);
+    Object anchor = new Object();
+    Batch batch = newBatchForReferent(anchor);
+    return new BatchEntry(new LongAdder(), anchor, batch, perRequestDemandTime);
   }
 
   private static final long CACHE_VALIDATION_MAGIC =
@@ -844,7 +857,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     };
   }
 
-  private Batch newBatchForReferent(LongAdder referent) {
+  private Batch newBatchForReferent(Object referent) {
     int partIdx = tlrIndex();
     Cache3<HoldRef> p = holdRefs3[partIdx];
     int slot = p.acquire();
@@ -863,7 +876,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   private Batch registerNewBatch() {
-    LongAdder referent = new LongAdder();
+    Object referent = new Object();
     Batch batch = newBatchForReferent(referent);
     // we need a strong referent to prevent collection outside a BatchEntry context
     batch.strongRef = referent;
@@ -901,7 +914,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         // Fast path: reuse cached batch (request or operation scope) on this thread.
         NodeRefStruct nrs = new NodeRefStruct();
         if (batch.addToClose(nrs)) {
-          in.setBatchReferrent((LongAdder) referent);
+          in.setBatchReferrent(referent, null);
           return nrs;
         }
       }
@@ -914,11 +927,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         synchronized (ctx) {
           b = (BatchEntry) ctx.computeIfAbsent(referentKey, batchInitFunction);
         }
-        Map.Entry<LongAdder, Batch> batchEntry = b.getBatch(this);
-        if (batchEntry != null) {
+        Map.Entry<Object, Batch> entry = b.getBatch(this);
+        if (entry != null) {
           NodeRefStruct nrs = new NodeRefStruct();
-          if (batchEntry.getValue().addToClose(nrs)) {
-            in.setBatchReferrent(batchEntry.getKey());
+          if (entry.getValue().addToClose(nrs)) {
+            in.setBatchReferrent(entry.getKey(), b.missLatencyNanos);
             return nrs;
           }
         }
