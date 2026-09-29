@@ -73,7 +73,6 @@ import org.apache.lucene.internal.hppc.LongObjectHashMap;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.BlockCacheMapping;
 import org.apache.lucene.store.BlockCacheMmapProvider;
-import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
@@ -463,12 +462,17 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       }
     }
 
-    void addToClose(NodeRefStruct nrs) {
+    boolean addToClose(NodeRefStruct nrs) {
       NodeRefStruct head;
       do {
-        nrs.nextInBatch = head = batchHead;
+        head = batchHead;
+        if (head == BATCH_CLOSED) {
+          return false;
+        }
+        nrs.nextInBatch = head;
       } while (!BATCH_HEAD.compareAndSet(this, head, nrs));
       batchSize++;
+      return true;
     }
 
     // Three-state liveness field for getLiveReferent():
@@ -489,9 +493,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     @Override
     void doCloseFor(BlockCache cache) {
-      NodeRefStruct nrs = batchHead;
-      if (nrs != null) {
-        batchHead = null;
+      NodeRefStruct nrs = (NodeRefStruct) BATCH_HEAD.getAndSet(this, BATCH_CLOSED);
+      if (nrs != BATCH_CLOSED && nrs != null) {
         for (; ; ) {
           nrs.closeFor(cache);
           NodeRefStruct next = nrs.nextInBatch;
@@ -531,6 +534,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       }
     }
   }
+
+  private static final NodeRefStruct BATCH_CLOSED = new NodeRefStruct();
 
   private static final Object CLOSED_SENTINEL = new Object();
 
@@ -585,22 +590,44 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   private static final class BatchEntry implements SolrQueryRequest.RequestCloseAware {
-    private final LongAdder missLatencyNanos;
-    private final Batch batch;
+
+    private static final Map.Entry<LongAdder, Batch> CLOSED_ENTRY =
+        new AbstractMap.SimpleImmutableEntry<>(null, new Batch(null, null, null, -1L));
+
+    static {
+      CLOSED_ENTRY.getValue().batchSize = Integer.MAX_VALUE;
+    }
+
+    private static final VarHandle BATCH_ENTRY;
+
+    static {
+      try {
+        BATCH_ENTRY =
+            MethodHandles.lookup().findVarHandle(BatchEntry.class, "batchEntry", Map.Entry.class);
+      } catch (ReflectiveOperationException e) {
+        throw new Error(e);
+      }
+    }
+
+    private volatile Map.Entry<LongAdder, Batch> batchEntry;
     private final Timer perRequestDemandTime;
 
     private BatchEntry(LongAdder missLatencyNanos, Batch batch, Timer perRequestDemandTime) {
-      this.missLatencyNanos = missLatencyNanos;
-      this.batch = batch;
+      this.batchEntry = new AbstractMap.SimpleImmutableEntry<>(missLatencyNanos, batch);
       this.perRequestDemandTime = perRequestDemandTime;
     }
 
     @Override
     public void onRequestClose(long startNanos) {
-      if (USE_CACHED_BATCH) {
-        cachedBatch.remove();
-        batch.onRequestClose(startNanos);
+      @SuppressWarnings("unchecked")
+      Map.Entry<LongAdder, Batch> extant =
+          (Map.Entry<LongAdder, Batch>) BATCH_ENTRY.getAndSet(this, CLOSED_ENTRY);
+      if (extant == CLOSED_ENTRY) {
+        log.warn("already closed");
+        return;
       }
+      LongAdder missLatencyNanos = extant.getKey();
+      extant.getValue().onRequestClose(startNanos);
       long cacheMissLatencyNanos = missLatencyNanos.sum();
       if (cacheMissLatencyNanos > 0) {
         this.perRequestDemandTime.update(cacheMissLatencyNanos, TimeUnit.NANOSECONDS);
@@ -640,6 +667,30 @@ public class BlockCache implements Closeable, SolrMetricProducer {
                 TimeUnit.NANOSECONDS.toMillis(cacheMissLatencyNanos),
                 paramsString);
           }
+        }
+      }
+    }
+
+    public Map.Entry<LongAdder, Batch> getBatch(BlockCache c) {
+      Map.Entry<LongAdder, Batch> extant = batchEntry;
+      for (; ; ) {
+        if (extant.getValue().batchSize < BATCH_ROLLOVER) {
+          return extant;
+        } else if (extant == CLOSED_ENTRY) {
+          return null;
+        }
+        LongAdder newReferent = new LongAdder();
+        Map.Entry<LongAdder, Batch> replacementCandidate =
+            new AbstractMap.SimpleImmutableEntry<>(newReferent, c.newBatchForReferent(newReferent));
+        @SuppressWarnings("unchecked")
+        Map.Entry<LongAdder, Batch> witness =
+            (Map.Entry<LongAdder, Batch>)
+                BATCH_ENTRY.compareAndExchange(this, extant, replacementCandidate);
+        if (witness == extant) {
+          newReferent.add(extant.getKey().sum());
+          return replacementCandidate;
+        } else {
+          extant = witness;
         }
       }
     }
@@ -706,21 +757,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * generation=0 in the upper 32 bits. Empty for ephemeral or fresh caches.
    */
   private final long[] extantMap;
-
-  /**
-   * Registers a {@link WeakReference} to the specified {@link IndexInput}. The {@link
-   * WeakReference} carries a strong reference to the associated specified {@link NodeRefStruct},
-   * which is used to unpin any pinned cache nodes upon GC of the {@link IndexInput}.
-   *
-   * <p>Callers may use the returned {@link NodeRefStruct} to explicitly unpin any node referenced
-   * by it and remove the strong ref to the {@link WeakReference}, thereby pruning pointless
-   * references.
-   */
-  private static final boolean USE_CACHED_BATCH =
-      EnvUtils.getPropertyAsBool("solr.blockCache.useCachedBatch", false);
-
-  private static final ThreadLocal<Batch> cachedBatch =
-      USE_CACHED_BATCH ? new ThreadLocal<>() : null;
 
   // Operation-level batch (e.g. merges, commits, core load): groups NodeRefStruct registrations
   // on the current thread into a single Batch, reducing PhantomReference count. Opened via
@@ -836,56 +872,59 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
-    Object referent;
-    Batch batch = null;
-    SegmentScopedBatch scopedBatch; // scopedBatch takes precedence!
-    if (in.segId != -1L
-        && (((scopedBatch = operationBatch.get()) != null
-                && (batch = scopedBatch.getBatch(in.segId, in.readOnce)) != null
-                && (referent = batch.getLiveReferent()) != null)
-            || (USE_CACHED_BATCH
-                && (batch = cachedBatch.get()) != null
-                && (referent = batch.getLiveReferent()) != null))) {
-      // Fast path: reuse cached batch (request or operation scope) on this thread.
-      in.setBatchReferrent((LongAdder) referent);
-      nrs = new NodeRefStruct();
-      batch.addToClose(nrs);
+    if (in.segId == -1L || (nrs = batched(in)) == null) {
+      // unbatched
+      int partIdx = tlrIndex();
+      Cache3<HoldRef> p = holdRefs3[partIdx];
+      int slot = p.acquire();
+      if (slot != Cache3.NULL_SLOT) {
+        nrs = new NodeRefStruct(in, collected, null, (long) partIdx << 32 | slot);
+        p.getPayload(slot).ref = nrs;
+      } else {
+        // Pool exhausted: fall back to heap-allocated Cache.Node.
+        Cache.Node<WeakReference<Object>> n = new Cache.Node<>(createNrs, in);
+        holdRefs[partIdx].add(n);
+        nrs = (NodeRefStruct) n.getPayload();
+      }
+      outstandingHoldRefs.increment();
+    }
+    refsCreated.increment();
+    return nrs;
+  }
+
+  private NodeRefStruct batched(CachedCompressedIndexInput in) {
+    SegmentScopedBatch scopedBatch = operationBatch.get(); // scopedBatch takes precedence!
+    if (scopedBatch != null) {
+      Batch batch = scopedBatch.getBatch(in.segId, in.readOnce);
+      Object referent = batch.getLiveReferent();
+      if (referent != null) {
+        // Fast path: reuse cached batch (request or operation scope) on this thread.
+        NodeRefStruct nrs = new NodeRefStruct();
+        if (batch.addToClose(nrs)) {
+          in.setBatchReferrent((LongAdder) referent);
+          return nrs;
+        }
+      }
     } else {
-      SolrRequestInfo sri;
       SolrQueryRequest req;
-      if (in.segId != -1L
-          && (sri = SolrRequestInfo.getRequestInfo()) != null
-          && (req = sri.getReq()) != null) {
+      SolrRequestInfo sri = SolrRequestInfo.getRequestInfo();
+      if (sri != null && (req = sri.getReq()) != null) {
         Map<Object, Object> ctx = req.getContext();
         BatchEntry b;
         synchronized (ctx) {
           b = (BatchEntry) ctx.computeIfAbsent(referentKey, batchInitFunction);
         }
-        in.setBatchReferrent(b.missLatencyNanos);
-        nrs = new NodeRefStruct();
-        b.batch.addToClose(nrs);
-        if (USE_CACHED_BATCH) cachedBatch.set(b.batch);
-      } else {
-        if (USE_CACHED_BATCH && batch != null) {
-          cachedBatch.remove();
+        Map.Entry<LongAdder, Batch> batchEntry = b.getBatch(this);
+        if (batchEntry != null) {
+          NodeRefStruct nrs = new NodeRefStruct();
+          if (batchEntry.getValue().addToClose(nrs)) {
+            in.setBatchReferrent(batchEntry.getKey());
+            return nrs;
+          }
         }
-        int partIdx = tlrIndex();
-        Cache3<HoldRef> p = holdRefs3[partIdx];
-        int slot = p.acquire();
-        if (slot != Cache3.NULL_SLOT) {
-          nrs = new NodeRefStruct(in, collected, null, (long) partIdx << 32 | slot);
-          p.getPayload(slot).ref = nrs;
-        } else {
-          // Pool exhausted: fall back to heap-allocated Cache.Node.
-          Cache.Node<WeakReference<Object>> n = new Cache.Node<>(createNrs, in);
-          holdRefs[partIdx].add(n);
-          nrs = (NodeRefStruct) n.getPayload();
-        }
-        outstandingHoldRefs.increment();
       }
     }
-    refsCreated.increment();
-    return nrs;
+    return null;
   }
 
   /**
