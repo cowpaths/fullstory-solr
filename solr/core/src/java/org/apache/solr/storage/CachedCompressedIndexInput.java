@@ -383,7 +383,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         unsetBuffers();
       }
     } finally {
-      Reference.reachabilityFence(batchReferrent);
+      // TODO: probably unnecessary (closeFor()/doCloseFor() are CAS-protected against
+      // concurrent/duplicate invocation); revisit removal.
+      Reference.reachabilityFence(this);
     }
   }
 
@@ -411,6 +413,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public final long getFilePointer() {
+    // No reachabilityFence: touches only postBuffer/currentNodeRef bookkeeping (Java-heap fields
+    // on ByteBuffer/NodeRefStruct), never dereferences buffer content via `guard`.
     if (seekPos != -1) return seekPos - offset;
     int blockIdx = currentNodeRef.currentBlockIdx;
     if (blockIdx < 0) blockIdx = ~blockIdx;
@@ -421,17 +425,21 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public final void seek(long pos) throws IOException {
+    // No reachabilityFence: plain field write, no buffer touch at all.
     seekPos = pos + offset;
   }
 
   @Override
   public final long length() {
+    // No reachabilityFence: plain field read, no buffer touch at all.
     return sliceLength;
   }
 
   @Override
   public final IndexInput slice(String sliceDescription, long sliceOffset, long sliceLength)
       throws IOException {
+    // No reachabilityFence: cloneSlice() only copies immutable identifiers to construct a
+    // sibling instance; no buffer content is dereferenced via `guard`.
     if (sliceOffset < 0 || sliceLength < 0 || sliceOffset + sliceLength > this.sliceLength) {
       throw new IllegalArgumentException("slice out of bounds");
     }
@@ -440,6 +448,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public CachedCompressedIndexInput clone() {
+    // No reachabilityFence: same rationale as slice()/getFilePointer(), neither of which
+    // dereferences buffer content via `guard`.
     CachedCompressedIndexInput clone = cloneSlice(toString(), 0, sliceLength);
     try {
       clone.seek(getFilePointer());
@@ -677,6 +687,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     // Intentional passthrough: the base class (DataInput) delegates to readBytes(b, offset, len),
     // which we already override efficiently. The useBuffer hint is meaningful only to
     // BufferedIndexInput subclasses that maintain an internal read buffer. We have no such buffer.
+    // No reachabilityFence here: this method touches no guard/postBuffer state itself, and the
+    // super call re-enters our own readBytes(b, offset, len) override, which fences `this` for
+    // the full duration of the actual work.
     super.readBytes(b, offset, len, useBuffer);
   }
 
@@ -692,6 +705,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   @Override
   public int readZInt() throws IOException {
     // don't override this, so long as it's simply a wrapper around `readVInt()`
+    // No reachabilityFence here: this method touches no guard/postBuffer state itself, and the
+    // super call re-enters our own readVInt() override, which fences `this` for the full
+    // duration of the actual work.
     return super.readZInt();
   }
 
@@ -741,29 +757,45 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public byte readByte(final long pos) throws IOException {
-    return _readByte(pos);
+    try {
+      return _readByte(pos);
+    } finally {
+      Reference.reachabilityFence(this);
+    }
   }
 
   @Override
   public short readShort(final long pos) throws IOException {
-    final long absolutePos = pos + offset;
-    final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
-    if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
-    final int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
-    if (postBuffer.limit() - localPos >= Short.BYTES) {
-      return guard.getShort(postBuffer, localPos);
+    try {
+      final long absolutePos = pos + offset;
+      final int blockIdx = (int) (absolutePos >> COMPRESSION_BLOCK_SHIFT);
+      if (blockIdx != currentNodeRef.currentBlockIdx) initBlock(blockIdx);
+      final int localPos = postBufferBaseline + (int) (absolutePos & COMPRESSION_BLOCK_MASK_LOW);
+      if (postBuffer.limit() - localPos >= Short.BYTES) {
+        return guard.getShort(postBuffer, localPos);
+      }
+      return (short) (((_readByte(pos + 1) & 0xFF) << 8) | (_readByte(pos) & 0xFF));
+    } finally {
+      Reference.reachabilityFence(this);
     }
-    return (short) (((_readByte(pos + 1) & 0xFF) << 8) | (_readByte(pos) & 0xFF));
   }
 
   @Override
   public int readInt(final long pos) throws IOException {
-    return _readInt(pos);
+    try {
+      return _readInt(pos);
+    } finally {
+      Reference.reachabilityFence(this);
+    }
   }
 
   @Override
   public long readLong(final long pos) throws IOException {
-    return _readLong(pos);
+    try {
+      return _readLong(pos);
+    } finally {
+      Reference.reachabilityFence(this);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -772,23 +804,31 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public byte readByte() throws IOException {
-    initPositional();
-    if (!postBuffer.hasRemaining()) initBlockSeq();
-    return guard.getByte(postBuffer);
+    try {
+      initPositional();
+      if (!postBuffer.hasRemaining()) initBlockSeq();
+      return guard.getByte(postBuffer);
+    } finally {
+      Reference.reachabilityFence(this);
+    }
   }
 
   @Override
   public void readBytes(byte[] dst, int offset, int len) throws IOException {
-    initPositional();
-    int left = postBuffer.remaining();
-    while (left < len) {
-      guard.getBytes(postBuffer, dst, offset, left);
-      len -= left;
-      offset += left;
-      initBlockSeq();
-      left = postBuffer.remaining();
+    try {
+      initPositional();
+      int left = postBuffer.remaining();
+      while (left < len) {
+        guard.getBytes(postBuffer, dst, offset, left);
+        len -= left;
+        offset += left;
+        initBlockSeq();
+        left = postBuffer.remaining();
+      }
+      guard.getBytes(postBuffer, dst, offset, len);
+    } finally {
+      Reference.reachabilityFence(this);
     }
-    guard.getBytes(postBuffer, dst, offset, len);
   }
 
   // ---------------------------------------------------------------------------
@@ -804,32 +844,48 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public short readShort() throws IOException {
-    initPositional();
-    final int remaining = postBuffer.remaining();
-    if (remaining >= Short.BYTES) {
-      return guard.getShort(postBuffer);
+    try {
+      initPositional();
+      final int remaining = postBuffer.remaining();
+      if (remaining >= Short.BYTES) {
+        return guard.getShort(postBuffer);
+      }
+      final byte b1 = _readByte(remaining);
+      final byte b2 = _readByte(remaining - 1);
+      return (short) (((b2 & 0xFF) << 8) | (b1 & 0xFF));
+    } finally {
+      Reference.reachabilityFence(this);
     }
-    final byte b1 = _readByte(remaining);
-    final byte b2 = _readByte(remaining - 1);
-    return (short) (((b2 & 0xFF) << 8) | (b1 & 0xFF));
   }
 
   @Override
   public int readInt() throws IOException {
-    initPositional();
-    return _readInt(postBuffer.remaining());
+    try {
+      initPositional();
+      return _readInt(postBuffer.remaining());
+    } finally {
+      Reference.reachabilityFence(this);
+    }
   }
 
   @Override
   public long readLong() throws IOException {
-    initPositional();
-    return _readLong(postBuffer.remaining());
+    try {
+      initPositional();
+      return _readLong(postBuffer.remaining());
+    } finally {
+      Reference.reachabilityFence(this);
+    }
   }
 
   @Override
   public int readVInt() throws IOException {
-    initPositional();
-    return _readVInt(postBuffer.remaining());
+    try {
+      initPositional();
+      return _readVInt(postBuffer.remaining());
+    } finally {
+      Reference.reachabilityFence(this);
+    }
   }
 
   private int _readVInt(int remaining) throws IOException {
@@ -872,14 +928,22 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public long readVLong() throws IOException {
-    initPositional();
-    return _readVLong(false);
+    try {
+      initPositional();
+      return _readVLong(false);
+    } finally {
+      Reference.reachabilityFence(this);
+    }
   }
 
   @Override
   public long readZLong() throws IOException {
-    initPositional();
-    return BitUtil.zigZagDecode(_readVLong(true));
+    try {
+      initPositional();
+      return BitUtil.zigZagDecode(_readVLong(true));
+    } finally {
+      Reference.reachabilityFence(this);
+    }
   }
 
   private long _readVLong(final boolean allowNegative) throws IOException {
@@ -958,8 +1022,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public String readString() throws IOException {
-    initPositional();
-    return _readString();
+    try {
+      initPositional();
+      return _readString();
+    } finally {
+      Reference.reachabilityFence(this);
+    }
   }
 
   private String _readString() throws IOException {
@@ -988,38 +1056,46 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public Map<String, String> readMapOfStrings() throws IOException {
-    initPositional();
-    final int count = _readVInt(postBuffer.remaining());
-    switch (count) {
-      case 0:
-        return Collections.emptyMap();
-      case 1:
-        return Collections.singletonMap(_readString(), _readString());
-      default:
-        final Map<String, String> map =
-            count > 10 ? CollectionUtil.newHashMap(count) : new TreeMap<>();
-        for (int i = count; i > 0; i--) {
-          map.put(_readString(), _readString());
-        }
-        return Collections.unmodifiableMap(map);
+    try {
+      initPositional();
+      final int count = _readVInt(postBuffer.remaining());
+      switch (count) {
+        case 0:
+          return Collections.emptyMap();
+        case 1:
+          return Collections.singletonMap(_readString(), _readString());
+        default:
+          final Map<String, String> map =
+              count > 10 ? CollectionUtil.newHashMap(count) : new TreeMap<>();
+          for (int i = count; i > 0; i--) {
+            map.put(_readString(), _readString());
+          }
+          return Collections.unmodifiableMap(map);
+      }
+    } finally {
+      Reference.reachabilityFence(this);
     }
   }
 
   @Override
   public Set<String> readSetOfStrings() throws IOException {
-    initPositional();
-    final int count = _readVInt(postBuffer.remaining());
-    switch (count) {
-      case 0:
-        return Collections.emptySet();
-      case 1:
-        return Collections.singleton(_readString());
-      default:
-        final Set<String> set = count > 10 ? CollectionUtil.newHashSet(count) : new TreeSet<>();
-        for (int i = count; i > 0; i--) {
-          set.add(_readString());
-        }
-        return Collections.unmodifiableSet(set);
+    try {
+      initPositional();
+      final int count = _readVInt(postBuffer.remaining());
+      switch (count) {
+        case 0:
+          return Collections.emptySet();
+        case 1:
+          return Collections.singleton(_readString());
+        default:
+          final Set<String> set = count > 10 ? CollectionUtil.newHashSet(count) : new TreeSet<>();
+          for (int i = count; i > 0; i--) {
+            set.add(_readString());
+          }
+          return Collections.unmodifiableSet(set);
+      }
+    } finally {
+      Reference.reachabilityFence(this);
     }
   }
 
@@ -1072,61 +1148,73 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   @Override
   public void readLongs(final long[] dst, final int offset, final int length) throws IOException {
-    initPositional();
-    if (longViews == null) {
-      longViews = initLongViews();
-    }
-    final int remaining = postBuffer.remaining();
-    final long bytesRequested = (long) length << 3;
-    if (remaining < bytesRequested) {
-      dst[offset] = _readLong(remaining);
-      for (int i = 1; i < length; i++) {
-        dst[offset + i] = _readLong(postBuffer.remaining());
+    try {
+      initPositional();
+      if (longViews == null) {
+        longViews = initLongViews();
       }
-    } else {
-      final int position = postBuffer.position();
-      guard.getLongs(longViews[position & 0x07].position(position >>> 3), dst, offset, length);
-      postBuffer.position(position + (int) bytesRequested);
+      final int remaining = postBuffer.remaining();
+      final long bytesRequested = (long) length << 3;
+      if (remaining < bytesRequested) {
+        dst[offset] = _readLong(remaining);
+        for (int i = 1; i < length; i++) {
+          dst[offset + i] = _readLong(postBuffer.remaining());
+        }
+      } else {
+        final int position = postBuffer.position();
+        guard.getLongs(longViews[position & 0x07].position(position >>> 3), dst, offset, length);
+        postBuffer.position(position + (int) bytesRequested);
+      }
+    } finally {
+      Reference.reachabilityFence(this);
     }
   }
 
   @Override
   public void readInts(final int[] dst, final int offset, final int length) throws IOException {
-    initPositional();
-    if (intViews == null) {
-      intViews = initIntViews();
-    }
-    final int remaining = postBuffer.remaining();
-    final long bytesRequested = (long) length << 2;
-    if (remaining < bytesRequested) {
-      dst[offset] = _readInt(remaining);
-      for (int i = 1; i < length; i++) {
-        dst[offset + i] = _readInt(postBuffer.remaining());
+    try {
+      initPositional();
+      if (intViews == null) {
+        intViews = initIntViews();
       }
-    } else {
-      final int position = postBuffer.position();
-      guard.getInts(intViews[position & 0x03].position(position >>> 2), dst, offset, length);
-      postBuffer.position(position + (int) bytesRequested);
+      final int remaining = postBuffer.remaining();
+      final long bytesRequested = (long) length << 2;
+      if (remaining < bytesRequested) {
+        dst[offset] = _readInt(remaining);
+        for (int i = 1; i < length; i++) {
+          dst[offset + i] = _readInt(postBuffer.remaining());
+        }
+      } else {
+        final int position = postBuffer.position();
+        guard.getInts(intViews[position & 0x03].position(position >>> 2), dst, offset, length);
+        postBuffer.position(position + (int) bytesRequested);
+      }
+    } finally {
+      Reference.reachabilityFence(this);
     }
   }
 
   @Override
   public void readFloats(final float[] dst, final int offset, final int length) throws IOException {
-    initPositional();
-    if (floatViews == null) {
-      floatViews = initFloatViews();
-    }
-    final int remaining = postBuffer.remaining();
-    final long bytesRequested = (long) length << 2;
-    if (remaining < bytesRequested) {
-      dst[offset] = Float.intBitsToFloat(_readInt(remaining));
-      for (int i = 1; i < length; i++) {
-        dst[offset + i] = Float.intBitsToFloat(_readInt(postBuffer.remaining()));
+    try {
+      initPositional();
+      if (floatViews == null) {
+        floatViews = initFloatViews();
       }
-    } else {
-      final int position = postBuffer.position();
-      guard.getFloats(floatViews[position & 0x03].position(position >>> 2), dst, offset, length);
-      postBuffer.position(position + (int) bytesRequested);
+      final int remaining = postBuffer.remaining();
+      final long bytesRequested = (long) length << 2;
+      if (remaining < bytesRequested) {
+        dst[offset] = Float.intBitsToFloat(_readInt(remaining));
+        for (int i = 1; i < length; i++) {
+          dst[offset + i] = Float.intBitsToFloat(_readInt(postBuffer.remaining()));
+        }
+      } else {
+        final int position = postBuffer.position();
+        guard.getFloats(floatViews[position & 0x03].position(position >>> 2), dst, offset, length);
+        postBuffer.position(position + (int) bytesRequested);
+      }
+    } finally {
+      Reference.reachabilityFence(this);
     }
   }
 
