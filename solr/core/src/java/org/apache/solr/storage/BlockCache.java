@@ -73,7 +73,6 @@ import org.apache.lucene.internal.hppc.LongObjectHashMap;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.BlockCacheMapping;
 import org.apache.lucene.store.BlockCacheMmapProvider;
-import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
@@ -448,10 +447,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     private static final int MAX_BATCH_SIZE = 20_000;
 
     // Treiber stack: lock-free LIFO list of NodeRefStructs to close. Each node's nextInBatch
-    // forms the chain. batchSize is a non-atomic approximate count — MAX_BATCH_SIZE is a loose
-    // failsafe, so slight undercounting under concurrent pushes is acceptable.
+    // forms the chain. batchSize is non-atomically incremented (concurrent pushes can lose
+    // updates) but must stay volatile: BATCH_ROLLOVER relies on cross-thread visibility of this
+    // count (unlike the looser MAX_BATCH_SIZE failsafe, where staleness doesn't matter), and
+    // plain int writes here have no other happens-before edge to piggyback on.
     private volatile NodeRefStruct batchHead;
-    private int batchSize;
+    private volatile int batchSize;
     private static final VarHandle BATCH_HEAD;
 
     static {
@@ -463,12 +464,17 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       }
     }
 
-    void addToClose(NodeRefStruct nrs) {
+    boolean addToClose(NodeRefStruct nrs) {
       NodeRefStruct head;
       do {
-        nrs.nextInBatch = head = batchHead;
+        head = batchHead;
+        if (head == BATCH_CLOSED) {
+          return false;
+        }
+        nrs.nextInBatch = head;
       } while (!BATCH_HEAD.compareAndSet(this, head, nrs));
       batchSize++;
+      return true;
     }
 
     // Three-state liveness field for getLiveReferent():
@@ -489,9 +495,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     @Override
     void doCloseFor(BlockCache cache) {
-      NodeRefStruct nrs = batchHead;
-      if (nrs != null) {
-        batchHead = null;
+      NodeRefStruct nrs = (NodeRefStruct) BATCH_HEAD.getAndSet(this, BATCH_CLOSED);
+      if (nrs != BATCH_CLOSED && nrs != null) {
         for (; ; ) {
           nrs.closeFor(cache);
           NodeRefStruct next = nrs.nextInBatch;
@@ -531,6 +536,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       }
     }
   }
+
+  private static final NodeRefStruct BATCH_CLOSED = new NodeRefStruct();
 
   private static final Object CLOSED_SENTINEL = new Object();
 
@@ -585,22 +592,58 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   private static final class BatchEntry implements SolrQueryRequest.RequestCloseAware {
+
+    // Sentinel pair marking the request as closed. The dummy Batch's batchSize is set to
+    // Integer.MAX_VALUE so the (redundant, defensive) size check in getBatch() also naturally
+    // rejects it, regardless of check ordering.
+    private static final Map.Entry<Object, Batch> CLOSED_ENTRY =
+        new AbstractMap.SimpleImmutableEntry<>(null, new Batch(null, null, null, -1L));
+
+    static {
+      CLOSED_ENTRY.getValue().batchSize = Integer.MAX_VALUE;
+    }
+
+    private static final VarHandle BATCH_ENTRY;
+
+    static {
+      try {
+        BATCH_ENTRY =
+            MethodHandles.lookup().findVarHandle(BatchEntry.class, "batchEntry", Map.Entry.class);
+      } catch (ReflectiveOperationException e) {
+        throw new Error(e);
+      }
+    }
+
+    // Never rotated: the single per-request miss-latency accumulator, shared by every chunk
+    // (rolled-over Batch) this request ever registers against. Decoupling this from the rotating
+    // per-chunk anchor means no recorded latency can ever be stranded on an abandoned chunk.
     private final LongAdder missLatencyNanos;
-    private final Batch batch;
+    // (anchor, Batch) pair, rotated together on rollover. This field -- not Batch.strongRef/
+    // getLiveReferent(), which depends on onRequestClose() firing reliably (not guaranteed) -- is
+    // what keeps the *current* chunk's anchor strongly reachable: BatchEntry itself is reachable
+    // for exactly as long as the request/context is reachable, independent of any close callback.
+    // Once superseded by rollover, the old pair's anchor is no longer referenced here and the old
+    // chunk's fate reverts to depending purely on its own registered CCIIs, as intended.
+    private volatile Map.Entry<Object, Batch> batchEntry;
     private final Timer perRequestDemandTime;
 
-    private BatchEntry(LongAdder missLatencyNanos, Batch batch, Timer perRequestDemandTime) {
+    private BatchEntry(
+        LongAdder missLatencyNanos, Object anchor, Batch batch, Timer perRequestDemandTime) {
       this.missLatencyNanos = missLatencyNanos;
-      this.batch = batch;
+      this.batchEntry = new AbstractMap.SimpleImmutableEntry<>(anchor, batch);
       this.perRequestDemandTime = perRequestDemandTime;
     }
 
     @Override
     public void onRequestClose(long startNanos) {
-      if (USE_CACHED_BATCH) {
-        cachedBatch.remove();
-        batch.onRequestClose(startNanos);
+      @SuppressWarnings("unchecked")
+      Map.Entry<Object, Batch> extant =
+          (Map.Entry<Object, Batch>) BATCH_ENTRY.getAndSet(this, CLOSED_ENTRY);
+      if (extant == CLOSED_ENTRY) {
+        log.warn("already closed");
+        return;
       }
+      extant.getValue().onRequestClose(startNanos);
       long cacheMissLatencyNanos = missLatencyNanos.sum();
       if (cacheMissLatencyNanos > 0) {
         this.perRequestDemandTime.update(cacheMissLatencyNanos, TimeUnit.NANOSECONDS);
@@ -643,14 +686,48 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         }
       }
     }
+
+    public Map.Entry<Object, Batch> getBatch(BlockCache c) {
+      Map.Entry<Object, Batch> extant = batchEntry;
+      if (extant.getValue().batchSize < BATCH_ROLLOVER) {
+        return extant;
+      } else if (extant == CLOSED_ENTRY) {
+        return null;
+      } else {
+        Object newAnchor = new Object();
+        Batch newBatch = c.newBatchForReferent(newAnchor);
+        Map.Entry<Object, Batch> replacementCandidate =
+            new AbstractMap.SimpleImmutableEntry<>(newAnchor, newBatch);
+        for (; ; ) {
+          @SuppressWarnings("unchecked")
+          Map.Entry<Object, Batch> witness =
+              (Map.Entry<Object, Batch>)
+                  BATCH_ENTRY.compareAndExchange(this, extant, replacementCandidate);
+          if (witness == extant) {
+            return replacementCandidate;
+          } else if (witness.getValue().batchSize < BATCH_ROLLOVER) {
+            extant = witness;
+            break;
+          } else if (witness == CLOSED_ENTRY) {
+            extant = null;
+            break;
+          } else {
+            extant = witness;
+          }
+        }
+        // our new batch lost
+        newBatch.closeFor(c);
+        return extant;
+      }
+    }
   }
 
   private final Function<Object, BatchEntry> batchInitFunction = this::batchInitFunction;
 
   private BatchEntry batchInitFunction(Object k) {
-    LongAdder referent = new LongAdder();
-    Batch ret = newBatchForReferent(referent);
-    return new BatchEntry(referent, ret, perRequestDemandTime);
+    Object anchor = new Object();
+    Batch batch = newBatchForReferent(anchor);
+    return new BatchEntry(new LongAdder(), anchor, batch, perRequestDemandTime);
   }
 
   private static final long CACHE_VALIDATION_MAGIC =
@@ -707,21 +784,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   private final long[] extantMap;
 
-  /**
-   * Registers a {@link WeakReference} to the specified {@link IndexInput}. The {@link
-   * WeakReference} carries a strong reference to the associated specified {@link NodeRefStruct},
-   * which is used to unpin any pinned cache nodes upon GC of the {@link IndexInput}.
-   *
-   * <p>Callers may use the returned {@link NodeRefStruct} to explicitly unpin any node referenced
-   * by it and remove the strong ref to the {@link WeakReference}, thereby pruning pointless
-   * references.
-   */
-  private static final boolean USE_CACHED_BATCH =
-      EnvUtils.getPropertyAsBool("solr.blockCache.useCachedBatch", false);
-
-  private static final ThreadLocal<Batch> cachedBatch =
-      USE_CACHED_BATCH ? new ThreadLocal<>() : null;
-
   // Operation-level batch (e.g. merges, commits, core load): groups NodeRefStruct registrations
   // on the current thread into a single Batch, reducing PhantomReference count. Opened via
   // openBatchScope(). Static ThreadLocal: assumes one BlockCache per JVM (true in this deployment).
@@ -738,7 +800,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private Closeable openBatchScopePerSegment() {
     // thread-local, so plain map is fine
     LongObjectHashMap<Batch> segMap = new LongObjectHashMap<>();
-    boolean[] warned = new boolean[1];
     operationBatch.set(
         (segId, readOnce) -> {
           long key = readOnce ? 0 : segId;
@@ -746,11 +807,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           Batch ret;
           if (idx >= 0) {
             ret = segMap.indexGet(idx);
-            if (ret.batchSize >= BATCH_ROLLOVER && !warned[0]) {
-              // in practice we generally see only a handful per entry here, so this should
-              // literally never happen.
-              warned[0] = true;
-              log.warn("unexpectedly exceeded ref batch rollover threshold {}", BATCH_ROLLOVER);
+            if (ret.batchSize >= BATCH_ROLLOVER) {
+              // In practice we generally see only a handful per entry here, so this should be
+              // rare -- but merge workflows may share this per-segment path for some inputs, so
+              // rolling over (rather than just warning) costs us nothing and covers that case too.
+              ret.strongRef = CLOSED_SENTINEL;
+              ret = registerNewBatch();
+              segMap.indexReplace(idx, ret);
             }
           } else {
             ret = registerNewBatch();
@@ -767,15 +830,15 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   /**
-   * Batch-size threshold at which {@link #openBatchScopePlain()} retires the current batch and
-   * starts a fresh one.
+   * Batch-size threshold at which an operation-scoped batch ({@link #openBatchScopePlain()} or
+   * {@link #openBatchScopePerSegment()}) retires the current batch and starts a fresh one.
    *
    * <p>{@code openBatchScopePlain()} (merge scopes) uses a single rolling batch for both readOnce
-   * and non-readOnce registrations, unlike {@link #openBatchScopePerSegment()}. That's safe because
-   * nothing registered during a merge outlives the merge -- "non-readOnce" here just means "alive
-   * for the merge's duration," not indefinitely alive like a searcher-held SegmentCoreReaders input
-   * -- so there's no long-lived registration to protect from being trapped alongside short-lived
-   * ones.
+   * and non-readOnce registrations, unlike {@link #openBatchScopePerSegment()}'s per-segment
+   * batches. That's safe because nothing registered during a merge outlives the merge --
+   * "non-readOnce" here just means "alive for the merge's duration," not indefinitely alive like a
+   * searcher-held SegmentCoreReaders input -- so there's no long-lived registration to protect from
+   * being trapped alongside short-lived ones.
    *
    * <p>Still, a single merge can register a large, slowly-accumulating number of NodeRefStructs
    * (observed up to ~48,000 over ~26 seconds for one large merge). Without rollover, all of them --
@@ -783,6 +846,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * batchHead} until the whole merge finishes. Rolling over at this threshold bounds that
    * dead-weight accumulation and lets retired chunks become collectible while the merge is still
    * running.
+   *
+   * <p>{@code openBatchScopePerSegment()} (searcher opens) is expected to register only a handful
+   * of inputs per segment, so this threshold should essentially never be hit there. It rolls over
+   * anyway rather than just warning: merge workflows may share this per-segment path for some
+   * inputs, and rolling over costs nothing in the expected case while covering that one too.
    *
    * <p>1024 is well below {@code Batch.MAX_BATCH_SIZE} (a leaked-request failsafe, not expected to
    * matter here since operation-scoped batches close deterministically via try-with-resources) and
@@ -808,7 +876,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     };
   }
 
-  private Batch newBatchForReferent(LongAdder referent) {
+  private Batch newBatchForReferent(Object referent) {
     int partIdx = tlrIndex();
     Cache3<HoldRef> p = holdRefs3[partIdx];
     int slot = p.acquire();
@@ -827,7 +895,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   private Batch registerNewBatch() {
-    LongAdder referent = new LongAdder();
+    Object referent = new Object();
     Batch batch = newBatchForReferent(referent);
     // we need a strong referent to prevent collection outside a BatchEntry context
     batch.strongRef = referent;
@@ -836,56 +904,59 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
-    Object referent;
-    Batch batch = null;
-    SegmentScopedBatch scopedBatch; // scopedBatch takes precedence!
-    if (in.segId != -1L
-        && (((scopedBatch = operationBatch.get()) != null
-                && (batch = scopedBatch.getBatch(in.segId, in.readOnce)) != null
-                && (referent = batch.getLiveReferent()) != null)
-            || (USE_CACHED_BATCH
-                && (batch = cachedBatch.get()) != null
-                && (referent = batch.getLiveReferent()) != null))) {
-      // Fast path: reuse cached batch (request or operation scope) on this thread.
-      in.setBatchReferrent((LongAdder) referent);
-      nrs = new NodeRefStruct();
-      batch.addToClose(nrs);
+    if (in.segId == -1L || (nrs = batched(in)) == null) {
+      // unbatched
+      int partIdx = tlrIndex();
+      Cache3<HoldRef> p = holdRefs3[partIdx];
+      int slot = p.acquire();
+      if (slot != Cache3.NULL_SLOT) {
+        nrs = new NodeRefStruct(in, collected, null, (long) partIdx << 32 | slot);
+        p.getPayload(slot).ref = nrs;
+      } else {
+        // Pool exhausted: fall back to heap-allocated Cache.Node.
+        Cache.Node<WeakReference<Object>> n = new Cache.Node<>(createNrs, in);
+        holdRefs[partIdx].add(n);
+        nrs = (NodeRefStruct) n.getPayload();
+      }
+      outstandingHoldRefs.increment();
+    }
+    refsCreated.increment();
+    return nrs;
+  }
+
+  private NodeRefStruct batched(CachedCompressedIndexInput in) {
+    SegmentScopedBatch scopedBatch = operationBatch.get(); // scopedBatch takes precedence!
+    if (scopedBatch != null) {
+      Batch batch = scopedBatch.getBatch(in.segId, in.readOnce);
+      Object referent = batch.getLiveReferent();
+      if (referent != null) {
+        // Fast path: reuse cached batch (request or operation scope) on this thread.
+        NodeRefStruct nrs = new NodeRefStruct();
+        if (batch.addToClose(nrs)) {
+          in.setBatchReferrent(referent, null);
+          return nrs;
+        }
+      }
     } else {
-      SolrRequestInfo sri;
       SolrQueryRequest req;
-      if (in.segId != -1L
-          && (sri = SolrRequestInfo.getRequestInfo()) != null
-          && (req = sri.getReq()) != null) {
+      SolrRequestInfo sri = SolrRequestInfo.getRequestInfo();
+      if (sri != null && (req = sri.getReq()) != null) {
         Map<Object, Object> ctx = req.getContext();
         BatchEntry b;
         synchronized (ctx) {
           b = (BatchEntry) ctx.computeIfAbsent(referentKey, batchInitFunction);
         }
-        in.setBatchReferrent(b.missLatencyNanos);
-        nrs = new NodeRefStruct();
-        b.batch.addToClose(nrs);
-        if (USE_CACHED_BATCH) cachedBatch.set(b.batch);
-      } else {
-        if (USE_CACHED_BATCH && batch != null) {
-          cachedBatch.remove();
+        Map.Entry<Object, Batch> entry = b.getBatch(this);
+        if (entry != null) {
+          NodeRefStruct nrs = new NodeRefStruct();
+          if (entry.getValue().addToClose(nrs)) {
+            in.setBatchReferrent(entry.getKey(), b.missLatencyNanos);
+            return nrs;
+          }
         }
-        int partIdx = tlrIndex();
-        Cache3<HoldRef> p = holdRefs3[partIdx];
-        int slot = p.acquire();
-        if (slot != Cache3.NULL_SLOT) {
-          nrs = new NodeRefStruct(in, collected, null, (long) partIdx << 32 | slot);
-          p.getPayload(slot).ref = nrs;
-        } else {
-          // Pool exhausted: fall back to heap-allocated Cache.Node.
-          Cache.Node<WeakReference<Object>> n = new Cache.Node<>(createNrs, in);
-          holdRefs[partIdx].add(n);
-          nrs = (NodeRefStruct) n.getPayload();
-        }
-        outstandingHoldRefs.increment();
       }
     }
-    refsCreated.increment();
-    return nrs;
+    return null;
   }
 
   /**

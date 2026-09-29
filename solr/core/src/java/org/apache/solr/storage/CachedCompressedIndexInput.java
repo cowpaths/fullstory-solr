@@ -115,7 +115,14 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private ByteBuffer postBuffer = ByteBuffer.allocate(0);
   private int postBufferBaseline;
   private NodeRefStruct currentNodeRef = UNINITIALIZED;
-  private LongAdder batchReferrent;
+  // batchAnchor is the per-chunk object that must stay reachable through close() for the owning
+  // Batch's liveness/collectibility tracking; missLatencyNanos (when non-null) is the separate,
+  // never-rotated per-request accumulator that cache-miss latency is recorded into. Decoupled so
+  // that Batch rollover (chunking a large request/operation into independently-collectible pieces)
+  // never loses latency recorded by an IndexInput registered under an earlier, already-rolled-over
+  // chunk.
+  private Object batchAnchor;
+  private LongAdder missLatencyNanos;
 
   private LongBuffer[] longViews;
   private IntBuffer[] intViews;
@@ -383,14 +390,16 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         unsetBuffers();
       }
     } finally {
-      // TODO: probably unnecessary (closeFor()/doCloseFor() are CAS-protected against
-      // concurrent/duplicate invocation); revisit removal.
+      // TODO: probably unnecessary. The trailing unsetBuffers() call above already touches
+      //  `this` after doClose()/unmap, so no bytecode-liveness gap precedes this fence; revisit
+      //  removal.
       Reference.reachabilityFence(this);
     }
   }
 
-  void setBatchReferrent(LongAdder batchReferrent) {
-    this.batchReferrent = batchReferrent;
+  void setBatchReferrent(Object batchAnchor, LongAdder missLatencyNanos) {
+    this.batchAnchor = batchAnchor;
+    this.missLatencyNanos = missLatencyNanos;
   }
 
   private NodeRefStruct nodeRef() {
@@ -530,8 +539,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       throw e;
     }
     setCurrentNode(cached, blockIdx, cachedVal, type);
-    if (waitNanos > 0 && batchReferrent != null) {
-      batchReferrent.add(waitNanos);
+    if (waitNanos > 0 && missLatencyNanos != null) {
+      missLatencyNanos.add(waitNanos);
     }
     postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
     postBufferBaseline = 0;
@@ -625,8 +634,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
           }
         }
         setCurrentNode(node, blockIdx, null, 2);
-        if (elapsedNanos != -1L && batchReferrent != null) {
-          batchReferrent.add(elapsedNanos);
+        if (elapsedNanos != -1L && missLatencyNanos != null) {
+          missLatencyNanos.add(elapsedNanos);
         }
         postBuffer = buf.duplicate().order(ByteOrder.LITTLE_ENDIAN).position(0);
         postBufferBaseline = 0;
@@ -667,8 +676,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
     ByteBuffer heapBuf = ByteBuffer.wrap(supplied, 0, decompressedLen);
     setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, 3);
-    if (batchReferrent != null) {
-      batchReferrent.add(elapsedNanos);
+    if (missLatencyNanos != null) {
+      missLatencyNanos.add(elapsedNanos);
     }
     postBuffer = heapBuf;
     postBufferBaseline = heapBuf.position();
