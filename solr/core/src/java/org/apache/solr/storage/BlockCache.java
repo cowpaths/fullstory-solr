@@ -447,10 +447,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     private static final int MAX_BATCH_SIZE = 20_000;
 
     // Treiber stack: lock-free LIFO list of NodeRefStructs to close. Each node's nextInBatch
-    // forms the chain. batchSize is a non-atomic approximate count — MAX_BATCH_SIZE is a loose
-    // failsafe, so slight undercounting under concurrent pushes is acceptable.
+    // forms the chain. batchSize is non-atomically incremented (concurrent pushes can lose
+    // updates) but must stay volatile: BATCH_ROLLOVER relies on cross-thread visibility of this
+    // count (unlike the looser MAX_BATCH_SIZE failsafe, where staleness doesn't matter), and
+    // plain int writes here have no other happens-before edge to piggyback on.
     private volatile NodeRefStruct batchHead;
-    private int batchSize;
+    private volatile int batchSize;
     private static final VarHandle BATCH_HEAD;
 
     static {
@@ -687,24 +689,35 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     public Map.Entry<Object, Batch> getBatch(BlockCache c) {
       Map.Entry<Object, Batch> extant = batchEntry;
-      for (; ; ) {
-        if (extant.getValue().batchSize < BATCH_ROLLOVER) {
-          return extant;
-        } else if (extant == CLOSED_ENTRY) {
-          return null;
-        }
+      if (extant.getValue().batchSize < BATCH_ROLLOVER) {
+        return extant;
+      } else if (extant == CLOSED_ENTRY) {
+        return null;
+      } else {
         Object newAnchor = new Object();
+        Batch newBatch = c.newBatchForReferent(newAnchor);
         Map.Entry<Object, Batch> replacementCandidate =
-            new AbstractMap.SimpleImmutableEntry<>(newAnchor, c.newBatchForReferent(newAnchor));
-        @SuppressWarnings("unchecked")
-        Map.Entry<Object, Batch> witness =
-            (Map.Entry<Object, Batch>)
-                BATCH_ENTRY.compareAndExchange(this, extant, replacementCandidate);
-        if (witness == extant) {
-          return replacementCandidate;
-        } else {
-          extant = witness;
+            new AbstractMap.SimpleImmutableEntry<>(newAnchor, newBatch);
+        for (; ; ) {
+          @SuppressWarnings("unchecked")
+          Map.Entry<Object, Batch> witness =
+              (Map.Entry<Object, Batch>)
+                  BATCH_ENTRY.compareAndExchange(this, extant, replacementCandidate);
+          if (witness == extant) {
+            return replacementCandidate;
+          } else if (witness.getValue().batchSize < BATCH_ROLLOVER) {
+            extant = witness;
+            break;
+          } else if (witness == CLOSED_ENTRY) {
+            extant = null;
+            break;
+          } else {
+            extant = witness;
+          }
         }
+        // our new batch lost
+        newBatch.closeFor(c);
+        return extant;
       }
     }
   }
