@@ -100,8 +100,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
   private final BlockCache cache;
 
   @Override
-  public Closeable openBatchScope(boolean segmentScoped) {
-    return cache.openBatchScope(segmentScoped);
+  public Closeable openBatchScope(boolean openSearcher) {
+    return cache.openBatchScope(openSearcher);
   }
 
   private final ExecutorService ioExec;

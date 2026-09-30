@@ -16,5 +16,5 @@ import java.io.Closeable;
  * }</pre>
  */
 public interface BlockCacheBatchScope {
-  Closeable openBatchScope(boolean segmentScoped);
+  Closeable openBatchScope(boolean openSearcher);
 }

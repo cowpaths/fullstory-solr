@@ -694,7 +694,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       } else if (extant == CLOSED_ENTRY) {
         return null;
       } else {
-        Object newAnchor = new Object();
+        Object newAnchor = new RequestBatchAnchor();
         Batch newBatch = c.newBatchForReferent(newAnchor);
         Map.Entry<Object, Batch> replacementCandidate =
             new AbstractMap.SimpleImmutableEntry<>(newAnchor, newBatch);
@@ -722,10 +722,16 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
   }
 
+  private static final class RequestBatchAnchor {}
+
+  private static final class OpenSearcherBatchAnchor {}
+
+  private static final class MergeBatchAnchor {}
+
   private final Function<Object, BatchEntry> batchInitFunction = this::batchInitFunction;
 
   private BatchEntry batchInitFunction(Object k) {
-    Object anchor = new Object();
+    Object anchor = new RequestBatchAnchor();
     Batch batch = newBatchForReferent(anchor);
     return new BatchEntry(new LongAdder(), anchor, batch, perRequestDemandTime);
   }
@@ -793,11 +799,21 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     Batch getBatch(long segmentId, boolean readOnce);
   }
 
-  Closeable openBatchScope(boolean segmentScoped) {
-    return segmentScoped ? openBatchScopePerSegment() : openBatchScopePlain();
+  private static final boolean BATCH_MERGE_SEGMENT_SCOPED =
+      EnvUtils.getPropertyAsBool("solr.writer.batchMergeSegmentScoped", false);
+
+  private static final boolean BATCH_SEARCHER_SEGMENT_SCOPED =
+      EnvUtils.getPropertyAsBool("solr.core.batchSearcherSegmentScoped", true);
+
+  Closeable openBatchScope(boolean openSearcher) {
+    if (openSearcher ? BATCH_SEARCHER_SEGMENT_SCOPED : BATCH_MERGE_SEGMENT_SCOPED) {
+      return openBatchScopePerSegment(openSearcher);
+    } else {
+      return openBatchScopePlain(openSearcher);
+    }
   }
 
-  private Closeable openBatchScopePerSegment() {
+  private Closeable openBatchScopePerSegment(boolean openSearcher) {
     // thread-local, so plain map is fine
     LongObjectHashMap<Batch> segMap = new LongObjectHashMap<>();
     operationBatch.set(
@@ -812,11 +828,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
               // rare -- but merge workflows may share this per-segment path for some inputs, so
               // rolling over (rather than just warning) costs us nothing and covers that case too.
               ret.strongRef = CLOSED_SENTINEL;
-              ret = registerNewBatch();
+              ret = registerNewBatch(openSearcher);
               segMap.indexReplace(idx, ret);
             }
           } else {
-            ret = registerNewBatch();
+            ret = registerNewBatch(openSearcher);
             segMap.indexInsert(idx, key, ret);
           }
           return ret;
@@ -830,15 +846,15 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   /**
-   * Batch-size threshold at which an operation-scoped batch ({@link #openBatchScopePlain()} or
-   * {@link #openBatchScopePerSegment()}) retires the current batch and starts a fresh one.
+   * Batch-size threshold at which an operation-scoped batch ({@link #openBatchScopePlain} or {@link
+   * #openBatchScopePerSegment}) retires the current batch and starts a fresh one.
    *
    * <p>{@code openBatchScopePlain()} (merge scopes) uses a single rolling batch for both readOnce
-   * and non-readOnce registrations, unlike {@link #openBatchScopePerSegment()}'s per-segment
-   * batches. That's safe because nothing registered during a merge outlives the merge --
-   * "non-readOnce" here just means "alive for the merge's duration," not indefinitely alive like a
-   * searcher-held SegmentCoreReaders input -- so there's no long-lived registration to protect from
-   * being trapped alongside short-lived ones.
+   * and non-readOnce registrations, unlike {@link #openBatchScopePerSegment}'s per-segment batches.
+   * That's safe because nothing registered during a merge outlives the merge -- "non-readOnce" here
+   * just means "alive for the merge's duration," not indefinitely alive like a searcher-held
+   * SegmentCoreReaders input -- so there's no long-lived registration to protect from being trapped
+   * alongside short-lived ones.
    *
    * <p>Still, a single merge can register a large, slowly-accumulating number of NodeRefStructs
    * (observed up to ~48,000 over ~26 seconds for one large merge). Without rollover, all of them --
@@ -858,14 +874,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   private static final int BATCH_ROLLOVER = 1024;
 
-  private Closeable openBatchScopePlain() {
-    Batch[] batch = new Batch[] {registerNewBatch()};
+  private Closeable openBatchScopePlain(boolean openSearcher) {
+    Batch[] batch = new Batch[] {registerNewBatch(openSearcher)};
     operationBatch.set(
         (segId, readOnce) -> {
           Batch ret = batch[0];
           if (ret.batchSize >= BATCH_ROLLOVER) {
             ret.strongRef = CLOSED_SENTINEL;
-            ret = registerNewBatch();
+            ret = registerNewBatch(openSearcher);
             batch[0] = ret;
           }
           return ret;
@@ -894,8 +910,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     return batch;
   }
 
-  private Batch registerNewBatch() {
-    Object referent = new Object();
+  private Batch registerNewBatch(boolean openSearcher) {
+    Object referent = openSearcher ? new OpenSearcherBatchAnchor() : new MergeBatchAnchor();
     Batch batch = newBatchForReferent(referent);
     // we need a strong referent to prevent collection outside a BatchEntry context
     batch.strongRef = referent;

@@ -284,9 +284,6 @@ public class SolrIndexWriter extends IndexWriter {
   private static final boolean BATCH_MERGE =
       EnvUtils.getPropertyAsBool("solr.writer.batchMerge", true);
 
-  private static final boolean BATCH_MERGE_SEGMENT_SCOPED =
-      EnvUtils.getPropertyAsBool("solr.writer.batchMergeSegmentScoped", false);
-
   // we override this method to collect metrics for merges.
   @Override
   @SuppressWarnings("try")
@@ -294,7 +291,7 @@ public class SolrIndexWriter extends IndexWriter {
     Directory dir = FilterDirectory.unwrap(getDirectory());
     try (Closeable scope =
         BATCH_MERGE && dir instanceof BlockCacheBatchScope
-            ? ((BlockCacheBatchScope) dir).openBatchScope(BATCH_MERGE_SEGMENT_SCOPED)
+            ? ((BlockCacheBatchScope) dir).openBatchScope(false)
             : null) {
       merge0(merge);
     }
