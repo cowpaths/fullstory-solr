@@ -66,6 +66,11 @@ public class DelegatingSolrQueryRequest implements SolrQueryRequest {
   }
 
   @Override
+  public void beforeRequestClose(long startNanos) {
+    delegate.beforeRequestClose(startNanos);
+  }
+
+  @Override
   public Map<Object, Object> getContext() {
     return delegate.getContext();
   }

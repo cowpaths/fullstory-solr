@@ -21,6 +21,7 @@ import io.opentracing.Tracer;
 import io.opentracing.noop.NoopSpan;
 import io.opentracing.util.GlobalTracer;
 import java.io.Closeable;
+import java.lang.invoke.MethodHandles;
 import java.security.Principal;
 import java.util.Collections;
 import java.util.HashMap;
@@ -41,6 +42,8 @@ import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.servlet.HttpSolrCall;
 import org.apache.solr.util.RTimerTree;
 import org.apache.solr.util.RefCounted;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Base implementation of <code>SolrQueryRequest</code> that provides some convenience methods for
@@ -50,6 +53,9 @@ import org.apache.solr.util.RefCounted;
  * longer in use.
  */
 public abstract class SolrQueryRequestBase implements SolrQueryRequest, Closeable {
+
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+
   protected final SolrCore core;
   protected final SolrParams origParams;
   protected volatile IndexSchema schema;
@@ -177,16 +183,37 @@ public abstract class SolrQueryRequestBase implements SolrQueryRequest, Closeabl
     schema = core.getLatestSchema();
   }
 
+  private long requestStartNanos = -1L;
+
+  @Override
+  public void beforeRequestClose(long startNanos) {
+    this.requestStartNanos = startNanos;
+  }
+
   /**
    * Frees resources associated with this request, this method <b>must</b> be called when the object
    * is no longer in use.
    */
   @Override
   public void close() {
-    if (searcherHolder != null) {
-      assert ObjectReleaseTracker.release(this);
-      searcherHolder.decref();
-      searcherHolder = null;
+    try {
+      if (context != null) {
+        for (Object v : context.values()) {
+          if (v instanceof RequestCloseAware) {
+            try {
+              ((RequestCloseAware) v).onRequestClose(requestStartNanos);
+            } catch (Exception ex) {
+              log.warn("exception closing request context item {}", v, ex);
+            }
+          }
+        }
+      }
+    } finally {
+      if (searcherHolder != null) {
+        assert ObjectReleaseTracker.release(this);
+        searcherHolder.decref();
+        searcherHolder = null;
+      }
     }
   }
 
