@@ -202,7 +202,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       if (file.startsWith("segments_")) {
         segmentsFiles.add(file);
         AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
-        if (input.blockOffsets != null) {
+        if (input.blockOffsets() != null) {
           toClose.add(input);
           priorityInputs.add(input);
         } else {
@@ -213,7 +213,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       if (!file.startsWith("_")) continue;
       AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
       toClose.add(input);
-      if (input.blockOffsets != null && file.endsWith(".si")) {
+      if (input.blockOffsets() != null && file.endsWith(".si")) {
         priorityInputs.add(input);
       } else {
         String segName = IndexFileNames.parseSegmentName(file);
@@ -235,7 +235,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
 
       // Priority files: hint all blocks (small, fully read).
       for (AD2IndexInput in : priorityInputs) {
-        int blockCount = in.blockOffsets.length - 1;
+        int blockCount = in.blockOffsets().length - 1;
         if (blockCount > 0) {
           in.hintCompressedRange(0, blockCount - 1);
         }
@@ -245,13 +245,13 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       for (String segName : roughSegOrder) {
         for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
           AD2IndexInput in = e.getValue();
-          if (in.blockOffsets == null) continue;
+          if (in.blockOffsets() == null) continue;
           String name = e.getKey();
           if (name.endsWith(".cfe")) {
-            int blockCount = in.blockOffsets.length - 1;
+            int blockCount = in.blockOffsets().length - 1;
             if (blockCount > 0) in.hintCompressedRange(0, blockCount - 1);
           } else if (name.endsWith(".cfs")) {
-            int lastIdx = in.blockOffsets.length - 2;
+            int lastIdx = in.blockOffsets().length - 2;
             if (lastIdx <= 1) {
               in.hintCompressedRange(0, lastIdx);
             } else {
@@ -264,10 +264,10 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       for (String segName : roughSegOrder) {
         for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
           AD2IndexInput in = e.getValue();
-          if (in.blockOffsets == null) continue;
+          if (in.blockOffsets() == null) continue;
           String name = e.getKey();
           if (!name.endsWith(".cfs") && !name.endsWith(".cfe")) {
-            int lastIdx = in.blockOffsets.length - 2;
+            int lastIdx = in.blockOffsets().length - 2;
             if (lastIdx <= 1) {
               in.hintCompressedRange(0, lastIdx);
             } else {
@@ -290,8 +290,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           }
         }
         if (cfeInput != null) {
-          if (cfeInput.blockOffsets != null) {
-            int cfeBlockCount = cfeInput.blockOffsets.length - 1;
+          if (cfeInput.blockOffsets() != null) {
+            int cfeBlockCount = cfeInput.blockOffsets().length - 1;
             for (int i = 0; i < cfeBlockCount; i++) {
               AD2IndexInput.loadBlock(cfeInput, i);
             }
@@ -303,7 +303,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
             // Find the CFS input and hint sub-file compressed ranges, coalescing adjacent blocks.
             for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
               AD2IndexInput cfsInput;
-              if (e.getKey().endsWith(".cfs") && (cfsInput = e.getValue()).blockOffsets != null) {
+              if (e.getKey().endsWith(".cfs") && (cfsInput = e.getValue()).blockOffsets() != null) {
                 int rangeStart = blockIndexes.get(0);
                 int rangeEnd = rangeStart;
                 for (int i = 1, size = blockIndexes.size(); i < size; i++) {
@@ -326,7 +326,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
 
       // Phase 1: priority files (segments_N, .si) — all blocks (small, fully read)
       for (AD2IndexInput in : priorityInputs) {
-        for (int idx = 0, blockCount = in.blockOffsets.length - 1; idx < blockCount; idx++) {
+        for (int idx = 0, blockCount = in.blockOffsets().length - 1; idx < blockCount; idx++) {
           AD2IndexInput.loadBlock(in, idx);
         }
       }
@@ -352,9 +352,9 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       for (String seg : segOrder) {
         for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
           AD2IndexInput in;
-          if (e.getKey().endsWith(".cfs") && (in = e.getValue()).blockOffsets != null) {
+          if (e.getKey().endsWith(".cfs") && (in = e.getValue()).blockOffsets() != null) {
             AD2IndexInput.loadBlock(in, 0);
-            int lastIdx = in.blockOffsets.length - 2;
+            int lastIdx = in.blockOffsets().length - 2;
             if (lastIdx > 0) AD2IndexInput.loadBlock(in, lastIdx);
           }
         }
@@ -367,13 +367,13 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         AD2IndexInput cfsInput = null;
         for (Map.Entry<String, AD2IndexInput> e : inputs) {
           String name = e.getKey();
-          if (name.endsWith(".cfs") && e.getValue().blockOffsets != null) {
+          if (name.endsWith(".cfs") && e.getValue().blockOffsets() != null) {
             cfsInput = e.getValue();
-          } else if (!name.endsWith(".cfe") && e.getValue().blockOffsets != null) {
+          } else if (!name.endsWith(".cfe") && e.getValue().blockOffsets() != null) {
             // non-CFS file: load boundary blocks
             AD2IndexInput in = e.getValue();
             AD2IndexInput.loadBlock(in, 0);
-            int lastIdx = in.blockOffsets.length - 2;
+            int lastIdx = in.blockOffsets().length - 2;
             if (lastIdx > 0) AD2IndexInput.loadBlock(in, lastIdx);
           }
         }
@@ -559,15 +559,43 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
 
   static final class AD2IndexInput extends CachedCompressedIndexInput {
 
-    private final ExecutorService ioExec;
-    private final ByteBufferGuard compressedGuard;
-    private final ByteBuffer[] compressed;
-    private final long[] compressedBaseAddresses;
-    private final boolean isRoot;
+    /**
+     * Bundles the root-scoped compressed-file state that is otherwise redundantly copied onto every
+     * slice/clone of the same file: the compressed mmap buffers, their guard, their base addresses
+     * for MADV_WILLNEED hinting, and the lock guarding their unmap lifetime — or, for
+     * owned-buffer-only (pre-mirrored small-file) inputs, the single owned decompressed buffer
+     * instead. Exactly one of {@code ownedBlock} or the other four fields is non-null. One instance
+     * per root file, referenced (not copied) by every slice and clone.
+     */
+    private static final class CompressedInfo {
+      final ByteBufferGuard compressedGuard;
+      final ByteBuffer[] compressed;
+      final long[] compressedBaseAddresses;
 
-    // Non-null for single-block (small) files: mmap'd decompressed data from the access directory.
-    // Served via ownedBufferFor(0), bypassing BlockCache entirely.
-    private final ByteBuffer ownedBlock;
+      // Guards compressed ByteBuffer lifetime. Root holds write lock on close; supply calls hold
+      // read lock. StampedLock.tryReadLock() returns 0 while a write lock is waiting, so in-flight
+      // supply calls drain before invalidateAndUnmap runs, and new tasks see 0 and throw rather
+      // than touching freed memory.
+      final StampedLock supplyLock;
+
+      final ByteBuffer ownedBlock;
+
+      CompressedInfo(
+          ByteBufferGuard compressedGuard,
+          ByteBuffer[] compressed,
+          long[] compressedBaseAddresses,
+          StampedLock supplyLock,
+          ByteBuffer ownedBlock) {
+        this.compressedGuard = compressedGuard;
+        this.compressed = compressed;
+        this.compressedBaseAddresses = compressedBaseAddresses;
+        this.supplyLock = supplyLock;
+        this.ownedBlock = ownedBlock;
+      }
+    }
+
+    private final CompressedInfo compressedInfo;
+    private final boolean isRoot;
 
     /**
      * Constructs a lightweight AD2IndexInput for a pre-mirrored small file. The decompressed data
@@ -597,28 +625,16 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           readOnce,
           new AtomicLongArray(0) /*accessMapped — empty, ownedBufferFor handles all blocks*/,
           Boolean.TRUE /*logicalRoot — not eligible for range preload*/);
-      this.ioExec = dir.ioExec;
-      this.compressedGuard = null;
-      this.compressed = null;
-      this.compressedBaseAddresses = null;
+      this.compressedInfo = new CompressedInfo(null, null, null, null, ownedBlock);
       this.isRoot = true;
       this.blockSupplier = null;
       this.nodesEntry = null;
-      this.supplyLock = null;
-      this.ownedBlock = ownedBlock;
     }
 
     private final BlockPreloader.BlockSupplier blockSupplier;
 
     // non-null for root inputs with tracked nodes; null otherwise
     private final NodesEntry nodesEntry;
-
-    // Guards compressed ByteBuffer lifetime. Root holds write lock on close; supply calls hold
-    // read lock. StampedLock.tryReadLock() returns 0 while a write lock is waiting, so in-flight
-    // supply calls drain before invalidateAndUnmap runs, and new tasks see 0 and throw rather than
-    // touching freed memory. Null for clones and sentinel (they share root's lock via
-    // blockSupplier).
-    private final StampedLock supplyLock;
 
     // -------------------------------------------------------------------------
     // Root constructor (via this() delegation)
@@ -852,17 +868,17 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           readOnce,
           p.accessMapped,
           logicalRoot);
-      this.ioExec = dir.ioExec;
-      this.compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
-      this.compressed = p.compressed;
+      ByteBufferGuard compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
+      ByteBuffer[] compressed = p.compressed;
       long[] addrs = new long[p.compressed.length];
       for (int i = 0; i < addrs.length; i++) {
         addrs[i] = dir.cache.baseAddress(p.compressed[i]);
       }
-      this.compressedBaseAddresses = addrs;
+      StampedLock supplyLock = new StampedLock();
+      this.compressedInfo =
+          new CompressedInfo(compressedGuard, compressed, addrs, supplyLock, null);
       this.isRoot = true;
       this.nodesEntry = p.entry;
-      this.supplyLock = new StampedLock();
       blockSupplier =
           (blockOffset, compressedLen, decompressedLen) -> {
             long stamp = supplyLock.tryReadLock();
@@ -874,7 +890,6 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
               supplyLock.unlockRead(stamp);
             }
           };
-      this.ownedBlock = null;
     }
 
     // -------------------------------------------------------------------------
@@ -889,15 +904,10 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           sliceOffset,
           sliceLen,
           parent.logicalRoot == null ? Boolean.TRUE : Boolean.FALSE);
-      this.ioExec = parent.ioExec;
-      this.compressedGuard = parent.compressedGuard;
-      this.compressed = parent.compressed;
-      this.compressedBaseAddresses = parent.compressedBaseAddresses;
+      this.compressedInfo = parent.compressedInfo;
       this.isRoot = false;
       this.nodesEntry = null;
-      this.supplyLock = parent.supplyLock;
       blockSupplier = parent.blockSupplier;
-      this.ownedBlock = parent.ownedBlock;
     }
 
     // -------------------------------------------------------------------------
@@ -906,6 +916,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
 
     @Override
     protected ByteBuffer ownedBufferFor(int blockIdx) {
+      ByteBuffer ownedBlock = compressedInfo.ownedBlock;
       if (ownedBlock != null && blockIdx == 0) {
         return ownedBlock.duplicate().order(ByteOrder.LITTLE_ENDIAN);
       }
@@ -936,7 +947,11 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         readAheadTo = blockIdx;
       }
       return supplyFromBuffers(
-          compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
+          compressedInfo.compressed,
+          compressedInfo.compressedGuard,
+          blockOffset,
+          compressedLen,
+          decompressedLen);
     }
 
     /**
@@ -953,6 +968,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         int hintTo = -1;
         int newReadAheadTo = target;
         AtomicLongArray am = accessMapped;
+        BlockCache cache = cache();
         for (int i = hintFrom; i <= target; i++) {
           long extant = am.get(i);
           if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) {
@@ -970,10 +986,13 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
 
     /** Issues MADV_WILLNEED on compressed data for blocks [fromIdx, toIdx] inclusive. */
     private void hintCompressedRange(int fromIdx, int toIdx) {
+      long[] blockOffsets = blockOffsets();
+      BlockCache cache = cache();
       long from = blockOffsets[fromIdx];
       long to = blockOffsets[toIdx + 1];
       int regionIdx = (int) (from >> MAX_MAP_SHIFT);
       int regionEnd = (int) (to >> MAX_MAP_SHIFT);
+      long[] compressedBaseAddresses = compressedInfo.compressedBaseAddresses;
       if (regionIdx == regionEnd) {
         long addr = compressedBaseAddresses[regionIdx] + (from & MAX_MAP_MASK);
         cache.willneed(addr, to - from);
@@ -996,18 +1015,21 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
      * otherwise.
      */
     private static boolean loadBlock(AD2IndexInput in, int idx) throws IOException {
+      BlockCache cache = in.cache();
+      UUID blobUUID = in.blobUUID();
       long extant = in.accessMapped.get(idx);
-      if (extant != BlockCache.NULL_HANDLE && in.cache.pinnable(extant)) return true;
+      if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) return true;
       long[] nodeHandle = new long[1];
-      BlockCache.Val toPopulateVal = in.cache.acquireNode(nodeHandle, in.blobUUID, idx);
+      BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle, blobUUID, idx);
       if (toPopulateVal == null) return false;
       long toPopulate = nodeHandle[0];
       if (in.accessMapped.compareAndSet(idx, extant, toPopulate)) {
         if (toPopulateVal.isPopulated()) {
-          in.cache.recordWarmStartHit();
+          cache.recordWarmStartHit();
         } else {
-          long blockOffset = in.blockOffsets[idx];
-          int compressedLen = (int) (in.blockOffsets[idx + 1] - blockOffset);
+          long[] blockOffsets = in.blockOffsets();
+          long blockOffset = blockOffsets[idx];
+          int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
           BlockPreloader.populateBuf(
               blockOffset,
               compressedLen,
@@ -1016,13 +1038,13 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
               toPopulate,
               toPopulateVal,
               in.accessMapped,
-              in.cache,
+              cache,
               in.blockSupplier,
-              in.blobUUID);
+              blobUUID);
         }
-        in.cache.unpin(toPopulate, false);
+        cache.unpin(toPopulate, false);
       } else {
-        in.cache.close(toPopulate, toPopulateVal);
+        cache.close(toPopulate, toPopulateVal);
       }
       return true;
     }
@@ -1067,17 +1089,17 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
     @Override
     protected ByteBuffer doClose() throws IOException {
       if (!isRoot) return null;
-      if (ownedBlock != null) {
+      if (compressedInfo.ownedBlock != null) {
         // Owned-buffer-only input: return the mmap'd buffer for unmapping by CCII.close().
-        return ownedBlock;
+        return compressedInfo.ownedBlock;
       }
       if (nodesEntry != null) {
-        nodesEntry.release(cache);
+        nodesEntry.release(cache());
       }
       // Acquire exclusive lock and never release — drains in-flight supplyFromBuffers calls,
       // and all subsequent tryReadLock() calls return 0, preventing access to freed memory.
-      supplyLock.writeLock();
-      compressedGuard.invalidateAndUnmap(compressed);
+      compressedInfo.supplyLock.writeLock();
+      compressedInfo.compressedGuard.invalidateAndUnmap(compressedInfo.compressed);
       return null;
     }
   }
