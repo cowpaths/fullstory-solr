@@ -80,6 +80,11 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private static final IntBuffer EMPTY_INTBUFFER = IntBuffer.allocate(0);
   private static final FloatBuffer EMPTY_FLOATBUFFER = FloatBuffer.allocate(0);
 
+  // Shared placeholder: zero-capacity, so hasRemaining() is false, triggering init-on-first-read.
+  // Never mutated in place (always reassigned wholesale on first real read), so sharing across
+  // every instance is safe.
+  private static final ByteBuffer EMPTY_POST_BUFFER = ByteBuffer.allocate(0);
+
   protected final BlockCache cache;
   protected final UUID blobUUID;
   // Total logical (decompressed) length of the underlying file.
@@ -112,7 +117,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   protected final Boolean logicalRoot;
 
   private long seekPos = -1;
-  private ByteBuffer postBuffer = ByteBuffer.allocate(0);
+  private ByteBuffer postBuffer = EMPTY_POST_BUFFER;
   private int postBufferBaseline;
   private NodeRefStruct currentNodeRef = UNINITIALIZED;
   // batchAnchor is the per-chunk object that must stay reachable through close() for the owning
@@ -340,7 +345,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     this.offset = parent.offset + sliceOffset;
     this.seekPos = this.offset;
     this.sliceLength = sliceLen;
-    this.postBuffer = ByteBuffer.allocate(0);
     this.sliceFirstBlockIdx = Math.toIntExact(this.offset >> COMPRESSION_BLOCK_SHIFT);
     this.readAheadTo = sliceFirstBlockIdx;
     this.sliceLastBlockIdx =
