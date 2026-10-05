@@ -632,7 +632,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         HashMap<String, NodesEntry> pendingNodes)
         throws IOException {
       this(
-          "lazy:" + source,
+          source.getFileName().toString(),
           dir,
           parseRootParams(
               source,
