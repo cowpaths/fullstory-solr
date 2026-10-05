@@ -158,6 +158,17 @@ class Cache2<V extends Cache2.Val> {
    */
   final Val[] payload;
 
+  /**
+   * Direct references to the COLD_HEAD/COLD_TAIL sentinel Vals, cached at construction to avoid an
+   * array-indexed lookup (bounds check + address computation) on every list operation. Safe because
+   * {@code payload[COLD_HEAD]}/{@code payload[COLD_TAIL]} are assigned exactly once, in the
+   * constructor, and never reassigned. {@link DualQueueCache} caches its own HOT_HEAD/HOT_TAIL
+   * equivalents the same way.
+   */
+  protected final Val coldHeadVal;
+
+  protected final Val coldTailVal;
+
   // ---------------------------------------------------------------------------
   // Constructor
   // ---------------------------------------------------------------------------
@@ -183,8 +194,8 @@ class Cache2<V extends Cache2.Val> {
     // Initialize sentinel Val objects for the cold queue sentinels.
     // rc=-1: permanently inert (never evicted by acquireTail's CAS(0→-1)).
     // DualQueueCache initializes HOT_HEAD / HOT_TAIL sentinel Vals in its own constructor.
-    payload[COLD_HEAD] = new Val(-1);
-    payload[COLD_TAIL] = new Val(-1);
+    this.coldHeadVal = payload[COLD_HEAD] = new Val(-1);
+    this.coldTailVal = payload[COLD_TAIL] = new Val(-1);
 
     // Build cold-queue chain: COLD_HEAD ↔ slot_1 ↔ slot_2 ↔ … ↔ COLD_TAIL.
     // Slot 0 is reserved (null) and never linked. Single-threaded init; plain field writes fine.
@@ -221,8 +232,7 @@ class Cache2<V extends Cache2.Val> {
    * returns the prior value. Returns REMOVED_LINK immediately if the slot has already been spliced
    * out.
    */
-  private int reserve(int slot, int reservation) {
-    Val v = payload[slot];
+  private int reserve(Val v, int reservation) {
     int cur = (int) NEXT_VH.getVolatile(v);
     for (; ; ) {
       while (cur == RESERVED_LINK) {
@@ -242,26 +252,25 @@ class Cache2<V extends Cache2.Val> {
     }
   }
 
-  protected boolean insertAtHead(int listHead, int slot, boolean recordAccess) {
+  protected boolean insertAtHead(int listHead, Val listHeadVal, int slot, boolean recordAccess) {
     Val vSlot = payload[slot];
-    Val vHead = payload[listHead];
     PREV_VH.setVolatile(vSlot, listHead);
-    int oldNext = reserve(listHead, RESERVED_LINK);
+    int oldNext = reserve(listHeadVal, RESERVED_LINK);
     assert oldNext != REMOVED_LINK : "queue head sentinel should never be removed";
     vSlot.next = oldNext;
     PREV_VH.setVolatile(payload[oldNext], slot);
-    if (!NEXT_VH.compareAndSet(vHead, RESERVED_LINK, slot)) {
+    if (!NEXT_VH.compareAndSet(listHeadVal, RESERVED_LINK, slot)) {
       throw new IllegalStateException("unexpected concurrent modification of listHead.next");
     }
     return false;
   }
 
   private void removeFromList(int slot) {
-    int oldNext = reserve(slot, REMOVED_LINK);
+    Val vSlot = payload[slot];
+    int oldNext = reserve(vSlot, REMOVED_LINK);
     if (oldNext == REMOVED_LINK) {
       throw new IllegalStateException("already removed");
     }
-    Val vSlot = payload[slot];
     int prevSlot;
     for (; ; ) {
       prevSlot = (int) PREV_VH.getVolatile(vSlot);
@@ -278,11 +287,10 @@ class Cache2<V extends Cache2.Val> {
 
   private void insertAtTail(int slot) {
     Val vSlot = payload[slot];
-    Val vTail = payload[COLD_TAIL];
     for (; ; ) {
-      int predSlot = (int) PREV_VH.getVolatile(vTail);
+      int predSlot = (int) PREV_VH.getVolatile(coldTailVal);
       Val vPred = payload[predSlot];
-      int oldNext = reserve(predSlot, RESERVED_LINK);
+      int oldNext = reserve(vPred, RESERVED_LINK);
       if (oldNext != COLD_TAIL) {
         if (oldNext == REMOVED_LINK) {
           continue; // pred was concurrently removed; retry
@@ -295,7 +303,7 @@ class Cache2<V extends Cache2.Val> {
       }
       vSlot.next = COLD_TAIL;
       PREV_VH.setVolatile(vSlot, predSlot);
-      PREV_VH.setVolatile(vTail, slot);
+      PREV_VH.setVolatile(coldTailVal, slot);
       if (!NEXT_VH.compareAndSet(vPred, RESERVED_LINK, slot)) {
         throw new IllegalStateException("unexpected concurrent modification during tail insertion");
       }
@@ -392,7 +400,7 @@ class Cache2<V extends Cache2.Val> {
       if (rc == 1) {
         int witness = (int) REF_COUNT.compareAndExchange(p, 1, UNPIN_SENTINEL);
         if (witness == 1) {
-          boolean toHot = insertAtHead(COLD_HEAD, slot, recordAccess);
+          boolean toHot = insertAtHead(COLD_HEAD, coldHeadVal, slot, recordAccess);
           if (!REF_COUNT.compareAndSet(p, UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
@@ -424,8 +432,7 @@ class Cache2<V extends Cache2.Val> {
    * <p>Returns {@link #NULL_SLOT} if the list is empty (all slots are pinned).
    */
   protected int acquireTail() {
-    for (int candidate;
-        (candidate = (int) PREV_VH.getVolatile(payload[COLD_TAIL])) != COLD_HEAD; ) {
+    for (int candidate; (candidate = (int) PREV_VH.getVolatile(coldTailVal)) != COLD_HEAD; ) {
       Val p = payload[candidate];
       if (REF_COUNT.compareAndSet(p, 0, -1)) {
         return candidate;
@@ -574,25 +581,30 @@ class Cache2<V extends Cache2.Val> {
     /** Hot queue: tail sentinel. */
     private final int HOT_TAIL;
 
+    /** Cached direct references to the hot sentinel Vals; see {@link Cache2#coldHeadVal}. */
+    private final Val hotHeadVal;
+
+    private final Val hotTailVal;
+
     DualQueueCache(int capacity, Iterable<? extends V> initialValues) {
       super(capacity, 2, initialValues);
       this.HOT_HEAD = capacity + 3;
       this.HOT_TAIL = capacity + 4;
       // Initialize sentinel Val objects for the hot queue.
-      payload[HOT_HEAD] = new Val(-1);
-      payload[HOT_TAIL] = new Val(-1);
-      payload[HOT_HEAD].next = HOT_TAIL;
-      payload[HOT_TAIL].prev = HOT_HEAD;
+      this.hotHeadVal = payload[HOT_HEAD] = new Val(-1);
+      this.hotTailVal = payload[HOT_TAIL] = new Val(-1);
+      hotHeadVal.next = HOT_TAIL;
+      hotTailVal.prev = HOT_HEAD;
     }
 
     @Override
-    protected final boolean insertAtHead(int head, int slot, boolean recordAccess) {
+    protected final boolean insertAtHead(int head, Val headVal, int slot, boolean recordAccess) {
       TsVal tvp = (TsVal) payload[slot];
       long lastUnpin = tvp.lastUnpinNanos;
       tvp.lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
       boolean toHot = toHot(lastUnpin);
       tvp.fromHot = toHot;
-      super.insertAtHead(toHot ? HOT_HEAD : head, slot, recordAccess);
+      super.insertAtHead(toHot ? HOT_HEAD : head, toHot ? hotHeadVal : headVal, slot, recordAccess);
       return toHot;
     }
 
@@ -604,8 +616,8 @@ class Cache2<V extends Cache2.Val> {
       long now = System.nanoTime();
       Val p;
       do {
-        int coldCandidate = (int) PREV_VH.getVolatile(payload[COLD_TAIL]);
-        int hotCandidate = (int) PREV_VH.getVolatile(payload[HOT_TAIL]);
+        int coldCandidate = (int) PREV_VH.getVolatile(coldTailVal);
+        int hotCandidate = (int) PREV_VH.getVolatile(hotTailVal);
         if (coldCandidate == COLD_HEAD) {
           // cold queue is empty
           if (hotCandidate == HOT_HEAD) {

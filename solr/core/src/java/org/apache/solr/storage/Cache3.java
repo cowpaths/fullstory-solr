@@ -107,6 +107,16 @@ class Cache3<V extends Cache3.Val> {
    */
   private final Val[] payload;
 
+  /**
+   * Direct references to the HEAD/TAIL sentinel Vals, cached at construction to avoid an
+   * array-indexed lookup (bounds check + address computation) on every free-list operation. Safe
+   * because {@code payload[HEAD]}/{@code payload[TAIL]} are assigned exactly once, in the
+   * constructor, and never reassigned.
+   */
+  private final Val headVal;
+
+  private final Val tailVal;
+
   // ---------------------------------------------------------------------------
   // Constructor
   // ---------------------------------------------------------------------------
@@ -121,8 +131,8 @@ class Cache3<V extends Cache3.Val> {
     this.payload = new Val[capacity + 3];
 
     // Sentinel Vals: rc=-1 so acquireTail's CAS(0→-1) never claims them.
-    payload[HEAD] = new Val(-1);
-    payload[TAIL] = new Val(-1);
+    this.headVal = payload[HEAD] = new Val(-1);
+    this.tailVal = payload[TAIL] = new Val(-1);
 
     // Build free-list chain: HEAD ↔ slot_1 ↔ … ↔ slot_N ↔ TAIL.
     // Slot 0 is reserved and never linked. Single-threaded init; plain field writes fine.
@@ -149,8 +159,7 @@ class Cache3<V extends Cache3.Val> {
    * returns the prior value. Returns REMOVED_LINK immediately if the slot has already been spliced
    * out.
    */
-  private int reserve(int slot, int reservation) {
-    Val v = payload[slot];
+  private int reserve(Val v, int reservation) {
     int cur = (int) NEXT_VH.getVolatile(v);
     for (; ; ) {
       while (cur == RESERVED_LINK) {
@@ -172,21 +181,20 @@ class Cache3<V extends Cache3.Val> {
 
   private void insertAtHead(int slot) {
     Val vSlot = payload[slot];
-    Val vHead = payload[HEAD];
     PREV_VH.setVolatile(vSlot, HEAD);
-    int oldNext = reserve(HEAD, RESERVED_LINK);
+    int oldNext = reserve(headVal, RESERVED_LINK);
     assert oldNext != REMOVED_LINK : "HEAD sentinel should never be removed";
     vSlot.next = oldNext;
     PREV_VH.setVolatile(payload[oldNext], slot);
-    if (!NEXT_VH.compareAndSet(vHead, RESERVED_LINK, slot)) {
+    if (!NEXT_VH.compareAndSet(headVal, RESERVED_LINK, slot)) {
       throw new IllegalStateException("unexpected concurrent modification of HEAD.next");
     }
   }
 
   private boolean removeFromList(int slot) {
-    int oldNext = reserve(slot, REMOVED_LINK);
-    if (oldNext == REMOVED_LINK) return false;
     Val vSlot = payload[slot];
+    int oldNext = reserve(vSlot, REMOVED_LINK);
+    if (oldNext == REMOVED_LINK) return false;
     int prevSlot;
     for (; ; ) {
       prevSlot = (int) PREV_VH.getVolatile(vSlot);
@@ -212,7 +220,7 @@ class Cache3<V extends Cache3.Val> {
    * list; the caller owns it exclusively until {@link #tryRelease} is called.
    */
   int acquire() {
-    for (int candidate; (candidate = (int) PREV_VH.getVolatile(payload[TAIL])) != HEAD; ) {
+    for (int candidate; (candidate = (int) PREV_VH.getVolatile(tailVal)) != HEAD; ) {
       Val p = payload[candidate];
       if (REF_COUNT.compareAndSet(p, 0, -1)) {
         if (!removeFromList(candidate)) {
