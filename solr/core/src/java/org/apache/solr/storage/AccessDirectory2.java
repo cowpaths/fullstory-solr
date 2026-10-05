@@ -559,15 +559,43 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
 
   static final class AD2IndexInput extends CachedCompressedIndexInput {
 
-    private final ExecutorService ioExec;
-    private final ByteBufferGuard compressedGuard;
-    private final ByteBuffer[] compressed;
-    private final long[] compressedBaseAddresses;
-    private final boolean isRoot;
+    /**
+     * Bundles the root-scoped compressed-file state that is otherwise redundantly copied onto every
+     * slice/clone of the same file: the compressed mmap buffers, their guard, their base addresses
+     * for MADV_WILLNEED hinting, and the lock guarding their unmap lifetime — or, for
+     * owned-buffer-only (pre-mirrored small-file) inputs, the single owned decompressed buffer
+     * instead. Exactly one of {@code ownedBlock} or the other four fields is non-null. One instance
+     * per root file, referenced (not copied) by every slice and clone.
+     */
+    private static final class CompressedInfo {
+      final ByteBufferGuard compressedGuard;
+      final ByteBuffer[] compressed;
+      final long[] compressedBaseAddresses;
 
-    // Non-null for single-block (small) files: mmap'd decompressed data from the access directory.
-    // Served via ownedBufferFor(0), bypassing BlockCache entirely.
-    private final ByteBuffer ownedBlock;
+      // Guards compressed ByteBuffer lifetime. Root holds write lock on close; supply calls hold
+      // read lock. StampedLock.tryReadLock() returns 0 while a write lock is waiting, so in-flight
+      // supply calls drain before invalidateAndUnmap runs, and new tasks see 0 and throw rather
+      // than touching freed memory.
+      final StampedLock supplyLock;
+
+      final ByteBuffer ownedBlock;
+
+      CompressedInfo(
+          ByteBufferGuard compressedGuard,
+          ByteBuffer[] compressed,
+          long[] compressedBaseAddresses,
+          StampedLock supplyLock,
+          ByteBuffer ownedBlock) {
+        this.compressedGuard = compressedGuard;
+        this.compressed = compressed;
+        this.compressedBaseAddresses = compressedBaseAddresses;
+        this.supplyLock = supplyLock;
+        this.ownedBlock = ownedBlock;
+      }
+    }
+
+    private final CompressedInfo compressedInfo;
+    private final boolean isRoot;
 
     /**
      * Constructs a lightweight AD2IndexInput for a pre-mirrored small file. The decompressed data
@@ -597,28 +625,16 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           readOnce,
           new AtomicLongArray(0) /*accessMapped — empty, ownedBufferFor handles all blocks*/,
           Boolean.TRUE /*logicalRoot — not eligible for range preload*/);
-      this.ioExec = dir.ioExec;
-      this.compressedGuard = null;
-      this.compressed = null;
-      this.compressedBaseAddresses = null;
+      this.compressedInfo = new CompressedInfo(null, null, null, null, ownedBlock);
       this.isRoot = true;
       this.blockSupplier = null;
       this.nodesEntry = null;
-      this.supplyLock = null;
-      this.ownedBlock = ownedBlock;
     }
 
     private final BlockPreloader.BlockSupplier blockSupplier;
 
     // non-null for root inputs with tracked nodes; null otherwise
     private final NodesEntry nodesEntry;
-
-    // Guards compressed ByteBuffer lifetime. Root holds write lock on close; supply calls hold
-    // read lock. StampedLock.tryReadLock() returns 0 while a write lock is waiting, so in-flight
-    // supply calls drain before invalidateAndUnmap runs, and new tasks see 0 and throw rather than
-    // touching freed memory. Null for clones and sentinel (they share root's lock via
-    // blockSupplier).
-    private final StampedLock supplyLock;
 
     // -------------------------------------------------------------------------
     // Root constructor (via this() delegation)
@@ -852,17 +868,17 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           readOnce,
           p.accessMapped,
           logicalRoot);
-      this.ioExec = dir.ioExec;
-      this.compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
-      this.compressed = p.compressed;
+      ByteBufferGuard compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
+      ByteBuffer[] compressed = p.compressed;
       long[] addrs = new long[p.compressed.length];
       for (int i = 0; i < addrs.length; i++) {
         addrs[i] = dir.cache.baseAddress(p.compressed[i]);
       }
-      this.compressedBaseAddresses = addrs;
+      StampedLock supplyLock = new StampedLock();
+      this.compressedInfo =
+          new CompressedInfo(compressedGuard, compressed, addrs, supplyLock, null);
       this.isRoot = true;
       this.nodesEntry = p.entry;
-      this.supplyLock = new StampedLock();
       blockSupplier =
           (blockOffset, compressedLen, decompressedLen) -> {
             long stamp = supplyLock.tryReadLock();
@@ -874,7 +890,6 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
               supplyLock.unlockRead(stamp);
             }
           };
-      this.ownedBlock = null;
     }
 
     // -------------------------------------------------------------------------
@@ -889,15 +904,10 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           sliceOffset,
           sliceLen,
           parent.logicalRoot == null ? Boolean.TRUE : Boolean.FALSE);
-      this.ioExec = parent.ioExec;
-      this.compressedGuard = parent.compressedGuard;
-      this.compressed = parent.compressed;
-      this.compressedBaseAddresses = parent.compressedBaseAddresses;
+      this.compressedInfo = parent.compressedInfo;
       this.isRoot = false;
       this.nodesEntry = null;
-      this.supplyLock = parent.supplyLock;
       blockSupplier = parent.blockSupplier;
-      this.ownedBlock = parent.ownedBlock;
     }
 
     // -------------------------------------------------------------------------
@@ -906,6 +916,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
 
     @Override
     protected ByteBuffer ownedBufferFor(int blockIdx) {
+      ByteBuffer ownedBlock = compressedInfo.ownedBlock;
       if (ownedBlock != null && blockIdx == 0) {
         return ownedBlock.duplicate().order(ByteOrder.LITTLE_ENDIAN);
       }
@@ -936,7 +947,11 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         readAheadTo = blockIdx;
       }
       return supplyFromBuffers(
-          compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
+          compressedInfo.compressed,
+          compressedInfo.compressedGuard,
+          blockOffset,
+          compressedLen,
+          decompressedLen);
     }
 
     /**
@@ -974,6 +989,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       long to = blockOffsets[toIdx + 1];
       int regionIdx = (int) (from >> MAX_MAP_SHIFT);
       int regionEnd = (int) (to >> MAX_MAP_SHIFT);
+      long[] compressedBaseAddresses = compressedInfo.compressedBaseAddresses;
       if (regionIdx == regionEnd) {
         long addr = compressedBaseAddresses[regionIdx] + (from & MAX_MAP_MASK);
         cache.willneed(addr, to - from);
@@ -1067,17 +1083,17 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
     @Override
     protected ByteBuffer doClose() throws IOException {
       if (!isRoot) return null;
-      if (ownedBlock != null) {
+      if (compressedInfo.ownedBlock != null) {
         // Owned-buffer-only input: return the mmap'd buffer for unmapping by CCII.close().
-        return ownedBlock;
+        return compressedInfo.ownedBlock;
       }
       if (nodesEntry != null) {
         nodesEntry.release(cache);
       }
       // Acquire exclusive lock and never release — drains in-flight supplyFromBuffers calls,
       // and all subsequent tryReadLock() calls return 0, preventing access to freed memory.
-      supplyLock.writeLock();
-      compressedGuard.invalidateAndUnmap(compressed);
+      compressedInfo.supplyLock.writeLock();
+      compressedInfo.compressedGuard.invalidateAndUnmap(compressedInfo.compressed);
       return null;
     }
   }

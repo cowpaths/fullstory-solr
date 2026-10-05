@@ -87,15 +87,33 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   protected final BlockCache cache;
   protected final UUID blobUUID;
-  // Total logical (decompressed) length of the underlying file.
-  private final long length;
   // blockOffsets[i] = compressed byte offset of block i within the backend storage;
   // blockOffsets[blockCount] = total compressed size sentinel. Null for always-mapped inputs
   // (where all blocks are pre-pinned as tail nodes and no compressed reads occur).
   protected final long[] blockOffsets;
-  private final int blockCount;
-  private final int lastBlockIdx;
-  private final int lastBlockDecompressedLen;
+
+  /**
+   * Bundles the handful of root-scoped values that are otherwise redundantly copied onto every
+   * slice/clone of the same file: {@code lastBlockIdx}/{@code lastBlockDecompressedLen}, derived
+   * once from the file's logical length. One instance per root file, referenced (not copied) by
+   * every slice and clone. ({@code guard} deliberately stays a direct field rather than joining
+   * this — it's on the hottest read path (one extra dependent-load indirection per primitive read,
+   * not just per block transition), and that tradeoff hasn't been measured.)
+   */
+  private static final class RootInfo {
+    final int lastBlockIdx;
+    final int lastBlockDecompressedLen;
+
+    RootInfo(long length) {
+      int tailLen = (int) (length & COMPRESSION_BLOCK_MASK_LOW);
+      boolean hasTail = tailLen > 0;
+      int blockCount = length == 0 ? 1 : (int) (((length - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
+      this.lastBlockIdx = blockCount - 1;
+      this.lastBlockDecompressedLen = hasTail ? tailLen : COMPRESSION_BLOCK_SIZE;
+    }
+  }
+
+  private final RootInfo rootInfo;
   // Guard for unmap; shared across all slices/clones so root.close() invalidates all in-flight
   // reads.
   private final ByteBufferGuard guard;
@@ -208,7 +226,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * remaining tail length.
    */
   protected final int decompressedLenFor(int blockIdx) {
-    return blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
+    return blockIdx == rootInfo.lastBlockIdx
+        ? rootInfo.lastBlockDecompressedLen
+        : COMPRESSION_BLOCK_SIZE;
   }
 
   /**
@@ -219,7 +239,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    */
   protected void onCacheHit(int blockIdx, BlockCache.Val val, int seqAccessCount) {
     val.maybeLoadHint(cache, decompressedLenFor(blockIdx));
-    if (seqAccessCount >= PROSPECTIVE_READAHEAD_THRESHOLD && blockIdx < lastBlockIdx) {
+    if (seqAccessCount >= PROSPECTIVE_READAHEAD_THRESHOLD && blockIdx < rootInfo.lastBlockIdx) {
       int nextIdx = blockIdx + 1;
       long nextHandle = accessMapped.get(nextIdx);
       if (nextHandle != BlockCache.NULL_HANDLE) {
@@ -278,19 +298,14 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     super(resourceDescription);
     this.cache = cache;
     this.blobUUID = blobUUID;
-    this.length = length;
     this.blockOffsets = blockOffsets;
+    this.rootInfo = new RootInfo(length);
     this.guard = guard;
     this.accessMapped = accessMapped;
-    int tailLen = (int) (length & COMPRESSION_BLOCK_MASK_LOW);
-    boolean hasTail = tailLen > 0;
-    this.blockCount = length == 0 ? 1 : (int) (((length - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
-    this.lastBlockIdx = blockCount - 1;
-    this.lastBlockDecompressedLen = hasTail ? tailLen : COMPRESSION_BLOCK_SIZE;
     this.offset = 0;
     this.sliceLength = length;
     this.sliceFirstBlockIdx = 0;
-    this.sliceLastBlockIdx = lastBlockIdx;
+    this.sliceLastBlockIdx = rootInfo.lastBlockIdx;
     this.segId = segId;
     this.readOnce = readOnce;
     this.logicalRoot = logicalRoot;
@@ -335,11 +350,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     super(resourceDescription);
     this.cache = parent.cache;
     this.blobUUID = parent.blobUUID;
-    this.length = parent.length;
     this.blockOffsets = parent.blockOffsets;
-    this.blockCount = parent.blockCount;
-    this.lastBlockIdx = parent.lastBlockIdx;
-    this.lastBlockDecompressedLen = parent.lastBlockDecompressedLen;
+    this.rootInfo = parent.rootInfo;
     this.guard = parent.guard;
     this.accessMapped = parent.accessMapped;
     this.offset = parent.offset + sliceOffset;
@@ -475,10 +487,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   }
 
   private void initBlock(int blockIdx) throws IOException {
-    if (blockIdx > lastBlockIdx) throw new EOFException();
+    if (blockIdx > rootInfo.lastBlockIdx) throw new EOFException();
     ByteBuffer owned = ownedBufferFor(blockIdx);
     if (owned != null) {
-      if (lastBlockIdx == 0) {
+      if (rootInfo.lastBlockIdx == 0) {
         // Single-block file: skip registration, use singleton.
         currentNodeRef = OWNED_BLOCK_ZERO;
       } else {
@@ -576,7 +588,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     long blockOffset = blockOffsets[blockIdx];
     int compressedLen = (int) (blockOffsets[blockIdx + 1] - blockOffset);
     int decompressedLen =
-        blockIdx == lastBlockIdx ? lastBlockDecompressedLen : COMPRESSION_BLOCK_SIZE;
+        blockIdx == rootInfo.lastBlockIdx
+            ? rootInfo.lastBlockDecompressedLen
+            : COMPRESSION_BLOCK_SIZE;
 
     long[] nodeHandle = new long[1];
     BlockCache.Val nodeVal = cache.acquireNode(nodeHandle, blobUUID, blockIdx);
@@ -598,7 +612,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
                 blockIdx,
                 sliceFirstBlockIdx,
                 sliceLastBlockIdx,
-                lastBlockIdx,
+                rootInfo.lastBlockIdx,
                 this,
                 stackTraceId());
           }
@@ -645,7 +659,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
           blockIdx,
           sliceFirstBlockIdx,
           sliceLastBlockIdx,
-          lastBlockIdx,
+          rootInfo.lastBlockIdx,
           this,
           stackTraceId());
     }
