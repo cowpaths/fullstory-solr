@@ -2057,11 +2057,11 @@ public class GCSDirectory extends SizeAwareDirectory {
               compressedLen,
               decompressedLen,
               accessMapped,
-              blockOffsets,
+              blockOffsets(),
               toIdx,
               this::decompressedLenFor,
               dir.ioExec,
-              blobUUID);
+              blobUUID());
         }
       }
       return dir.supply(blobName, blockOffset, compressedLen, decompressedLen);
@@ -2073,6 +2073,7 @@ public class GCSDirectory extends SizeAwareDirectory {
           ownedBlocks == null
               ? sliceLastBlockIdx
               : Math.min(sliceLastBlockIdx, ownedBlocksOffset - 1);
+      BlockCache cache = cache();
       for (int i = end; i > blockIdx; i--) {
         long extant = accessMapped.get(i);
         if (extant == BlockCache.NULL_HANDLE || !cache.pinnable(extant)) {
@@ -2091,7 +2092,7 @@ public class GCSDirectory extends SizeAwareDirectory {
     protected ByteBuffer doClose() throws IOException {
       if (blocksStruct == null) return null; // slice — nothing to do
 
-      if (blobUUID == null) {
+      if (blobUUID() == null) {
         // always-mapped root: not registered in pendingNodes; just invalidate and unmap.
         return blocksStruct.origMapping.join();
       }
@@ -2101,7 +2102,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       Runnable[] deletionToRun = new Runnable[1];
       BlocksStruct[] toRecycle = new BlocksStruct[1];
       dir.pendingNodes.computeIfPresent(
-          blobUUID,
+          blobUUID(),
           (k, v) -> {
             int outstandingRefs = v.refCount.decrementAndGet();
             if (outstandingRefs == 0) {

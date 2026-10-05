@@ -85,26 +85,31 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // every instance is safe.
   private static final ByteBuffer EMPTY_POST_BUFFER = ByteBuffer.allocate(0);
 
-  protected final BlockCache cache;
-  protected final UUID blobUUID;
-  // blockOffsets[i] = compressed byte offset of block i within the backend storage;
-  // blockOffsets[blockCount] = total compressed size sentinel. Null for always-mapped inputs
-  // (where all blocks are pre-pinned as tail nodes and no compressed reads occur).
-  protected final long[] blockOffsets;
-
   /**
-   * Bundles the handful of root-scoped values that are otherwise redundantly copied onto every
-   * slice/clone of the same file: {@code lastBlockIdx}/{@code lastBlockDecompressedLen}, derived
-   * once from the file's logical length. One instance per root file, referenced (not copied) by
-   * every slice and clone. ({@code guard} deliberately stays a direct field rather than joining
-   * this — it's on the hottest read path (one extra dependent-load indirection per primitive read,
-   * not just per block transition), and that tradeoff hasn't been measured.)
+   * Bundles the root-scoped values that are otherwise redundantly copied onto every slice/clone of
+   * the same file: {@code cache}/{@code blobUUID}/{@code blockOffsets}/{@code segId}, plus {@code
+   * lastBlockIdx}/{@code lastBlockDecompressedLen} derived once from the file's logical length. One
+   * instance per root file, referenced (not copied) by every slice and clone. ({@code guard}
+   * deliberately stays a direct field rather than joining this — it's on the hottest read path (one
+   * extra dependent-load indirection per primitive read, not just per block transition), and that
+   * tradeoff hasn't been measured.)
    */
   private static final class RootInfo {
+    final BlockCache cache;
+    final UUID blobUUID;
+    // blockOffsets[i] = compressed byte offset of block i within the backend storage;
+    // blockOffsets[blockCount] = total compressed size sentinel. Null for always-mapped inputs
+    // (where all blocks are pre-pinned as tail nodes and no compressed reads occur).
+    final long[] blockOffsets;
+    final long segId;
     final int lastBlockIdx;
     final int lastBlockDecompressedLen;
 
-    RootInfo(long length) {
+    RootInfo(BlockCache cache, UUID blobUUID, long[] blockOffsets, long segId, long length) {
+      this.cache = cache;
+      this.blobUUID = blobUUID;
+      this.blockOffsets = blockOffsets;
+      this.segId = segId;
       int tailLen = (int) (length & COMPRESSION_BLOCK_MASK_LOW);
       boolean hasTail = tailLen > 0;
       int blockCount = length == 0 ? 1 : (int) (((length - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
@@ -117,8 +122,24 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // Guard for unmap; shared across all slices/clones so root.close() invalidates all in-flight
   // reads.
   private final ByteBufferGuard guard;
-  final long segId;
   final boolean readOnce;
+
+  protected final BlockCache cache() {
+    return rootInfo.cache;
+  }
+
+  protected final UUID blobUUID() {
+    return rootInfo.blobUUID;
+  }
+
+  protected final long[] blockOffsets() {
+    return rootInfo.blockOffsets;
+  }
+
+  final long segId() {
+    return rootInfo.segId;
+  }
+
   // Shared per-file array; null'd on close.
   protected AtomicLongArray accessMapped;
 
@@ -200,7 +221,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   /**
    * Create a clone or slice of this input. The returned instance shares {@link #accessMapped} and
-   * {@link #blockOffsets} with the parent but does not own the backend mapping.
+   * {@link #blockOffsets()} with the parent but does not own the backend mapping.
    *
    * @param description the resource description for the new input
    * @param sliceOffset the offset within this input's logical file space
@@ -238,28 +259,13 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * the populated data (avoids paging in unused tail-block padding).
    */
   protected void onCacheHit(int blockIdx, BlockCache.Val val, int seqAccessCount) {
-    val.maybeLoadHint(cache, decompressedLenFor(blockIdx));
+    val.maybeLoadHint(rootInfo.cache, decompressedLenFor(blockIdx));
     if (seqAccessCount >= PROSPECTIVE_READAHEAD_THRESHOLD && blockIdx < rootInfo.lastBlockIdx) {
       int nextIdx = blockIdx + 1;
       long nextHandle = accessMapped.get(nextIdx);
       if (nextHandle != BlockCache.NULL_HANDLE) {
-        cache.maybeLoadHint(nextHandle, decompressedLenFor(nextIdx));
+        rootInfo.cache.maybeLoadHint(nextHandle, decompressedLenFor(nextIdx));
       }
-    }
-  }
-
-  /**
-   * Checks whether the cache block at {@code handle} is live and pinnable. When {@code
-   * seqAccessCount} meets the {@link #PROSPECTIVE_READAHEAD_THRESHOLD}, also issues a throttled
-   * length-aware {@code MADV_WILLNEED} hint on the cache file block. Used by preload tasks to warm
-   * the page cache for blocks that are already in the block cache but may not yet be paged in from
-   * the backing file.
-   */
-  protected boolean pinnable(int blockIdx, long handle, int seqAccessCount) {
-    if (seqAccessCount < PROSPECTIVE_READAHEAD_THRESHOLD) {
-      return cache.pinnable(handle);
-    } else {
-      return cache.maybeLoadHint(handle, decompressedLenFor(blockIdx));
     }
   }
 
@@ -296,17 +302,13 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       AtomicLongArray accessMapped,
       Boolean logicalRoot) {
     super(resourceDescription);
-    this.cache = cache;
-    this.blobUUID = blobUUID;
-    this.blockOffsets = blockOffsets;
-    this.rootInfo = new RootInfo(length);
+    this.rootInfo = new RootInfo(cache, blobUUID, blockOffsets, segId, length);
     this.guard = guard;
     this.accessMapped = accessMapped;
     this.offset = 0;
     this.sliceLength = length;
     this.sliceFirstBlockIdx = 0;
     this.sliceLastBlockIdx = rootInfo.lastBlockIdx;
-    this.segId = segId;
     this.readOnce = readOnce;
     this.logicalRoot = logicalRoot;
   }
@@ -348,9 +350,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long sliceLen,
       Boolean logicalRoot) {
     super(resourceDescription);
-    this.cache = parent.cache;
-    this.blobUUID = parent.blobUUID;
-    this.blockOffsets = parent.blockOffsets;
     this.rootInfo = parent.rootInfo;
     this.guard = parent.guard;
     this.accessMapped = parent.accessMapped;
@@ -363,7 +362,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         sliceLen == 0
             ? sliceFirstBlockIdx
             : Math.toIntExact((this.offset + sliceLen - 1) >> COMPRESSION_BLOCK_SHIFT);
-    this.segId = parent.segId;
     this.readOnce = false; // we can't assume slices/clones inherit
     this.logicalRoot = logicalRoot;
   }
@@ -401,7 +399,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private NodeRefStruct nodeRef() {
     NodeRefStruct ref = currentNodeRef;
     if (ref == UNINITIALIZED) {
-      return currentNodeRef = cache.register(this);
+      return currentNodeRef = rootInfo.cache.register(this);
     } else {
       return ref;
     }
@@ -409,7 +407,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   private void unsetBuffers() {
     accessMapped = null;
-    currentNodeRef.closeFor(cache);
+    currentNodeRef.closeFor(rootInfo.cache);
     postBuffer = null;
     floatViews = null;
     intViews = null;
@@ -507,9 +505,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     boolean uninitialized;
     BlockCache.Val cachedVal;
     if ((uninitialized = cached == BlockCache.NULL_HANDLE)
-        || (cachedVal = cache.pin(cached)) == null) {
+        || (cachedVal = rootInfo.cache.pin(cached)) == null) {
       if (!uninitialized) {
-        cache.recordFailedPin();
+        rootInfo.cache.recordFailedPin();
       }
       cacheMiss(cached, blockIdx);
     } else {
@@ -525,10 +523,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     long waitNanos;
     cacheHitBlockNanos[0] = 0;
     try {
-      buf = cachedVal.join(cache, cacheHitBlockNanos);
+      buf = cachedVal.join(rootInfo.cache, cacheHitBlockNanos);
       waitNanos = cacheHitBlockNanos[0];
     } catch (Throwable e) {
-      cache.unpin(cached);
+      rootInfo.cache.unpin(cached);
       if (e instanceof CompletionException) {
         throw unwrapException(e.getCause());
       }
@@ -546,7 +544,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   }
 
   private void setCurrentNode(long node, int blockIdx, BlockCache.Val val, int type) {
-    seqAccessCount = nodeRef().setCurrentNode(node, blockIdx, cache);
+    seqAccessCount = nodeRef().setCurrentNode(node, blockIdx, rootInfo.cache);
     if (seqAccessCount == -1) {
       readAheadTo = sliceFirstBlockIdx;
     }
@@ -585,15 +583,16 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private static final boolean VERBOSE = false;
 
   private void cacheMiss(final long cached, final int blockIdx) throws IOException {
-    long blockOffset = blockOffsets[blockIdx];
-    int compressedLen = (int) (blockOffsets[blockIdx + 1] - blockOffset);
+    long blockOffset = rootInfo.blockOffsets[blockIdx];
+    BlockCache cache = rootInfo.cache;
+    int compressedLen = (int) (rootInfo.blockOffsets[blockIdx + 1] - blockOffset);
     int decompressedLen =
         blockIdx == rootInfo.lastBlockIdx
             ? rootInfo.lastBlockDecompressedLen
             : COMPRESSION_BLOCK_SIZE;
 
     long[] nodeHandle = new long[1];
-    BlockCache.Val nodeVal = cache.acquireNode(nodeHandle, blobUUID, blockIdx);
+    BlockCache.Val nodeVal = cache.acquireNode(nodeHandle, rootInfo.blobUUID, blockIdx);
     if (nodeVal != null) {
       long node = nodeHandle[0];
       long extant = accessMapped.compareAndExchange(blockIdx, cached, node);
@@ -619,7 +618,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
           long start = System.nanoTime();
           try {
             byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
-            buf = nodeVal.populate(heapBuf, 0, decompressedLen, blobUUID, blockIdx, cache);
+            buf = nodeVal.populate(heapBuf, 0, decompressedLen, rootInfo.blobUUID, blockIdx, cache);
           } catch (Throwable t) {
             nodeVal.completeExceptionally(t);
             accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);

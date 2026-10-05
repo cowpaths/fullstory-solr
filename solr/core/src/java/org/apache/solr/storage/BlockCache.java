@@ -920,7 +920,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   NodeRefStruct register(CachedCompressedIndexInput in) {
     NodeRefStruct nrs;
-    if (in.segId == -1L || (nrs = batched(in)) == null) {
+    if (in.segId() == -1L || (nrs = batched(in)) == null) {
       // unbatched
       int partIdx = tlrIndex();
       Cache3<HoldRef> p = holdRefs3[partIdx];
@@ -943,7 +943,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private NodeRefStruct batched(CachedCompressedIndexInput in) {
     SegmentScopedBatch scopedBatch = operationBatch.get(); // scopedBatch takes precedence!
     if (scopedBatch != null) {
-      Batch batch = scopedBatch.getBatch(in.segId, in.readOnce);
+      Batch batch = scopedBatch.getBatch(in.segId(), in.readOnce);
       Object referent = batch.getLiveReferent();
       if (referent != null) {
         // Fast path: reuse cached batch (request or operation scope) on this thread.

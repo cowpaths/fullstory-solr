@@ -202,7 +202,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       if (file.startsWith("segments_")) {
         segmentsFiles.add(file);
         AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
-        if (input.blockOffsets != null) {
+        if (input.blockOffsets() != null) {
           toClose.add(input);
           priorityInputs.add(input);
         } else {
@@ -213,7 +213,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       if (!file.startsWith("_")) continue;
       AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
       toClose.add(input);
-      if (input.blockOffsets != null && file.endsWith(".si")) {
+      if (input.blockOffsets() != null && file.endsWith(".si")) {
         priorityInputs.add(input);
       } else {
         String segName = IndexFileNames.parseSegmentName(file);
@@ -235,7 +235,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
 
       // Priority files: hint all blocks (small, fully read).
       for (AD2IndexInput in : priorityInputs) {
-        int blockCount = in.blockOffsets.length - 1;
+        int blockCount = in.blockOffsets().length - 1;
         if (blockCount > 0) {
           in.hintCompressedRange(0, blockCount - 1);
         }
@@ -245,13 +245,13 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       for (String segName : roughSegOrder) {
         for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
           AD2IndexInput in = e.getValue();
-          if (in.blockOffsets == null) continue;
+          if (in.blockOffsets() == null) continue;
           String name = e.getKey();
           if (name.endsWith(".cfe")) {
-            int blockCount = in.blockOffsets.length - 1;
+            int blockCount = in.blockOffsets().length - 1;
             if (blockCount > 0) in.hintCompressedRange(0, blockCount - 1);
           } else if (name.endsWith(".cfs")) {
-            int lastIdx = in.blockOffsets.length - 2;
+            int lastIdx = in.blockOffsets().length - 2;
             if (lastIdx <= 1) {
               in.hintCompressedRange(0, lastIdx);
             } else {
@@ -264,10 +264,10 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       for (String segName : roughSegOrder) {
         for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
           AD2IndexInput in = e.getValue();
-          if (in.blockOffsets == null) continue;
+          if (in.blockOffsets() == null) continue;
           String name = e.getKey();
           if (!name.endsWith(".cfs") && !name.endsWith(".cfe")) {
-            int lastIdx = in.blockOffsets.length - 2;
+            int lastIdx = in.blockOffsets().length - 2;
             if (lastIdx <= 1) {
               in.hintCompressedRange(0, lastIdx);
             } else {
@@ -290,8 +290,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           }
         }
         if (cfeInput != null) {
-          if (cfeInput.blockOffsets != null) {
-            int cfeBlockCount = cfeInput.blockOffsets.length - 1;
+          if (cfeInput.blockOffsets() != null) {
+            int cfeBlockCount = cfeInput.blockOffsets().length - 1;
             for (int i = 0; i < cfeBlockCount; i++) {
               AD2IndexInput.loadBlock(cfeInput, i);
             }
@@ -303,7 +303,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
             // Find the CFS input and hint sub-file compressed ranges, coalescing adjacent blocks.
             for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
               AD2IndexInput cfsInput;
-              if (e.getKey().endsWith(".cfs") && (cfsInput = e.getValue()).blockOffsets != null) {
+              if (e.getKey().endsWith(".cfs") && (cfsInput = e.getValue()).blockOffsets() != null) {
                 int rangeStart = blockIndexes.get(0);
                 int rangeEnd = rangeStart;
                 for (int i = 1, size = blockIndexes.size(); i < size; i++) {
@@ -326,7 +326,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
 
       // Phase 1: priority files (segments_N, .si) — all blocks (small, fully read)
       for (AD2IndexInput in : priorityInputs) {
-        for (int idx = 0, blockCount = in.blockOffsets.length - 1; idx < blockCount; idx++) {
+        for (int idx = 0, blockCount = in.blockOffsets().length - 1; idx < blockCount; idx++) {
           AD2IndexInput.loadBlock(in, idx);
         }
       }
@@ -352,9 +352,9 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       for (String seg : segOrder) {
         for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
           AD2IndexInput in;
-          if (e.getKey().endsWith(".cfs") && (in = e.getValue()).blockOffsets != null) {
+          if (e.getKey().endsWith(".cfs") && (in = e.getValue()).blockOffsets() != null) {
             AD2IndexInput.loadBlock(in, 0);
-            int lastIdx = in.blockOffsets.length - 2;
+            int lastIdx = in.blockOffsets().length - 2;
             if (lastIdx > 0) AD2IndexInput.loadBlock(in, lastIdx);
           }
         }
@@ -367,13 +367,13 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         AD2IndexInput cfsInput = null;
         for (Map.Entry<String, AD2IndexInput> e : inputs) {
           String name = e.getKey();
-          if (name.endsWith(".cfs") && e.getValue().blockOffsets != null) {
+          if (name.endsWith(".cfs") && e.getValue().blockOffsets() != null) {
             cfsInput = e.getValue();
-          } else if (!name.endsWith(".cfe") && e.getValue().blockOffsets != null) {
+          } else if (!name.endsWith(".cfe") && e.getValue().blockOffsets() != null) {
             // non-CFS file: load boundary blocks
             AD2IndexInput in = e.getValue();
             AD2IndexInput.loadBlock(in, 0);
-            int lastIdx = in.blockOffsets.length - 2;
+            int lastIdx = in.blockOffsets().length - 2;
             if (lastIdx > 0) AD2IndexInput.loadBlock(in, lastIdx);
           }
         }
@@ -968,6 +968,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         int hintTo = -1;
         int newReadAheadTo = target;
         AtomicLongArray am = accessMapped;
+        BlockCache cache = cache();
         for (int i = hintFrom; i <= target; i++) {
           long extant = am.get(i);
           if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) {
@@ -985,6 +986,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
 
     /** Issues MADV_WILLNEED on compressed data for blocks [fromIdx, toIdx] inclusive. */
     private void hintCompressedRange(int fromIdx, int toIdx) {
+      long[] blockOffsets = blockOffsets();
+      BlockCache cache = cache();
       long from = blockOffsets[fromIdx];
       long to = blockOffsets[toIdx + 1];
       int regionIdx = (int) (from >> MAX_MAP_SHIFT);
@@ -1012,18 +1015,21 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
      * otherwise.
      */
     private static boolean loadBlock(AD2IndexInput in, int idx) throws IOException {
+      BlockCache cache = in.cache();
+      UUID blobUUID = in.blobUUID();
       long extant = in.accessMapped.get(idx);
-      if (extant != BlockCache.NULL_HANDLE && in.cache.pinnable(extant)) return true;
+      if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) return true;
       long[] nodeHandle = new long[1];
-      BlockCache.Val toPopulateVal = in.cache.acquireNode(nodeHandle, in.blobUUID, idx);
+      BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle, blobUUID, idx);
       if (toPopulateVal == null) return false;
       long toPopulate = nodeHandle[0];
       if (in.accessMapped.compareAndSet(idx, extant, toPopulate)) {
         if (toPopulateVal.isPopulated()) {
-          in.cache.recordWarmStartHit();
+          cache.recordWarmStartHit();
         } else {
-          long blockOffset = in.blockOffsets[idx];
-          int compressedLen = (int) (in.blockOffsets[idx + 1] - blockOffset);
+          long[] blockOffsets = in.blockOffsets();
+          long blockOffset = blockOffsets[idx];
+          int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
           BlockPreloader.populateBuf(
               blockOffset,
               compressedLen,
@@ -1032,13 +1038,13 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
               toPopulate,
               toPopulateVal,
               in.accessMapped,
-              in.cache,
+              cache,
               in.blockSupplier,
-              in.blobUUID);
+              blobUUID);
         }
-        in.cache.unpin(toPopulate, false);
+        cache.unpin(toPopulate, false);
       } else {
-        in.cache.close(toPopulate, toPopulateVal);
+        cache.close(toPopulate, toPopulateVal);
       }
       return true;
     }
@@ -1088,7 +1094,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         return compressedInfo.ownedBlock;
       }
       if (nodesEntry != null) {
-        nodesEntry.release(cache);
+        nodesEntry.release(cache());
       }
       // Acquire exclusive lock and never release — drains in-flight supplyFromBuffers calls,
       // and all subsequent tryReadLock() calls return 0, preventing access to freed memory.
