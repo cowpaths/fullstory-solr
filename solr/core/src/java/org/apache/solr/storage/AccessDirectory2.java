@@ -644,19 +644,6 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           readOnce);
     }
 
-    private AD2IndexInput() {
-      super("done_sentinel");
-      this.ioExec = null;
-      this.compressedGuard = null;
-      this.compressed = null;
-      this.compressedBaseAddresses = null;
-      this.isRoot = false;
-      this.blockSupplier = null;
-      this.nodesEntry = null;
-      this.supplyLock = null;
-      this.ownedBlock = null;
-    }
-
     private static final class RootParams {
       final long length;
       final long[] blockOffsets;

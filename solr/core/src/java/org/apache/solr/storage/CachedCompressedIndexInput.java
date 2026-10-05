@@ -253,26 +253,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // Root constructor
   // ---------------------------------------------------------------------------
 
-  /** dummy/sentinel ctor */
-  protected CachedCompressedIndexInput(String resourceDescription) {
-    super(resourceDescription);
-    this.cache = null;
-    this.blobUUID = null;
-    this.length = -1;
-    this.blockOffsets = null;
-    this.guard = null;
-    this.blockCount = -1;
-    this.lastBlockIdx = -1;
-    this.lastBlockDecompressedLen = -1;
-    this.offset = -1;
-    this.sliceLength = -1;
-    this.sliceFirstBlockIdx = -1;
-    this.sliceLastBlockIdx = -1;
-    this.logicalRoot = null;
-    this.segId = -1L;
-    this.readOnce = false;
-  }
-
   /**
    * Root constructor. Computes block-count and last-block-length from {@code length}.
    *
