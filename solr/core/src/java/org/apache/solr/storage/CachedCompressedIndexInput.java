@@ -156,8 +156,13 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
 
   private final long offset; // absolute start offset of this slice within the file
   private final long sliceLength;
-  protected final int sliceFirstBlockIdx;
   protected final int sliceLastBlockIdx;
+
+  // Rarely read (only on a backward-seek reset) and trivially cheap to derive from `offset`, so
+  // not worth caching as a field.
+  private int sliceFirstBlockIdx() {
+    return Math.toIntExact(offset >> COMPRESSION_BLOCK_SHIFT);
+  }
 
   /**
    * Combines nesting-depth kind (for range-preload eligibility — meaning is subclass-defined; CCII
@@ -361,7 +366,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     this.guard = guard;
     this.offset = 0;
     this.sliceLength = length;
-    this.sliceFirstBlockIdx = 0;
     this.sliceLastBlockIdx = rootInfo.lastBlockIdx;
     this.rootKind = rootKind;
   }
@@ -408,7 +412,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     this.offset = parent.offset + sliceOffset;
     this.seekPos = this.offset;
     this.sliceLength = sliceLen;
-    this.sliceFirstBlockIdx = Math.toIntExact(this.offset >> COMPRESSION_BLOCK_SHIFT);
+    int sliceFirstBlockIdx = sliceFirstBlockIdx();
     this.readAheadTo = sliceFirstBlockIdx;
     this.sliceLastBlockIdx =
         sliceLen == 0
@@ -626,7 +630,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private void setCurrentNode(long node, int blockIdx, BlockCache.Val val, int type) {
     seqAccessCount = nodeRef().setCurrentNode(node, blockIdx, rootInfo.cache);
     if (seqAccessCount == -1) {
-      readAheadTo = sliceFirstBlockIdx;
+      readAheadTo = sliceFirstBlockIdx();
     }
     if (type == 0) {
       onCacheHit(blockIdx, val, seqAccessCount);
@@ -690,7 +694,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
             log.info(
                 "demand {} of {}/{}/{} {} [{}]",
                 blockIdx,
-                sliceFirstBlockIdx,
+                sliceFirstBlockIdx(),
                 sliceLastBlockIdx,
                 rootInfo.lastBlockIdx,
                 this,
@@ -737,7 +741,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       log.info(
           "demand HEAP {} of {}/{}/{} {} [{}]",
           blockIdx,
-          sliceFirstBlockIdx,
+          sliceFirstBlockIdx(),
           sliceLastBlockIdx,
           rootInfo.lastBlockIdx,
           this,
