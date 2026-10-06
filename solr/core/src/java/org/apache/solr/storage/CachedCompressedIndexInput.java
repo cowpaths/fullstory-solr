@@ -95,7 +95,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * extra dependent-load indirection per primitive read, not just per block transition), and that
    * tradeoff hasn't been measured.)
    */
-  private static final class RootInfo {
+  static final class RootInfo {
     final BlockCache cache;
     final UUID blobUUID;
     // blockOffsets[i] = compressed byte offset of block i within the backend storage;
@@ -119,7 +119,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  private final RootInfo rootInfo;
+  // Shared per-root-input struct; null'd on close.
+  private RootInfo rootInfo;
   // Guard for unmap; shared across all slices/clones so root.close() invalidates all in-flight
   // reads.
   private final ByteBufferGuard guard;
@@ -140,8 +141,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     return rootInfo.segId;
   }
 
-  // Shared per-file array; null'd on close.
-  protected AtomicLongArray accessMapped;
+  // Shared per-file array
+  protected final AtomicLongArray accessMapped;
 
   private final long offset; // absolute start offset of this slice within the file
   private final long sliceLength;
@@ -275,8 +276,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * Release backend-specific resources owned by this root input. Not called for slices (which do
    * not own the mapping). Called inside a {@code try-finally} by {@link #close()}; {@link
    * #unsetBuffers()} always executes in the {@code finally} block regardless of exceptions here.
+   * {@code rootInfo} is the value captured by {@code unsetBuffers()} just before it nulled out the
+   * instance field of the same name — by the time this method runs, {@code this.rootInfo} (and thus
+   * {@link #cache()}/{@link #blobUUID()}/{@link #blockOffsets()}/{@link #segId()}) is already null,
+   * so implementations needing any of those values must read them off this parameter instead.
    */
-  protected abstract ByteBuffer doClose() throws IOException;
+  protected abstract ByteBuffer doClose(RootInfo rootInfo) throws IOException;
 
   // ---------------------------------------------------------------------------
   // Protected hook methods (no-op defaults)
@@ -411,10 +416,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   @Override
   public final void close() throws IOException {
     try {
-      if (accessMapped == null) return;
-      unsetBuffers();
+      if (rootInfo == null) return;
+      RootInfo ri = unsetBuffers();
       try {
-        ByteBuffer toUnmap = doClose();
+        ByteBuffer toUnmap = doClose(ri);
         if (toUnmap != null) {
           guard.invalidateAndUnmap(toUnmap);
         }
@@ -443,13 +448,17 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  private void unsetBuffers() {
-    accessMapped = null;
-    currentNodeRef.closeFor(rootInfo.cache);
+  private RootInfo unsetBuffers() {
+    RootInfo ri = rootInfo;
+    if (ri != null) {
+      rootInfo = null;
+      currentNodeRef.closeFor(ri.cache);
+    }
     postBuffer = null;
     floatViews = null;
     intViews = null;
     longViews = null;
+    return ri;
   }
 
   @Override

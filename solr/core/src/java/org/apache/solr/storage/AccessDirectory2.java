@@ -1075,14 +1075,14 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
     }
 
     @Override
-    protected ByteBuffer doClose() throws IOException {
+    protected ByteBuffer doClose(RootInfo rootInfo) throws IOException {
       if (!isRoot) return null;
       if (compressedInfo.ownedBlock != null) {
         // Owned-buffer-only input: return the mmap'd buffer for unmapping by CCII.close().
         return compressedInfo.ownedBlock;
       }
       if (nodesEntry != null) {
-        nodesEntry.release(cache());
+        nodesEntry.release(rootInfo.cache);
       }
       // Acquire exclusive lock and never release — drains in-flight supplyFromBuffers calls,
       // and all subsequent tryReadLock() calls return 0, preventing access to freed memory.

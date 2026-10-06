@@ -2086,10 +2086,10 @@ public class GCSDirectory extends SizeAwareDirectory {
     }
 
     @Override
-    protected ByteBuffer doClose() throws IOException {
+    protected ByteBuffer doClose(RootInfo rootInfo) throws IOException {
       if (blocksStruct == null) return null; // slice — nothing to do
 
-      if (blobUUID() == null) {
+      if (rootInfo.blobUUID == null) {
         // always-mapped root: not registered in pendingNodes; just invalidate and unmap.
         return blocksStruct.origMapping.join();
       }
@@ -2099,7 +2099,7 @@ public class GCSDirectory extends SizeAwareDirectory {
       Runnable[] deletionToRun = new Runnable[1];
       BlocksStruct[] toRecycle = new BlocksStruct[1];
       dir.pendingNodes.computeIfPresent(
-          blobUUID(),
+          rootInfo.blobUUID,
           (k, v) -> {
             int outstandingRefs = v.refCount.decrementAndGet();
             if (outstandingRefs == 0) {
