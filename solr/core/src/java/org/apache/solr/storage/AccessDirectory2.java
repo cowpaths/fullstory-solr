@@ -612,6 +612,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       }
     }
 
+    private static final AtomicLongArray EMPTY_ACCESS_MAPPED = new AtomicLongArray(0);
+
     private AD2IndexInput(
         String name, AccessDirectory2 dir, ByteBuffer ownedBlock, boolean readOnce) {
       super(
@@ -622,9 +624,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           null /*blockOffsets*/,
           new ByteBufferGuard("ad2-owned", unmapHack()),
           CachedCompressedIndexInput.parseSegId(name),
-          readOnce,
-          new AtomicLongArray(0) /*accessMapped — empty, ownedBufferFor handles all blocks*/,
-          Boolean.TRUE /*logicalRoot — not eligible for range preload*/);
+          EMPTY_ACCESS_MAPPED /*accessMapped — empty, ownedBufferFor handles all blocks*/,
+          RootKind.of(false, readOnce) /*not applicable for owned-buffer-only*/);
       this.compressedInfo = new CompressedInfo(null, null, null, null, ownedBlock);
       this.isRoot = true;
       this.blockSupplier = null;
@@ -656,8 +657,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
               pendingNodes,
               dir.uuidForFile(source.getFileName().toString()),
               dir.cache),
-          source.getFileName().toString().endsWith(".cfs") ? null : Boolean.TRUE,
-          readOnce);
+          RootKind.of(source.getFileName().toString().endsWith(".cfs"), readOnce));
     }
 
     private static final class RootParams {
@@ -852,11 +852,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
     }
 
     private AD2IndexInput(
-        String description,
-        AccessDirectory2 dir,
-        RootParams p,
-        Boolean logicalRoot,
-        boolean readOnce) {
+        String description, AccessDirectory2 dir, RootParams p, RootKind rootKind) {
       super(
           description,
           dir.cache,
@@ -865,9 +861,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           p.blockOffsets,
           new ByteBufferGuard("ad2-decompressed", unmapHack()),
           p.segId,
-          readOnce,
           p.accessMapped,
-          logicalRoot);
+          rootKind);
       ByteBufferGuard compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
       ByteBuffer[] compressed = p.compressed;
       long[] addrs = new long[p.compressed.length];
@@ -898,12 +893,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
 
     private AD2IndexInput(
         String description, AD2IndexInput parent, long sliceOffset, long sliceLen) {
-      super(
-          description,
-          parent,
-          sliceOffset,
-          sliceLen,
-          parent.logicalRoot == null ? Boolean.TRUE : Boolean.FALSE);
+      super(description, parent, sliceOffset, sliceLen, RootKind.inheritFrom(parent.rootKind));
       this.compressedInfo = parent.compressedInfo;
       this.isRoot = false;
       this.nodesEntry = null;
@@ -924,20 +914,18 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
     }
 
     @Override
-    @SuppressWarnings("ReferenceEquality")
     protected void onCacheHit(int blockIdx, BlockCache.Val val, int seqAccessCount) {
       super.onCacheHit(blockIdx, val, seqAccessCount);
-      if (HINT_ON_CACHE_HIT && logicalRoot == Boolean.FALSE && seqAccessCount > 0) {
+      if (HINT_ON_CACHE_HIT && rootKind == RootKind.SUB_SLICE && seqAccessCount > 0) {
         // Start past current block — it's a hit, so its compressed data isn't needed.
         expandCompressedReadahead(blockIdx, blockIdx + 1, seqAccessCount);
       }
     }
 
     @Override
-    @SuppressWarnings("ReferenceEquality")
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
-      if (logicalRoot == Boolean.FALSE && (MIN_READ_AHEAD > 0 || seqAccessCount > 0)) {
+      if (rootKind == RootKind.SUB_SLICE && (MIN_READ_AHEAD > 0 || seqAccessCount > 0)) {
         // Include current block — it's a miss, its compressed data needs to be paged in.
         expandCompressedReadahead(blockIdx, blockIdx, Math.max(MIN_READ_AHEAD, seqAccessCount));
       } else if (ALWAYS_HINT_CURRENT_BLOCK) {

@@ -122,7 +122,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // Guard for unmap; shared across all slices/clones so root.close() invalidates all in-flight
   // reads.
   private final ByteBufferGuard guard;
-  final boolean readOnce;
 
   protected final BlockCache cache() {
     return rootInfo.cache;
@@ -149,11 +148,52 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   protected final int sliceLastBlockIdx;
 
   /**
-   * Encodes nesting depth for range-preload eligibility. Meaning is subclass-defined; CCII stores
-   * and exposes it but does not interpret it. Typical convention (GCSIndexInput): {@code null} =
-   * CFS outer; {@code true} = logical-file root; {@code false} = sub-slice eligible for preload.
+   * Combines nesting-depth kind (for range-preload eligibility — meaning is subclass-defined; CCII
+   * stores and exposes it but does not interpret it; typical convention (GCSIndexInput): {@link
+   * #CFS_OUTER} = CFS outer; {@link #LOGICAL_ROOT} = logical-file root; {@link #SUB_SLICE} =
+   * sub-slice eligible for preload) with {@code readOnce}. {@code readOnce} is effectively
+   * subordinate to the kind: it only ever varies on the instance actually opened as a root (CFS
+   * outer or logical-file root); every slice/clone hard-codes it false regardless of the parent's
+   * value (we can't assume slices/clones inherit it), so {@link #SUB_SLICE} never carries {@code
+   * readOnce=true} — one of the six nominal combinations never occurs.
    */
-  protected final Boolean logicalRoot;
+  protected enum RootKind {
+    CFS_OUTER(false),
+    CFS_OUTER_READ_ONCE(true),
+    LOGICAL_ROOT(false),
+    LOGICAL_ROOT_READ_ONCE(true),
+    SUB_SLICE(false);
+
+    final boolean readOnce;
+
+    RootKind(boolean readOnce) {
+      this.readOnce = readOnce;
+    }
+
+    static RootKind of(boolean cfsOuter, boolean readOnce) {
+      if (cfsOuter) {
+        return readOnce ? CFS_OUTER_READ_ONCE : CFS_OUTER;
+      } else {
+        return readOnce ? LOGICAL_ROOT_READ_ONCE : LOGICAL_ROOT;
+      }
+    }
+
+    static RootKind inheritFrom(RootKind parent) {
+      switch (parent) {
+        case CFS_OUTER:
+        case CFS_OUTER_READ_ONCE:
+          return LOGICAL_ROOT;
+        case LOGICAL_ROOT:
+        case SUB_SLICE:
+        case LOGICAL_ROOT_READ_ONCE:
+          return SUB_SLICE;
+        default:
+          throw new IllegalArgumentException();
+      }
+    }
+  }
+
+  protected final RootKind rootKind;
 
   private long seekPos = -1;
   private ByteBuffer postBuffer = EMPTY_POST_BUFFER;
@@ -298,9 +338,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       long[] blockOffsets,
       ByteBufferGuard guard,
       long segId,
-      boolean readOnce,
       AtomicLongArray accessMapped,
-      Boolean logicalRoot) {
+      RootKind rootKind) {
     super(resourceDescription);
     this.rootInfo = new RootInfo(cache, blobUUID, blockOffsets, segId, length);
     this.guard = guard;
@@ -309,8 +348,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     this.sliceLength = length;
     this.sliceFirstBlockIdx = 0;
     this.sliceLastBlockIdx = rootInfo.lastBlockIdx;
-    this.readOnce = readOnce;
-    this.logicalRoot = logicalRoot;
+    this.rootKind = rootKind;
   }
 
   // ---------------------------------------------------------------------------
@@ -348,7 +386,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       CachedCompressedIndexInput parent,
       long sliceOffset,
       long sliceLen,
-      Boolean logicalRoot) {
+      RootKind rootKind) {
     super(resourceDescription);
     this.rootInfo = parent.rootInfo;
     this.guard = parent.guard;
@@ -362,8 +400,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         sliceLen == 0
             ? sliceFirstBlockIdx
             : Math.toIntExact((this.offset + sliceLen - 1) >> COMPRESSION_BLOCK_SHIFT);
-    this.readOnce = false; // we can't assume slices/clones inherit
-    this.logicalRoot = logicalRoot;
+    this.rootKind = rootKind;
   }
 
   // ---------------------------------------------------------------------------

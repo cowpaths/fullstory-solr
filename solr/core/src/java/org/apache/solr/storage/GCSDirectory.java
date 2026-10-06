@@ -1934,9 +1934,8 @@ public class GCSDirectory extends SizeAwareDirectory {
           p.bs.blockOffsets,
           p.bs.guard,
           p.segId,
-          readOnce,
           p.bs.accessMapped,
-          p.logicalRoot);
+          RootKind.of(p.logicalRoot == null, readOnce));
       this.dir = dir;
       this.blobName = p.blobUUID.toString();
       this.segUUID = p.segUUID;
@@ -2002,9 +2001,8 @@ public class GCSDirectory extends SizeAwareDirectory {
           null /*blockOffsets — never accessed for always-mapped*/,
           p.bs.guard,
           -1L,
-          readOnce,
           new AtomicLongArray(0),
-          null /*logicalRoot — always-mapped: no GCS fetching, no preload*/);
+          RootKind.of(true, readOnce) /*always-mapped: no GCS fetching, no preload*/);
       this.dir = dir;
       this.blobName = null;
       this.segUUID = null;
@@ -2020,13 +2018,13 @@ public class GCSDirectory extends SizeAwareDirectory {
 
     private GCSIndexInput(
         String resourceDescription, GCSIndexInput parent, long sliceOffset, long sliceLen) {
-      // null (CFS outer) → true (logical file); t/f (any logical file) → false (sub-slice)
+      // CFS outer → logical file; any logical file → sub-slice
       super(
           resourceDescription,
           parent,
           sliceOffset,
           sliceLen,
-          parent.logicalRoot == null ? Boolean.TRUE : Boolean.FALSE);
+          RootKind.inheritFrom(parent.rootKind));
       this.dir = parent.dir;
       this.blobName = parent.blobName;
       this.segUUID = parent.segUUID;
@@ -2041,10 +2039,9 @@ public class GCSDirectory extends SizeAwareDirectory {
     // -------------------------------------------------------------------------
 
     @Override
-    @SuppressWarnings("ReferenceEquality")
     protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
         throws IOException {
-      if (logicalRoot == Boolean.FALSE
+      if (rootKind == RootKind.SUB_SLICE
           && sliceLastBlockIdx > readAheadTo
           && blockIdx < sliceLastBlockIdx) {
         readAheadTo = sliceLastBlockIdx;
