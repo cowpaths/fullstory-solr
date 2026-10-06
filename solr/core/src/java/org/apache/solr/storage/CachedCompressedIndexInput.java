@@ -64,12 +64,12 @@ import org.slf4j.LoggerFactory;
  * decompressed blocks. Subclasses supply compressed block bytes (via {@link #supply}) and handle
  * lifecycle management specific to their storage backend.
  *
- * <p>Reads are served from {@link #accessMapped}: a per-file {@link AtomicLongArray} of opaque
+ * <p>Reads are served from {@link #accessMapped()}: a per-file {@link AtomicLongArray} of opaque
  * {@link BlockCache} handles keyed by block index. On a cache miss, {@link #supply} is invoked to
  * fetch and decompress the block, which is then inserted into the cache for subsequent hits.
  *
  * <p>Threading: each instance (root or slice) is accessed by at most one thread at a time via
- * {@link NodeRefStruct} local-pin/unpin. The {@link #accessMapped} array is shared across all
+ * {@link NodeRefStruct} local-pin/unpin. The {@link #accessMapped()} array is shared across all
  * slices and clones; concurrent access is mediated by compare-and-exchange.
  */
 abstract class CachedCompressedIndexInput extends IndexInput implements RandomAccessInput {
@@ -95,7 +95,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * extra dependent-load indirection per primitive read, not just per block transition), and that
    * tradeoff hasn't been measured.)
    */
-  private static final class RootInfo {
+  static final class RootInfo {
     final BlockCache cache;
     final UUID blobUUID;
     // blockOffsets[i] = compressed byte offset of block i within the backend storage;
@@ -105,8 +105,16 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     final long segId;
     final int lastBlockIdx;
     final int lastBlockDecompressedLen;
+    // Shared per-file array.
+    final AtomicLongArray accessMapped;
 
-    RootInfo(BlockCache cache, UUID blobUUID, long[] blockOffsets, long segId, long length) {
+    RootInfo(
+        BlockCache cache,
+        UUID blobUUID,
+        long[] blockOffsets,
+        long segId,
+        long length,
+        AtomicLongArray accessMapped) {
       this.cache = cache;
       this.blobUUID = blobUUID;
       this.blockOffsets = blockOffsets;
@@ -116,10 +124,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       int blockCount = length == 0 ? 1 : (int) (((length - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
       this.lastBlockIdx = blockCount - 1;
       this.lastBlockDecompressedLen = hasTail ? tailLen : COMPRESSION_BLOCK_SIZE;
+      this.accessMapped = accessMapped;
     }
   }
 
-  private final RootInfo rootInfo;
+  // Shared per-root-input struct; null'd on close.
+  private RootInfo rootInfo;
   // Guard for unmap; shared across all slices/clones so root.close() invalidates all in-flight
   // reads.
   private final ByteBufferGuard guard;
@@ -140,8 +150,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     return rootInfo.segId;
   }
 
-  // Shared per-file array; null'd on close.
-  protected AtomicLongArray accessMapped;
+  protected final AtomicLongArray accessMapped() {
+    return rootInfo.accessMapped;
+  }
 
   private final long offset; // absolute start offset of this slice within the file
   private final long sliceLength;
@@ -261,7 +272,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       int blockIdx, long blockOffset, int compressedLen, int decompressedLen) throws IOException;
 
   /**
-   * Create a clone or slice of this input. The returned instance shares {@link #accessMapped} and
+   * Create a clone or slice of this input. The returned instance shares {@link #accessMapped()} and
    * {@link #blockOffsets()} with the parent but does not own the backend mapping.
    *
    * @param description the resource description for the new input
@@ -275,8 +286,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * Release backend-specific resources owned by this root input. Not called for slices (which do
    * not own the mapping). Called inside a {@code try-finally} by {@link #close()}; {@link
    * #unsetBuffers()} always executes in the {@code finally} block regardless of exceptions here.
+   * {@code rootInfo} is the value captured by {@code unsetBuffers()} just before it nulled out the
+   * instance field of the same name — by the time this method runs, {@code this.rootInfo} (and thus
+   * {@link #cache()}/{@link #blobUUID()}/{@link #blockOffsets()}/{@link #segId()}) is already null,
+   * so implementations needing any of those values must read them off this parameter instead.
    */
-  protected abstract ByteBuffer doClose() throws IOException;
+  protected abstract ByteBuffer doClose(RootInfo rootInfo) throws IOException;
 
   // ---------------------------------------------------------------------------
   // Protected hook methods (no-op defaults)
@@ -303,7 +318,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     val.maybeLoadHint(rootInfo.cache, decompressedLenFor(blockIdx));
     if (seqAccessCount >= PROSPECTIVE_READAHEAD_THRESHOLD && blockIdx < rootInfo.lastBlockIdx) {
       int nextIdx = blockIdx + 1;
-      long nextHandle = accessMapped.get(nextIdx);
+      long nextHandle = rootInfo.accessMapped.get(nextIdx);
       if (nextHandle != BlockCache.NULL_HANDLE) {
         rootInfo.cache.maybeLoadHint(nextHandle, decompressedLenFor(nextIdx));
       }
@@ -342,9 +357,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       AtomicLongArray accessMapped,
       RootKind rootKind) {
     super(resourceDescription);
-    this.rootInfo = new RootInfo(cache, blobUUID, blockOffsets, segId, length);
+    this.rootInfo = new RootInfo(cache, blobUUID, blockOffsets, segId, length, accessMapped);
     this.guard = guard;
-    this.accessMapped = accessMapped;
     this.offset = 0;
     this.sliceLength = length;
     this.sliceFirstBlockIdx = 0;
@@ -391,7 +405,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     super(resourceDescription);
     this.rootInfo = parent.rootInfo;
     this.guard = parent.guard;
-    this.accessMapped = parent.accessMapped;
     this.offset = parent.offset + sliceOffset;
     this.seekPos = this.offset;
     this.sliceLength = sliceLen;
@@ -411,10 +424,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   @Override
   public final void close() throws IOException {
     try {
-      if (accessMapped == null) return;
-      unsetBuffers();
+      if (rootInfo == null) return;
+      RootInfo ri = unsetBuffers();
       try {
-        ByteBuffer toUnmap = doClose();
+        ByteBuffer toUnmap = doClose(ri);
         if (toUnmap != null) {
           guard.invalidateAndUnmap(toUnmap);
         }
@@ -443,13 +456,17 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  private void unsetBuffers() {
-    accessMapped = null;
-    currentNodeRef.closeFor(rootInfo.cache);
+  private RootInfo unsetBuffers() {
+    RootInfo ri = rootInfo;
+    if (ri != null) {
+      rootInfo = null;
+      currentNodeRef.closeFor(ri.cache);
+    }
     postBuffer = null;
     floatViews = null;
     intViews = null;
     longViews = null;
+    return ri;
   }
 
   @Override
@@ -564,7 +581,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       floatViews = null;
       return;
     }
-    long cached = accessMapped.get(blockIdx);
+    long cached = rootInfo.accessMapped.get(blockIdx);
     boolean uninitialized;
     BlockCache.Val cachedVal;
     if ((uninitialized = cached == BlockCache.NULL_HANDLE)
@@ -648,6 +665,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private void cacheMiss(final long cached, final int blockIdx) throws IOException {
     long blockOffset = rootInfo.blockOffsets[blockIdx];
     BlockCache cache = rootInfo.cache;
+    AtomicLongArray accessMapped = rootInfo.accessMapped;
     int compressedLen = (int) (rootInfo.blockOffsets[blockIdx + 1] - blockOffset);
     int decompressedLen =
         blockIdx == rootInfo.lastBlockIdx
