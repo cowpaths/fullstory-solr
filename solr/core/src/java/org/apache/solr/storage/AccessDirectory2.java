@@ -1106,9 +1106,13 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
    *
    * <p>This avoids writing an uncompressed copy to the access-path {@link MMapDirectory}.
    */
-  static final class WriteThroughOutput extends IndexOutput implements LongConsumer {
+  static final class WriteThroughOutput extends IndexOutput
+      implements LongConsumer, CompressingDirectory.SizeReportingIndexOutput {
 
     private final IndexOutput delegate;
+    // Non-null in the real (CompressingDirectory-backed) call path; delegate.getFilePointer() is
+    // the fallback for any hypothetical delegate that doesn't report compressed on-disk size.
+    private final CompressingDirectory.SizeReportingIndexOutput delegateSizeReporting;
     private final AccessDirectory2 dir;
     private final String name;
     private final byte[] blockBuf = new byte[COMPRESSION_BLOCK_SIZE];
@@ -1123,8 +1127,19 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       if (delegate instanceof CompressingDirectory.ChunkedOutput) {
         ((CompressingDirectory.ChunkedOutput) delegate).setChunkCallback(this);
       }
+      this.delegateSizeReporting =
+          delegate instanceof CompressingDirectory.SizeReportingIndexOutput
+              ? (CompressingDirectory.SizeReportingIndexOutput) delegate
+              : null;
       this.dir = dir;
       this.name = name;
+    }
+
+    @Override
+    public long getBytesWritten() {
+      return delegateSizeReporting != null
+          ? delegateSizeReporting.getBytesWritten()
+          : delegate.getFilePointer();
     }
 
     @Override

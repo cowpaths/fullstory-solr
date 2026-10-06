@@ -25,6 +25,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FilterDirectory;
@@ -48,6 +49,10 @@ public class SizeAwareDirectory extends MMapDirectory
           + RamUsageEstimator.shallowSizeOf(new Future[1]);
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  // A backing that doesn't implement CompressingDirectory.SizeReportingIndexOutput still gets a
+  // correct on-disk total at close() (see SizeAccountingIndexOutput.close()), but loses
+  // incremental tracking during the write. This should never happen, so log it once, ever.
+  private static final AtomicBoolean loggedNonConformingBacking = new AtomicBoolean();
   private final long reconcileTTLNanos;
   private boolean initialized = false;
   private volatile long reconciledTimeNanos;
@@ -461,6 +466,16 @@ public class SizeAwareDirectory extends MMapDirectory
         sizeWriter.apply(0, finalBytesWritten - lastBytesWritten, name);
       } else {
         onDiskSize = backingDirectory.onDiskFileLength0(name);
+        sizeWriter.apply(0, onDiskSize, name);
+        if (log.isWarnEnabled() && loggedNonConformingBacking.compareAndSet(false, true)) {
+          log.warn(
+              "{} does not implement {}; on-disk size for \"{}\" (and other files written through"
+                  + " non-conforming backings) is only tracked at close(), not incrementally"
+                  + " during writes",
+              backing.getClass(),
+              CompressingDirectory.SizeReportingIndexOutput.class.getSimpleName(),
+              name);
+        }
       }
       fileSizeMap.put(name, new Sizes(backing.getFilePointer(), onDiskSize));
       liveOutputs.remove(name);
