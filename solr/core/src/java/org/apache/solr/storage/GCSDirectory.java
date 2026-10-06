@@ -2053,7 +2053,7 @@ public class GCSDirectory extends SizeAwareDirectory {
               blockOffset,
               compressedLen,
               decompressedLen,
-              accessMapped,
+              accessMapped(),
               blockOffsets(),
               toIdx,
               this::decompressedLenFor,
@@ -2071,6 +2071,7 @@ public class GCSDirectory extends SizeAwareDirectory {
               ? sliceLastBlockIdx
               : Math.min(sliceLastBlockIdx, ownedBlocksOffset - 1);
       BlockCache cache = cache();
+      AtomicLongArray accessMapped = accessMapped();
       for (int i = end; i > blockIdx; i--) {
         long extant = accessMapped.get(i);
         if (extant == BlockCache.NULL_HANDLE || !cache.pinnable(extant)) {

@@ -955,7 +955,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         int hintFrom = Math.max(readAheadTo + 1, hintFromMin);
         int hintTo = -1;
         int newReadAheadTo = target;
-        AtomicLongArray am = accessMapped;
+        AtomicLongArray am = accessMapped();
         BlockCache cache = cache();
         for (int i = hintFrom; i <= target; i++) {
           long extant = am.get(i);
@@ -1005,13 +1005,14 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
     private static boolean loadBlock(AD2IndexInput in, int idx) throws IOException {
       BlockCache cache = in.cache();
       UUID blobUUID = in.blobUUID();
-      long extant = in.accessMapped.get(idx);
+      AtomicLongArray accessMapped = in.accessMapped();
+      long extant = accessMapped.get(idx);
       if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) return true;
       long[] nodeHandle = new long[1];
       BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle, blobUUID, idx);
       if (toPopulateVal == null) return false;
       long toPopulate = nodeHandle[0];
-      if (in.accessMapped.compareAndSet(idx, extant, toPopulate)) {
+      if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
         if (toPopulateVal.isPopulated()) {
           cache.recordWarmStartHit();
         } else {
@@ -1025,7 +1026,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
               in.decompressedLenFor(idx),
               toPopulate,
               toPopulateVal,
-              in.accessMapped,
+              accessMapped,
               cache,
               in.blockSupplier,
               blobUUID);
