@@ -38,6 +38,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -475,7 +476,23 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     return sliceLength;
   }
 
+  private static final class MemoizedSliceDescription {
+    private final String sliceDescription;
+    private final String fullSliceDescription;
+
+    private MemoizedSliceDescription(String sliceDescription, String fullSliceDescription) {
+      this.sliceDescription = sliceDescription;
+      this.fullSliceDescription = fullSliceDescription;
+    }
+  }
+
+  private static final MemoizedSliceDescription EMPTY_MEMOIZED_SLICE_DESCRIPTION =
+      new MemoizedSliceDescription(Long.toUnsignedString(new Random(0).nextLong(), 16), null);
+
+  private MemoizedSliceDescription memoizedSliceDescription = EMPTY_MEMOIZED_SLICE_DESCRIPTION;
+
   @Override
+  @SuppressWarnings("ReferenceEquality")
   public final IndexInput slice(String sliceDescription, long sliceOffset, long sliceLength)
       throws IOException {
     // No reachabilityFence: cloneSlice() only copies immutable identifiers to construct a
@@ -483,7 +500,16 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     if (sliceOffset < 0 || sliceLength < 0 || sliceOffset + sliceLength > this.sliceLength) {
       throw new IllegalArgumentException("slice out of bounds");
     }
-    return cloneSlice(getFullSliceDescription(sliceDescription), sliceOffset, sliceLength);
+    MemoizedSliceDescription candidate = memoizedSliceDescription;
+    String fullSliceDescription;
+    if (sliceDescription == candidate.sliceDescription) {
+      fullSliceDescription = candidate.fullSliceDescription;
+    } else {
+      fullSliceDescription = getFullSliceDescription(sliceDescription);
+      memoizedSliceDescription =
+          new MemoizedSliceDescription(sliceDescription, fullSliceDescription);
+    }
+    return cloneSlice(fullSliceDescription, sliceOffset, sliceLength);
   }
 
   @Override
