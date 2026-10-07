@@ -45,6 +45,7 @@ import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.FilterDirectory;
+import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.util.RamUsageEstimator;
@@ -511,6 +512,49 @@ public class TeeDirectoryFactory extends MMapDirectoryFactory {
             return new AbstractMap.SimpleImmutableEntry<>(content, Collections.emptyList());
           };
       return new TeeDirectory(naive, accessFunction, persistentFunction, nodeLevelState);
+    }
+  }
+
+  /**
+   * Override to go through the Directory API instead of filesystem-level {@code Files.move()}.
+   * {@link org.apache.solr.core.StandardDirectoryFactory#move} unwraps FilterDirectory layers and
+   * moves files directly on the filesystem when both sides are an {@code FSDirectory} --- which
+   * {@link TeeDirectory} is (transitively, via {@link SizeAwareDirectory} / {@link MMapDirectory}),
+   * and it isn't a FilterDirectory so unwrapping stops there --- bypassing {@link
+   * SizeAwareDirectory}'s size tracking entirely. Only intercede when a {@link TeeDirectory} is
+   * actually involved; a plain {@code MMapDirectory} (the {@code !isDataNode} case in {@link
+   * #create}) has no tracking to protect, so let it keep the atomic filesystem fast path.
+   */
+  @Override
+  public void move(Directory fromDir, Directory toDir, String fileName, IOContext ioContext)
+      throws IOException {
+    if (getBaseDir(fromDir) instanceof TeeDirectory || getBaseDir(toDir) instanceof TeeDirectory) {
+      // TODO: maybe inline atomic move from super.move()
+      toDir.copyFrom(fromDir, fileName, fileName, ioContext);
+      fromDir.deleteFile(fileName);
+    } else {
+      super.move(fromDir, toDir, fileName, ioContext);
+    }
+  }
+
+  /**
+   * Override to go through the Directory API instead of filesystem-level {@code Files.move()}.
+   *
+   * @see #move(Directory, Directory, String, IOContext)
+   */
+  @Override
+  public void renameWithOverwrite(Directory dir, String fileName, String toName)
+      throws IOException {
+    if (getBaseDir(dir) instanceof TeeDirectory) {
+      // TODO: maybe inline atomic rename from super.renameWithOverwrite()
+      try {
+        dir.deleteFile(toName);
+      } catch (FileNotFoundException | NoSuchFileException e) {
+        // target doesn't exist, that's fine
+      }
+      dir.rename(fileName, toName);
+    } else {
+      super.renameWithOverwrite(dir, fileName, toName);
     }
   }
 
