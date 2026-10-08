@@ -173,7 +173,12 @@ dependencies {
 
   implementation 'com.j256.simplemagic:simplemagic'
 
+  // GCS-backed directory (GCSDirectory / GCSDirectoryFactory)
+  implementation 'com.google.cloud:google-cloud-storage'
+
   // -- Test Dependencies
+
+  testImplementation 'com.google.cloud:google-cloud-nio'
 
   testRuntimeOnly 'org.slf4j:jcl-over-slf4j'
 

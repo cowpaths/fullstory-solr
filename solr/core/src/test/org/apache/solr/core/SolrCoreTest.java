@@ -18,6 +18,7 @@ package org.apache.solr.core;
 
 import com.codahale.metrics.Gauge;
 import com.codahale.metrics.MetricFilter;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -341,13 +342,19 @@ public class SolrCoreTest extends SolrTestCaseJ4 {
    */
   @Test
   public void testCoreInitDeadlockMetrics() throws Exception {
-    SolrMetricManager metricManager = h.getCoreContainer().getMetricManager();
-    CoreContainer coreContainer = h.getCoreContainer();
+    Path tmpHome = createTempDir("deadlock-metrics-home");
+    String configsets = getFile("solr/configsets").getAbsolutePath();
+    CoreContainer coreContainer =
+        new CoreContainer(
+            SolrXmlConfig.fromString(
+                tmpHome, "<solr><str name=\"configSetBaseDir\">" + configsets + "</str></solr>"));
+    coreContainer.load();
 
     String coreName = "tmpCore";
     AtomicBoolean created = new AtomicBoolean(false);
     AtomicBoolean atLeastOnePoll = new AtomicBoolean(false);
 
+    SolrMetricManager metricManager = coreContainer.getMetricManager();
     final ExecutorService executor =
         ExecutorUtil.newMDCAwareFixedThreadPool(
             1, new SolrNamedThreadFactory("testCoreInitDeadlockMetrics"));
@@ -385,6 +392,7 @@ public class SolrCoreTest extends SolrTestCaseJ4 {
     } finally {
       created.set(true);
       ExecutorUtil.shutdownAndAwaitTermination(executor);
+      coreContainer.shutdown();
     }
     assertTrue(atLeastOnePoll.get());
   }

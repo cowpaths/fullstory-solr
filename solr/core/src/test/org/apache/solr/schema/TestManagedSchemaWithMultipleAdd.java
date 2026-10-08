@@ -88,8 +88,20 @@ public class TestManagedSchemaWithMultipleAdd extends SolrCloudTestCase {
     // Because of this we are waiting for autoSoftCommit to finish if there is one.
     Thread.sleep(AUTOSOFTCOMMIT_MAXTIME_MS + 500);
 
-    assertEquals(
-        numDocs, cloudClient.query(collection, new SolrQuery("*:*")).getResults().getNumFound());
+    try {
+      assertEquals(
+          numDocs, cloudClient.query(collection, new SolrQuery("*:*")).getResults().getNumFound());
+    } catch (AssertionError er) {
+      // wait and try again. if it passes the second time, then wrap the initial error to indicate
+      // clearly that this is not a serious problem. but we don't want to fully swallow the
+      // error either.
+      // This is fundamentally a test problem, with the arbitrary 500ms wait buffer testing
+      // _performance_, not _correctness_.
+      Thread.sleep(AUTOSOFTCOMMIT_MAXTIME_MS + 500);
+      assertEquals(
+          numDocs, cloudClient.query(collection, new SolrQuery("*:*")).getResults().getNumFound());
+      throw new AssertionError("spurious failure (timing, not correctness)", er);
+    }
   }
 
   private void addStringField(String fieldName, String collection, CloudSolrClient cloudClient)
