@@ -786,9 +786,25 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * Sorted triplets {@code [uuidMsb, uuidLsb, (blockIdx << 32 | handleLow32)]} for binary-search
    * lookup of pre-existing valid cache entries on startup. {@code handleLow32} encodes {@code
    * (partIdx << PART_SHIFT) | localSlot} and can be passed directly to {@link #pin} with
-   * generation=0 in the upper 32 bits. Empty for ephemeral or fresh caches.
+   * generation=0 in the upper 32 bits. {@code null} for ephemeral/fresh caches, or once released.
+   *
+   * <p>Sized by extant-block count at reconstruction time (24 bytes/entry), so for a
+   * fully-populated large persistent cache this is a real heap cost on top of the Val pool --
+   * released (nulled out) the first time {@link #acquireNode(long[])} acquires a slot from the hot
+   * queue. Because {@code DualQueueCache.acquireTail} always prefers a never-unpinned (virgin) cold
+   * candidate over any hot candidate (its {@code age()} gives virgin slots a {@code VERY_STALE}
+   * sentinel), and the free list's strict FIFO ordering guarantees every virgin slot is drained
+   * before any returned slot reaches the tail, the first hot acquisition is a precise signal that
+   * every slot has been allocated at least once since this map was built -- so any surviving
+   * entry's physical slot has, by then, either already been reclaimed via this map or overwritten
+   * by new data, making the rest of the map moot either way. Not volatile: a lookup racing the
+   * release just uses the (still perfectly valid) old array a little longer, which is immaterial
+   * given this object lives for hours/days and is consulted far more than once before any such race
+   * could matter. {@link #extantMapLookup} takes it as a parameter rather than reading the field
+   * directly, purely so a single call sees one consistent array (or {@code null}) rather than
+   * potentially switching arrays mid-binary-search.
    */
-  private final long[] extantMap;
+  private long[] extantMap;
 
   // Operation-level batch (e.g. merges, commits, core load): groups NodeRefStruct registrations
   // on the current thread into a single Batch, reducing PhantomReference count. Opened via
@@ -1282,7 +1298,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.pool = m.dataPool();
     this.metaBuf = null;
     this.alwaysPrepareWrite = false;
-    this.extantMap = new long[0];
+    this.extantMap = null;
     this.partitions = distribute(nBlocks);
     this.nPartitions = partitions.length;
     this.holdRefs3 =
@@ -1342,7 +1358,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           Long.toHexString(storedId),
           Long.toHexString(storedSig));
       this.alwaysPrepareWrite = !m.invalidateAll();
-      this.extantMap = new long[0];
+      this.extantMap = null;
       // Zero the metadata region so stale per-block entries from a prior crashed run
       // don't appear valid to the next successful run's extant map.
       for (int pos = 0; pos < trailerOffset; pos += 4) {
@@ -1359,13 +1375,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.holdRefs = initHoldRefs(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     this.drainTask = drainExec.submit(this::drain);
+    long[] extant = this.extantMap;
     log.info(
         "BlockCache restored from {}: nBlocks={}, targetBytes={}, nPartitions={}, extantEntries={}",
         existingBackingFile,
         nBlocks,
         totalBytes,
         nPartitions,
-        extantMap.length / 3);
+        extant == null ? 0 : extant.length / 3);
   }
 
   /**
@@ -1610,6 +1627,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       if (v.fromHot()) {
         hotAcquisitions.increment();
         p.pinnedFromHot.increment();
+        if (extantMap != null) {
+          // First-ever hot acquisition: every slot has now been allocated at least once since
+          // extantMap was built, so it's served its purpose (see the field javadoc for why this
+          // signal is precise). The null guard just prevents redundant writes on every subsequent
+          // hot acquisition for the rest of the cache's life.
+          extantMap = null;
+        }
       } else {
         p.pinnedFromCold.increment();
       }
@@ -1639,7 +1663,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * backing file was not present at startup (ephemeral cache).
    */
   Val acquireNode(long[] outHandle, UUID blobUUID, int blockIdx) {
-    int handleLow = extantMapLookup(blobUUID, blockIdx);
+    int handleLow = extantMapLookup(extantMap, blobUUID, blockIdx);
     if (handleLow > 0) {
       // Attempt to pin the pre-existing slot at generation=0 (upper 32 bits zero). If the slot
       // was evicted and recycled since startup, its generation will have advanced past 0 and
@@ -1668,7 +1692,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * @return the handle's low 32 bits ({@code (partIdx << PART_SHIFT) | localSlot}) if found, or
    *     {@code -1}
    */
-  private int extantMapLookup(UUID blobUUID, int blockIdx) {
+  private static int extantMapLookup(long[] extantMap, UUID blobUUID, int blockIdx) {
+    if (extantMap == null) return -1;
     long searchMsb = blobUUID.getMostSignificantBits();
     long searchLsb = blobUUID.getLeastSignificantBits();
     int lo = 0, hi = extantMap.length / 3 - 1;
