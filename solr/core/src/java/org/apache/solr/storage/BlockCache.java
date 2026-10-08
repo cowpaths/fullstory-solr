@@ -1640,10 +1640,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         hotAcquisitions.increment();
         p.pinnedFromHot.increment();
         if (extantMap != null) {
-          // First-ever hot acquisition: every slot has now been allocated at least once since
-          // extantMap was built, so it's served its purpose (see the field javadoc for why this
-          // signal is precise). The null guard just prevents redundant writes on every subsequent
-          // hot acquisition for the rest of the cache's life.
+          // First-ever hot acquisition: every slot in THIS partition has now been allocated at
+          // least once since extantMap was built (see the field javadoc for why this signal is
+          // precise), so this partition's share of extantMap has served its purpose. This triggers
+          // on the first partition to reach that point, not all of them -- other partitions may
+          // still have virgin slots with useful entries, but assuming roughly balanced load across
+          // partitions, the bulk of the benefit is already captured by the time any one finishes.
+          // The null guard just prevents redundant writes on every subsequent hot acquisition.
           extantMap = null;
         }
       } else {
