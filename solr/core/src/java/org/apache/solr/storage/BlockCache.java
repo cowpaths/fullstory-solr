@@ -786,9 +786,32 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * Sorted triplets {@code [uuidMsb, uuidLsb, (blockIdx << 32 | handleLow32)]} for binary-search
    * lookup of pre-existing valid cache entries on startup. {@code handleLow32} encodes {@code
    * (partIdx << PART_SHIFT) | localSlot} and can be passed directly to {@link #pin} with
-   * generation=0 in the upper 32 bits. Empty for ephemeral or fresh caches.
+   * generation=0 in the upper 32 bits. {@code null} for ephemeral/fresh caches, or once released.
+   *
+   * <p>Direct (off-heap) buffer, sized by extant-block count at reconstruction time (24
+   * bytes/entry) -- for a fully-populated large persistent cache this would be a meaningful amount
+   * of memory to hold on heap, so it lives off-heap instead, same as {@link #metaBuf}. Built as a
+   * plain on-heap {@code long[]} (see {@link #buildExtantMap}/{@link #sortExtantMap}, which stay
+   * array-based since the radix sort's sequential scans are exactly the case where on-heap arrays
+   * plausibly help, and it's one-time cost regardless) and copied into this buffer only once, at
+   * the end of construction, for long-term storage. Released (nulled out) the first time {@link
+   * #acquireNode(long[])} acquires a slot from the hot queue. Because {@code
+   * DualQueueCache.acquireTail} always prefers a never-unpinned (virgin) cold candidate over any
+   * hot candidate (its {@code age()} gives virgin slots a {@code VERY_STALE} sentinel), and the
+   * free list's strict FIFO ordering guarantees every virgin slot is drained before any returned
+   * slot reaches the tail, the first hot acquisition is a precise signal that every slot has been
+   * allocated at least once since this map was built -- so any surviving entry's physical slot has,
+   * by then, either already been reclaimed via this map or overwritten by new data, making the rest
+   * of the map moot either way. Not volatile: a lookup racing the release just uses the (still
+   * perfectly valid) old buffer a little longer, which is immaterial given this object lives for
+   * hours/days and is consulted far more than once before any such race could matter. {@link
+   * #extantMapLookup} takes it as a parameter rather than reading the field directly, purely so a
+   * single call sees one consistent buffer (or {@code null}) rather than potentially switching
+   * buffers mid-binary-search.
    */
-  private final long[] extantMap;
+  private ByteBuffer extantMap;
+
+  private static final int LONG_BYTE_ENTRY_MULTIPLIER = 3 * Long.BYTES;
 
   // Operation-level batch (e.g. merges, commits, core load): groups NodeRefStruct registrations
   // on the current thread into a single Batch, reducing PhantomReference count. Opened via
@@ -1282,7 +1305,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.pool = m.dataPool();
     this.metaBuf = null;
     this.alwaysPrepareWrite = false;
-    this.extantMap = new long[0];
+    this.extantMap = null;
     this.partitions = distribute(nBlocks);
     this.nPartitions = partitions.length;
     this.holdRefs3 =
@@ -1342,7 +1365,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           Long.toHexString(storedId),
           Long.toHexString(storedSig));
       this.alwaysPrepareWrite = !m.invalidateAll();
-      this.extantMap = new long[0];
+      this.extantMap = null;
       // Zero the metadata region so stale per-block entries from a prior crashed run
       // don't appear valid to the next successful run's extant map.
       for (int pos = 0; pos < trailerOffset; pos += 4) {
@@ -1359,13 +1382,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.holdRefs = initHoldRefs(nPartitions);
     this.totalBytes = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     this.drainTask = drainExec.submit(this::drain);
+    ByteBuffer extant = this.extantMap;
     log.info(
         "BlockCache restored from {}: nBlocks={}, targetBytes={}, nPartitions={}, extantEntries={}",
         existingBackingFile,
         nBlocks,
         totalBytes,
         nPartitions,
-        extantMap.length / 3);
+        extant == null ? 0 : extant.capacity() / LONG_BYTE_ENTRY_MULTIPLIER);
   }
 
   /**
@@ -1376,10 +1400,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * block {@code i}, so the warm-start path can call {@link #pin} directly with generation=0 in the
    * upper 32 bits.
    *
-   * <p>For a 340 GiB (usable) cache the on-disk metadata is ~27 MiB; the in-memory extant map is
-   * ~32 MiB. Even if never trimmed, this is acceptable steady-state overhead.
+   * <p>For a 340 GiB (usable) cache the on-disk metadata is ~27 MiB; the extant map is ~32 MiB.
+   * Built on-heap (see return statement) since that's the better fit for the radix sort's
+   * sequential scans; copied to a direct buffer for the caller to retain long-term.
    */
-  private static long[] buildExtantMap(int nBlocks, ByteBuffer metaBuf, Partition[] partitions) {
+  private static ByteBuffer buildExtantMap(
+      int nBlocks, ByteBuffer metaBuf, Partition[] partitions) {
     long[] ret = new long[nBlocks * 3];
     int j = 0;
     int curPart = 0;
@@ -1405,7 +1431,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
     long[] valid = j == ret.length ? ret : Arrays.copyOf(ret, j);
     sortExtantMap(valid, j / 3);
-    return valid;
+    ByteBuffer direct =
+        ByteBuffer.allocateDirect(valid.length * Long.BYTES).order(ByteOrder.nativeOrder());
+    direct.asLongBuffer().put(valid);
+    return direct;
   }
 
   private static final int SORT_RADIX_BITS = 16;
@@ -1610,6 +1639,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       if (v.fromHot()) {
         hotAcquisitions.increment();
         p.pinnedFromHot.increment();
+        if (extantMap != null) {
+          // First-ever hot acquisition: every slot has now been allocated at least once since
+          // extantMap was built, so it's served its purpose (see the field javadoc for why this
+          // signal is precise). The null guard just prevents redundant writes on every subsequent
+          // hot acquisition for the rest of the cache's life.
+          extantMap = null;
+        }
       } else {
         p.pinnedFromCold.increment();
       }
@@ -1639,7 +1675,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * backing file was not present at startup (ephemeral cache).
    */
   Val acquireNode(long[] outHandle, UUID blobUUID, int blockIdx) {
-    int handleLow = extantMapLookup(blobUUID, blockIdx);
+    int handleLow = extantMapLookup(extantMap, blobUUID, blockIdx);
     if (handleLow > 0) {
       // Attempt to pin the pre-existing slot at generation=0 (upper 32 bits zero). If the slot
       // was evicted and recycled since startup, its generation will have advanced past 0 and
@@ -1668,22 +1704,25 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * @return the handle's low 32 bits ({@code (partIdx << PART_SHIFT) | localSlot}) if found, or
    *     {@code -1}
    */
-  private int extantMapLookup(UUID blobUUID, int blockIdx) {
+  private static int extantMapLookup(ByteBuffer extantMap, UUID blobUUID, int blockIdx) {
+    if (extantMap == null) return -1;
     long searchMsb = blobUUID.getMostSignificantBits();
     long searchLsb = blobUUID.getLeastSignificantBits();
-    int lo = 0, hi = extantMap.length / 3 - 1;
+    int lo = 0, hi = extantMap.capacity() / LONG_BYTE_ENTRY_MULTIPLIER - 1;
     while (lo <= hi) {
       int mid = (lo + hi) >>> 1;
-      int base = mid * 3;
-      int cmp = Long.compareUnsigned(extantMap[base], searchMsb);
-      if (cmp == 0) cmp = Long.compareUnsigned(extantMap[base + 1], searchLsb);
-      if (cmp == 0) cmp = Integer.compareUnsigned((int) (extantMap[base + 2] >>> 32), blockIdx);
+      int base = mid * LONG_BYTE_ENTRY_MULTIPLIER;
+      int cmp = Long.compareUnsigned(extantMap.getLong(base), searchMsb);
+      if (cmp == 0) cmp = Long.compareUnsigned(extantMap.getLong(base + 8), searchLsb);
+      if (cmp == 0) {
+        cmp = Integer.compareUnsigned((int) (extantMap.getLong(base + 16) >>> 32), blockIdx);
+      }
       if (cmp < 0) {
         lo = mid + 1;
       } else if (cmp > 0) {
         hi = mid - 1;
       } else {
-        return (int) extantMap[base + 2]; // handleLow32 in low 32 bits
+        return (int) extantMap.getLong(base + 16); // handleLow32 in low 32 bits
       }
     }
     return -1;
