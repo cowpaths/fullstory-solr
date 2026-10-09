@@ -143,10 +143,12 @@ public class SizeAwareDirectory extends FilterDirectory
   @Override
   public long size() throws IOException {
     Integer reconcileThreshold = CoreAdminHandler.getReconcileThreshold();
+    long trackedSize = size.sum();
     if (initialized
+        && trackedSize > 0
         && (reconcileThreshold == null
             || System.nanoTime() - reconciledTimeNanos < reconcileTTLNanos)) {
-      return size.sum();
+      return trackedSize;
     }
     return initSize().size;
   }
@@ -170,6 +172,7 @@ public class SizeAwareDirectory extends FilterDirectory
       theyCompute = computingSize[0];
       if (theyCompute == null) {
         weCompute = new CompletableFuture<>();
+        computingSize[0] = weCompute;
       } else {
         weCompute = null;
       }
@@ -235,7 +238,11 @@ public class SizeAwareDirectory extends FilterDirectory
       long diff = extant.size - ret.size;
       long onDiskDiff = extant.onDiskSize - ret.onDiskSize;
       boolean initializing = !initialized;
+      // Files may appear outside this wrapper after an empty initialization, for example while a
+      // core is being restored. In that case the cached counter cannot be authoritative.
+      boolean invalidTrackedSize = extant.size <= 0 && ret.size > 0;
       if (!initializing
+          && !invalidTrackedSize
           && (reconcileThreshold == null
               || (Math.abs(diff) < reconcileThreshold
                   && Math.abs(onDiskDiff) < reconcileThreshold))) {
@@ -266,12 +273,16 @@ public class SizeAwareDirectory extends FilterDirectory
         }
         reconciledTimeNanos = System.nanoTime();
         if (initializing) {
-          initialized = true;
-          if (log.isInfoEnabled()) {
-            log.info(
-                "initialized heap-tracked size {} (overhead: {})",
-                RamUsageEstimator.humanReadableUnits(ret.size),
-                RamUsageEstimator.humanReadableUnits(ramBytesUsed()));
+          // An empty first scan must not latch. STATUS/metrics can run while the
+          // index dir is still being populated; a later scan should see the files.
+          if (ret.size > 0) {
+            initialized = true;
+            if (log.isInfoEnabled()) {
+              log.info(
+                  "initialized heap-tracked size {} (overhead: {})",
+                  RamUsageEstimator.humanReadableUnits(ret.size),
+                  RamUsageEstimator.humanReadableUnits(ramBytesUsed()));
+            }
           }
         } else {
           double ratio = (double) extant.size / ret.size;
@@ -290,6 +301,12 @@ public class SizeAwareDirectory extends FilterDirectory
       weCompute.complete(ret);
 
       return ret;
+    } catch (IOException e) {
+      weCompute.completeExceptionally(e);
+      throw e;
+    } catch (RuntimeException e) {
+      weCompute.completeExceptionally(e);
+      throw e;
     } finally {
       synchronized (computingSize) {
         computingSize[0] = null;
