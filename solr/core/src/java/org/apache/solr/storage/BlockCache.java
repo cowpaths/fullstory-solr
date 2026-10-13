@@ -828,6 +828,17 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final boolean BATCH_SEARCHER_SEGMENT_SCOPED =
       EnvUtils.getPropertyAsBool("solr.core.batchSearcherSegmentScoped", true);
 
+  /**
+   * Disables the per-request (as opposed to per-operation/segment) batching path in {@link
+   * #batched}: the {@code SolrRequestInfo}/request-context lookup, and the per-request miss-latency
+   * metric it exists to support. Merge- and searcher-open-scoped batching (everything gated by
+   * {@link #operationBatch}) are unaffected. When disabled, CCII registrations that would have used
+   * request-scoped batching fall back to the normal unbatched path (same as {@code segId == -1}
+   * registrations today) -- a well-exercised path, not a new one.
+   */
+  private static final boolean BATCH_REQUEST_SCOPED =
+      EnvUtils.getPropertyAsBool("solr.core.batchRequestScoped", true);
+
   Closeable openBatchScope(boolean openSearcher) {
     if (openSearcher ? BATCH_SEARCHER_SEGMENT_SCOPED : BATCH_MERGE_SEGMENT_SCOPED) {
       return openBatchScopePerSegment(openSearcher);
@@ -976,7 +987,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           return nrs;
         }
       }
-    } else {
+    } else if (BATCH_REQUEST_SCOPED) {
       SolrQueryRequest req;
       SolrRequestInfo sri = SolrRequestInfo.getRequestInfo();
       if (sri != null && (req = sri.getReq()) != null) {
@@ -1834,9 +1845,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     blocksDecompressedDemandTime =
         solrMetricsContext.timer(
             "blocksDecompressedDemandTime", SolrInfoBean.Category.DIRECTORY.toString(), scope);
-    perRequestDemandTime =
-        solrMetricsContext.timer(
-            "perRequestDemandTime", SolrInfoBean.Category.DIRECTORY.toString(), scope);
+    if (BATCH_REQUEST_SCOPED) {
+      perRequestDemandTime =
+          solrMetricsContext.timer(
+              "perRequestDemandTime", SolrInfoBean.Category.DIRECTORY.toString(), scope);
+    }
   }
 
   @Override
