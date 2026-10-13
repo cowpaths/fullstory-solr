@@ -38,6 +38,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
@@ -821,11 +822,12 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
     AUTOCOMMIT(
         "UPDATE.updateHandler.autoCommits",
         "auto_commits_hard",
-        "cumulative number of hard auto commits across cores"),
+        "cumulative number of hard auto commits across cores",
+        "commitReason"),
     SOFT_AUTOCOMMIT(
         "UPDATE.updateHandler.softAutoCommits",
         "auto_commits_soft",
-        "cumulative number of soft auto commits across cores"),
+        "cumulative number of soft auto commits across cores"), //no need to get commitReason like hard commit as we only use maxTime for soft commits
     COMMITS("UPDATE.updateHandler.commits", "commits", "cumulative number of commits across cores"),
     CUMULATIVE_DEL_BY_ID(
         "UPDATE.updateHandler.cumulativeDeletesById",
@@ -1025,7 +1027,7 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         "Current outstanding requests in the HTTP client used by the httpShardHandler",
         null,
         PrometheusMetricType.GAUGE);
-    final String key, metricName, desc, property;
+    final String key, metricName, desc, property, tag;
     private final PrometheusMetricType metricType;
     private static final Map<String, CoreMetric> lookup = new HashMap<>();
 
@@ -1036,7 +1038,12 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
     }
 
     CoreMetric(String key, String metricName, String desc) {
-      this(key, metricName, desc, "count", PrometheusMetricType.COUNTER);
+      this(key, metricName, desc, "count", PrometheusMetricType.COUNTER, null);
+    }
+
+    /** Counter metric that may have Dropwizard path children under {@code key.<tag>.<value>}. */
+    CoreMetric(String key, String metricName, String desc, String tag) {
+      this(key, metricName, desc, "count", PrometheusMetricType.COUNTER, tag);
     }
 
     CoreMetric(
@@ -1045,11 +1052,26 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         String desc,
         String property,
         PrometheusMetricType metricType) {
+      this(key, metricName, desc, property, metricType, null);
+    }
+
+    CoreMetric(
+        String key,
+        String metricName,
+        String desc,
+        String property,
+        PrometheusMetricType metricType,
+        String tag) {
       this.key = key;
       this.metricName = metricName;
       this.desc = desc;
       this.property = property;
       this.metricType = metricType;
+      this.tag = tag;
+    }
+
+    boolean hasTag() {
+      return tag != null && !tag.isEmpty();
     }
 
     PrometheusMetric createPrometheusMetric(Number value) {
@@ -1057,8 +1079,14 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
     }
 
     PrometheusMetric createPrometheusMetric(Number value, String descriptionSuffix) {
+      return createPrometheusMetric(value, descriptionSuffix, null);
+    }
+
+    PrometheusMetric createPrometheusMetric(
+        Number value, String descriptionSuffix, Map<String, String> labels) {
       return new PrometheusMetric(
           metricName,
+          labels,
           metricType,
           desc + (descriptionSuffix != null ? descriptionSuffix : ""),
           value.longValue());
@@ -1130,6 +1158,9 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
                   : getNumber(nodeMetricNode, metric.key);
           if (!INVALID_NUMBER.equals(value)) {
             results.add(metric.createPrometheusMetric(value, "[node aggregated]"));
+            if (metric.tag != null) { //assume tagged metrics also present if the non tagged metrics is available in aggregated node
+              results.addAll(extractTaggedMetrics(nodeMetricNode, metric, "[node aggregated]"));
+            }
           } else {
             resultContext.missingCoreMetrics.add(metric);
           }
@@ -1214,8 +1245,35 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
 
     @Override
     protected void handle(ResultContext resultContext, JsonNode metrics) throws IOException {
+      class MetricKey {
+        final CoreMetric metric;
+        final Map<String, String> labels;
+
+        MetricKey(CoreMetric metric) {
+          this(metric, null);
+        }
+
+        MetricKey(CoreMetric metric, Map<String, String> labels) {
+          this.metric = metric;
+          this.labels = labels;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+          if (this == o) return true;
+          if (!(o instanceof MetricKey)) return false;
+          MetricKey metricKey = (MetricKey) o;
+          return metric == metricKey.metric && Objects.equals(labels, metricKey.labels);
+        }
+
+        @Override
+        public int hashCode() {
+          return Objects.hash(metric, labels);
+        }
+      }
+
       List<PrometheusMetric> results = resultContext.resultMetrics;
-      Map<CoreMetric, Long> accumulative = new LinkedHashMap<>();
+      Map<MetricKey, Long> accumulative = new LinkedHashMap<>();
       for (CoreMetric missingCoreMetric : getTargetCoreMetrics(resultContext)) {
         for (JsonNode coreMetricNode : metrics) {
           Number val =
@@ -1223,17 +1281,25 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
                   ? getNumber(coreMetricNode, missingCoreMetric.key, missingCoreMetric.property)
                   : getNumber(coreMetricNode, missingCoreMetric.key);
           if (!val.equals(INVALID_NUMBER)) {
+            MetricKey key = new MetricKey(missingCoreMetric);
             accumulative.put(
-                missingCoreMetric,
-                accumulative.getOrDefault(missingCoreMetric, 0L) + val.longValue());
+                key,
+                accumulative.getOrDefault(key, 0L) + val.longValue());
+          }
+          if (missingCoreMetric.tag != null) {
+            Map<String, Number> metricsByTag = extractMetricsByTag(coreMetricNode, missingCoreMetric);
+            metricsByTag.forEach((String tagVal, Number metricsVal) -> {
+              MetricKey key = new MetricKey(missingCoreMetric, Map.of(missingCoreMetric.tag, tagVal));
+              accumulative.put(key, accumulative.getOrDefault(key, 0L) + metricsVal.longValue());
+            });
           }
         }
       }
 
-      for (Map.Entry<CoreMetric, Long> coreMetricEntry : accumulative.entrySet()) {
-        CoreMetric coreMetric = coreMetricEntry.getKey();
+      for (Map.Entry<MetricKey, Long> coreMetricEntry : accumulative.entrySet()) {
+        CoreMetric coreMetric = coreMetricEntry.getKey().metric;
         Long accumulativeVal = coreMetricEntry.getValue();
-        results.add(coreMetric.createPrometheusMetric(accumulativeVal));
+        results.add(coreMetric.createPrometheusMetric(accumulativeVal, null, coreMetricEntry.getKey().labels));
       }
     }
   }
@@ -1442,7 +1508,7 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
     }
   }
 
-  static Number getNumber(JsonNode node, String... names) throws IOException {
+  static Number getNumber(JsonNode node, String... names) {
     JsonNode originalNode = node;
     for (String name : names) {
       node = node.path(name);
@@ -1455,6 +1521,63 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
       log.warn("node {} does not have a number at the path {}.", originalNode, names);
       return INVALID_NUMBER;
     }
+  }
+
+  static List<PrometheusMetric> extractTaggedMetrics(
+      JsonNode metricsNode,
+      CoreMetric metric,
+      String descriptionSuffix) {
+    List<PrometheusMetric> taggedMetrics = new ArrayList<>();
+    forEachTaggedMetric(
+        metricsNode,
+        metric,
+        (tagValue, value) ->
+                taggedMetrics.add(
+                metric.createPrometheusMetric(
+                    value, descriptionSuffix, Map.of(metric.tag, tagValue))));
+    return taggedMetrics;
+  }
+
+  static LinkedHashMap<String, Number> extractMetricsByTag(
+          JsonNode metricsNode,
+          CoreMetric metric) {
+    LinkedHashMap<String, Number> taggedMetricsByTag = new LinkedHashMap<>();
+    forEachTaggedMetric(
+            metricsNode,
+            metric,
+            taggedMetricsByTag::put);
+    return taggedMetricsByTag;
+  }
+
+  static void forEachTaggedMetric(
+      JsonNode metricsNode,
+      CoreMetric metric,
+      java.util.function.BiConsumer<String, Number> consumer) {
+    if (metricsNode == null || !metric.hasTag()) {
+      return;
+    }
+    String taggedPrefix = metric.key + "." + metric.tag + ".";
+    metricsNode
+        .fields()
+        .forEachRemaining(
+            entry -> {
+              String name = entry.getKey();
+              // This could be a bit slow since it iterates all the metrics to find match. However, to make this fast
+              // we will need to re-structure the whole metrics response which is too big of a change
+              if (!name.startsWith(taggedPrefix)) {
+                return;
+              }
+              String tagValue = name.substring(taggedPrefix.length());
+              if (tagValue.isEmpty() || tagValue.indexOf('.') >= 0) {
+                // only direct children: key.tag.value (no further nesting)
+                return;
+              }
+              JsonNode valNode = metric.property != null ? entry.getValue().path(metric.property) : entry.getValue();
+              Number value = getNumber(valNode);
+              if (!INVALID_NUMBER.equals(value)) {
+                consumer.accept(tagValue, value);
+              }
+            });
   }
 
   static SolrDispatchFilter getSolrDispatchFilter(HttpServletRequest request) throws IOException {
