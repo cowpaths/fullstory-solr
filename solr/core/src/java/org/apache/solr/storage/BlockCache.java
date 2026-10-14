@@ -1128,10 +1128,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
      */
     @SuppressWarnings("ReferenceEquality")
     public ByteBuffer join(BlockCache c, long[] waitNanos) {
-      if (cacheBlockOrd == -1) {
-        // tail buffer, always populated, already read-only
-        return (ByteBuffer) CACHED.getVolatile(c.cached, cacheBlockOrd);
-      }
       if (!isPopulated(c)) {
         waiting = true;
         long startNanos = System.nanoTime();
