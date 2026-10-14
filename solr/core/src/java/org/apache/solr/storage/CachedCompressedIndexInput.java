@@ -599,16 +599,16 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
   }
 
-  private final long[] cacheHitBlockNanos = new long[1];
+  private final long[] cacheHitBlockNanos = BlockCache.BATCH_REQUEST_SCOPED ? new long[1] : null;
 
   private void cacheHit(int blockIdx, long cached, BlockCache.Val cachedVal, int type)
       throws IOException {
     ByteBuffer buf;
     long waitNanos;
-    cacheHitBlockNanos[0] = 0;
+    if (BlockCache.BATCH_REQUEST_SCOPED) cacheHitBlockNanos[0] = 0;
     try {
       buf = cachedVal.join(rootInfo.cache, cacheHitBlockNanos);
-      waitNanos = cacheHitBlockNanos[0];
+      waitNanos = BlockCache.BATCH_REQUEST_SCOPED ? cacheHitBlockNanos[0] : 0;
     } catch (Throwable e) {
       rootInfo.cache.unpin(cached);
       if (e instanceof CompletionException) {

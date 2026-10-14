@@ -836,7 +836,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * request-scoped batching fall back to the normal unbatched path (same as {@code segId == -1}
    * registrations today) -- a well-exercised path, not a new one.
    */
-  private static final boolean BATCH_REQUEST_SCOPED =
+  static final boolean BATCH_REQUEST_SCOPED =
       EnvUtils.getPropertyAsBool("solr.core.batchRequestScoped", true);
 
   Closeable openBatchScope(boolean openSearcher) {
