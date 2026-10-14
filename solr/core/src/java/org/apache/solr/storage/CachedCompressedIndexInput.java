@@ -684,7 +684,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       if (extant == cached) {
         ByteBuffer buf;
         long elapsedNanos = -1L;
-        if (nodeVal.isPopulated()) {
+        if (nodeVal.isPopulated(cache)) {
           // Warm-start hit: pool buffer already holds valid data from a previous run.
           cache.recordWarmStartHit();
           buf = nodeVal.join(cache, null);
@@ -705,7 +705,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
             byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
             buf = nodeVal.populate(heapBuf, 0, decompressedLen, rootInfo.blobUUID, blockIdx, cache);
           } catch (Throwable t) {
-            nodeVal.completeExceptionally(t);
+            nodeVal.completeExceptionally(cache, t);
             accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);
             cache.unpin(node);
             cache.close(node);

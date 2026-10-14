@@ -1013,7 +1013,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       if (toPopulateVal == null) return false;
       long toPopulate = nodeHandle[0];
       if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-        if (toPopulateVal.isPopulated()) {
+        if (toPopulateVal.isPopulated(cache)) {
           cache.recordWarmStartHit();
         } else {
           long[] blockOffsets = in.blockOffsets();
