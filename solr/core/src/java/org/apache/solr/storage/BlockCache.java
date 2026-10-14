@@ -1060,6 +1060,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     private volatile ByteBuffer cached;
 
+    // TODO: we deploy with solr.blockCache.noLoadHint=true, which makes maybeLoadHint() a no-op
+    //  before this field is ever touched (see NO_LOAD_HINT check below) -- this field,
+    //  LAST_LOAD_HINT_NANOS, LOAD_HINT_THROTTLE_NANOS, and maybeLoadHint() itself (plus its two
+    //  call sites in CachedCompressedIndexInput.onCacheHit()) are all dead weight under that
+    //  config. Rip out entirely once we're confident load hinting isn't coming back.
     private volatile long lastLoadHintNanos;
 
     Val(int cacheBlockOrd, int initialRefCount) {
