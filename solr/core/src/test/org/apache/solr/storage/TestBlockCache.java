@@ -221,7 +221,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                             long extant = handles.compareAndExchange(idx, handle, h[0]);
                             if (extant == handle) {
                               handle = h[0];
-                              if (v.isPopulated(cache)) {
+                              if (v.isPopulated()) {
                                 ByteBuffer join = v.join(cache, null);
                                 assertEquals(idx, join.getInt(0));
                               } else {
