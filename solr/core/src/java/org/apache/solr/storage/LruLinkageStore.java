@@ -61,8 +61,8 @@ import java.nio.ByteOrder;
  */
 final class LruLinkageStore {
   private static final int CACHE_LINE = 64;
-  private static final int STRIDE = 32; // 2 slots per 64-byte cache line
-  private static final int NEXT_OFFSET = 0;
+  private static final int STRIDE = 32; // 2 slots per 64-byte cache line; must be a power of 2
+  private static final int STRIDE_SHIFT = Integer.numberOfTrailingZeros(STRIDE);
   private static final int PREV_OFFSET = 4;
   private static final int FROM_HOT_OFFSET = 8;
   private static final int LAST_UNPIN_NANOS_OFFSET = 16; // 8-byte-aligned within the 32B stride
@@ -123,63 +123,59 @@ final class LruLinkageStore {
     return buf.capacity();
   }
 
-  private int slotBase(int slot) {
-    return Math.multiplyExact(slot, STRIDE);
-  }
-
   int getNextVolatile(int slot) {
-    return (int) INT_VH.getVolatile(buf, slotBase(slot) + NEXT_OFFSET);
+    return (int) INT_VH.getVolatile(buf, slot << STRIDE_SHIFT);
   }
 
   /**
    * Pre-publication-safe plain write -- used only before the slot is reachable by other threads.
    */
   void setNextPlain(int slot, int value) {
-    INT_VH.set(buf, slotBase(slot) + NEXT_OFFSET, value);
+    INT_VH.set(buf, slot << STRIDE_SHIFT, value);
   }
 
   void setNextVolatile(int slot, int value) {
-    INT_VH.setVolatile(buf, slotBase(slot) + NEXT_OFFSET, value);
+    INT_VH.setVolatile(buf, slot << STRIDE_SHIFT, value);
   }
 
   int compareAndExchangeNext(int slot, int expect, int update) {
-    return (int) INT_VH.compareAndExchange(buf, slotBase(slot) + NEXT_OFFSET, expect, update);
+    return (int) INT_VH.compareAndExchange(buf, slot << STRIDE_SHIFT, expect, update);
   }
 
   boolean compareAndSetNext(int slot, int expect, int update) {
-    return (boolean) INT_VH.compareAndSet(buf, slotBase(slot) + NEXT_OFFSET, expect, update);
+    return (boolean) INT_VH.compareAndSet(buf, slot << STRIDE_SHIFT, expect, update);
   }
 
   int getPrevVolatile(int slot) {
-    return (int) INT_VH.getVolatile(buf, slotBase(slot) + PREV_OFFSET);
+    return (int) INT_VH.getVolatile(buf, (slot << STRIDE_SHIFT) + PREV_OFFSET);
   }
 
   /**
    * Pre-publication-safe plain write -- used only before the slot is reachable by other threads.
    */
   void setPrevPlain(int slot, int value) {
-    INT_VH.set(buf, slotBase(slot) + PREV_OFFSET, value);
+    INT_VH.set(buf, (slot << STRIDE_SHIFT) + PREV_OFFSET, value);
   }
 
   void setPrevVolatile(int slot, int value) {
-    INT_VH.setVolatile(buf, slotBase(slot) + PREV_OFFSET, value);
+    INT_VH.setVolatile(buf, (slot << STRIDE_SHIFT) + PREV_OFFSET, value);
   }
 
   /** Plain (non-atomic) read, matching today's ordinary field-access semantics. */
   long getLastUnpinNanos(int slot) {
-    return (long) LONG_VH.get(buf, slotBase(slot) + LAST_UNPIN_NANOS_OFFSET);
+    return (long) LONG_VH.get(buf, (slot << STRIDE_SHIFT) + LAST_UNPIN_NANOS_OFFSET);
   }
 
   /** Plain (non-atomic) write, matching today's ordinary field-access semantics. */
   void setLastUnpinNanos(int slot, long value) {
-    LONG_VH.set(buf, slotBase(slot) + LAST_UNPIN_NANOS_OFFSET, value);
+    LONG_VH.set(buf, (slot << STRIDE_SHIFT) + LAST_UNPIN_NANOS_OFFSET, value);
   }
 
   boolean getFromHotVolatile(int slot) {
-    return (int) INT_VH.getVolatile(buf, slotBase(slot) + FROM_HOT_OFFSET) != 0;
+    return (int) INT_VH.getVolatile(buf, (slot << STRIDE_SHIFT) + FROM_HOT_OFFSET) != 0;
   }
 
   void setFromHotVolatile(int slot, boolean value) {
-    INT_VH.setVolatile(buf, slotBase(slot) + FROM_HOT_OFFSET, value ? 1 : 0);
+    INT_VH.setVolatile(buf, (slot << STRIDE_SHIFT) + FROM_HOT_OFFSET, value ? 1 : 0);
   }
 }

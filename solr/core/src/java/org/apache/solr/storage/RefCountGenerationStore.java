@@ -40,8 +40,8 @@ import java.nio.ByteOrder;
  * {@code java.nio}/{@code java.lang.invoke}, available since Java 9).
  */
 final class RefCountGenerationStore {
-  private static final int STRIDE = 64; // one cache line per slot
-  private static final int REF_COUNT_OFFSET = 0;
+  private static final int STRIDE = 64; // one cache line per slot; must be a power of 2
+  private static final int STRIDE_SHIFT = Integer.numberOfTrailingZeros(STRIDE);
   private static final int GENERATION_OFFSET = 4;
 
   // byteBufferViewVarHandle's coordinates are (ByteBuffer, int offset); access modes
@@ -67,13 +67,9 @@ final class RefCountGenerationStore {
     this.buf = ByteBuffer.allocateDirect(needed + 2 * (STRIDE - 1)).alignedSlice(STRIDE);
   }
 
-  private int slotBase(int slot) {
-    return Math.multiplyExact(slot, STRIDE);
-  }
-
   /** Volatile read of {@code refCount} at {@code slot}. */
   int getRefCountVolatile(int slot) {
-    return (int) INT_VH.getVolatile(buf, slotBase(slot) + REF_COUNT_OFFSET);
+    return (int) INT_VH.getVolatile(buf, slot << STRIDE_SHIFT);
   }
 
   /**
@@ -83,7 +79,7 @@ final class RefCountGenerationStore {
    * VarHandle.compareAndExchange}.
    */
   int compareAndExchangeRefCount(int slot, int expect, int update) {
-    return (int) INT_VH.compareAndExchange(buf, slotBase(slot) + REF_COUNT_OFFSET, expect, update);
+    return (int) INT_VH.compareAndExchange(buf, slot << STRIDE_SHIFT, expect, update);
   }
 
   /**
@@ -92,12 +88,12 @@ final class RefCountGenerationStore {
    * VarHandle.compareAndSet}.
    */
   boolean compareAndSetRefCount(int slot, int expect, int update) {
-    return (boolean) INT_VH.compareAndSet(buf, slotBase(slot) + REF_COUNT_OFFSET, expect, update);
+    return (boolean) INT_VH.compareAndSet(buf, slot << STRIDE_SHIFT, expect, update);
   }
 
   /** Volatile read of {@code generation} at {@code slot}. */
   int getGenerationVolatile(int slot) {
-    return (int) INT_VH.getVolatile(buf, slotBase(slot) + GENERATION_OFFSET);
+    return (int) INT_VH.getVolatile(buf, (slot << STRIDE_SHIFT) + GENERATION_OFFSET);
   }
 
   /**
@@ -107,7 +103,7 @@ final class RefCountGenerationStore {
    * calls for the same slot are not supported and may lose updates.
    */
   int incrementAndGetGeneration(int slot) {
-    int offset = slotBase(slot) + GENERATION_OFFSET;
+    int offset = (slot << STRIDE_SHIFT) + GENERATION_OFFSET;
     int newGen = (int) INT_VH.getVolatile(buf, offset) + 1;
     INT_VH.setVolatile(buf, offset, newGen);
     return newGen;
