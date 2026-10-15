@@ -57,7 +57,14 @@ final class RefCountGenerationStore {
    */
   RefCountGenerationStore(int capacity) {
     int needed = Math.multiplyExact(capacity + 1, STRIDE);
-    this.buf = ByteBuffer.allocateDirect(needed + STRIDE - 1).alignedSlice(STRIDE);
+    // ByteBuffer.alignedSlice rounds its limit down (as well as its start up) to the nearest
+    // alignment boundary, so up to (STRIDE-1) bytes can be lost from each end independently; a
+    // margin of only (STRIDE-1) is only safe here because `needed` happens to always be an exact
+    // multiple of STRIDE (capacity+1 times a stride equal to the alignment unit itself). Using
+    // 2*(STRIDE-1) removes the dependency on that coincidence (see LruLinkageStore, where an
+    // analogous STRIDE != alignment-unit case made the coincidence not hold and the smaller
+    // margin insufficient).
+    this.buf = ByteBuffer.allocateDirect(needed + 2 * (STRIDE - 1)).alignedSlice(STRIDE);
   }
 
   private int slotBase(int slot) {
