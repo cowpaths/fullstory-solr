@@ -662,7 +662,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       if (extant == cached) {
         ByteBuffer buf;
         long elapsedNanos = -1L;
-        if (nodeVal.isPopulated(cache)) {
+        if (nodeVal.isPopulated()) {
           // Warm-start hit: pool buffer already holds valid data from a previous run.
           cache.recordWarmStartHit();
           buf = nodeVal.join(cache, null);

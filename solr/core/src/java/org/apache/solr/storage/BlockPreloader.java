@@ -140,7 +140,7 @@ class BlockPreloader {
             () -> {
               try {
                 if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-                  if (toPopulateVal.isPopulated(cache)) {
+                  if (toPopulateVal.isPopulated()) {
                     cache.recordWarmStartHit();
                   } else {
                     long blockOffset = blockOffsets[idx];
@@ -217,7 +217,7 @@ class BlockPreloader {
                 if (toPopulateVal == null) return null; // cache full — stop
                 long toPopulate = nodeHandle[0];
                 if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-                  if (toPopulateVal.isPopulated(cache)) {
+                  if (toPopulateVal.isPopulated()) {
                     cache.recordWarmStartHit();
                   } else {
                     long blockOffset = blockOffsets[idx];
