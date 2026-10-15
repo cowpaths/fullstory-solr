@@ -1054,8 +1054,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     //  config. Rip out entirely once we're confident load hinting isn't coming back.
     private volatile long lastLoadHintNanos;
 
-    Val(int cacheBlockOrd, int initialRefCount) {
-      super(initialRefCount);
+    Val(int cacheBlockOrd) {
       this.cacheBlockOrd = cacheBlockOrd;
     }
 
@@ -1557,7 +1556,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
                 @Override
                 public Val next() {
-                  return new Val(i--, 0);
+                  return new Val(i--);
                 }
               };
       parts[i] = new Partition(count, poolList);

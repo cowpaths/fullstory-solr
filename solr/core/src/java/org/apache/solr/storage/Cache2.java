@@ -22,11 +22,24 @@ import java.lang.invoke.VarHandle;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Fixed-capacity concurrent LRU cache. Each node carries its doubly-linked list {@code next}/{@code
- * prev} pointers as {@code int} fields directly on the {@link Val} payload object, eliminating the
- * separate parallel {@code int[]} arrays of earlier designs. This co-locates list-pointer reads
- * with the refCount and generation fields that are almost always accessed at the same time, trading
- * the dense-array cache-line benefit for fewer total array index lookups and bounds checks.
+ * Fixed-capacity concurrent LRU cache.
+ *
+ * <p>{@code refCount}/{@code generation} ("Group 1") live in an external {@link
+ * RefCountGenerationStore} rather than as {@link Val} instance fields, isolated from {@code
+ * next}/{@code prev}/{@code fromHot}/{@code lastUnpinNanos} ("Group 2", which remain {@link Val}
+ * fields). This split exists because production data showed Group 1 carries roughly 9x more write
+ * traffic than Group 2 (most pins are "re-pins" of an already-pinned slot -- a pure {@code
+ * refCount} CAS with no list manipulation): colocating the two groups on one object, as earlier
+ * versions of this class did, meant Group 2's cold reads/writes shared a cache line with Group 1's
+ * hot CAS traffic, and vice versa. {@link RefCountGenerationStore} (backed by a single 64-byte-
+ * aligned {@code ByteBuffer.allocateDirect} buffer) places each slot's Group 1 pair on its own
+ * cache line, which a plain on-heap {@code int[]} cannot do without wasting 7/8 of the array on
+ * padding -- 16 unrelated slots' refCounts would otherwise pack onto one line, which would trade
+ * today's same-slot false sharing for new false sharing among 16 neighbors on the majority-traffic
+ * field. Group 2 stays colocated on {@link Val} because it has no comparable traffic-asymmetry
+ * problem and splitting it would lose real single-thread locality (e.g. {@code
+ * DualQueueCache.insertAtHead} touches {@code lastUnpinNanos}+{@code fromHot}+{@code next}/{@code
+ * prev} together, in one logical operation, on every list transition).
  *
  * <p>The LRU semantics, pin/unpin reference-count protocol, and hot/cold dual-queue logic are
  * identical to {@link Cache} and {@link Cache.DualQueueCache}.
@@ -56,22 +69,6 @@ class Cache2<V extends Cache2.Val> {
 
   static class Val {
     /**
-     * Reference count.
-     *
-     * <ul>
-     *   <li>&ge;1 — pinned (not in LRU list)
-     *   <li>0 — evictable (in LRU list)
-     *   <li>-1 — permanently dead (evicted); slot must not be used
-     * </ul>
-     */
-    private volatile int refCount;
-
-    // Incremented by acquireNode() on each recycle, before the volatile write to refCount.
-    // Readers who volatile-read refCount before reading this field are guaranteed to see the
-    // current value (happens-before via the volatile write in resetPayload).
-    private volatile int generation;
-
-    /**
      * Doubly-linked list successor (toward the head) and predecessor (toward the tail). Accessed
      * atomically via {@link Cache2#NEXT_VH} and {@link Cache2#PREV_VH}. Sentinel slots (COLD_HEAD,
      * COLD_TAIL, HOT_HEAD, HOT_TAIL) also carry these fields.
@@ -80,23 +77,17 @@ class Cache2<V extends Cache2.Val> {
 
     private int prev;
 
-    Val(int initialRefCount) {
-      this.refCount = initialRefCount;
-    }
-
     void reset() {
       // no-op default impl;
     }
   }
 
-  private static final VarHandle REF_COUNT;
   private static final VarHandle NEXT_VH;
   private static final VarHandle PREV_VH;
 
   static {
     try {
       MethodHandles.Lookup lookup = MethodHandles.lookup();
-      REF_COUNT = lookup.findVarHandle(Val.class, "refCount", int.class);
       NEXT_VH = lookup.findVarHandle(Val.class, "next", int.class);
       PREV_VH = lookup.findVarHandle(Val.class, "prev", int.class);
     } catch (ReflectiveOperationException e) {
@@ -169,6 +160,16 @@ class Cache2<V extends Cache2.Val> {
 
   protected final Val coldTailVal;
 
+  /**
+   * Group 1 (refCount/generation) storage -- see the class javadoc for why this isn't a {@link Val}
+   * field. Sized for real slots {@code 1..capacity} only: sentinel slots (COLD_HEAD/COLD_TAIL
+   * /HOT_HEAD/HOT_TAIL) never have {@code refCount}/{@code generation} read by any live code path
+   * (confirmed: {@code acquireTail}'s loop/guard conditions structurally exclude sentinels from
+   * ever reaching a {@code refCount} CAS; {@code generation} is never touched on a sentinel at
+   * all), so no sentinel coverage is needed here, unlike {@code payload}.
+   */
+  final RefCountGenerationStore refCountGeneration;
+
   // ---------------------------------------------------------------------------
   // Constructor
   // ---------------------------------------------------------------------------
@@ -186,16 +187,21 @@ class Cache2<V extends Cache2.Val> {
    */
   Cache2(int capacity, int extraSentinelSlots, Iterable<? extends V> initialValues) {
     this.capacity = capacity;
+    // Real slots start at refCount=0/generation=0 (the zero-initialized default), matching the
+    // implicit-zero `new Val(i--, 0)` call this construction replaces.
+    this.refCountGeneration = new RefCountGenerationStore(capacity);
     this.COLD_HEAD = capacity + 1;
     this.COLD_TAIL = capacity + 2;
     int arrayLen = capacity + 3 + extraSentinelSlots;
     this.payload = new Val[arrayLen];
 
-    // Initialize sentinel Val objects for the cold queue sentinels.
-    // rc=-1: permanently inert (never evicted by acquireTail's CAS(0→-1)).
+    // Initialize sentinel Val objects for the cold queue sentinels. Sentinels never have
+    // refCount/generation touched by any live code path (see refCountGeneration's javadoc), so
+    // there's no "permanently inert" value to set here anymore -- the old rc=-1 marker was
+    // vestigial (written once, never read).
     // DualQueueCache initializes HOT_HEAD / HOT_TAIL sentinel Vals in its own constructor.
-    this.coldHeadVal = payload[COLD_HEAD] = new Val(-1);
-    this.coldTailVal = payload[COLD_TAIL] = new Val(-1);
+    this.coldHeadVal = payload[COLD_HEAD] = new Val();
+    this.coldTailVal = payload[COLD_TAIL] = new Val();
 
     // Build cold-queue chain: COLD_HEAD ↔ slot_1 ↔ slot_2 ↔ … ↔ COLD_TAIL.
     // Slot 0 is reserved (null) and never linked. Single-threaded init; plain field writes fine.
@@ -330,20 +336,20 @@ class Cache2<V extends Cache2.Val> {
    */
   int pin(long handle) {
     int slot = (int) handle & SLOT_MASK;
+    assert slot >= 1 && slot <= capacity;
     int expectedGen = (int) (handle >>> 32);
-    Val p = payload[slot];
-    if (p.generation != expectedGen) return -1;
-    int rc = p.refCount;
+    if (refCountGeneration.getGenerationVolatile(slot) != expectedGen) return -1;
+    int rc = refCountGeneration.getRefCountVolatile(slot);
     for (; ; ) {
       switch (rc) {
         case -1:
           return -1;
         case UNPIN_SENTINEL:
-          rc = p.refCount;
+          rc = refCountGeneration.getRefCountVolatile(slot);
           continue;
       }
       assert rc >= 0;
-      int witness = (int) REF_COUNT.compareAndExchange(p, rc, rc + 1);
+      int witness = refCountGeneration.compareAndExchangeRefCount(slot, rc, rc + 1);
       if (witness == rc) {
         break;
       } else {
@@ -356,10 +362,11 @@ class Cache2<V extends Cache2.Val> {
     }
     // Check generation after acquiring the pin. The CAS above is a volatile read-modify-write
     // that establishes happens-before with the generation write preceding the volatile refCount
-    // write in acquireNode, so p.generation is guaranteed to reflect the current generation.
-    // If mismatched, the slot was recycled; unpin() correctly reverses the full pin (including
-    // re-insertion into the LRU list for the rc==0 case via UNPIN_SENTINEL → insertAtHead).
-    if (p.generation != expectedGen) {
+    // write in acquireNode, so this generation read is guaranteed to reflect the current
+    // generation. If mismatched, the slot was recycled; unpin() correctly reverses the full pin
+    // (including re-insertion into the LRU list for the rc==0 case via UNPIN_SENTINEL →
+    // insertAtHead).
+    if (refCountGeneration.getGenerationVolatile(slot) != expectedGen) {
       unpin(handle, false);
       return -1;
     }
@@ -373,14 +380,14 @@ class Cache2<V extends Cache2.Val> {
    */
   Val pinnable(long handle) {
     int slot = (int) handle & SLOT_MASK;
+    assert slot >= 1 && slot <= capacity;
     int expectedGen = (int) (handle >>> 32);
-    Val p = payload[slot];
-    switch (p.refCount) {
+    switch (refCountGeneration.getRefCountVolatile(slot)) {
       case UNPIN_SENTINEL:
       case -1:
         return null;
       default:
-        return p.generation == expectedGen ? p : null;
+        return refCountGeneration.getGenerationVolatile(slot) == expectedGen ? payload[slot] : null;
     }
   }
 
@@ -394,14 +401,14 @@ class Cache2<V extends Cache2.Val> {
    */
   int unpin(long handle, boolean recordAccess) {
     int slot = (int) handle & SLOT_MASK;
-    Val p = payload[slot];
-    int rc = p.refCount;
+    assert slot >= 1 && slot <= capacity;
+    int rc = refCountGeneration.getRefCountVolatile(slot);
     for (; ; ) {
       if (rc == 1) {
-        int witness = (int) REF_COUNT.compareAndExchange(p, 1, UNPIN_SENTINEL);
+        int witness = refCountGeneration.compareAndExchangeRefCount(slot, 1, UNPIN_SENTINEL);
         if (witness == 1) {
           boolean toHot = insertAtHead(COLD_HEAD, coldHeadVal, slot, recordAccess);
-          if (!REF_COUNT.compareAndSet(p, UNPIN_SENTINEL, 0)) {
+          if (!refCountGeneration.compareAndSetRefCount(slot, UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
           return toHot ? 1 : 0;
@@ -410,7 +417,7 @@ class Cache2<V extends Cache2.Val> {
         }
       } else {
         assert rc > 1 : "unexpected refCount: " + rc;
-        int witness = (int) REF_COUNT.compareAndExchange(p, rc, rc - 1);
+        int witness = refCountGeneration.compareAndExchangeRefCount(slot, rc, rc - 1);
         if (witness == rc) {
           return -1;
         } else {
@@ -433,8 +440,7 @@ class Cache2<V extends Cache2.Val> {
    */
   protected int acquireTail() {
     for (int candidate; (candidate = (int) PREV_VH.getVolatile(coldTailVal)) != COLD_HEAD; ) {
-      Val p = payload[candidate];
-      if (REF_COUNT.compareAndSet(p, 0, -1)) {
+      if (refCountGeneration.compareAndSetRefCount(candidate, 0, -1)) {
         return candidate;
       }
     }
@@ -455,10 +461,10 @@ class Cache2<V extends Cache2.Val> {
     removeFromList(slot);
     // NOTE: generation increment here is safe because we hold an effective lock
     // on this slot here and this is the only place generation is modified.
+    int newGen = refCountGeneration.incrementAndGetGeneration(slot);
     Val p = payload[slot];
-    int newGen = ++p.generation;
     p.reset();
-    if (!REF_COUNT.compareAndSet(p, -1, 1)) {
+    if (!refCountGeneration.compareAndSetRefCount(slot, -1, 1)) {
       throw new IllegalStateException();
     }
     outHandle[0] = (long) newGen << 32 | slot;
@@ -474,20 +480,22 @@ class Cache2<V extends Cache2.Val> {
    */
   int close(long handle) {
     int slot = (int) handle & SLOT_MASK;
-    Val p = payload[slot];
-    int ret = (int) REF_COUNT.compareAndExchange(p, 0, -1);
+    assert slot >= 1 && slot <= capacity;
+    int ret = refCountGeneration.compareAndExchangeRefCount(slot, 0, -1);
     if (ret == 0) {
       // successfully closed
       removeFromList(slot);
       // Keep rc=-1 during insertion so acquireTail cannot grab this slot mid-insertion
-      // (its CAS(0→-1) won't match rc=-1). Bump generation before the volatile p.reset(0) so
-      // that any handle read before close() fails pin()'s pre-CAS generation check and
-      // cannot successfully pin — or hang in join() — after this slot has been recycled.
-      p.reset();
-      ++p.generation;
+      // (its CAS(0→-1) won't match rc=-1). reset() then bump generation -- order between the two
+      // doesn't matter for correctness (refCount==-1 grants exclusivity across this whole window
+      // regardless), but the generation bump must land before any handle read before this close()
+      // can pin() again: pin()'s pre-CAS generation check will then fail, so a stale pinner cannot
+      // successfully pin -- or hang in join() -- after this slot has been recycled.
+      payload[slot].reset();
+      refCountGeneration.incrementAndGetGeneration(slot);
       insertAtTail(slot);
       // refCount -> 0 makes reclaimable
-      if (!REF_COUNT.compareAndSet(p, -1, 0)) {
+      if (!refCountGeneration.compareAndSetRefCount(slot, -1, 0)) {
         throw new IllegalStateException();
       }
     }
@@ -505,15 +513,15 @@ class Cache2<V extends Cache2.Val> {
    */
   void closeUnconditional(long handle) {
     int slot = (int) handle & SLOT_MASK;
-    Val v = payload[slot];
-    int rc = v.refCount;
+    assert slot >= 1 && slot <= capacity;
+    int rc = refCountGeneration.getRefCountVolatile(slot);
     for (; ; ) {
       if (rc == 1) {
         // Sole holder: use -1 as intermediate to block acquireTail during tail insertion.
-        int witness = (int) REF_COUNT.compareAndExchange(v, 1, -1);
+        int witness = refCountGeneration.compareAndExchangeRefCount(slot, 1, -1);
         if (witness == 1) {
           insertAtTail(slot);
-          if (!REF_COUNT.compareAndSet(v, -1, 0)) {
+          if (!refCountGeneration.compareAndSetRefCount(slot, -1, 0)) {
             throw new IllegalStateException("rc changed during insertAtTail in closeUnconditional");
           }
           return;
@@ -523,7 +531,7 @@ class Cache2<V extends Cache2.Val> {
         // A stale pin() raced: its CAS retry loop incremented rc past 1 before its post-CAS
         // generation check could call unpin(). Decrement our own pin and return; the stale
         // pinner's subsequent unpin() will see rc==1 and reinstate this slot in the LRU.
-        int witness = (int) REF_COUNT.compareAndExchange(v, rc, rc - 1);
+        int witness = refCountGeneration.compareAndExchangeRefCount(slot, rc, rc - 1);
         if (witness == rc) {
           return;
         }
@@ -560,10 +568,6 @@ class Cache2<V extends Cache2.Val> {
     void reset() {
       lastUnpinNanos = 0;
     }
-
-    TsVal(int initialRefCount) {
-      super(initialRefCount);
-    }
   }
 
   private static long lastUnpinNanos(TsVal v) {
@@ -590,9 +594,10 @@ class Cache2<V extends Cache2.Val> {
       super(capacity, 2, initialValues);
       this.HOT_HEAD = capacity + 3;
       this.HOT_TAIL = capacity + 4;
-      // Initialize sentinel Val objects for the hot queue.
-      this.hotHeadVal = payload[HOT_HEAD] = new Val(-1);
-      this.hotTailVal = payload[HOT_TAIL] = new Val(-1);
+      // Initialize sentinel Val objects for the hot queue. Sentinels never have refCount/
+      // generation touched by any live code path (see refCountGeneration's javadoc).
+      this.hotHeadVal = payload[HOT_HEAD] = new Val();
+      this.hotTailVal = payload[HOT_TAIL] = new Val();
       hotHeadVal.next = HOT_TAIL;
       hotTailVal.prev = HOT_HEAD;
     }
@@ -614,7 +619,6 @@ class Cache2<V extends Cache2.Val> {
       int candidate;
       boolean fromHot;
       long now = System.nanoTime();
-      Val p;
       do {
         int coldCandidate = (int) PREV_VH.getVolatile(coldTailVal);
         int hotCandidate = (int) PREV_VH.getVolatile(hotTailVal);
@@ -641,11 +645,11 @@ class Cache2<V extends Cache2.Val> {
                   < age(now, lastUnpinNanos((TsVal) payload[hotCandidate])) >> HOT_EVICTION_SHIFT;
           candidate = fromHot ? hotCandidate : coldCandidate;
         }
-      } while (!REF_COUNT.compareAndSet(p = payload[candidate], 0, -1));
+      } while (!refCountGeneration.compareAndSetRefCount(candidate, 0, -1));
       if (coldCandidateTs != 0) {
         this.coldTs = coldCandidateTs;
       }
-      ((TsVal) p).fromHot = fromHot;
+      ((TsVal) payload[candidate]).fromHot = fromHot;
       return candidate;
     }
 
