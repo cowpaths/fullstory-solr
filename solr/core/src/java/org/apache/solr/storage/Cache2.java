@@ -17,29 +17,38 @@
 
 package org.apache.solr.storage;
 
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Fixed-capacity concurrent LRU cache.
  *
- * <p>{@code refCount}/{@code generation} ("Group 1") live in an external {@link
- * RefCountGenerationStore} rather than as {@link Val} instance fields, isolated from {@code
- * next}/{@code prev}/{@code fromHot}/{@code lastUnpinNanos} ("Group 2", which remain {@link Val}
- * fields). This split exists because production data showed Group 1 carries roughly 9x more write
- * traffic than Group 2 (most pins are "re-pins" of an already-pinned slot -- a pure {@code
- * refCount} CAS with no list manipulation): colocating the two groups on one object, as earlier
- * versions of this class did, meant Group 2's cold reads/writes shared a cache line with Group 1's
- * hot CAS traffic, and vice versa. {@link RefCountGenerationStore} (backed by a single 64-byte-
- * aligned {@code ByteBuffer.allocateDirect} buffer) places each slot's Group 1 pair on its own
- * cache line, which a plain on-heap {@code int[]} cannot do without wasting 7/8 of the array on
- * padding -- 16 unrelated slots' refCounts would otherwise pack onto one line, which would trade
- * today's same-slot false sharing for new false sharing among 16 neighbors on the majority-traffic
- * field. Group 2 stays colocated on {@link Val} because it has no comparable traffic-asymmetry
- * problem and splitting it would lose real single-thread locality (e.g. {@code
- * DualQueueCache.insertAtHead} touches {@code lastUnpinNanos}+{@code fromHot}+{@code next}/{@code
- * prev} together, in one logical operation, on every list transition).
+ * <p>Two field clusters live in external, off-heap stores rather than as {@link Val} instance
+ * fields:
+ *
+ * <ul>
+ *   <li>{@code refCount}/{@code generation} ("Group 1", in {@link RefCountGenerationStore}) --
+ *       carries roughly 9x more write traffic than Group 2 (most pins are "re-pins" of an
+ *       already-pinned slot -- a pure {@code refCount} CAS with no list manipulation). Stored one
+ *       pair per 64-byte cache line, so no two slots' hottest fields ever share a line.
+ *   <li>{@code next}/{@code prev}/{@code fromHot}/{@code lastUnpinNanos} ("Group 2", in {@link
+ *       LruLinkageStore}) -- touched only on genuine first-pin/last-unpin list transitions. Stored
+ *       2 slots per 64-byte line (lower-traffic tier than Group 1, so a looser packing is an
+ *       acceptable tradeoff for roughly a third of the memory cost of 1-per-line).
+ * </ul>
+ *
+ * <p>Colocating either group with the other, or with {@link Val}'s own residual fields (as earlier
+ * versions of this class did), meant unrelated fields with very different traffic profiles shared a
+ * cache line -- Group 1's hot CAS traffic needlessly invalidating Group 2's much colder
+ * reads/writes and vice versa, and (for {@code BlockCache.Val} specifically) Group 2's write
+ * traffic needlessly invalidating reads of {@code cacheBlockOrd}, which is read on essentially
+ * every cache hit by an unrelated thread population (query-serving threads, as opposed to the
+ * I/O-completion threads that drive list-splice writes).
+ *
+ * <p>Unlike {@link RefCountGenerationStore} (sized for real slots {@code 1..capacity} only, since
+ * {@code refCount}/{@code generation} are never touched on sentinels), {@link LruLinkageStore} must
+ * cover every addressable slot, sentinels included: sentinel {@link Val}s
+ * (COLD_HEAD/COLD_TAIL/HOT_HEAD/HOT_TAIL) are the literal list-boundary pointers, with their {@code
+ * next}/{@code prev} read and written on essentially every list operation.
  *
  * <p>The LRU semantics, pin/unpin reference-count protocol, and hot/cold dual-queue logic are
  * identical to {@link Cache} and {@link Cache.DualQueueCache}.
@@ -68,30 +77,8 @@ class Cache2<V extends Cache2.Val> {
   // ---------------------------------------------------------------------------
 
   static class Val {
-    /**
-     * Doubly-linked list successor (toward the head) and predecessor (toward the tail). Accessed
-     * atomically via {@link Cache2#NEXT_VH} and {@link Cache2#PREV_VH}. Sentinel slots (COLD_HEAD,
-     * COLD_TAIL, HOT_HEAD, HOT_TAIL) also carry these fields.
-     */
-    private int next;
-
-    private int prev;
-
     void reset() {
       // no-op default impl;
-    }
-  }
-
-  private static final VarHandle NEXT_VH;
-  private static final VarHandle PREV_VH;
-
-  static {
-    try {
-      MethodHandles.Lookup lookup = MethodHandles.lookup();
-      NEXT_VH = lookup.findVarHandle(Val.class, "next", int.class);
-      PREV_VH = lookup.findVarHandle(Val.class, "prev", int.class);
-    } catch (ReflectiveOperationException e) {
-      throw new Error(e);
     }
   }
 
@@ -99,9 +86,9 @@ class Cache2<V extends Cache2.Val> {
   // Sentinels
   // ---------------------------------------------------------------------------
 
-  // Sentinel link values stored in Val.next to signal list-operation state.
-  // Analogous to the RESERVED / REMOVED Node sentinels in Cache, but encoded as ints
-  // in the Val's next field rather than as object references.
+  // Sentinel link values stored in LruLinkageStore's next field to signal list-operation state.
+  // Analogous to the RESERVED / REMOVED Node sentinels in Cache, but encoded as ints rather than
+  // as object references.
   private static final int RESERVED_LINK = Integer.MIN_VALUE;
   private static final int REMOVED_LINK = Integer.MIN_VALUE + 1;
 
@@ -144,21 +131,11 @@ class Cache2<V extends Cache2.Val> {
   /**
    * Payload for all slot indices 0..arrayLen-1. Slot 0 is reserved (null). Real slots are
    * 1..capacity. Sentinel slots (COLD_HEAD, COLD_TAIL, and optionally HOT_HEAD, HOT_TAIL) occupy
-   * the remaining indices; they hold base {@link Val} objects whose {@code next}/{@code prev}
-   * fields carry the list-boundary pointers. Elements are set at construction and never swapped.
+   * the remaining indices, holding placeholder {@link Val} objects (their {@code next}/{@code prev}
+   * live in {@link #lruLinkage}, indexed the same way as any other slot). Elements are set at
+   * construction and never swapped.
    */
   final Val[] payload;
-
-  /**
-   * Direct references to the COLD_HEAD/COLD_TAIL sentinel Vals, cached at construction to avoid an
-   * array-indexed lookup (bounds check + address computation) on every list operation. Safe because
-   * {@code payload[COLD_HEAD]}/{@code payload[COLD_TAIL]} are assigned exactly once, in the
-   * constructor, and never reassigned. {@link DualQueueCache} caches its own HOT_HEAD/HOT_TAIL
-   * equivalents the same way.
-   */
-  protected final Val coldHeadVal;
-
-  protected final Val coldTailVal;
 
   /**
    * Group 1 (refCount/generation) storage -- see the class javadoc for why this isn't a {@link Val}
@@ -166,9 +143,17 @@ class Cache2<V extends Cache2.Val> {
    * /HOT_HEAD/HOT_TAIL) never have {@code refCount}/{@code generation} read by any live code path
    * (confirmed: {@code acquireTail}'s loop/guard conditions structurally exclude sentinels from
    * ever reaching a {@code refCount} CAS; {@code generation} is never touched on a sentinel at
-   * all), so no sentinel coverage is needed here, unlike {@code payload}.
+   * all), so no sentinel coverage is needed here, unlike {@link #lruLinkage}.
    */
   final RefCountGenerationStore refCountGeneration;
+
+  /**
+   * Group 2 (next/prev/fromHot/lastUnpinNanos) storage -- see the class javadoc. Sized to cover
+   * every addressable slot, sentinels included (unlike {@link #refCountGeneration}): sentinel
+   * {@link Val}s are the literal list-boundary pointers, with {@code next}/{@code prev} read and
+   * written on essentially every list operation.
+   */
+  final LruLinkageStore lruLinkage;
 
   // ---------------------------------------------------------------------------
   // Constructor
@@ -194,28 +179,28 @@ class Cache2<V extends Cache2.Val> {
     this.COLD_TAIL = capacity + 2;
     int arrayLen = capacity + 3 + extraSentinelSlots;
     this.payload = new Val[arrayLen];
+    this.lruLinkage = new LruLinkageStore(arrayLen);
+    assert COLD_TAIL < arrayLen;
 
-    // Initialize sentinel Val objects for the cold queue sentinels. Sentinels never have
-    // refCount/generation touched by any live code path (see refCountGeneration's javadoc), so
-    // there's no "permanently inert" value to set here anymore -- the old rc=-1 marker was
-    // vestigial (written once, never read).
+    // Placeholder sentinel Val objects for the cold queue sentinels -- next/prev live in
+    // lruLinkage, indexed by COLD_HEAD/COLD_TAIL directly; these objects are never read.
     // DualQueueCache initializes HOT_HEAD / HOT_TAIL sentinel Vals in its own constructor.
-    this.coldHeadVal = payload[COLD_HEAD] = new Val();
-    this.coldTailVal = payload[COLD_TAIL] = new Val();
+    this.payload[COLD_HEAD] = new Val();
+    this.payload[COLD_TAIL] = new Val();
 
     // Build cold-queue chain: COLD_HEAD ↔ slot_1 ↔ slot_2 ↔ … ↔ COLD_TAIL.
-    // Slot 0 is reserved (null) and never linked. Single-threaded init; plain field writes fine.
+    // Slot 0 is reserved (null) and never linked. Single-threaded init; plain writes fine.
     int prevIdx = COLD_HEAD;
     int slot = 1;
     for (V v : initialValues) {
       if (slot > capacity) throw new IllegalArgumentException("too many initial values");
       payload[slot] = v;
-      payload[prevIdx].next = slot;
-      ((Val) v).prev = prevIdx;
+      lruLinkage.setNextPlain(prevIdx, slot);
+      lruLinkage.setPrevPlain(slot, prevIdx);
       prevIdx = slot++;
     }
-    payload[prevIdx].next = COLD_TAIL;
-    payload[COLD_TAIL].prev = prevIdx;
+    lruLinkage.setNextPlain(prevIdx, COLD_TAIL);
+    lruLinkage.setPrevPlain(COLD_TAIL, prevIdx);
     // COLD_HEAD.prev is never read (head sentinel has no meaningful predecessor).
   }
 
@@ -228,6 +213,11 @@ class Cache2<V extends Cache2.Val> {
     return (V) payload[(int) handle & SLOT_MASK];
   }
 
+  /** True if the slot identified by {@code handle} was most recently routed to the hot queue. */
+  final boolean fromHot(long handle) {
+    return lruLinkage.getFromHotVolatile((int) handle & SLOT_MASK);
+  }
+
   // ---------------------------------------------------------------------------
   // LRU list operations
   // ---------------------------------------------------------------------------
@@ -238,19 +228,19 @@ class Cache2<V extends Cache2.Val> {
    * returns the prior value. Returns REMOVED_LINK immediately if the slot has already been spliced
    * out.
    */
-  private int reserve(Val v, int reservation) {
-    int cur = (int) NEXT_VH.getVolatile(v);
+  private int reserve(int slot, int reservation) {
+    int cur = lruLinkage.getNextVolatile(slot);
     for (; ; ) {
       while (cur == RESERVED_LINK) {
         if (reservation == REMOVED_LINK) {
           Thread.yield();
         }
-        cur = (int) NEXT_VH.getVolatile(v);
+        cur = lruLinkage.getNextVolatile(slot);
       }
       if (cur == REMOVED_LINK) {
         return cur;
       }
-      int witness = (int) NEXT_VH.compareAndExchange(v, cur, reservation);
+      int witness = lruLinkage.compareAndExchangeNext(slot, cur, reservation);
       if (witness == cur) {
         return cur;
       }
@@ -258,59 +248,55 @@ class Cache2<V extends Cache2.Val> {
     }
   }
 
-  protected boolean insertAtHead(int listHead, Val listHeadVal, int slot, boolean recordAccess) {
-    Val vSlot = payload[slot];
-    PREV_VH.setVolatile(vSlot, listHead);
-    int oldNext = reserve(listHeadVal, RESERVED_LINK);
+  protected boolean insertAtHead(int listHead, int slot, boolean recordAccess) {
+    lruLinkage.setPrevVolatile(slot, listHead);
+    int oldNext = reserve(listHead, RESERVED_LINK);
     assert oldNext != REMOVED_LINK : "queue head sentinel should never be removed";
-    vSlot.next = oldNext;
-    PREV_VH.setVolatile(payload[oldNext], slot);
-    if (!NEXT_VH.compareAndSet(listHeadVal, RESERVED_LINK, slot)) {
+    lruLinkage.setNextPlain(slot, oldNext);
+    lruLinkage.setPrevVolatile(oldNext, slot);
+    if (!lruLinkage.compareAndSetNext(listHead, RESERVED_LINK, slot)) {
       throw new IllegalStateException("unexpected concurrent modification of listHead.next");
     }
     return false;
   }
 
   private void removeFromList(int slot) {
-    Val vSlot = payload[slot];
-    int oldNext = reserve(vSlot, REMOVED_LINK);
+    int oldNext = reserve(slot, REMOVED_LINK);
     if (oldNext == REMOVED_LINK) {
       throw new IllegalStateException("already removed");
     }
     int prevSlot;
     for (; ; ) {
-      prevSlot = (int) PREV_VH.getVolatile(vSlot);
-      if (NEXT_VH.compareAndSet(payload[prevSlot], slot, RESERVED_LINK)) {
+      prevSlot = lruLinkage.getPrevVolatile(slot);
+      if (lruLinkage.compareAndSetNext(prevSlot, slot, RESERVED_LINK)) {
         break;
       }
       Thread.yield();
     }
-    PREV_VH.setVolatile(payload[oldNext], prevSlot);
-    if (!NEXT_VH.compareAndSet(payload[prevSlot], RESERVED_LINK, oldNext)) {
+    lruLinkage.setPrevVolatile(oldNext, prevSlot);
+    if (!lruLinkage.compareAndSetNext(prevSlot, RESERVED_LINK, oldNext)) {
       throw new IllegalStateException("unexpected concurrent modification during list removal");
     }
   }
 
   private void insertAtTail(int slot) {
-    Val vSlot = payload[slot];
     for (; ; ) {
-      int predSlot = (int) PREV_VH.getVolatile(coldTailVal);
-      Val vPred = payload[predSlot];
-      int oldNext = reserve(vPred, RESERVED_LINK);
+      int predSlot = lruLinkage.getPrevVolatile(COLD_TAIL);
+      int oldNext = reserve(predSlot, RESERVED_LINK);
       if (oldNext != COLD_TAIL) {
         if (oldNext == REMOVED_LINK) {
           continue; // pred was concurrently removed; retry
         }
         // release reservation; pred is no longer tail's predecessor
-        if (!NEXT_VH.compareAndSet(vPred, RESERVED_LINK, oldNext)) {
+        if (!lruLinkage.compareAndSetNext(predSlot, RESERVED_LINK, oldNext)) {
           throw new IllegalStateException();
         }
         continue;
       }
-      vSlot.next = COLD_TAIL;
-      PREV_VH.setVolatile(vSlot, predSlot);
-      PREV_VH.setVolatile(coldTailVal, slot);
-      if (!NEXT_VH.compareAndSet(vPred, RESERVED_LINK, slot)) {
+      lruLinkage.setNextPlain(slot, COLD_TAIL);
+      lruLinkage.setPrevVolatile(slot, predSlot);
+      lruLinkage.setPrevVolatile(COLD_TAIL, slot);
+      if (!lruLinkage.compareAndSetNext(predSlot, RESERVED_LINK, slot)) {
         throw new IllegalStateException("unexpected concurrent modification during tail insertion");
       }
       return;
@@ -407,7 +393,7 @@ class Cache2<V extends Cache2.Val> {
       if (rc == 1) {
         int witness = refCountGeneration.compareAndExchangeRefCount(slot, 1, UNPIN_SENTINEL);
         if (witness == 1) {
-          boolean toHot = insertAtHead(COLD_HEAD, coldHeadVal, slot, recordAccess);
+          boolean toHot = insertAtHead(COLD_HEAD, slot, recordAccess);
           if (!refCountGeneration.compareAndSetRefCount(slot, UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
@@ -439,7 +425,7 @@ class Cache2<V extends Cache2.Val> {
    * <p>Returns {@link #NULL_SLOT} if the list is empty (all slots are pinned).
    */
   protected int acquireTail() {
-    for (int candidate; (candidate = (int) PREV_VH.getVolatile(coldTailVal)) != COLD_HEAD; ) {
+    for (int candidate; (candidate = lruLinkage.getPrevVolatile(COLD_TAIL)) != COLD_HEAD; ) {
       if (refCountGeneration.compareAndSetRefCount(candidate, 0, -1)) {
         return candidate;
       }
@@ -542,39 +528,7 @@ class Cache2<V extends Cache2.Val> {
     }
   }
 
-  static class TsVal extends Val {
-
-    /**
-     * Nanosecond timestamp of the most recent {@link Cache2#unpin}, or {@code 0} if never unpinned.
-     * {@code 0} is treated as maximally stale, making never-used slots the highest-priority
-     * eviction candidates.
-     */
-    private long lastUnpinNanos;
-
-    /**
-     * True if this slot was most recently routed to the hot queue by {@link
-     * DualQueueCache#insertAtHead}. Set through {@link Val#reset(int)} on eviction so that {@link
-     * BlockCache} can maintain per-queue counters without any list traversal. Volatile for
-     * cross-thread visibility between the unpinning thread (writer) and the evicting/pinning thread
-     * (reader).
-     */
-    private volatile boolean fromHot;
-
-    boolean fromHot() {
-      return fromHot;
-    }
-
-    @Override
-    void reset() {
-      lastUnpinNanos = 0;
-    }
-  }
-
-  private static long lastUnpinNanos(TsVal v) {
-    return v.lastUnpinNanos;
-  }
-
-  static class DualQueueCache<V extends TsVal> extends Cache2<V> {
+  static class DualQueueCache<V extends Val> extends Cache2<V> {
 
     /** Running memoization of last seen non-zero cold queue timestamp */
     private volatile long coldTs;
@@ -585,31 +539,25 @@ class Cache2<V extends Cache2.Val> {
     /** Hot queue: tail sentinel. */
     private final int HOT_TAIL;
 
-    /** Cached direct references to the hot sentinel Vals; see {@link Cache2#coldHeadVal}. */
-    private final Val hotHeadVal;
-
-    private final Val hotTailVal;
-
     DualQueueCache(int capacity, Iterable<? extends V> initialValues) {
       super(capacity, 2, initialValues);
       this.HOT_HEAD = capacity + 3;
       this.HOT_TAIL = capacity + 4;
-      // Initialize sentinel Val objects for the hot queue. Sentinels never have refCount/
-      // generation touched by any live code path (see refCountGeneration's javadoc).
-      this.hotHeadVal = payload[HOT_HEAD] = new Val();
-      this.hotTailVal = payload[HOT_TAIL] = new Val();
-      hotHeadVal.next = HOT_TAIL;
-      hotTailVal.prev = HOT_HEAD;
+      assert HOT_TAIL < lruLinkage.length();
+      // Placeholder sentinel Val objects for the hot queue -- next/prev live in lruLinkage.
+      payload[HOT_HEAD] = new Val();
+      payload[HOT_TAIL] = new Val();
+      lruLinkage.setNextPlain(HOT_HEAD, HOT_TAIL);
+      lruLinkage.setPrevPlain(HOT_TAIL, HOT_HEAD);
     }
 
     @Override
-    protected final boolean insertAtHead(int head, Val headVal, int slot, boolean recordAccess) {
-      TsVal tvp = (TsVal) payload[slot];
-      long lastUnpin = tvp.lastUnpinNanos;
-      tvp.lastUnpinNanos = recordAccess ? System.nanoTime() : 0;
+    protected final boolean insertAtHead(int head, int slot, boolean recordAccess) {
+      long lastUnpin = lruLinkage.getLastUnpinNanos(slot);
+      lruLinkage.setLastUnpinNanos(slot, recordAccess ? System.nanoTime() : 0);
       boolean toHot = toHot(lastUnpin);
-      tvp.fromHot = toHot;
-      super.insertAtHead(toHot ? HOT_HEAD : head, toHot ? hotHeadVal : headVal, slot, recordAccess);
+      lruLinkage.setFromHotVolatile(slot, toHot);
+      super.insertAtHead(toHot ? HOT_HEAD : head, slot, recordAccess);
       return toHot;
     }
 
@@ -620,8 +568,8 @@ class Cache2<V extends Cache2.Val> {
       boolean fromHot;
       long now = System.nanoTime();
       do {
-        int coldCandidate = (int) PREV_VH.getVolatile(coldTailVal);
-        int hotCandidate = (int) PREV_VH.getVolatile(hotTailVal);
+        int coldCandidate = lruLinkage.getPrevVolatile(COLD_TAIL);
+        int hotCandidate = lruLinkage.getPrevVolatile(HOT_TAIL);
         if (coldCandidate == COLD_HEAD) {
           // cold queue is empty
           if (hotCandidate == HOT_HEAD) {
@@ -634,22 +582,22 @@ class Cache2<V extends Cache2.Val> {
         } else if (hotCandidate == HOT_HEAD) {
           candidate = coldCandidate;
           fromHot = false;
-          coldCandidateTs = lastUnpinNanos((TsVal) payload[coldCandidate]);
+          coldCandidateTs = lruLinkage.getLastUnpinNanos(coldCandidate);
         } else {
           // Evict from hot only when cold is at least HOT_EVICTION_MULTIPLIER times as stale,
           // giving hot slots proportional protection. age() maps lastUnpinNanos=0 to a large
           // sentinel so never-used cold slots are always preferred over any real hot slot.
-          coldCandidateTs = lastUnpinNanos((TsVal) payload[coldCandidate]);
+          coldCandidateTs = lruLinkage.getLastUnpinNanos(coldCandidate);
           fromHot =
               age(now, coldCandidateTs)
-                  < age(now, lastUnpinNanos((TsVal) payload[hotCandidate])) >> HOT_EVICTION_SHIFT;
+                  < age(now, lruLinkage.getLastUnpinNanos(hotCandidate)) >> HOT_EVICTION_SHIFT;
           candidate = fromHot ? hotCandidate : coldCandidate;
         }
       } while (!refCountGeneration.compareAndSetRefCount(candidate, 0, -1));
       if (coldCandidateTs != 0) {
         this.coldTs = coldCandidateTs;
       }
-      ((TsVal) payload[candidate]).fromHot = fromHot;
+      lruLinkage.setFromHotVolatile(candidate, fromHot);
       return candidate;
     }
 

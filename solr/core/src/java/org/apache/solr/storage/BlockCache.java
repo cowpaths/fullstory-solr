@@ -1038,7 +1038,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    *       count, fails {@link BlockCache#pin(long)}, and falls back to loading.
    * </ol>
    */
-  public static final class Val extends Cache2.TsVal {
+  public static final class Val extends Cache2.Val {
 
     private volatile boolean waiting;
 
@@ -1558,7 +1558,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         return p.getPayload(handle);
       default:
         Val v = p.getPayload(handle);
-        (v.fromHot() ? p.pinnedFromHot : p.pinnedFromCold).increment();
+        (p.fromHot(handle) ? p.pinnedFromHot : p.pinnedFromCold).increment();
         return v;
     }
   }
@@ -1630,7 +1630,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       // a cache hit. Since writeMetrics computes hits = repinHits + pinnedFromHot + pinnedFromCold,
       // we offset the upcoming pinnedFrom* increment so it doesn't inflate the hit count.
       p.repinHits.decrement();
-      if (v.fromHot()) {
+      if (p.fromHot(outHandle[0])) {
         hotAcquisitions.increment();
         p.pinnedFromHot.increment();
         if (extantMap != null) {
@@ -1855,8 +1855,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       // Read fromHot() before the close. Only relevant for the non-unconditional path where the
       // slot is in the evictable list (refCount=0); unconditional slots are pinned and not in
       // any queue.
-      Val v = p.getPayload(handle);
-      boolean fromHot = v.fromHot();
+      boolean fromHot = p.fromHot(handle);
       switch (p.close(handle)) {
         case 0:
           if (fromHot) {
