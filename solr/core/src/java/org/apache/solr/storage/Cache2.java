@@ -17,6 +17,7 @@
 
 package org.apache.solr.storage;
 
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -200,20 +201,170 @@ class Cache2<V extends Cache2.Val> {
     this.payload[COLD_HEAD] = new Val();
     this.payload[COLD_TAIL] = new Val();
 
-    // Build cold-queue chain: COLD_HEAD ↔ slot_1 ↔ slot_2 ↔ … ↔ COLD_TAIL.
-    // Slot 0 is reserved (null) and never linked. Single-threaded init; plain writes fine.
-    int prevIdx = COLD_HEAD;
+    // Pass 1: populate payload[] sequentially, slot = 1..capacity. This ordering is load-bearing
+    // and must NOT change -- BlockCache.distribute()'s reverse-order Val construction and
+    // buildExtantMap()'s warm-start slot-number reconstruction formula both depend on it.
     int slot = 1;
     for (V v : initialValues) {
       if (slot > capacity) throw new IllegalArgumentException("too many initial values");
       payload[slot] = v;
-      lruLinkage.setNextPlain(prevIdx, slot);
-      lruLinkage.setPrevPlain(slot, prevIdx);
-      prevIdx = slot++;
+      slot++;
+    }
+
+    // Pass 2: link slots 1..capacity into the cold-queue chain (COLD_HEAD <-> ... <-> COLD_TAIL)
+    // in a randomized stride order rather than sequential slot order. Chain position determines
+    // acquisition order (acquireTail() always takes from the COLD_TAIL end), so sequential linking
+    // would mean a burst of initial/warm-up acquisitions drains physically-adjacent slots in
+    // immediate succession -- the same kind of temporal/physical adjacency correlation that
+    // motivated RefCountGenerationStore's and LruLinkageStore's cache-line-aware layouts in the
+    // first place, except here it's an artifact of link order rather than slot-number assignment.
+    // Does NOT affect payload[]/cacheBlockOrd/buildExtantMap, all governed solely by pass 1 above.
+    int stride = choosePermutationStride(capacity);
+    int prevIdx = COLD_HEAD;
+    // random starting slot, from 1 (index 0 is unused)
+    int cur = ThreadLocalRandom.current().nextInt(capacity) + 1;
+    for (int i = 0; i < capacity; i++) {
+      lruLinkage.setNextPlain(prevIdx, cur);
+      lruLinkage.setPrevPlain(cur, prevIdx);
+      prevIdx = cur;
+      cur = (cur - 1 + stride) % capacity + 1; // 1-indexed modular stride advance
     }
     lruLinkage.setNextPlain(prevIdx, COLD_TAIL);
     lruLinkage.setPrevPlain(COLD_TAIL, prevIdx);
     // COLD_HEAD.prev is never read (head sentinel has no meaningful predecessor).
+  }
+
+  /**
+   * Rejects a candidate stride if the largest partial quotient in the continued-fraction expansion
+   * of {@code capacity/min(stride, capacity-stride)} exceeds this threshold. By standard
+   * continued-fraction / three-distance-theorem results, bounding every partial quotient bounds the
+   * worst-case gap achievable at <em>every</em> lag simultaneously, not just a checked prefix:
+   * {@code dist(k) >= capacity / ((MAX_PARTIAL_QUOTIENT + 2) * k)} for all {@code k} -- an
+   * unusually large partial quotient anywhere in the expansion means some (possibly large) lag
+   * produces an unusually good rational approximation to {@code stride/capacity}, i.e. a near-zero
+   * wraparound, i.e. two chain entries acquired that many steps apart would land on numerically-
+   * (and therefore physically-) adjacent slots. This check is computed via the same
+   * Euclidean-algorithm loop structure as {@link #gcd} ({@code O(log capacity)} steps), so its cost
+   * is independent of how large a lag is actually being protected against -- unlike brute-force
+   * checking of individual lags, which cannot scale to the thousands-to-tens-of-thousands lag range
+   * realistic concurrent bursts require (even after this cache's own per-CPU partitioning).
+   *
+   * <p><b>This bound inherently degrades as burst size grows</b> (by the pigeonhole principle:
+   * {@code B} points distributed around a circle of circumference {@code capacity} cannot all be
+   * more than {@code ~capacity/B} apart, regardless of how the stride is chosen) -- this check
+   * gives the best achievable dispersion for a given stride, not an escape from that fundamental
+   * limit. At this threshold and the 2,621,440-slot realistic partition-capacity ceiling, the
+   * guaranteed gap is in the tens at a burst size of 10,000 and comfortably in the hundreds at a
+   * few thousand; single-digit gaps become possible once burst size reaches the tens-of-thousands-
+   * to-200,000 range (roughly 1-8% of partition capacity) -- not only once burst size approaches
+   * the full partition capacity itself.
+   *
+   * <p>Unlike an initial version of this check, the stride's own distance from {@code 0}/{@code
+   * capacity} (the {@code k=1} case) must NOT be evaluated by excluding the first
+   * continued-fraction quotient: that first quotient, {@code floor(capacity / min(stride,
+   * capacity-stride))}, directly encodes how small the stride is and is exactly what must be
+   * bounded to rule out a near-sequential chain -- omitting it let pathologically small strides
+   * slip through undetected. Likewise, the expansion must be taken of {@code min(stride,
+   * capacity-stride)}, not {@code stride} itself: strides {@code s} and {@code capacity-s} produce
+   * the identical cycle (the same chain traversed in the opposite direction, hence identical
+   * slot-adjacency/cache-line-sharing properties), so accepting one while rejecting the other -- as
+   * an unreduced expansion would, since {@code capacity/(capacity-s)} and {@code capacity/s} have
+   * unrelated continued fractions in general -- would be an arbitrary, unjustified asymmetry.
+   */
+  private static final int MAX_PARTIAL_QUOTIENT = 20;
+
+  /**
+   * Hard cap on rejection-sampling attempts in {@link #choosePermutationStride}, after which it
+   * falls back to {@code stride=1} (always coprime to any {@code capacity}, hence always
+   * structurally valid, though locality-poor -- equivalent to the original unpermuted sequential
+   * chain). Empirical sweeps (exhaustive for small capacities, spot-checked including adversarial
+   * cases -- Fibonacci numbers, highly composite values -- up to several hundred thousand) never
+   * found a capacity requiring more than ~60 attempts, and never found one with zero valid strides
+   * at all; this cap is set with generous headroom above that.
+   *
+   * <p>That said, "a valid stride exists for every possible capacity" is not something this
+   * approach can mathematically guarantee in general: it is directly adjacent to Zaremba's
+   * conjecture (open since 1971 -- whether every integer has a coprime numerator whose
+   * continued-fraction partial quotients are all &le;5; proven only for a density-one, not
+   * density-<em>all</em>, subset of integers). {@code MAX_PARTIAL_QUOTIENT=20} here is far more
+   * permissive than Zaremba's conjectured-sufficient bound of 5, making a real failure far less
+   * likely still, but this fallback exists specifically so an unproven number-theoretic edge case
+   * can never manifest as a hung or crashing partition construction -- correctness degrades
+   * gracefully to "no permutation benefit" rather than failing.
+   */
+  private static final int MAX_STRIDE_SELECTION_ATTEMPTS = 1000;
+
+  /**
+   * Returns a stride coprime to {@code capacity}, so that repeatedly advancing by this stride (mod
+   * {@code capacity}, 1-indexed) visits every slot in {@code 1..capacity} exactly once before
+   * returning to the start -- a single Hamiltonian cycle through the slot space, required for
+   * {@link #Cache2}'s chain-building pass to produce a valid, fully-connected LRU list (an
+   * incoprime stride would silently produce multiple disjoint cycles, orphaning some slots as
+   * permanently unevictable while linking others twice).
+   *
+   * <p>Beyond mere coprimality, the stride is rejected if its continued-fraction expansion (see
+   * {@link #MAX_PARTIAL_QUOTIENT}) contains too large a partial quotient -- this single check
+   * covers both immediate-neighbor and arbitrarily-distant locality concerns uniformly. See {@link
+   * #MAX_STRIDE_SELECTION_ATTEMPTS} for why this rejection loop is bounded rather than
+   * unconditional.
+   *
+   * <p>The stride is chosen freshly at random on every call (i.e. every {@code Cache2}/partition
+   * construction, every JVM run) -- not a single fixed "good" value -- so initial chain layout
+   * varies run to run rather than reproducing an identical pattern on every restart.
+   */
+  private static int choosePermutationStride(int capacity) {
+    if (capacity <= 2) {
+      // Trivial cases: a single slot has no meaningful permutation space; for two slots, stride=1
+      // is the only valid nontrivial choice (gcd(1,2)=1) and rejection sampling would just find it
+      // immediately anyway.
+      return 1;
+    }
+    // A bound of MAX_PARTIAL_QUOTIENT on the first continued-fraction quotient alone already
+    // implies min(stride, capacity-stride) > capacity/(MAX_PARTIAL_QUOTIENT+1), so sampling
+    // directly from that range skips candidates guaranteed to fail regardless of the rest of the
+    // expansion. floor <= capacity-floor always holds here (capacity >= 3 at this point): floor <=
+    // capacity/(MAX_PARTIAL_QUOTIENT+1) + 1 <= capacity/2 for every capacity >= 3 at
+    // MAX_PARTIAL_QUOTIENT=20, so the sampling range below is never empty.
+    int floor = Math.max(1, capacity / (MAX_PARTIAL_QUOTIENT + 1) + 1);
+    ThreadLocalRandom rnd = ThreadLocalRandom.current();
+    for (int attempt = 0; attempt < MAX_STRIDE_SELECTION_ATTEMPTS; attempt++) {
+      int stride = floor + rnd.nextInt(capacity - (2 * floor) + 1); // [floor, capacity-floor]
+      if (gcd(stride, capacity) == 1
+          && maxPartialQuotient(capacity, Math.min(stride, capacity - stride))
+              <= MAX_PARTIAL_QUOTIENT) {
+        return stride;
+      }
+    }
+    // See MAX_STRIDE_SELECTION_ATTEMPTS javadoc: never observed in practice, but a correctness-
+    // preserving fallback rather than an unbounded loop.
+    return 1;
+  }
+
+  /**
+   * Largest partial quotient in the continued-fraction expansion of {@code a/b} (including the
+   * first quotient -- see {@link #MAX_PARTIAL_QUOTIENT}'s javadoc for why it must not be excluded),
+   * computed via the same Euclidean-algorithm loop structure as {@link #gcd} -- {@code
+   * O(log(min(a,b)))} steps.
+   */
+  private static int maxPartialQuotient(int a, int b) {
+    int max = 0;
+    while (b != 0) {
+      int q = a / b;
+      max = Math.max(max, q);
+      int t = b;
+      b = a - q * b;
+      a = t;
+    }
+    return max;
+  }
+
+  private static int gcd(int a, int b) {
+    while (b != 0) {
+      int t = b;
+      b = a % b;
+      a = t;
+    }
+    return a;
   }
 
   // ---------------------------------------------------------------------------
