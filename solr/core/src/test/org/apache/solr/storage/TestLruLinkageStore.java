@@ -16,6 +16,7 @@
  */
 package org.apache.solr.storage;
 
+import java.nio.ByteBuffer;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -136,6 +137,68 @@ public class TestLruLinkageStore extends SolrTestCaseJ4 {
       assertEquals(0, store.getNextVolatile(slot + 1));
     } finally {
       pool.shutdownNow();
+    }
+  }
+
+  /**
+   * Regression test: the backing buffer must be aligned to a full 64-byte cache line, not merely to
+   * {@code STRIDE} (32 bytes). {@link Cache2}'s sentinel spacing assumes every even slot index
+   * starts a fresh 64-byte line; a buffer that is only 32-byte aligned can land exactly half a
+   * stride into a line, silently shifting that assumption off by one slot for every even/odd pair
+   * in the buffer. Run across many lengths/trials since {@code allocateDirect}'s actual alignment
+   * varies from run to run (it is not guaranteed better than ~8-32 bytes by the JDK).
+   */
+  public void testBufferIs64ByteAligned() {
+    int[] lengths = {1, 2, 3, 4, 5, 100, 101, 511, 512, 513, 1000, 2_621_442};
+    for (int length : lengths) {
+      for (int trial = 0; trial < 20; trial++) {
+        LruLinkageStore store = new LruLinkageStore(length);
+        assertEquals(
+            "length=" + length + " trial=" + trial + ": buffer must be 64-byte aligned",
+            0,
+            store.alignmentOffset(64));
+      }
+    }
+  }
+
+  /**
+   * Regression test: {@link ByteBuffer#alignedSlice} rounds its limit down as well as rounding its
+   * start up, so the backing buffer must be over-allocated by enough margin to guarantee at least
+   * {@code length * STRIDE} bytes survive alignment -- a margin of only {@code CACHE_LINE - 1} is
+   * insufficient whenever {@code length * STRIDE} isn't itself a multiple of 64, which (since
+   * {@code STRIDE == 32}) is true for every odd {@code length}. Exercises the full valid slot range
+   * (including the last slot) to confirm no shortfall/corruption at the tail.
+   */
+  public void testBufferHasSufficientCapacityForFullLength() {
+    int[] lengths = {1, 2, 3, 4, 5, 100, 101, 511, 512, 513, 1000, 2_621_442};
+    for (int length : lengths) {
+      for (int trial = 0; trial < 20; trial++) {
+        LruLinkageStore store = new LruLinkageStore(length);
+        int needed = length * 32; // STRIDE
+        assertTrue(
+            "length="
+                + length
+                + " trial="
+                + trial
+                + ": buffer too short (capacity="
+                + store.byteCapacity()
+                + ", needed="
+                + needed
+                + ")",
+            store.byteCapacity() >= needed);
+
+        // Exercise the last valid slot directly -- under the margin bug this either throws
+        // (buffer literally too short) or silently aliases neighboring native memory.
+        int lastSlot = length - 1;
+        store.setNextPlain(lastSlot, 123);
+        store.setPrevPlain(lastSlot, 456);
+        store.setFromHotVolatile(lastSlot, true);
+        store.setLastUnpinNanos(lastSlot, 789L);
+        assertEquals(123, store.getNextVolatile(lastSlot));
+        assertEquals(456, store.getPrevVolatile(lastSlot));
+        assertTrue(store.getFromHotVolatile(lastSlot));
+        assertEquals(789L, store.getLastUnpinNanos(lastSlot));
+      }
     }
   }
 }

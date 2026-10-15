@@ -60,6 +60,7 @@ import java.nio.ByteOrder;
  * </ul>
  */
 final class LruLinkageStore {
+  private static final int CACHE_LINE = 64;
   private static final int STRIDE = 32; // 2 slots per 64-byte cache line
   private static final int NEXT_OFFSET = 0;
   private static final int PREV_OFFSET = 4;
@@ -80,12 +81,46 @@ final class LruLinkageStore {
   LruLinkageStore(int length) {
     this.length = length;
     int needed = Math.multiplyExact(length, STRIDE);
-    this.buf = ByteBuffer.allocateDirect(needed + STRIDE - 1).alignedSlice(STRIDE);
+    // Must align to CACHE_LINE (64), not STRIDE (32): the cache-line-isolation guarantee this
+    // store exists for (and that Cache2's sentinel spacing depends on) requires every even slot
+    // index to start a fresh 64-byte line, which only holds if the buffer's own base is 64-byte
+    // aligned -- 32-byte alignment alone is not sufficient and was a bug in an earlier version of
+    // this class (confirmed empirically: ByteBuffer.allocateDirect's underlying native allocation
+    // is not guaranteed better than 32-byte aligned, and a 32-byte-but-not-64-byte-aligned base
+    // would silently shift every "even slot starts a line" assumption off by one slot).
+    //
+    // ByteBuffer.alignedSlice(unitSize) rounds its *limit* down to the nearest alignment boundary
+    // in addition to rounding its start up, so up to (CACHE_LINE-1) bytes can be lost from each
+    // end independently -- a margin of only (CACHE_LINE-1) is insufficient whenever `needed` is
+    // not itself an exact multiple of CACHE_LINE (as it is not here: STRIDE=32 means `needed` is
+    // only ever a multiple of 32, never guaranteed to be a multiple of 64), and can silently yield
+    // a slice narrower than `needed` (confirmed empirically to shortfall 100% of the time at this
+    // class's actual slot-count formula, using only a (CACHE_LINE-1) margin). 2*(CACHE_LINE-1)
+    // margin is sufficient regardless of `needed`'s own alignment.
+    this.buf = ByteBuffer.allocateDirect(needed + 2 * (CACHE_LINE - 1)).alignedSlice(CACHE_LINE);
   }
 
   /** Total addressable length (real slots + all sentinel slots) -- for bounds asserts. */
   int length() {
     return length;
+  }
+
+  /**
+   * For testing: {@code buf}'s base-address alignment, via the public {@link
+   * ByteBuffer#alignmentOffset(int, int)} (no reflection/{@code --add-opens} needed) -- 0 iff the
+   * backing buffer's address is a multiple of {@code unitSize} bytes.
+   */
+  int alignmentOffset(int unitSize) {
+    return buf.alignmentOffset(0, unitSize);
+  }
+
+  /**
+   * For testing: total byte capacity of the backing buffer, which may exceed {@code length *
+   * STRIDE} due to {@link ByteBuffer#alignedSlice}'s rounding -- never less, which is exactly what
+   * the margin bug under test would violate.
+   */
+  int byteCapacity() {
+    return buf.capacity();
   }
 
   private int slotBase(int slot) {

@@ -175,9 +175,21 @@ class Cache2<V extends Cache2.Val> {
     // Real slots start at refCount=0/generation=0 (the zero-initialized default), matching the
     // implicit-zero `new Val(i--, 0)` call this construction replaces.
     this.refCountGeneration = new RefCountGenerationStore(capacity);
-    this.COLD_HEAD = capacity + 1;
-    this.COLD_TAIL = capacity + 2;
-    int arrayLen = capacity + 3 + extraSentinelSlots;
+    // Sentinels are spaced 2 apart (not 1) in lruLinkage's index space, each leaving its odd-offset
+    // "pair partner" slot permanently unused -- at lruLinkage's 2-slots-per-64-byte-line stride,
+    // this guarantees every sentinel gets its own exclusive cache line, never sharing one with
+    // another sentinel or with the adjacent real slot (the hottest objects in the whole structure
+    // would otherwise be exactly the ones left exposed to the same false sharing this effort
+    // targets). Rounding the base up to the next even index (rather than using capacity+1 directly)
+    // is what prevents the last real slot from landing in the same pair as the first sentinel: for
+    // any capacity, floor((capacity+1 rounded up to even)/2) != floor(capacity/2).
+    int sentinelBase = capacity + 1;
+    if ((sentinelBase & 1) != 0) {
+      sentinelBase++;
+    }
+    this.COLD_HEAD = sentinelBase;
+    this.COLD_TAIL = sentinelBase + 2;
+    int arrayLen = COLD_TAIL + 1 + 2 * extraSentinelSlots;
     this.payload = new Val[arrayLen];
     this.lruLinkage = new LruLinkageStore(arrayLen);
     assert COLD_TAIL < arrayLen;
@@ -555,8 +567,10 @@ class Cache2<V extends Cache2.Val> {
 
     DualQueueCache(int capacity, Iterable<? extends V> initialValues) {
       super(capacity, 2, initialValues);
-      this.HOT_HEAD = capacity + 3;
-      this.HOT_TAIL = capacity + 4;
+      // Continue the spaced-by-2 sentinel scheme from COLD_TAIL (see base constructor) so
+      // HOT_HEAD/HOT_TAIL each also get an exclusive cache line.
+      this.HOT_HEAD = COLD_TAIL + 2;
+      this.HOT_TAIL = COLD_TAIL + 4;
       assert HOT_TAIL < lruLinkage.length();
       // Placeholder sentinel Val objects for the hot queue -- next/prev live in lruLinkage.
       payload[HOT_HEAD] = new Val();
