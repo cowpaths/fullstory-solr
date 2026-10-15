@@ -434,6 +434,16 @@ class Cache2<V extends Cache2.Val> {
   }
 
   /**
+   * Hook for subclasses to reset per-slot state they maintain outside {@link Val} (e.g. in {@link
+   * #lruLinkage}, whose contents base {@code Cache2} has no need to know). Called from {@link
+   * #acquireNode(long[])} and {@link #close(long)} on every slot recycle, alongside {@link
+   * Val#reset()}. No-op by default.
+   */
+  protected void reset(int slot) {
+    // no-op default impl; see DualQueueCache's override.
+  }
+
+  /**
    * Evicts the LRU slot, resets it, and returns it pinned (refCount=1). Writes the opaque handle
    * (generation&lt;&lt;32|slot) into {@code outHandle[0]}. Returns {@code null} (and leaves {@code
    * outHandle} unmodified) if all slots are pinned.
@@ -448,6 +458,7 @@ class Cache2<V extends Cache2.Val> {
     // NOTE: generation increment here is safe because we hold an effective lock
     // on this slot here and this is the only place generation is modified.
     int newGen = refCountGeneration.incrementAndGetGeneration(slot);
+    reset(slot);
     Val p = payload[slot];
     p.reset();
     if (!refCountGeneration.compareAndSetRefCount(slot, -1, 1)) {
@@ -477,6 +488,9 @@ class Cache2<V extends Cache2.Val> {
       // regardless), but the generation bump must land before any handle read before this close()
       // can pin() again: pin()'s pre-CAS generation check will then fail, so a stale pinner cannot
       // successfully pin -- or hang in join() -- after this slot has been recycled.
+      // insertAtTail() below splices directly into the cold list without going through
+      // DualQueueCache.insertAtHead(), so reset(slot) must be called explicitly here too.
+      reset(slot);
       payload[slot].reset();
       refCountGeneration.incrementAndGetGeneration(slot);
       insertAtTail(slot);
@@ -549,6 +563,14 @@ class Cache2<V extends Cache2.Val> {
       payload[HOT_TAIL] = new Val();
       lruLinkage.setNextPlain(HOT_HEAD, HOT_TAIL);
       lruLinkage.setPrevPlain(HOT_TAIL, HOT_HEAD);
+    }
+
+    @Override
+    protected void reset(int slot) {
+      // 0 is the maximally-stale sentinel age()/toHot() rely on. Without this, a recycled slot
+      // would carry its previous occupant's timestamp into the new occupant's first
+      // insertAtHead() decision and into acquireTail()'s staleness comparison.
+      lruLinkage.setLastUnpinNanos(slot, 0);
     }
 
     @Override
