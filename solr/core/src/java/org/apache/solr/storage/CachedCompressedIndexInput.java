@@ -244,18 +244,6 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   static final boolean ALWAYS_HINT_CURRENT_BLOCK =
       EnvUtils.getPropertyAsBool("solr.compressingDirectory.alwaysHintCurrentBlock", true);
 
-  private static final int PROSPECTIVE_READAHEAD_THRESHOLD;
-
-  static {
-    int v =
-        EnvUtils.getPropertyAsInteger(
-            "solr.blockCache.prospectiveReadaheadThreshold", Integer.MAX_VALUE);
-    if (v < 0) {
-      v = Integer.MAX_VALUE;
-    }
-    PROSPECTIVE_READAHEAD_THRESHOLD = v;
-  }
-
   protected int readAheadTo;
   protected int seqAccessCount;
 
@@ -316,19 +304,9 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   /**
    * Called on a genuine cache hit (block already pinnable in cache) just before the block is made
    * current. {@link #seqAccessCount} and {@link #readAheadTo} reflect the updated state for this
-   * access. Issues a length-aware {@code MADV_WILLNEED} hint on the cache file block, covering only
-   * the populated data (avoids paging in unused tail-block padding).
+   * access. No-op by default; overridden by subclasses for additional readahead behavior.
    */
-  protected void onCacheHit(int blockIdx, BlockCache.Val val, int seqAccessCount) {
-    val.maybeLoadHint(rootInfo.cache, decompressedLenFor(blockIdx));
-    if (seqAccessCount >= PROSPECTIVE_READAHEAD_THRESHOLD && blockIdx < rootInfo.lastBlockIdx) {
-      int nextIdx = blockIdx + 1;
-      long nextHandle = rootInfo.accessMapped.get(nextIdx);
-      if (nextHandle != BlockCache.NULL_HANDLE) {
-        rootInfo.cache.maybeLoadHint(nextHandle, decompressedLenFor(nextIdx));
-      }
-    }
-  }
+  protected void onCacheHit(int blockIdx, BlockCache.Val val, int seqAccessCount) {}
 
   /**
    * Returns a directly-owned (pre-mapped, cache-bypassing) {@link ByteBuffer} for the given block

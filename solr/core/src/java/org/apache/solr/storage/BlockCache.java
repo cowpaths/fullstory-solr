@@ -121,9 +121,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final boolean ENABLE_CACHE_PERSISTENCE =
       EnvUtils.getPropertyAsBool("solr.blockCache.persistence", true);
 
-  private static final boolean NO_LOAD_HINT =
-      EnvUtils.getPropertyAsBool("solr.blockCache.noLoadHint", false);
-
   // ---------------------------------------------------------------------------
   // Handle encoding: (generation << 32) | (partitionIndex << PART_SHIFT) | localSlot
   //
@@ -1047,13 +1044,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     private final int cacheBlockOrd;
 
-    // TODO: we deploy with solr.blockCache.noLoadHint=true, which makes maybeLoadHint() a no-op
-    //  before this field is ever touched (see NO_LOAD_HINT check below) -- this field,
-    //  LAST_LOAD_HINT_NANOS, LOAD_HINT_THROTTLE_NANOS, and maybeLoadHint() itself (plus its two
-    //  call sites in CachedCompressedIndexInput.onCacheHit()) are all dead weight under that
-    //  config. Rip out entirely once we're confident load hinting isn't coming back.
-    private volatile long lastLoadHintNanos;
-
     Val(int cacheBlockOrd) {
       this.cacheBlockOrd = cacheBlockOrd;
     }
@@ -1066,7 +1056,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       // are cleared by BlockCache.acquireNode() instead -- this method has no reference back to
       // the owning BlockCache.
       waiting = false;
-      lastLoadHintNanos = 0;
       super.reset();
     }
 
@@ -1107,7 +1096,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         l.unlock(stamp);
       }
       CACHED.setVolatile(c.cached, cacheBlockOrd, ret);
-      lastLoadHintNanos = System.nanoTime();
       assert !isPopulated(c);
       POPULATED.setVolatile(c.populated, cacheBlockOrd, true);
       if (waiting) {
@@ -1176,29 +1164,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         synchronized (this) {
           notifyAll();
         }
-      }
-    }
-
-    private static final VarHandle LAST_LOAD_HINT_NANOS;
-
-    static {
-      try {
-        MethodHandles.Lookup lookup = MethodHandles.lookup();
-        LAST_LOAD_HINT_NANOS = lookup.findVarHandle(Val.class, "lastLoadHintNanos", long.class);
-      } catch (ReflectiveOperationException e) {
-        throw new Error(e);
-      }
-    }
-
-    private static final long LOAD_HINT_THROTTLE_NANOS = TimeUnit.SECONDS.toNanos(5);
-
-    void maybeLoadHint(BlockCache c, int length) {
-      if (NO_LOAD_HINT) return;
-      long now = System.nanoTime();
-      long last = lastLoadHintNanos;
-      if (now - last < LOAD_HINT_THROTTLE_NANOS) return;
-      if (LAST_LOAD_HINT_NANOS.compareAndSet(this, last, now)) {
-        c.mapping.loadHint(cacheBlockOrd, length);
       }
     }
   }
@@ -1603,21 +1568,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   boolean pinnable(long handle) {
     return partitions[partOf(handle)].pinnable(handle) != null;
-  }
-
-  /**
-   * Non-mutating optimistic check: returns {@code true} if the handle appears live and pinnable. If
-   * {@code loadHintLen > 0} and the block is pinnable, issues a throttled length-aware {@code
-   * MADV_WILLNEED} hint.
-   */
-  boolean maybeLoadHint(long handle, int loadHintLen) {
-    Val v = (Val) partitions[partOf(handle)].pinnable(handle);
-    if (v == null) {
-      return false;
-    } else {
-      v.maybeLoadHint(this, loadHintLen);
-      return true;
-    }
   }
 
   /** Releases a pin on the slot identified by {@code handle}. */
