@@ -233,11 +233,16 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           roughSegOrder,
           Comparator.comparingLong(s -> Long.parseLong(s.substring(1), Character.MAX_RADIX)));
 
-      // Priority files: hint all blocks (small, fully read).
+      // Priority files: hint blocks not already present (see hintCompressedRangeIfAbsent) so the
+      // kernel can start paging in their compressed data while this constructor moves on to
+      // hint/load other files, before Phase 1 below performs the actual (possibly blocking) load.
+      // A present block means hinting it would issue MADV_WILLNEED (and the disk I/O that
+      // follows) against compressed data BlockCache doesn't need -- its decompressed content is
+      // already resident, from either this process or a prior persisted run.
       for (AD2IndexInput in : priorityInputs) {
         int blockCount = in.blockOffsets().length - 1;
         if (blockCount > 0) {
-          in.hintCompressedRange(0, blockCount - 1);
+          in.hintCompressedRangeIfAbsent(0, blockCount - 1);
         }
       }
       // CFS/CFE boundary blocks, then other files' boundary blocks — in rough segment order.
@@ -249,14 +254,14 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           String name = e.getKey();
           if (name.endsWith(".cfe")) {
             int blockCount = in.blockOffsets().length - 1;
-            if (blockCount > 0) in.hintCompressedRange(0, blockCount - 1);
+            if (blockCount > 0) in.hintCompressedRangeIfAbsent(0, blockCount - 1);
           } else if (name.endsWith(".cfs")) {
             int lastIdx = in.blockOffsets().length - 2;
             if (lastIdx <= 1) {
-              in.hintCompressedRange(0, lastIdx);
+              in.hintCompressedRangeIfAbsent(0, lastIdx);
             } else {
-              in.hintCompressedRange(0, 0);
-              in.hintCompressedRange(lastIdx, lastIdx);
+              in.hintCompressedRangeIfAbsent(0, 0);
+              in.hintCompressedRangeIfAbsent(lastIdx, lastIdx);
             }
           }
         }
@@ -269,10 +274,10 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
           if (!name.endsWith(".cfs") && !name.endsWith(".cfe")) {
             int lastIdx = in.blockOffsets().length - 2;
             if (lastIdx <= 1) {
-              in.hintCompressedRange(0, lastIdx);
+              in.hintCompressedRangeIfAbsent(0, lastIdx);
             } else {
-              in.hintCompressedRange(0, 0);
-              in.hintCompressedRange(lastIdx, lastIdx);
+              in.hintCompressedRangeIfAbsent(0, 0);
+              in.hintCompressedRangeIfAbsent(lastIdx, lastIdx);
             }
           }
         }
@@ -311,12 +316,12 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
                   if (val == rangeEnd + 1) {
                     rangeEnd = val;
                   } else {
-                    cfsInput.hintCompressedRange(rangeStart, rangeEnd);
+                    cfsInput.hintCompressedRangeIfAbsent(rangeStart, rangeEnd);
                     rangeStart = val;
                     rangeEnd = val;
                   }
                 }
-                cfsInput.hintCompressedRange(rangeStart, rangeEnd);
+                cfsInput.hintCompressedRangeIfAbsent(rangeStart, rangeEnd);
                 break;
               }
             }
@@ -972,6 +977,74 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       }
     }
 
+    /**
+     * Probe: {@code true} if block {@code idx}'s decompressed content is already resident in {@link
+     * BlockCache} (cached earlier this run, or a warm-start hit from a prior persisted run) -- the
+     * same {@code accessMapped}/{@link BlockCache#pinnable} check {@link #loadBlock} and {@link
+     * #expandCompressedReadahead} use before deciding whether to acquire/populate a slot, exposed
+     * standalone so callers can skip issuing a compressed-data hint for blocks that don't need one,
+     * without the side effect of acquiring/pinning a node.
+     *
+     * <p>Not read-only: on a warm-start hit not yet reflected in this instance's {@code
+     * accessMapped} (the common case the first time any given index is probed -- see below), this
+     * writes the discovered handle into {@code accessMapped} and calls {@link
+     * BlockCache#recordWarmStartHit}. {@link BlockCache#peekExtantHandle} itself also briefly
+     * pins/unpins the slot (to mark its {@code Val} populated -- see that method's doc comment for
+     * why that's required), so "read-only" only holds with respect to this input's own local
+     * bookkeeping being otherwise unaffected by a failed probe, not with respect to {@link
+     * BlockCache}'s internal pin state (which is restored before this method returns either way).
+     */
+    private boolean isPresent(int idx) {
+      AtomicLongArray accessMapped = accessMapped();
+      BlockCache cache = cache();
+      long extant = accessMapped.get(idx);
+      if (extant != BlockCache.NULL_HANDLE) {
+        return cache.pinnable(extant);
+      }
+      // accessMapped is a fresh, all-NULL_HANDLE array at this point in construction -- nothing
+      // has called acquireNode(..., blobUUID, idx) for this file yet, so a NULL_HANDLE entry here
+      // says nothing about whether the block was already persisted in a prior run. Peek the extant
+      // map directly to find out, without the other side effects of the full
+      // acquireNode(long[], UUID, int) path (e.g. this doesn't touch accessMapped itself).
+      long handle = cache.peekExtantHandle(blobUUID(), idx);
+      if (handle == BlockCache.NULL_HANDLE) {
+        return false;
+      }
+      // Found and still valid (peekExtantHandle already re-validated via pinnable()). Record the
+      // hit and publish the handle into accessMapped now, at the moment of discovery, so loadBlock
+      // later finds it via its own fast accessMapped/pinnable() check and never needs to consult
+      // the extant map itself (see loadBlock's own doc comment for why this matters).
+      if (accessMapped.compareAndSet(idx, BlockCache.NULL_HANDLE, handle)) {
+        cache.recordWarmStartHit();
+      }
+      // Either we just published it, or another thread concurrently resolved (and recorded) the
+      // same entry first -- present either way.
+      return true;
+    }
+
+    /**
+     * Like {@link #hintCompressedRange(int, int)}, but first splits {@code [fromIdx, toIdx]} into
+     * contiguous not-yet-{@link #isPresent}-blocks sub-runs and hints only those -- skipping
+     * compressed-data hints (and the disk I/O they trigger) for blocks already resident, whether
+     * from earlier this run or a warm-start hit from a prior persisted run.
+     */
+    private void hintCompressedRangeIfAbsent(int fromIdx, int toIdx) {
+      int hintFrom = -1;
+      for (int idx = fromIdx; idx <= toIdx; idx++) {
+        if (isPresent(idx)) {
+          if (hintFrom >= 0) {
+            hintCompressedRange(hintFrom, idx - 1);
+            hintFrom = -1;
+          }
+        } else if (hintFrom < 0) {
+          hintFrom = idx;
+        }
+      }
+      if (hintFrom >= 0) {
+        hintCompressedRange(hintFrom, toIdx);
+      }
+    }
+
     /** Issues MADV_WILLNEED on compressed data for blocks [fromIdx, toIdx] inclusive. */
     private void hintCompressedRange(int fromIdx, int toIdx) {
       long[] blockOffsets = blockOffsets();
@@ -998,44 +1071,75 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
     }
 
     /**
-     * Loads block {@code idx} of {@code in} into the cache if not already present. Returns {@code
-     * false} if the cache is full (caller should stop issuing further loads); {@code true}
-     * otherwise.
+     * Outcome of {@link #loadBlock(AD2IndexInput, int)}: whether the block was already present
+     * (either previously cached this run, or a warm-start hit from a prior persisted run), had to
+     * be fetched/decompressed, or the cache was full. Lets callers that issue {@code MADV_WILLNEED}
+     * hints on the compressed source skip the hint entirely for blocks that turn out to already be
+     * resident -- hinting (and the disk I/O that follows) is only useful ahead of a genuine {@link
+     * #MISS}.
      */
-    private static boolean loadBlock(AD2IndexInput in, int idx) throws IOException {
+    private enum LoadResult {
+      ALREADY_PRESENT,
+      MISS,
+      POOL_EXHAUSTED
+    }
+
+    /**
+     * Loads block {@code idx} of {@code in} into the cache if not already present. Returns {@link
+     * LoadResult#POOL_EXHAUSTED} if the cache is full (caller should stop issuing further loads);
+     * otherwise {@link LoadResult#ALREADY_PRESENT} or {@link LoadResult#MISS} depending on whether
+     * the block was already cached/warm-start-hit or had to be fetched and decompressed.
+     *
+     * <p><b>Precondition:</b> callers in this class's constructor always invoke {@link
+     * #isPresent}/{@link #hintCompressedRangeIfAbsent} over the same index range before calling
+     * this method, which already resolves any warm-start extant-map entry into {@code accessMapped}
+     * (see {@link #isPresent}). Because of that, this method deliberately does <em>not</em> consult
+     * the extant map itself on a miss here -- it falls straight through to the plain eviction-based
+     * {@link BlockCache#acquireNode(long[])}, not the extant-map-aware {@link
+     * BlockCache#acquireNode(long[], UUID, int)} overload, to avoid a second, redundant extant-map
+     * lookup for an index the hint phase has already resolved one way or the other. A hypothetical
+     * future caller that invokes {@code loadBlock} without a preceding presence check would still
+     * be correct (just miss out on a still-valid warm-start entry and decompress from source
+     * instead) -- not a correctness bug, just a lost optimization.
+     */
+    private static LoadResult loadBlock(AD2IndexInput in, int idx) throws IOException {
       BlockCache cache = in.cache();
       UUID blobUUID = in.blobUUID();
       AtomicLongArray accessMapped = in.accessMapped();
       long extant = accessMapped.get(idx);
-      if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) return true;
+      if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) {
+        return LoadResult.ALREADY_PRESENT;
+      }
       long[] nodeHandle = new long[1];
-      BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle, blobUUID, idx);
-      if (toPopulateVal == null) return false;
+      BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle);
+      if (toPopulateVal == null) return LoadResult.POOL_EXHAUSTED;
       long toPopulate = nodeHandle[0];
+      LoadResult result;
       if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-        if (toPopulateVal.isPopulated()) {
-          cache.recordWarmStartHit();
-        } else {
-          long[] blockOffsets = in.blockOffsets();
-          long blockOffset = blockOffsets[idx];
-          int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
-          BlockPreloader.populateBuf(
-              blockOffset,
-              compressedLen,
-              idx,
-              in.decompressedLenFor(idx),
-              toPopulate,
-              toPopulateVal,
-              accessMapped,
-              cache,
-              in.blockSupplier,
-              blobUUID);
-        }
+        long[] blockOffsets = in.blockOffsets();
+        long blockOffset = blockOffsets[idx];
+        int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
+        BlockPreloader.populateBuf(
+            blockOffset,
+            compressedLen,
+            idx,
+            in.decompressedLenFor(idx),
+            toPopulate,
+            toPopulateVal,
+            accessMapped,
+            cache,
+            in.blockSupplier,
+            blobUUID);
+        result = LoadResult.MISS;
         cache.unpin(toPopulate, false);
       } else {
         cache.close(toPopulate, toPopulateVal);
+        // Another thread already raced us to populate this slot; from this caller's perspective
+        // the block is present either way (we don't know/care which of the two outcomes the
+        // winning thread hit).
+        result = LoadResult.ALREADY_PRESENT;
       }
-      return true;
+      return result;
     }
 
     private static byte[] supplyFromBuffers(

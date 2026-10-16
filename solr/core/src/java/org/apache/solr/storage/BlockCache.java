@@ -1695,6 +1695,35 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   /**
+   * Peeks the extant map for a pre-existing warm cache entry matching {@code (blobUUID, blockIdx)};
+   * does not touch any caller-side {@code accessMapped} state. Returns {@link #NULL_HANDLE} if the
+   * extant map has no entry, the backing file was not present at startup (ephemeral cache), or the
+   * entry's slot has since been evicted and recycled (generation advanced past 0).
+   *
+   * <p>Intended for callers that want to know whether a block is already resident purely to decide
+   * whether a {@code MADV_WILLNEED} hint against its *compressed* source would be wasted -- not to
+   * actually read the cached data themselves right now. Unlike a plain {@link #pinnable} check,
+   * this pins the slot just long enough to mark its {@code Val} populated (mirroring {@link
+   * #acquireNode(long[], UUID, int)}'s own {@code v.populated = true}), then immediately unpins:
+   * callers typically stash the returned handle for a real reader to consume later (e.g. into
+   * {@code accessMapped}), and that reader's {@link Val#join} blocks on {@code populated} being
+   * {@code true} -- never set for a slot that was only ever {@link #pinnable}-checked, never
+   * pinned. Skipping this step would leave {@code populated} false, so a later real read would
+   * {@code pin()} successfully (generation still matches) but then hang in {@code join()} until its
+   * 30s timeout, since nothing would ever be in flight to populate and notify it.
+   */
+  long peekExtantHandle(UUID blobUUID, int blockIdx) {
+    int handleLow = extantMapLookup(extantMap, blobUUID, blockIdx);
+    if (handleLow <= 0) return NULL_HANDLE;
+    long handle = Integer.toUnsignedLong(handleLow); // generation=0, matches acquireNode's encoding
+    Val v = pin(handle);
+    if (v == null) return NULL_HANDLE;
+    v.populated = true;
+    unpin(handle, false);
+    return handle;
+  }
+
+  /**
    * Binary-searches {@link #extantMap} for {@code (blobUUID, blockIdx)}.
    *
    * @return the handle's low 32 bits ({@code (partIdx << PART_SHIFT) | localSlot}) if found, or
