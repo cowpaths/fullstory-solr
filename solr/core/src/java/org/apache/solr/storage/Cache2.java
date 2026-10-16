@@ -17,24 +17,33 @@
 
 package org.apache.solr.storage;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Fixed-capacity concurrent LRU cache.
  *
- * <p>Two field clusters live in external, off-heap stores rather than as {@link Val} instance
+ * <p>Two field clusters live in off-heap {@link ByteBuffer}s rather than as {@link Val} instance
  * fields:
  *
  * <ul>
- *   <li>{@code refCount}/{@code generation} ("Group 1", in {@link RefCountGenerationStore}) --
- *       carries roughly 9x more write traffic than Group 2 (most pins are "re-pins" of an
- *       already-pinned slot -- a pure {@code refCount} CAS with no list manipulation). Stored one
- *       pair per 64-byte cache line, so no two slots' hottest fields ever share a line.
+ *   <li>{@code refCount}/{@code generation} ("Group 1", in {@link #group1}) -- carries roughly 9x
+ *       more write traffic than Group 2 (most pins are "re-pins" of an already-pinned slot -- a
+ *       pure {@code refCount} CAS with no list manipulation). Stored one pair per 64-byte cache
+ *       line, so no two slots' hottest fields ever share a line. Sized for real slots {@code
+ *       1..capacity} only: sentinel slots (COLD_HEAD/COLD_TAIL/HOT_HEAD/HOT_TAIL) never have {@code
+ *       refCount}/{@code generation} read by any live code path.
  *   <li>{@code next}/{@code prev}/{@code fromHot}/{@code lastUnpinNanos} ("Group 2", in {@link
- *       LruLinkageStore}) -- touched only on genuine first-pin/last-unpin list transitions. Stored
- *       2 slots per 64-byte line (lower-traffic tier than Group 1, so a looser packing is an
- *       acceptable tradeoff for roughly a third of the memory cost of 1-per-line).
+ *       #group2}) -- touched only on genuine first-pin/last-unpin list transitions. Stored 2 slots
+ *       per 64-byte line (lower-traffic tier than Group 1, so a looser packing is an acceptable
+ *       tradeoff for roughly a third of the memory cost of 1-per-line). Unlike Group 1, covers
+ *       every addressable slot, sentinels included: sentinel {@link Val}s are the literal
+ *       list-boundary pointers, with their {@code next}/{@code prev} read and written on
+ *       essentially every list operation.
  * </ul>
  *
  * <p>Colocating either group with the other, or with {@link Val}'s own residual fields (as earlier
@@ -44,12 +53,6 @@ import java.util.concurrent.TimeUnit;
  * traffic needlessly invalidating reads of {@code cacheBlockOrd}, which is read on essentially
  * every cache hit by an unrelated thread population (query-serving threads, as opposed to the
  * I/O-completion threads that drive list-splice writes).
- *
- * <p>Unlike {@link RefCountGenerationStore} (sized for real slots {@code 1..capacity} only, since
- * {@code refCount}/{@code generation} are never touched on sentinels), {@link LruLinkageStore} must
- * cover every addressable slot, sentinels included: sentinel {@link Val}s
- * (COLD_HEAD/COLD_TAIL/HOT_HEAD/HOT_TAIL) are the literal list-boundary pointers, with their {@code
- * next}/{@code prev} read and written on essentially every list operation.
  *
  * <p>The LRU semantics, pin/unpin reference-count protocol, and hot/cold dual-queue logic are
  * identical to {@link Cache} and {@link Cache.DualQueueCache}.
@@ -84,12 +87,102 @@ class Cache2<V extends Cache2.Val> {
   }
 
   // ---------------------------------------------------------------------------
+  // Off-heap storage: Group 1 (refCount/generation) and Group 2 (next/prev/fromHot/lastUnpinNanos)
+  // ---------------------------------------------------------------------------
+  //
+  // Both groups are backed by a single 64-byte-aligned direct ByteBuffer, accessed via
+  // byteBufferViewVarHandle -- plain java.nio/java.lang.invoke, available since Java 9, no
+  // preview APIs or platform-specific code required. allocateAlignedDirect() (below) handles the
+  // allocation/alignment/margin arithmetic shared by both groups.
+  //
+  // Each store's stride is a power of 2, so slot -> byte-offset is a plain left shift
+  // (slot << *_STRIDE_SHIFT) rather than a multiply -- safe from overflow without a per-access
+  // check, since each constructor's one-time Math.multiplyExact(slots, STRIDE) already proves the
+  // largest valid offset fits in an int.
+
+  private static final VarHandle INT_VH =
+      MethodHandles.byteBufferViewVarHandle(int[].class, ByteOrder.nativeOrder());
+  private static final VarHandle LONG_VH =
+      MethodHandles.byteBufferViewVarHandle(long[].class, ByteOrder.nativeOrder());
+
+  /**
+   * Group 1 (refCount/generation) storage -- see the class javadoc. One {@code (refCount,
+   * generation)} pair per 64-byte stride (at byte offsets 0 and {@link #GENERATION_OFFSET} within
+   * the stride; the remaining 56 bytes are unused padding), indexed by real slot {@code
+   * 1..capacity} (slot 0 reserved/unused but still addressable).
+   */
+  private final ByteBuffer group1;
+
+  private static final int GROUP1_STRIDE = 64; // one cache line per slot; must be a power of 2
+  private static final int GROUP1_STRIDE_SHIFT = Integer.numberOfTrailingZeros(GROUP1_STRIDE);
+  // refCount's offset within the stride is 0, so it needs no named offset constant -- just the
+  // raw slot base.
+  private static final int GENERATION_OFFSET = 4;
+
+  /**
+   * Group 2 (next/prev/fromHot/lastUnpinNanos) storage -- see the class javadoc. 2 slots per
+   * 32-byte stride (comfortably more than the 17 bytes of real data per slot: {@code next} 4B +
+   * {@code prev} 4B + {@code fromHot} 1B + {@code lastUnpinNanos} 8B), indexed by every addressable
+   * slot (real slots and all sentinels).
+   *
+   * <p>Method semantics intentionally mirror today's exact per-field access patterns rather than
+   * uniformly using volatile/CAS everywhere: {@code next} is mixed plain/volatile/CAS; {@code prev}
+   * is volatile-only (never CAS'd); {@code lastUnpinNanos} is plain (a racy heuristic used only for
+   * eviction-priority scoring, not correctness-critical); {@code fromHot} is a volatile boolean,
+   * never CAS'd.
+   *
+   * <p>TODO: slot numbering is sequential/adjacent-correlated with real-world access-burst
+   * adjacency ({@code BlockCache.distribute()} assigns consecutive array slots to consecutive/
+   * file-adjacent {@code cacheBlockOrd} values). With 2 slots sharing a line, the two slots paired
+   * together are presently whichever two land at adjacent even/odd stride offsets -- i.e.
+   * likely-adjacent-access slots. Randomizing/decorrelating which two slots pair up on a line
+   * (independent of numeric adjacency) is deferred, to be picked up together with the analogous
+   * "shuffle initial slot distribution" idea deferred from the Group 1 round.
+   */
+  private final ByteBuffer group2;
+
+  private static final int GROUP2_CACHE_LINE = 64;
+  private static final int GROUP2_STRIDE = 32; // 2 slots per 64-byte cache line; must be a power
+  // of 2
+  private static final int GROUP2_STRIDE_SHIFT = Integer.numberOfTrailingZeros(GROUP2_STRIDE);
+  // next's offset within the stride is 0, so it needs no named offset constant -- just the raw
+  // slot base.
+  private static final int PREV_OFFSET = 4;
+  private static final int FROM_HOT_OFFSET = 8;
+  private static final int LAST_UNPIN_NANOS_OFFSET = 16; // 8-byte-aligned within the 32B stride
+
+  /**
+   * Allocates a direct {@link ByteBuffer} of at least {@code slots * stride} bytes, aligned to a
+   * full {@code alignment}-byte boundary -- a hard guarantee, not merely {@code allocateDirect}'s
+   * own (~8-32 byte, platform-dependent) alignment.
+   *
+   * <p>{@code alignment} must equal or be a multiple of {@code stride} wherever the caller's own
+   * slot-adjacency assumptions (e.g. "every even slot index starts a fresh cache line") depend on
+   * the buffer's base being aligned to more than just {@code stride} itself -- requesting only
+   * {@code stride}-alignment when the real requirement is a wider {@code alignment} would silently
+   * shift such assumptions off by one slot on some fraction of allocations.
+   *
+   * <p>{@link ByteBuffer#alignedSlice(int)} rounds its limit down as well as rounding its start up
+   * to the nearest {@code alignment} boundary, so up to {@code (alignment - 1)} bytes can be lost
+   * from each end independently; requesting only a {@code (alignment - 1)} margin is sufficient
+   * only when {@code slots * stride} happens to already be an exact multiple of {@code alignment}
+   * -- in general (e.g. {@code stride < alignment}) it is not, and can silently yield a slice
+   * narrower than requested. A margin of {@code 2 * (alignment - 1)} is sufficient regardless.
+   */
+  // Package-private (not private) so it can be unit-tested directly against ByteBuffer's own
+  // public alignmentOffset()/capacity() APIs, without needing dedicated test-only accessors.
+  static ByteBuffer allocateAlignedDirect(int slots, int stride, int alignment) {
+    int needed = Math.multiplyExact(slots, stride);
+    return ByteBuffer.allocateDirect(needed + 2 * (alignment - 1)).alignedSlice(alignment);
+  }
+
+  // ---------------------------------------------------------------------------
   // Sentinels
   // ---------------------------------------------------------------------------
 
-  // Sentinel link values stored in LruLinkageStore's next field to signal list-operation state.
-  // Analogous to the RESERVED / REMOVED Node sentinels in Cache, but encoded as ints rather than
-  // as object references.
+  // Sentinel link values stored in group2's next field to signal list-operation state. Analogous
+  // to the RESERVED / REMOVED Node sentinels in Cache, but encoded as ints rather than as object
+  // references.
   private static final int RESERVED_LINK = Integer.MIN_VALUE;
   private static final int REMOVED_LINK = Integer.MIN_VALUE + 1;
 
@@ -133,28 +226,10 @@ class Cache2<V extends Cache2.Val> {
    * Payload for all slot indices 0..arrayLen-1. Slot 0 is reserved (null). Real slots are
    * 1..capacity. Sentinel slots (COLD_HEAD, COLD_TAIL, and optionally HOT_HEAD, HOT_TAIL) occupy
    * the remaining indices, holding placeholder {@link Val} objects (their {@code next}/{@code prev}
-   * live in {@link #lruLinkage}, indexed the same way as any other slot). Elements are set at
+   * live in {@link #group2}, indexed the same way as any other slot). Elements are set at
    * construction and never swapped.
    */
   final Val[] payload;
-
-  /**
-   * Group 1 (refCount/generation) storage -- see the class javadoc for why this isn't a {@link Val}
-   * field. Sized for real slots {@code 1..capacity} only: sentinel slots (COLD_HEAD/COLD_TAIL
-   * /HOT_HEAD/HOT_TAIL) never have {@code refCount}/{@code generation} read by any live code path
-   * (confirmed: {@code acquireTail}'s loop/guard conditions structurally exclude sentinels from
-   * ever reaching a {@code refCount} CAS; {@code generation} is never touched on a sentinel at
-   * all), so no sentinel coverage is needed here, unlike {@link #lruLinkage}.
-   */
-  final RefCountGenerationStore refCountGeneration;
-
-  /**
-   * Group 2 (next/prev/fromHot/lastUnpinNanos) storage -- see the class javadoc. Sized to cover
-   * every addressable slot, sentinels included (unlike {@link #refCountGeneration}): sentinel
-   * {@link Val}s are the literal list-boundary pointers, with {@code next}/{@code prev} read and
-   * written on essentially every list operation.
-   */
-  final LruLinkageStore lruLinkage;
 
   // ---------------------------------------------------------------------------
   // Constructor
@@ -174,16 +249,19 @@ class Cache2<V extends Cache2.Val> {
   Cache2(int capacity, int extraSentinelSlots, Iterable<? extends V> initialValues) {
     this.capacity = capacity;
     // Real slots start at refCount=0/generation=0 (the zero-initialized default), matching the
-    // implicit-zero `new Val(i--, 0)` call this construction replaces.
-    this.refCountGeneration = new RefCountGenerationStore(capacity);
-    // Sentinels are spaced 2 apart (not 1) in lruLinkage's index space, each leaving its odd-offset
-    // "pair partner" slot permanently unused -- at lruLinkage's 2-slots-per-64-byte-line stride,
-    // this guarantees every sentinel gets its own exclusive cache line, never sharing one with
-    // another sentinel or with the adjacent real slot (the hottest objects in the whole structure
-    // would otherwise be exactly the ones left exposed to the same false sharing this effort
-    // targets). Rounding the base up to the next even index (rather than using capacity+1 directly)
-    // is what prevents the last real slot from landing in the same pair as the first sentinel: for
-    // any capacity, floor((capacity+1 rounded up to even)/2) != floor(capacity/2).
+    // implicit-zero `new Val(i--, 0)` call this construction replaces. Sized for real slots
+    // 1..capacity only (slot 0 reserved/unused but still addressable) -- sentinel slots never have
+    // refCount/generation read by any live code path, so no sentinel coverage is needed here,
+    // unlike group2 below.
+    this.group1 = allocateAlignedDirect(capacity + 1, GROUP1_STRIDE, GROUP1_STRIDE);
+    // Sentinels are spaced 2 apart (not 1) in group2's index space, each leaving its odd-offset
+    // "pair partner" slot permanently unused -- at group2's 2-slots-per-64-byte-line stride, this
+    // guarantees every sentinel gets its own exclusive cache line, never sharing one with another
+    // sentinel or with the adjacent real slot (the hottest objects in the whole structure would
+    // otherwise be exactly the ones left exposed to the same false sharing this effort targets).
+    // Rounding the base up to the next even index (rather than using capacity+1 directly) is what
+    // prevents the last real slot from landing in the same pair as the first sentinel: for any
+    // capacity, floor((capacity+1 rounded up to even)/2) != floor(capacity/2).
     int sentinelBase = capacity + 1;
     if ((sentinelBase & 1) != 0) {
       sentinelBase++;
@@ -192,12 +270,19 @@ class Cache2<V extends Cache2.Val> {
     this.COLD_TAIL = sentinelBase + 2;
     int arrayLen = COLD_TAIL + 1 + 2 * extraSentinelSlots;
     this.payload = new Val[arrayLen];
-    this.lruLinkage = new LruLinkageStore(arrayLen);
+    // Must align to GROUP2_CACHE_LINE (64), not GROUP2_STRIDE (32): the cache-line-isolation
+    // guarantee group2 exists for (and that the sentinel spacing above depends on) requires every
+    // even slot index to start a fresh 64-byte line, which only holds if group2's own base is
+    // 64-byte aligned -- 32-byte alignment alone is not sufficient (allocateDirect's underlying
+    // native allocation is not guaranteed better than 32-byte aligned, and a
+    // 32-byte-but-not-64-byte-aligned base would silently shift every "even slot starts a line"
+    // assumption off by one slot).
+    this.group2 = allocateAlignedDirect(arrayLen, GROUP2_STRIDE, GROUP2_CACHE_LINE);
     assert COLD_TAIL < arrayLen;
 
-    // Placeholder sentinel Val objects for the cold queue sentinels -- next/prev live in
-    // lruLinkage, indexed by COLD_HEAD/COLD_TAIL directly; these objects are never read.
-    // DualQueueCache initializes HOT_HEAD / HOT_TAIL sentinel Vals in its own constructor.
+    // Placeholder sentinel Val objects for the cold queue sentinels -- next/prev live in group2,
+    // indexed by COLD_HEAD/COLD_TAIL directly; these objects are never read. DualQueueCache
+    // initializes HOT_HEAD / HOT_TAIL sentinel Vals in its own constructor.
     this.payload[COLD_HEAD] = new Val();
     this.payload[COLD_TAIL] = new Val();
 
@@ -216,21 +301,21 @@ class Cache2<V extends Cache2.Val> {
     // acquisition order (acquireTail() always takes from the COLD_TAIL end), so sequential linking
     // would mean a burst of initial/warm-up acquisitions drains physically-adjacent slots in
     // immediate succession -- the same kind of temporal/physical adjacency correlation that
-    // motivated RefCountGenerationStore's and LruLinkageStore's cache-line-aware layouts in the
-    // first place, except here it's an artifact of link order rather than slot-number assignment.
-    // Does NOT affect payload[]/cacheBlockOrd/buildExtantMap, all governed solely by pass 1 above.
+    // motivated group1's/group2's cache-line-aware layouts in the first place, except here it's an
+    // artifact of link order rather than slot-number assignment. Does NOT affect
+    // payload[]/cacheBlockOrd/buildExtantMap, all governed solely by pass 1 above.
     int stride = choosePermutationStride(capacity);
     int prevIdx = COLD_HEAD;
     // random starting slot, from 1 (index 0 is unused)
     int cur = ThreadLocalRandom.current().nextInt(capacity) + 1;
     for (int i = 0; i < capacity; i++) {
-      lruLinkage.setNextPlain(prevIdx, cur);
-      lruLinkage.setPrevPlain(cur, prevIdx);
+      setNextPlain(prevIdx, cur);
+      setPrevPlain(cur, prevIdx);
       prevIdx = cur;
       cur = (cur - 1 + stride) % capacity + 1; // 1-indexed modular stride advance
     }
-    lruLinkage.setNextPlain(prevIdx, COLD_TAIL);
-    lruLinkage.setPrevPlain(COLD_TAIL, prevIdx);
+    setNextPlain(prevIdx, COLD_TAIL);
+    setPrevPlain(COLD_TAIL, prevIdx);
     // COLD_HEAD.prev is never read (head sentinel has no meaningful predecessor).
   }
 
@@ -368,6 +453,112 @@ class Cache2<V extends Cache2.Val> {
   }
 
   // ---------------------------------------------------------------------------
+  // Group 1 (refCount/generation) accessors
+  // ---------------------------------------------------------------------------
+
+  // Package-private (not private): DualQueueCache, a nested subclass, calls these directly as
+  // plain inherited instance methods. Cache2 itself is package-private, so this exposes nothing
+  // beyond org.apache.solr.storage.
+
+  /** Volatile read of {@code refCount} at {@code slot}. */
+  int getRefCountVolatile(int slot) {
+    return (int) INT_VH.getVolatile(group1, slot << GROUP1_STRIDE_SHIFT);
+  }
+
+  /**
+   * Atomically sets {@code refCount} at {@code slot} to {@code update} if it currently equals
+   * {@code expect}, returning the witness value (the value observed immediately before this call,
+   * which equals {@code expect} iff the exchange succeeded) -- same semantics as {@code
+   * VarHandle.compareAndExchange}.
+   */
+  int compareAndExchangeRefCount(int slot, int expect, int update) {
+    return (int) INT_VH.compareAndExchange(group1, slot << GROUP1_STRIDE_SHIFT, expect, update);
+  }
+
+  /**
+   * Atomically sets {@code refCount} at {@code slot} to {@code update} if it currently equals
+   * {@code expect}, returning {@code true} iff the exchange succeeded -- same semantics as {@code
+   * VarHandle.compareAndSet}.
+   */
+  boolean compareAndSetRefCount(int slot, int expect, int update) {
+    return (boolean) INT_VH.compareAndSet(group1, slot << GROUP1_STRIDE_SHIFT, expect, update);
+  }
+
+  /** Volatile read of {@code generation} at {@code slot}. */
+  int getGenerationVolatile(int slot) {
+    return (int) INT_VH.getVolatile(group1, (slot << GROUP1_STRIDE_SHIFT) + GENERATION_OFFSET);
+  }
+
+  /**
+   * Atomically increments {@code generation} at {@code slot} by one and returns the <em>new</em>
+   * (post-increment) value. Callers must hold exclusive ownership of {@code slot} when calling this
+   * (e.g. via a prior successful {@code refCount} CAS to an exclusive sentinel value) -- concurrent
+   * calls for the same slot are not supported and may lose updates.
+   */
+  int incrementAndGetGeneration(int slot) {
+    int offset = (slot << GROUP1_STRIDE_SHIFT) + GENERATION_OFFSET;
+    int newGen = (int) INT_VH.getVolatile(group1, offset) + 1;
+    INT_VH.setVolatile(group1, offset, newGen);
+    return newGen;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Group 2 (next/prev/fromHot/lastUnpinNanos) accessors
+  // ---------------------------------------------------------------------------
+
+  int getNextVolatile(int slot) {
+    return (int) INT_VH.getVolatile(group2, slot << GROUP2_STRIDE_SHIFT);
+  }
+
+  /**
+   * Pre-publication-safe plain write -- used only before the slot is reachable by other threads.
+   */
+  void setNextPlain(int slot, int value) {
+    INT_VH.set(group2, slot << GROUP2_STRIDE_SHIFT, value);
+  }
+
+  int compareAndExchangeNext(int slot, int expect, int update) {
+    return (int) INT_VH.compareAndExchange(group2, slot << GROUP2_STRIDE_SHIFT, expect, update);
+  }
+
+  boolean compareAndSetNext(int slot, int expect, int update) {
+    return (boolean) INT_VH.compareAndSet(group2, slot << GROUP2_STRIDE_SHIFT, expect, update);
+  }
+
+  int getPrevVolatile(int slot) {
+    return (int) INT_VH.getVolatile(group2, (slot << GROUP2_STRIDE_SHIFT) + PREV_OFFSET);
+  }
+
+  /**
+   * Pre-publication-safe plain write -- used only before the slot is reachable by other threads.
+   */
+  void setPrevPlain(int slot, int value) {
+    INT_VH.set(group2, (slot << GROUP2_STRIDE_SHIFT) + PREV_OFFSET, value);
+  }
+
+  void setPrevVolatile(int slot, int value) {
+    INT_VH.setVolatile(group2, (slot << GROUP2_STRIDE_SHIFT) + PREV_OFFSET, value);
+  }
+
+  /** Plain (non-atomic) read, matching today's ordinary field-access semantics. */
+  long getLastUnpinNanos(int slot) {
+    return (long) LONG_VH.get(group2, (slot << GROUP2_STRIDE_SHIFT) + LAST_UNPIN_NANOS_OFFSET);
+  }
+
+  /** Plain (non-atomic) write, matching today's ordinary field-access semantics. */
+  void setLastUnpinNanos(int slot, long value) {
+    LONG_VH.set(group2, (slot << GROUP2_STRIDE_SHIFT) + LAST_UNPIN_NANOS_OFFSET, value);
+  }
+
+  boolean getFromHotVolatile(int slot) {
+    return (int) INT_VH.getVolatile(group2, (slot << GROUP2_STRIDE_SHIFT) + FROM_HOT_OFFSET) != 0;
+  }
+
+  void setFromHotVolatile(int slot, boolean value) {
+    INT_VH.setVolatile(group2, (slot << GROUP2_STRIDE_SHIFT) + FROM_HOT_OFFSET, value ? 1 : 0);
+  }
+
+  // ---------------------------------------------------------------------------
   // Payload access / reset hook
   // ---------------------------------------------------------------------------
 
@@ -378,7 +569,7 @@ class Cache2<V extends Cache2.Val> {
 
   /** True if the slot identified by {@code handle} was most recently routed to the hot queue. */
   final boolean fromHot(long handle) {
-    return lruLinkage.getFromHotVolatile((int) handle & SLOT_MASK);
+    return getFromHotVolatile((int) handle & SLOT_MASK);
   }
 
   // ---------------------------------------------------------------------------
@@ -392,18 +583,18 @@ class Cache2<V extends Cache2.Val> {
    * out.
    */
   private int reserve(int slot, int reservation) {
-    int cur = lruLinkage.getNextVolatile(slot);
+    int cur = getNextVolatile(slot);
     for (; ; ) {
       while (cur == RESERVED_LINK) {
         if (reservation == REMOVED_LINK) {
           Thread.yield();
         }
-        cur = lruLinkage.getNextVolatile(slot);
+        cur = getNextVolatile(slot);
       }
       if (cur == REMOVED_LINK) {
         return cur;
       }
-      int witness = lruLinkage.compareAndExchangeNext(slot, cur, reservation);
+      int witness = compareAndExchangeNext(slot, cur, reservation);
       if (witness == cur) {
         return cur;
       }
@@ -412,12 +603,12 @@ class Cache2<V extends Cache2.Val> {
   }
 
   protected boolean insertAtHead(int listHead, int slot, boolean recordAccess) {
-    lruLinkage.setPrevVolatile(slot, listHead);
+    setPrevVolatile(slot, listHead);
     int oldNext = reserve(listHead, RESERVED_LINK);
     assert oldNext != REMOVED_LINK : "queue head sentinel should never be removed";
-    lruLinkage.setNextPlain(slot, oldNext);
-    lruLinkage.setPrevVolatile(oldNext, slot);
-    if (!lruLinkage.compareAndSetNext(listHead, RESERVED_LINK, slot)) {
+    setNextPlain(slot, oldNext);
+    setPrevVolatile(oldNext, slot);
+    if (!compareAndSetNext(listHead, RESERVED_LINK, slot)) {
       throw new IllegalStateException("unexpected concurrent modification of listHead.next");
     }
     return false;
@@ -430,36 +621,36 @@ class Cache2<V extends Cache2.Val> {
     }
     int prevSlot;
     for (; ; ) {
-      prevSlot = lruLinkage.getPrevVolatile(slot);
-      if (lruLinkage.compareAndSetNext(prevSlot, slot, RESERVED_LINK)) {
+      prevSlot = getPrevVolatile(slot);
+      if (compareAndSetNext(prevSlot, slot, RESERVED_LINK)) {
         break;
       }
       Thread.yield();
     }
-    lruLinkage.setPrevVolatile(oldNext, prevSlot);
-    if (!lruLinkage.compareAndSetNext(prevSlot, RESERVED_LINK, oldNext)) {
+    setPrevVolatile(oldNext, prevSlot);
+    if (!compareAndSetNext(prevSlot, RESERVED_LINK, oldNext)) {
       throw new IllegalStateException("unexpected concurrent modification during list removal");
     }
   }
 
   private void insertAtTail(int slot) {
     for (; ; ) {
-      int predSlot = lruLinkage.getPrevVolatile(COLD_TAIL);
+      int predSlot = getPrevVolatile(COLD_TAIL);
       int oldNext = reserve(predSlot, RESERVED_LINK);
       if (oldNext != COLD_TAIL) {
         if (oldNext == REMOVED_LINK) {
           continue; // pred was concurrently removed; retry
         }
         // release reservation; pred is no longer tail's predecessor
-        if (!lruLinkage.compareAndSetNext(predSlot, RESERVED_LINK, oldNext)) {
+        if (!compareAndSetNext(predSlot, RESERVED_LINK, oldNext)) {
           throw new IllegalStateException();
         }
         continue;
       }
-      lruLinkage.setNextPlain(slot, COLD_TAIL);
-      lruLinkage.setPrevVolatile(slot, predSlot);
-      lruLinkage.setPrevVolatile(COLD_TAIL, slot);
-      if (!lruLinkage.compareAndSetNext(predSlot, RESERVED_LINK, slot)) {
+      setNextPlain(slot, COLD_TAIL);
+      setPrevVolatile(slot, predSlot);
+      setPrevVolatile(COLD_TAIL, slot);
+      if (!compareAndSetNext(predSlot, RESERVED_LINK, slot)) {
         throw new IllegalStateException("unexpected concurrent modification during tail insertion");
       }
       return;
@@ -487,18 +678,18 @@ class Cache2<V extends Cache2.Val> {
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
     int expectedGen = (int) (handle >>> 32);
-    if (refCountGeneration.getGenerationVolatile(slot) != expectedGen) return -1;
-    int rc = refCountGeneration.getRefCountVolatile(slot);
+    if (getGenerationVolatile(slot) != expectedGen) return -1;
+    int rc = getRefCountVolatile(slot);
     for (; ; ) {
       switch (rc) {
         case -1:
           return -1;
         case UNPIN_SENTINEL:
-          rc = refCountGeneration.getRefCountVolatile(slot);
+          rc = getRefCountVolatile(slot);
           continue;
       }
       assert rc >= 0;
-      int witness = refCountGeneration.compareAndExchangeRefCount(slot, rc, rc + 1);
+      int witness = compareAndExchangeRefCount(slot, rc, rc + 1);
       if (witness == rc) {
         break;
       } else {
@@ -515,7 +706,7 @@ class Cache2<V extends Cache2.Val> {
     // generation. If mismatched, the slot was recycled; unpin() correctly reverses the full pin
     // (including re-insertion into the LRU list for the rc==0 case via UNPIN_SENTINEL →
     // insertAtHead).
-    if (refCountGeneration.getGenerationVolatile(slot) != expectedGen) {
+    if (getGenerationVolatile(slot) != expectedGen) {
       unpin(handle, false);
       return -1;
     }
@@ -531,12 +722,12 @@ class Cache2<V extends Cache2.Val> {
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
     int expectedGen = (int) (handle >>> 32);
-    switch (refCountGeneration.getRefCountVolatile(slot)) {
+    switch (getRefCountVolatile(slot)) {
       case UNPIN_SENTINEL:
       case -1:
         return null;
       default:
-        return refCountGeneration.getGenerationVolatile(slot) == expectedGen ? payload[slot] : null;
+        return getGenerationVolatile(slot) == expectedGen ? payload[slot] : null;
     }
   }
 
@@ -551,13 +742,13 @@ class Cache2<V extends Cache2.Val> {
   int unpin(long handle, boolean recordAccess) {
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
-    int rc = refCountGeneration.getRefCountVolatile(slot);
+    int rc = getRefCountVolatile(slot);
     for (; ; ) {
       if (rc == 1) {
-        int witness = refCountGeneration.compareAndExchangeRefCount(slot, 1, UNPIN_SENTINEL);
+        int witness = compareAndExchangeRefCount(slot, 1, UNPIN_SENTINEL);
         if (witness == 1) {
           boolean toHot = insertAtHead(COLD_HEAD, slot, recordAccess);
-          if (!refCountGeneration.compareAndSetRefCount(slot, UNPIN_SENTINEL, 0)) {
+          if (!compareAndSetRefCount(slot, UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
           return toHot ? 1 : 0;
@@ -566,7 +757,7 @@ class Cache2<V extends Cache2.Val> {
         }
       } else {
         assert rc > 1 : "unexpected refCount: " + rc;
-        int witness = refCountGeneration.compareAndExchangeRefCount(slot, rc, rc - 1);
+        int witness = compareAndExchangeRefCount(slot, rc, rc - 1);
         if (witness == rc) {
           return -1;
         } else {
@@ -588,8 +779,8 @@ class Cache2<V extends Cache2.Val> {
    * <p>Returns {@link #NULL_SLOT} if the list is empty (all slots are pinned).
    */
   protected int acquireTail() {
-    for (int candidate; (candidate = lruLinkage.getPrevVolatile(COLD_TAIL)) != COLD_HEAD; ) {
-      if (refCountGeneration.compareAndSetRefCount(candidate, 0, -1)) {
+    for (int candidate; (candidate = getPrevVolatile(COLD_TAIL)) != COLD_HEAD; ) {
+      if (compareAndSetRefCount(candidate, 0, -1)) {
         return candidate;
       }
     }
@@ -598,7 +789,7 @@ class Cache2<V extends Cache2.Val> {
 
   /**
    * Hook for subclasses to reset per-slot state they maintain outside {@link Val} (e.g. in {@link
-   * #lruLinkage}, whose contents base {@code Cache2} has no need to know). Called from {@link
+   * #group2}, whose contents base {@code Cache2} has no need to know). Called from {@link
    * #acquireNode(long[])} and {@link #close(long)} on every slot recycle, alongside {@link
    * Val#reset()}. No-op by default.
    */
@@ -620,11 +811,11 @@ class Cache2<V extends Cache2.Val> {
     removeFromList(slot);
     // NOTE: generation increment here is safe because we hold an effective lock
     // on this slot here and this is the only place generation is modified.
-    int newGen = refCountGeneration.incrementAndGetGeneration(slot);
+    int newGen = incrementAndGetGeneration(slot);
     reset(slot);
     Val p = payload[slot];
     p.reset();
-    if (!refCountGeneration.compareAndSetRefCount(slot, -1, 1)) {
+    if (!compareAndSetRefCount(slot, -1, 1)) {
       throw new IllegalStateException();
     }
     outHandle[0] = (long) newGen << 32 | slot;
@@ -641,7 +832,7 @@ class Cache2<V extends Cache2.Val> {
   int close(long handle) {
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
-    int ret = refCountGeneration.compareAndExchangeRefCount(slot, 0, -1);
+    int ret = compareAndExchangeRefCount(slot, 0, -1);
     if (ret == 0) {
       // successfully closed
       removeFromList(slot);
@@ -655,10 +846,10 @@ class Cache2<V extends Cache2.Val> {
       // DualQueueCache.insertAtHead(), so reset(slot) must be called explicitly here too.
       reset(slot);
       payload[slot].reset();
-      refCountGeneration.incrementAndGetGeneration(slot);
+      incrementAndGetGeneration(slot);
       insertAtTail(slot);
       // refCount -> 0 makes reclaimable
-      if (!refCountGeneration.compareAndSetRefCount(slot, -1, 0)) {
+      if (!compareAndSetRefCount(slot, -1, 0)) {
         throw new IllegalStateException();
       }
     }
@@ -677,14 +868,14 @@ class Cache2<V extends Cache2.Val> {
   void closeUnconditional(long handle) {
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
-    int rc = refCountGeneration.getRefCountVolatile(slot);
+    int rc = getRefCountVolatile(slot);
     for (; ; ) {
       if (rc == 1) {
         // Sole holder: use -1 as intermediate to block acquireTail during tail insertion.
-        int witness = refCountGeneration.compareAndExchangeRefCount(slot, 1, -1);
+        int witness = compareAndExchangeRefCount(slot, 1, -1);
         if (witness == 1) {
           insertAtTail(slot);
-          if (!refCountGeneration.compareAndSetRefCount(slot, -1, 0)) {
+          if (!compareAndSetRefCount(slot, -1, 0)) {
             throw new IllegalStateException("rc changed during insertAtTail in closeUnconditional");
           }
           return;
@@ -694,7 +885,7 @@ class Cache2<V extends Cache2.Val> {
         // A stale pin() raced: its CAS retry loop incremented rc past 1 before its post-CAS
         // generation check could call unpin(). Decrement our own pin and return; the stale
         // pinner's subsequent unpin() will see rc==1 and reinstate this slot in the LRU.
-        int witness = refCountGeneration.compareAndExchangeRefCount(slot, rc, rc - 1);
+        int witness = compareAndExchangeRefCount(slot, rc, rc - 1);
         if (witness == rc) {
           return;
         }
@@ -722,12 +913,12 @@ class Cache2<V extends Cache2.Val> {
       // HOT_HEAD/HOT_TAIL each also get an exclusive cache line.
       this.HOT_HEAD = COLD_TAIL + 2;
       this.HOT_TAIL = COLD_TAIL + 4;
-      assert HOT_TAIL < lruLinkage.length();
-      // Placeholder sentinel Val objects for the hot queue -- next/prev live in lruLinkage.
+      assert HOT_TAIL < payload.length;
+      // Placeholder sentinel Val objects for the hot queue -- next/prev live in group2.
       payload[HOT_HEAD] = new Val();
       payload[HOT_TAIL] = new Val();
-      lruLinkage.setNextPlain(HOT_HEAD, HOT_TAIL);
-      lruLinkage.setPrevPlain(HOT_TAIL, HOT_HEAD);
+      setNextPlain(HOT_HEAD, HOT_TAIL);
+      setPrevPlain(HOT_TAIL, HOT_HEAD);
     }
 
     @Override
@@ -735,15 +926,15 @@ class Cache2<V extends Cache2.Val> {
       // 0 is the maximally-stale sentinel age()/toHot() rely on. Without this, a recycled slot
       // would carry its previous occupant's timestamp into the new occupant's first
       // insertAtHead() decision and into acquireTail()'s staleness comparison.
-      lruLinkage.setLastUnpinNanos(slot, 0);
+      setLastUnpinNanos(slot, 0);
     }
 
     @Override
     protected final boolean insertAtHead(int head, int slot, boolean recordAccess) {
-      long lastUnpin = lruLinkage.getLastUnpinNanos(slot);
-      lruLinkage.setLastUnpinNanos(slot, recordAccess ? System.nanoTime() : 0);
+      long lastUnpin = getLastUnpinNanos(slot);
+      setLastUnpinNanos(slot, recordAccess ? System.nanoTime() : 0);
       boolean toHot = toHot(lastUnpin);
-      lruLinkage.setFromHotVolatile(slot, toHot);
+      setFromHotVolatile(slot, toHot);
       super.insertAtHead(toHot ? HOT_HEAD : head, slot, recordAccess);
       return toHot;
     }
@@ -755,8 +946,8 @@ class Cache2<V extends Cache2.Val> {
       boolean fromHot;
       long now = System.nanoTime();
       do {
-        int coldCandidate = lruLinkage.getPrevVolatile(COLD_TAIL);
-        int hotCandidate = lruLinkage.getPrevVolatile(HOT_TAIL);
+        int coldCandidate = getPrevVolatile(COLD_TAIL);
+        int hotCandidate = getPrevVolatile(HOT_TAIL);
         if (coldCandidate == COLD_HEAD) {
           // cold queue is empty
           if (hotCandidate == HOT_HEAD) {
@@ -769,22 +960,22 @@ class Cache2<V extends Cache2.Val> {
         } else if (hotCandidate == HOT_HEAD) {
           candidate = coldCandidate;
           fromHot = false;
-          coldCandidateTs = lruLinkage.getLastUnpinNanos(coldCandidate);
+          coldCandidateTs = getLastUnpinNanos(coldCandidate);
         } else {
           // Evict from hot only when cold is at least HOT_EVICTION_MULTIPLIER times as stale,
           // giving hot slots proportional protection. age() maps lastUnpinNanos=0 to a large
           // sentinel so never-used cold slots are always preferred over any real hot slot.
-          coldCandidateTs = lruLinkage.getLastUnpinNanos(coldCandidate);
+          coldCandidateTs = getLastUnpinNanos(coldCandidate);
           fromHot =
               age(now, coldCandidateTs)
-                  < age(now, lruLinkage.getLastUnpinNanos(hotCandidate)) >> HOT_EVICTION_SHIFT;
+                  < age(now, getLastUnpinNanos(hotCandidate)) >> HOT_EVICTION_SHIFT;
           candidate = fromHot ? hotCandidate : coldCandidate;
         }
-      } while (!refCountGeneration.compareAndSetRefCount(candidate, 0, -1));
+      } while (!compareAndSetRefCount(candidate, 0, -1));
       if (coldCandidateTs != 0) {
         this.coldTs = coldCandidateTs;
       }
-      lruLinkage.setFromHotVolatile(candidate, fromHot);
+      setFromHotVolatile(candidate, fromHot);
       return candidate;
     }
 

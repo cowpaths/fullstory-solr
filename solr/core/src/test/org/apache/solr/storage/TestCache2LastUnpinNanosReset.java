@@ -21,14 +21,14 @@ import java.util.List;
 import org.apache.solr.SolrTestCaseJ4;
 
 /**
- * Regression test: {@code lastUnpinNanos} lives in {@link LruLinkageStore} (off-heap), not as a
- * {@code Val} field, so {@code Val.reset()} alone cannot clear it on slot recycle. Both {@link
+ * Regression test: {@code lastUnpinNanos} lives in {@code Cache2}'s off-heap Group 2 storage, not
+ * as a {@code Val} field, so {@code Val.reset()} alone cannot clear it on slot recycle. Both {@link
  * Cache2#acquireNode(long[])} and {@link Cache2#close(long)} must explicitly zero it via {@code
- * lruLinkage.setLastUnpinNanos(slot, 0)}; without that, a recycled slot would carry its previous
- * occupant's timestamp into the new occupant's first {@code toHot()} decision (incorrectly
- * promoting a first-time entry to the hot queue) and into {@code acquireTail()}'s staleness
- * comparison (the slot would read as "fresher" than it should, i.e. not maximally stale, which
- * {@code lastUnpinNanos == 0} is specifically meant to represent for never-yet-unpinned slots).
+ * setLastUnpinNanos(slot, 0)}; without that, a recycled slot would carry its previous occupant's
+ * timestamp into the new occupant's first {@code toHot()} decision (incorrectly promoting a
+ * first-time entry to the hot queue) and into {@code acquireTail()}'s staleness comparison (the
+ * slot would read as "fresher" than it should, i.e. not maximally stale, which {@code
+ * lastUnpinNanos == 0} is specifically meant to represent for never-yet-unpinned slots).
  */
 public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
 
@@ -54,7 +54,7 @@ public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
     // acquireNode() call -- simulates a slot that was unpinned long ago in a previous generation.
     long poison = 987654321L;
     for (int slot = 1; slot <= capacity; slot++) {
-      cache.lruLinkage.setLastUnpinNanos(slot, poison);
+      cache.setLastUnpinNanos(slot, poison);
     }
 
     long[] handle = new long[1];
@@ -65,7 +65,7 @@ public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
       assertEquals(
           "acquireNode() must zero lastUnpinNanos on recycle, slot=" + slot,
           0L,
-          cache.lruLinkage.getLastUnpinNanos(slot));
+          cache.getLastUnpinNanos(slot));
     }
   }
 
@@ -89,12 +89,9 @@ public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
     int slot = (int) h & ((1 << 20) - 1);
 
     cache.unpin(h, false); // make the slot evictable (refCount -> 0); required for close() to act
-    cache.lruLinkage.setLastUnpinNanos(slot, 555555555L); // poison after unpin's own write
+    cache.setLastUnpinNanos(slot, 555555555L); // poison after unpin's own write
 
     assertEquals("close() should have recycled the now-evictable slot", 0, cache.close(h));
-    assertEquals(
-        "close() must zero lastUnpinNanos on recycle",
-        0L,
-        cache.lruLinkage.getLastUnpinNanos(slot));
+    assertEquals("close() must zero lastUnpinNanos on recycle", 0L, cache.getLastUnpinNanos(slot));
   }
 }

@@ -83,10 +83,10 @@ public class TestCache2ChainIntegrity extends SolrTestCaseJ4 {
     for (int iter = 0; iter < 10; iter++) {
       Cache2.DualQueueCache<Cache2.Val> cache = newCache(capacity);
       int[] chainOrder = new int[capacity];
-      int cur = cache.lruLinkage.getNextVolatile(cache.COLD_HEAD);
+      int cur = cache.getNextVolatile(cache.COLD_HEAD);
       for (int i = 0; i < capacity; i++) {
         chainOrder[i] = cur;
-        cur = cache.lruLinkage.getNextVolatile(cur);
+        cur = cache.getNextVolatile(cur);
       }
 
       // Check a sample of starting positions (checking all ~2.6M would be too slow) at every lag
@@ -189,7 +189,7 @@ public class TestCache2ChainIntegrity extends SolrTestCaseJ4 {
   private void checkChainIntegrity(Cache2.DualQueueCache<Cache2.Val> cache, int capacity) {
     int[] forwardOrder = new int[capacity];
     boolean[] seen = new boolean[capacity + 1];
-    int cur = cache.lruLinkage.getNextVolatile(cache.COLD_HEAD);
+    int cur = cache.getNextVolatile(cache.COLD_HEAD);
     for (int i = 0; i < capacity; i++) {
       assertTrue(
           "capacity=" + capacity + ": slot " + cur + " out of real-slot range",
@@ -198,20 +198,20 @@ public class TestCache2ChainIntegrity extends SolrTestCaseJ4 {
           "capacity=" + capacity + ": slot " + cur + " visited twice in forward walk", !seen[cur]);
       seen[cur] = true;
       forwardOrder[i] = cur;
-      cur = cache.lruLinkage.getNextVolatile(cur);
+      cur = cache.getNextVolatile(cur);
     }
     assertEquals(
         "capacity=" + capacity + ": forward walk did not reach COLD_TAIL after capacity steps",
         cache.COLD_TAIL,
         cur);
 
-    cur = cache.lruLinkage.getPrevVolatile(cache.COLD_TAIL);
+    cur = cache.getPrevVolatile(cache.COLD_TAIL);
     for (int i = capacity - 1; i >= 0; i--) {
       assertEquals(
           "capacity=" + capacity + ": backward walk diverged from forward walk at position " + i,
           forwardOrder[i],
           cur);
-      cur = cache.lruLinkage.getPrevVolatile(cur);
+      cur = cache.getPrevVolatile(cur);
     }
     assertEquals(
         "capacity=" + capacity + ": backward walk did not reach COLD_HEAD after capacity steps",
