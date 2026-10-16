@@ -584,6 +584,24 @@ class Cache2<V extends Cache2.Val> {
     LONG_VH.set(group2, (slot << GROUP2_STRIDE_SHIFT) + LAST_UNPIN_NANOS_OFFSET, value);
   }
 
+  /**
+   * Volatile read of {@code next} and {@code prev} at {@code slot} together, as a single 8-byte
+   * access -- {@code next} in the low 32 bits, {@code prev} in the high 32 bits (native byte order;
+   * both fields occupy one naturally-aligned {@code long}-sized region within the stride: offsets 0
+   * and {@link #PREV_OFFSET}). See {@link #getRefCountAndGenerationVolatile} for the general
+   * rationale (atomicity + half the load-acquire cost on platforms like aarch64).
+   *
+   * <p>Safe to use even where {@code next}/{@code prev} are read at logically different points in
+   * the existing (unfused) code, e.g. {@link #removeFromList}: both {@link #reserve}'s {@code cur}
+   * and {@code removeFromList}'s {@code prevSlot} are already treated as mere optimistic guesses,
+   * re-validated via CAS and refreshed on failure -- fusing their *initial* reads into one earlier
+   * joint snapshot can only turn a would-be-stale guess into an extra retry iteration, never an
+   * incorrect outcome.
+   */
+  long getNextAndPrevVolatile(int slot) {
+    return (long) LONG_VH.getVolatile(group2, slot << GROUP2_STRIDE_SHIFT);
+  }
+
   boolean getFromHotVolatile(int slot) {
     return (int) INT_VH.getVolatile(group2, (slot << GROUP2_STRIDE_SHIFT) + FROM_HOT_OFFSET) != 0;
   }
@@ -615,9 +633,15 @@ class Cache2<V extends Cache2.Val> {
    * link is held by another thread (RESERVED_LINK), then CAS-swaps it to {@code reservation} and
    * returns the prior value. Returns REMOVED_LINK immediately if the slot has already been spliced
    * out.
+   *
+   * <p>{@code cur} is the caller's initial guess for {@code next} -- typically a fresh {@link
+   * #getNextVolatile} read, but need not be: like every value fed into the CAS loop below, a stale
+   * guess only costs an extra iteration (refreshed via the witness on CAS failure, or via a direct
+   * re-read if it was {@code RESERVED_LINK}), never an incorrect outcome. {@link #removeFromList}
+   * takes advantage of this by passing the {@code next} half of a joint next/prev snapshot (see
+   * {@link #getNextAndPrevVolatile}) instead of a dedicated read.
    */
-  private int reserve(int slot, int reservation) {
-    int cur = getNextVolatile(slot);
+  private int reserve(int slot, int reservation, int cur) {
     for (; ; ) {
       while (cur == RESERVED_LINK) {
         if (reservation == REMOVED_LINK) {
@@ -638,7 +662,7 @@ class Cache2<V extends Cache2.Val> {
 
   protected boolean insertAtHead(int listHead, int slot, boolean recordAccess) {
     setPrevVolatile(slot, listHead);
-    int oldNext = reserve(listHead, RESERVED_LINK);
+    int oldNext = reserve(listHead, RESERVED_LINK, getNextVolatile(listHead));
     assert oldNext != REMOVED_LINK : "queue head sentinel should never be removed";
     setNextPlain(slot, oldNext);
     setPrevVolatile(oldNext, slot);
@@ -649,17 +673,20 @@ class Cache2<V extends Cache2.Val> {
   }
 
   private void removeFromList(int slot) {
-    int oldNext = reserve(slot, REMOVED_LINK);
+    // Joint initial read of next+prev (see getNextAndPrevVolatile) rather than two separate
+    // volatile reads -- both are fed only as optimistic initial guesses below (reserve()'s cur,
+    // and the prevSlot loop's first iteration), each independently re-validated/refreshed on
+    // failure, so reading them together earlier than today's code does cannot change behavior,
+    // only occasionally trade a slightly-more-likely-stale guess for an extra retry iteration.
+    long nextAndPrev = getNextAndPrevVolatile(slot);
+    int oldNext = reserve(slot, REMOVED_LINK, (int) nextAndPrev);
     if (oldNext == REMOVED_LINK) {
       throw new IllegalStateException("already removed");
     }
-    int prevSlot;
-    for (; ; ) {
-      prevSlot = getPrevVolatile(slot);
-      if (compareAndSetNext(prevSlot, slot, RESERVED_LINK)) {
-        break;
-      }
+    int prevSlot = (int) (nextAndPrev >>> 32);
+    while (!compareAndSetNext(prevSlot, slot, RESERVED_LINK)) {
       Thread.yield();
+      prevSlot = getPrevVolatile(slot);
     }
     setPrevVolatile(oldNext, prevSlot);
     if (!compareAndSetNext(prevSlot, RESERVED_LINK, oldNext)) {
@@ -670,7 +697,7 @@ class Cache2<V extends Cache2.Val> {
   private void insertAtTail(int slot) {
     for (; ; ) {
       int predSlot = getPrevVolatile(COLD_TAIL);
-      int oldNext = reserve(predSlot, RESERVED_LINK);
+      int oldNext = reserve(predSlot, RESERVED_LINK, getNextVolatile(predSlot));
       if (oldNext != COLD_TAIL) {
         if (oldNext == REMOVED_LINK) {
           continue; // pred was concurrently removed; retry
