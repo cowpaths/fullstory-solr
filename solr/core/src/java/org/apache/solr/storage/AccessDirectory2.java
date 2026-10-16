@@ -988,10 +988,11 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
      * <p>Not read-only: on a warm-start hit not yet reflected in this instance's {@code
      * accessMapped} (the common case the first time any given index is probed -- see below), this
      * writes the discovered handle into {@code accessMapped} and calls {@link
-     * BlockCache#recordWarmStartHit}. It never touches {@link BlockCache}'s own pinned/evictable
-     * slot state -- {@link BlockCache#peekExtantHandle} does not pin -- so "read-only" holds with
-     * respect to the cache's actual cached data, just not with respect to this input's local
-     * bookkeeping.
+     * BlockCache#recordWarmStartHit}. {@link BlockCache#peekExtantHandle} itself also briefly
+     * pins/unpins the slot (to mark its {@code Val} populated -- see that method's doc comment for
+     * why that's required), so "read-only" only holds with respect to this input's own local
+     * bookkeeping being otherwise unaffected by a failed probe, not with respect to {@link
+     * BlockCache}'s internal pin state (which is restored before this method returns either way).
      */
     private boolean isPresent(int idx) {
       AtomicLongArray accessMapped = accessMapped();
@@ -1003,8 +1004,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       // accessMapped is a fresh, all-NULL_HANDLE array at this point in construction -- nothing
       // has called acquireNode(..., blobUUID, idx) for this file yet, so a NULL_HANDLE entry here
       // says nothing about whether the block was already persisted in a prior run. Peek the extant
-      // map directly (no pin, no Val.populated write) to find out, without the side effects of the
-      // full acquireNode(long[], UUID, int) path.
+      // map directly to find out, without the other side effects of the full
+      // acquireNode(long[], UUID, int) path (e.g. this doesn't touch accessMapped itself).
       long handle = cache.peekExtantHandle(blobUUID(), idx);
       if (handle == BlockCache.NULL_HANDLE) {
         return false;

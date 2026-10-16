@@ -285,6 +285,61 @@ public class TestBlockCache extends SolrTestCaseJ4 {
     assertTrue(exec.awaitTermination(5, TimeUnit.SECONDS));
   }
 
+  /**
+   * Regression test: {@link BlockCache#peekExtantHandle} must mark the returned slot's {@link
+   * BlockCache.Val} populated, not just confirm it's pinnable. {@code AccessDirectory2} stashes the
+   * handle this returns directly into {@code accessMapped} for a later real reader to consume via
+   * {@code pin()} + {@link BlockCache.Val#join}; {@code join()} blocks on {@code populated} being
+   * {@code true} and is never notified for a slot that was only peeked (no fetch is ever in flight
+   * to populate and notify it) -- so if {@code peekExtantHandle} failed to set that flag, a real
+   * reader of a peeked-but-not-yet-otherwise-accessed warm-start block would pin successfully but
+   * then hang in {@code join()} for its full timeout before failing. This test only checks {@code
+   * isPopulated()} directly (not an actual {@code join()} call) specifically so a regression here
+   * reports as a fast, clear assertion failure instead of a slow timeout.
+   */
+  public void testPeekExtantHandleMarksPopulated() throws IOException {
+    int nBlocks = 2;
+    Path tmpDir = createTempDir();
+    Path cachePath = tmpDir.resolve("cache.tmp");
+    try (FileChannel fc =
+        FileChannel.open(cachePath, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+      fc.write(ByteBuffer.wrap(new byte[1]), BlockCache.backingFileBytes(nBlocks) - 1);
+    }
+
+    // Nonzero UUID: buildExtantMap() treats an all-zero (msb, lsb) entry as uninitialized and
+    // skips it (see its own doc comment) -- a literal UUID(0, 0) would be silently excluded from
+    // the extant map regardless of this test's fix under test.
+    UUID uuid = new UUID(0, 1);
+    byte[] sentinel = new byte[Integer.BYTES];
+    ByteBuffer.wrap(sentinel).putInt(0, 42);
+    try (BlockCache cache = new BlockCache(cachePath)) {
+      long[] h = new long[1];
+      BlockCache.Val v = cache.acquireNode(h, uuid, 0);
+      assertNotNull(v);
+      v.populate(sentinel, 0, Integer.BYTES, uuid, 0, cache);
+      cache.unpin(h[0]);
+    }
+
+    // Reopen (warm start): a fresh BlockCache/Val population, generation==0, extant map built from
+    // the persisted backing file -- peekExtantHandle is the only thing that has touched this slot
+    // so far this process.
+    try (BlockCache cache = new BlockCache(cachePath)) {
+      long handle = cache.peekExtantHandle(uuid, 0);
+      assertTrue("expected a valid warm-start handle", handle != BlockCache.NULL_HANDLE);
+
+      BlockCache.Val v = cache.pin(handle);
+      assertNotNull("peeked handle should still be pinnable immediately after the peek", v);
+      try {
+        assertTrue(
+            "peekExtantHandle must mark the slot's Val populated, or a real reader's join() would"
+                + " hang waiting for a fetch that will never happen",
+            v.isPopulated());
+      } finally {
+        cache.unpin(handle);
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Concurrent stress test
   // ---------------------------------------------------------------------------
