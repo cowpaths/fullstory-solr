@@ -64,6 +64,7 @@ import org.apache.lucene.store.LockFactory;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.store.MappedByteBufferIndexInputProvider;
 import org.apache.lucene.util.IOUtils;
+import org.apache.solr.common.util.EnvUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -87,6 +88,33 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
   public static final int MAX_MAP_SIZE = Integer.MIN_VALUE >>> MAP_BUF_DIVIDE_SHIFT;
   public static final int MAX_MAP_MASK = MAX_MAP_SIZE - 1;
   public static final int MAX_MAP_SHIFT = Integer.numberOfTrailingZeros(MAX_MAP_SIZE);
+
+  /**
+   * Whether {@link AD2IndexInput#parseRootParams} issues two precise {@code MADV_WILLNEED} hints
+   * (exactly the header, then exactly the footer, each immediately before it's read) rather than
+   * letting the header/footer reads fault in cold. Defaults to {@code true}.
+   *
+   * <p>This is not a latency optimization -- the hint and the read it precedes are back-to-back in
+   * the same synchronous call for the same file, with no other work interleaved to overlap the
+   * hinted I/O against, so it doesn't make {@code parseRootParams} itself any faster. The goal is
+   * purely to bound the *amount* of data the kernel pulls in: an unhinted cold page fault on a
+   * large mmap'd file can trigger the kernel's own adaptive readahead heuristic to speculatively
+   * pull in a much larger window of adjacent compressed block content than this code path needs
+   * (that content is fetched/hinted separately, on demand, as blocks are actually read elsewhere)
+   * -- an explicit {@code MADV_WILLNEED} for an exact byte range does not expand beyond what's
+   * requested.
+   *
+   * <p>Defaults on because the header and footer are, barring the in-process {@code
+   * sharedEntry.cachedBlockOffsets} fast path a few lines above (which only helps a second open of
+   * the same file within the same process -- never on the first open of any file after a restart),
+   * always read regardless -- so the hint is never wasted, only ever either a no-op (kernel
+   * readahead wouldn't have over-fetched anyway) or a genuine reduction in redundant read
+   * throughput. The fixed cost is two extra cheap syscalls per file, not extra disk I/O. Still
+   * sysprop-gated in case some deployment's kernel/filesystem readahead behavior makes the hint
+   * itself undesirable for an unanticipated reason.
+   */
+  private static final boolean HINT_ROOT_PARAMS_HEADER_FOOTER =
+      EnvUtils.getPropertyAsBool("solr.accessDirectory2.hintRootParamsHeaderFooter", true);
 
   private final long uuidMsb;
   private final long uuidLsb;
@@ -721,16 +749,15 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         return new RootParams(0, null, compressed, null, null, segId, null);
       }
 
-      long baseAddr = cache.baseAddress(compressed[0]);
-      if (size < ((long) COMPRESSION_BLOCK_SIZE << 1) + (4L << 10)) {
-        // Small file: hint the entire compressed file in one shot.
-        cache.willneed(baseAddr, size);
-      } else {
-        // Hint header region (header + estimated first block).
-        cache.willneed(baseAddr, COMPRESSION_BLOCK_SIZE);
-        // Hint footer region so the kernel starts paging it in before we read it.
-        long footerHintSize = Math.min(size, COMPRESSION_BLOCK_SIZE);
-        hintCompressedRegion(compressed, cache, size - footerHintSize, footerHintSize);
+      if (HINT_ROOT_PARAMS_HEADER_FOOTER) {
+        // Precisely hint the header before touching it, rather than letting the kernel's own
+        // page-fault-time readahead heuristic decide how much to pull in: an explicit, exact-sized
+        // MADV_WILLNEED is bounded to the requested range, whereas a cold fault on a large mmap'd
+        // file can trigger the kernel's adaptive readahead to pull in a much larger window of
+        // adjacent compressed block content this code path has no present use for (that content is
+        // fetched/hinted separately, on demand, as blocks are actually read elsewhere). The goal
+        // here is reducing that redundant read throughput, not reducing latency.
+        cache.willneed(cache.baseAddress(compressed[0]), Math.min(size, HEADER_SIZE));
       }
 
       ByteBuffer initial = compressed[0];
@@ -751,6 +778,10 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
       }
       byte[] footer = new byte[blockDeltaFooterSize];
       long blockDeltaFooterOffset = size - blockDeltaFooterSize;
+      if (HINT_ROOT_PARAMS_HEADER_FOOTER) {
+        // hint precisely that range before reading it; same reasoning as the header hint above.
+        hintCompressedRegion(compressed, cache, blockDeltaFooterOffset, blockDeltaFooterSize);
+      }
       // Read footer from the mmap'd compressed data (may span multiple regions)
       readFromCompressed(compressed, blockDeltaFooterOffset, footer, 0, blockDeltaFooterSize);
       ByteArrayDataInput in = new ByteArrayDataInput(footer);
