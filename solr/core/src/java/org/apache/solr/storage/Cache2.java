@@ -105,6 +105,22 @@ class Cache2<V extends Cache2.Val> {
   private static final VarHandle LONG_VH =
       MethodHandles.byteBufferViewVarHandle(long[].class, ByteOrder.nativeOrder());
 
+  static {
+    // getRefCountAndGenerationVolatile() packs two adjacent ints (refCount at offset 0,
+    // generation at offset GENERATION_OFFSET=4) into one long read and unpacks via
+    // refCount=(int)combined, generation=(int)(combined>>>32) -- correct only on little-endian,
+    // where the lower memory address (refCount) lands in the long's low bits. Fail fast at class
+    // init on any platform where that doesn't hold, rather than silently miscomputing generation
+    // checks in pin()/pinnable() (which could manifest as spurious -1 returns and, depending on
+    // caller retry logic, a hang) on a big-endian JVM.
+    if (ByteOrder.nativeOrder() != ByteOrder.LITTLE_ENDIAN) {
+      throw new ExceptionInInitializerError(
+          "Cache2 assumes little-endian native byte order (required by"
+              + " getRefCountAndGenerationVolatile's bit-packing); actual native order is "
+              + ByteOrder.nativeOrder());
+    }
+  }
+
   /**
    * Group 1 (refCount/generation) storage -- see the class javadoc. One {@code (refCount,
    * generation)} pair per 64-byte stride (at byte offsets 0 and {@link #GENERATION_OFFSET} within
@@ -490,6 +506,24 @@ class Cache2<V extends Cache2.Val> {
   }
 
   /**
+   * Volatile read of {@code refCount} and {@code generation} at {@code slot} together, as a single
+   * 8-byte access -- {@code refCount} in the low 32 bits, {@code generation} in the high 32 bits
+   * (native byte order; both fields occupy one naturally-aligned {@code long}-sized region within
+   * the 64-byte stride: offsets 0 and {@link #GENERATION_OFFSET}, with native order placing the
+   * lower memory address in the low bits on every little-endian platform this runs on). Equivalent
+   * to calling {@link #getRefCountVolatile} and {@link #getGenerationVolatile} separately, except
+   * atomic (one consistent point-in-time snapshot of both fields, vs. two independent loads that
+   * could observe an interleaved write in between) and, on platforms where a volatile load is not
+   * free (e.g. {@code ldar} on aarch64), half the load-acquire cost. Callers that need both fields
+   * together (e.g. {@link #pin}'s initial fast-bail check, {@link #pinnable}) should prefer this
+   * over two separate calls; callers that only need one field should keep using the single-field
+   * accessor.
+   */
+  long getRefCountAndGenerationVolatile(int slot) {
+    return (long) LONG_VH.getVolatile(group1, slot << GROUP1_STRIDE_SHIFT);
+  }
+
+  /**
    * Atomically increments {@code generation} at {@code slot} by one and returns the <em>new</em>
    * (post-increment) value. Callers must hold exclusive ownership of {@code slot} when calling this
    * (e.g. via a prior successful {@code refCount} CAS to an exclusive sentinel value) -- concurrent
@@ -678,8 +712,9 @@ class Cache2<V extends Cache2.Val> {
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
     int expectedGen = (int) (handle >>> 32);
-    if (getGenerationVolatile(slot) != expectedGen) return -1;
-    int rc = getRefCountVolatile(slot);
+    long rcAndGen = getRefCountAndGenerationVolatile(slot);
+    if ((int) (rcAndGen >>> 32) != expectedGen) return -1;
+    int rc = (int) rcAndGen;
     for (; ; ) {
       switch (rc) {
         case -1:
@@ -722,12 +757,13 @@ class Cache2<V extends Cache2.Val> {
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
     int expectedGen = (int) (handle >>> 32);
-    switch (getRefCountVolatile(slot)) {
+    long rcAndGen = getRefCountAndGenerationVolatile(slot);
+    switch ((int) rcAndGen) {
       case UNPIN_SENTINEL:
       case -1:
         return null;
       default:
-        return getGenerationVolatile(slot) == expectedGen ? payload[slot] : null;
+        return (int) (rcAndGen >>> 32) == expectedGen ? payload[slot] : null;
     }
   }
 
