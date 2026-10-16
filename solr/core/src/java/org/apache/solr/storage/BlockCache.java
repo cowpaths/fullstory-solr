@@ -1695,6 +1695,26 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   /**
+   * Non-mutating peek at the extant map for a pre-existing warm cache entry matching {@code
+   * (blobUUID, blockIdx)} -- unlike {@link #acquireNode(long[], UUID, int)}, does not pin, does not
+   * mark the slot's {@code Val} as populated, and does not touch any caller-side {@code
+   * accessMapped} state. Returns {@link #NULL_HANDLE} if the extant map has no entry, the backing
+   * file was not present at startup (ephemeral cache), or the entry's slot has since been evicted
+   * and recycled (generation advanced past 0).
+   *
+   * <p>Intended for callers that want to know whether a block is already resident purely to decide
+   * whether a {@code MADV_WILLNEED} hint against its *compressed* source would be wasted -- not to
+   * actually acquire/use the cached data. {@link #pinnable} re-validates the handle (rather than
+   * trusting the extant-map lookup alone) so a stale/recycled entry can't be reported as present.
+   */
+  long peekExtantHandle(UUID blobUUID, int blockIdx) {
+    int handleLow = extantMapLookup(extantMap, blobUUID, blockIdx);
+    if (handleLow <= 0) return NULL_HANDLE;
+    long handle = Integer.toUnsignedLong(handleLow); // generation=0, matches acquireNode's encoding
+    return pinnable(handle) ? handle : NULL_HANDLE;
+  }
+
+  /**
    * Binary-searches {@link #extantMap} for {@code (blobUUID, blockIdx)}.
    *
    * @return the handle's low 32 bits ({@code (partIdx << PART_SHIFT) | localSlot}) if found, or
