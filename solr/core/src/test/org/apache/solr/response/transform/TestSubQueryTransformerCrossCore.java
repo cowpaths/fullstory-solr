@@ -37,11 +37,18 @@ public class TestSubQueryTransformerCrossCore extends SolrTestCaseJ4 {
     initCore("solrconfig-basic.xml", "schema-docValuesJoin.xml");
     final CoreContainer coreContainer = h.getCoreContainer();
 
-    fromCore =
-        coreContainer.create(
-            "fromCore", // FileSystems.getDefault().getPath( TEST_HOME()),
-            // ImmutableMap.of("config","solrconfig-basic.xml","schema","schema-docValuesJoin.xml"
-            Map.of("configSet", "minimal"));
+    // Use MockDirectoryFactory for fromCore; some DirectoryFactories have path access issues here.
+    String prevDirFactory = System.getProperty("solr.directoryFactory");
+    System.setProperty("solr.directoryFactory", "org.apache.solr.core.MockDirectoryFactory");
+    try {
+      fromCore = coreContainer.create("fromCore", Map.of("configSet", "minimal"));
+    } finally {
+      if (prevDirFactory == null) {
+        System.clearProperty("solr.directoryFactory");
+      } else {
+        System.setProperty("solr.directoryFactory", prevDirFactory);
+      }
+    }
     assertU(
         add(
             doc(

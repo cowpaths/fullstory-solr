@@ -753,14 +753,14 @@ public class AccessDirectory extends MMapDirectory {
                 "file too long " + Long.toHexString(length) + ", " + source);
           }
           int blockDeltaFooterSize = guard.getInt(initial, Long.BYTES);
-          int cTypeId = guard.getByte(initial, HEADER_SIZE - Integer.BYTES) & 0xff;
-          if (cTypeId != CompressingDirectory.COMPRESSION_TYPE.id) {
-            throw new IllegalArgumentException("unrecognized compression type id: " + cTypeId);
-          }
-          int cBlockTypeId = guard.getByte(initial, HEADER_SIZE - Integer.BYTES + 1) & 0xff;
-          if (cBlockTypeId != CompressingDirectory.COMPRESSION_TYPE.id) {
+          int cBlockTypeId = guard.getByte(initial, HEADER_SIZE - Integer.BYTES) & 0xff;
+          if (cBlockTypeId != CompressingDirectory.COMPRESSION_BLOCK_TYPE.id) {
             throw new IllegalArgumentException(
                 "unrecognized compression block type id: " + cBlockTypeId);
+          }
+          int cTypeId = guard.getByte(initial, HEADER_SIZE - Integer.BYTES + 1) & 0xff;
+          if (cTypeId != CompressingDirectory.COMPRESSION_TYPE.id) {
+            throw new IllegalArgumentException("unrecognized compression type id: " + cTypeId);
           }
           byte[] footer = new byte[blockDeltaFooterSize];
           long blockDeltaFooterOffset = size - blockDeltaFooterSize;
