@@ -321,6 +321,25 @@ class Cache2<V extends Cache2.Val> {
    * automatically a multiple of {@link #GROUP2_SLOT_SHIFT}'s granularity since Group 1's own total
    * size is already, by construction, a multiple of {@link #GROUP1_SLOT_SHIFT}'s -- a stronger
    * alignment than Group 2 requires).
+   *
+   * <p><b>Known ceiling for the {@code Unsafe}/{@code ByteBuffer} fallback paths (not {@code
+   * MemorySegment}):</b> {@code totalBytes} below is computed as a {@code long} and is itself safe
+   * from overflow, but every mode except {@link OffHeapStoreMode#STRICT}'s success path eventually
+   * narrows it back to an {@code int} slot count (via {@code Math.toIntExact}) to call {@link
+   * UnsafeOffHeapStore}'s or {@link OffHeapStores#createByteBuffer}'s {@code (slots, stride,
+   * alignment)} constructors, which internally re-multiply back up to a byte count ({@code
+   * Math.multiplyExact(slots, stride)}) -- so the combined Group 1 + Group 2 byte total for those
+   * two paths is capped at {@code Integer.MAX_VALUE} bytes, same as the direct-buffer allocation it
+   * bottoms out in. At the default 256 KB compression block size this works out to roughly 5.3 TiB
+   * of cache capacity before the combined total would exceed that cap (throwing {@code
+   * ArithmeticException}); a much smaller {@code solr.compressionBlockKilobytes} setting lowers
+   * that ceiling proportionally (e.g. a 1 KB block size caps out around 32 GiB), though such small
+   * block sizes are realistically only used for testing/exercising the cache, not production-scale
+   * deployments. {@code MemorySegment} (via {@link OffHeapStores#tryClaimMemorySegment}, which
+   * takes {@code totalBytes} as a {@code long} directly, with no int round-trip) is not subject to
+   * this ceiling -- only {@link OffHeapStoreMode#PREFER_UNSAFE} (always hits the int-capped path)
+   * and whichever {@link BlockCache} in a JVM doesn't win the one-shot {@code MemorySegment} claim
+   * (falls back to the int-capped path) are exposed.
    */
   static SharedStores allocateSharedGroup1And2Stores(int totalGroup1Slots, int totalGroup2Slots) {
     long totalGroup1Bytes = (long) totalGroup1Slots << GROUP1_STRIDE_SHIFT;
