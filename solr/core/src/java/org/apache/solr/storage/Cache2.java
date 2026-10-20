@@ -22,6 +22,8 @@ import java.nio.ByteOrder;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import org.apache.lucene.store.OffHeapStore;
+import org.apache.lucene.store.OffHeapStores;
+import org.apache.solr.common.util.EnvUtils;
 
 /**
  * Fixed-capacity concurrent LRU cache.
@@ -245,48 +247,162 @@ class Cache2<V extends Cache2.Val> {
   }
 
   /**
-   * Allocates one {@link OffHeapStore} sized to hold {@code totalGroup1Slots} Group 1 slots
-   * combined across every partition of a single {@link BlockCache} -- see {@code
-   * BlockCache.distribute()}, which sums {@link #group1SlotCount} across all its partitions to
-   * compute this total, then slices the result into one {@code (store, baseOffset)} pair per
-   * partition (each at a {@code baseOffset} that is itself a multiple of {@link #GROUP1_STRIDE}, so
-   * every partition's own slot-0-relative addressing continues to work unchanged).
+   * Selects which backing implementation {@link #allocateSharedGroup1And2Stores} uses, via the
+   * {@code solr.cache2.offHeapStoreMode} system property (read once, at class-init time -- see
+   * {@link #OFF_HEAP_STORE_MODE}). Values are matched case-insensitively against each constant's
+   * name; an unrecognized value falls back to {@link #DEFAULT} (logged, not thrown, since an
+   * off-heap backing choice is a performance tuning knob, not a correctness-critical setting).
    */
-  static OffHeapStore allocateSharedGroup1Store(int totalGroup1Slots) {
-    return new UnsafeOffHeapStore(totalGroup1Slots, GROUP1_STRIDE, GROUP1_STRIDE);
+  private enum OffHeapStoreMode {
+    /**
+     * Try the one-shot, JVM-wide {@code MemorySegment} claim ({@link
+     * OffHeapStores#tryClaimMemorySegment}); the first caller across the whole JVM to reach this
+     * point (whichever {@link BlockCache} initializes first) gets real {@code MemorySegment}
+     * backing, every subsequent caller falls back to a plain {@link
+     * OffHeapStores#createByteBuffer}-backed store. No {@code Unsafe} involved in either case.
+     */
+    DEFAULT,
+    /** Always use {@link UnsafeOffHeapStore}; never attempts the {@code MemorySegment} claim. */
+    PREFER_UNSAFE,
+    /**
+     * Try the {@code MemorySegment} claim like {@link #DEFAULT}, but fall back to {@link
+     * UnsafeOffHeapStore} (not {@code ByteBuffer}) for every caller that doesn't win it.
+     */
+    UNSAFE_FALLBACK,
+    /**
+     * Try the {@code MemorySegment} claim; if this caller doesn't win it (either the claim was
+     * already taken by an earlier caller, or the JDK21+ implementation couldn't be loaded at all),
+     * fail fast with an {@link IllegalStateException} rather than silently degrading to any
+     * fallback. For deployments that have deliberately sized their JVM/topology around exactly one
+     * real {@code MemorySegment}-backed {@link BlockCache} and want a loud, immediate signal if
+     * that assumption is ever violated (e.g. an unexpected second {@code BlockCache} in the same
+     * JVM, or an unsupported JDK), rather than quietly running in a degraded-performance mode that
+     * could go unnoticed.
+     */
+    STRICT;
+
+    private static OffHeapStoreMode fromSysprop(String value) {
+      if (value == null) {
+        return DEFAULT;
+      }
+      for (OffHeapStoreMode mode : values()) {
+        if (mode.name().equalsIgnoreCase(value)) {
+          return mode;
+        }
+      }
+      return DEFAULT;
+    }
+  }
+
+  private static final OffHeapStoreMode OFF_HEAP_STORE_MODE =
+      OffHeapStoreMode.fromSysprop(EnvUtils.getProperty("solr.cache2.offHeapStoreMode"));
+
+  /**
+   * Allocates ONE combined {@link OffHeapStore} sized to hold both Group 1 ({@code
+   * totalGroup1Slots} slots) and Group 2 ({@code totalGroup2Slots} slots) storage for every
+   * partition of a single {@link BlockCache} combined, rather than each group (or each {@code
+   * Cache2}/{@code Partition}) allocating its own -- see {@code BlockCache.distribute()}, which
+   * sums {@link #group1SlotCount}/{@link #group2SlotCount} across all its partitions to compute
+   * these totals, then slices the single returned store into one {@code (store, baseOffset)} pair
+   * per group per partition.
+   *
+   * <p>Combining Group 1 and Group 2 into a single allocation (rather than two separate ones, as an
+   * earlier version of this method did) is required for the {@code MemorySegment} path: a {@code
+   * MemorySegment}-backed store's one-shot, JVM-wide claim ({@link
+   * OffHeapStores#tryClaimMemorySegment}) can only ever be won once, by one caller, for one size --
+   * so {@code BlockCache.distribute()} must make exactly one combined-size claim attempt covering
+   * both groups, not two independent ones (where only whichever group's call happened to run first
+   * would ever get real {@code MemorySegment} backing, and the other would always fall back).
+   *
+   * <p>Returns a {@link SharedStores} holding the one store plus Group 2's byte {@code baseOffset}
+   * within it (Group 1 always starts at offset 0; Group 2 immediately follows, at an offset that is
+   * automatically a multiple of {@link #GROUP2_CACHE_LINE} since Group 1's own total size is
+   * already, by construction, a multiple of {@link #GROUP1_STRIDE} -- a stronger alignment than
+   * {@link #GROUP2_CACHE_LINE} requires).
+   */
+  static SharedStores allocateSharedGroup1And2Stores(int totalGroup1Slots, int totalGroup2Slots) {
+    long totalGroup1Bytes = (long) totalGroup1Slots << GROUP1_STRIDE_SHIFT;
+    long totalGroup2Bytes = (long) totalGroup2Slots << GROUP2_STRIDE_SHIFT;
+    long totalBytes = totalGroup1Bytes + totalGroup2Bytes;
+    // GROUP1_STRIDE (64) is a multiple of GROUP2_CACHE_LINE (64) -- in fact currently equal --
+    // so requesting the wider (or equal) of the two alignments for the combined allocation
+    // satisfies both groups' own alignment requirements at once.
+    int alignment = Math.max(GROUP1_STRIDE, GROUP2_CACHE_LINE);
+
+    OffHeapStore store;
+    switch (OFF_HEAP_STORE_MODE) {
+      case PREFER_UNSAFE:
+        store =
+            new UnsafeOffHeapStore(
+                Math.toIntExact(totalBytes / GROUP1_STRIDE), GROUP1_STRIDE, alignment);
+        break;
+      case STRICT:
+        store = OffHeapStores.tryClaimMemorySegment(totalBytes, alignment);
+        if (store == null) {
+          throw new IllegalStateException(
+              "solr.cache2.offHeapStoreMode=STRICT but the MemorySegment claim was not won"
+                  + " (either already claimed by an earlier BlockCache in this JVM, or this JDK"
+                  + " doesn't support it)");
+        }
+        break;
+      case UNSAFE_FALLBACK:
+        store = OffHeapStores.tryClaimMemorySegment(totalBytes, alignment);
+        if (store == null) {
+          store =
+              new UnsafeOffHeapStore(
+                  Math.toIntExact(totalBytes / GROUP1_STRIDE), GROUP1_STRIDE, alignment);
+        }
+        break;
+      case DEFAULT:
+      default:
+        store = OffHeapStores.tryClaimMemorySegment(totalBytes, alignment);
+        if (store == null) {
+          store =
+              OffHeapStores.createByteBuffer(
+                  Math.toIntExact(totalBytes / GROUP1_STRIDE), GROUP1_STRIDE, alignment);
+        }
+        break;
+    }
+    return new SharedStores(store, totalGroup1Bytes);
   }
 
   /**
-   * Allocates one {@link OffHeapStore} sized to hold {@code totalGroup2Slots} Group 2 slots
-   * combined across every partition -- see {@link #allocateSharedGroup1Store}'s javadoc for the
-   * general shape; this is Group 2's analogue, using {@link #GROUP2_STRIDE}/{@link
-   * #GROUP2_CACHE_LINE} instead. Unlike Group 1, each partition's individual {@link
-   * #group2SlotCount} is not itself guaranteed even (indeed it never is: {@code coldTail} is always
-   * even, so {@code arrayLen = coldTail + 1 + 2*extraSentinelSlots} is always odd) -- {@code
-   * BlockCache.distribute()} must round each partition's own slot count up to the next even number
-   * before summing, so every partition's {@code baseOffset} into this shared store stays a multiple
-   * of {@link #GROUP2_CACHE_LINE} (64 bytes = 2 Group-2 slots), preserving the same "every even
-   * slot index starts a fresh cache line" invariant the single-partition case already depends on
-   * (see the constructor's own comment on this below). The one slot of padding this costs per
-   * partition boundary is a single unused 32-byte Group 2 slot -- negligible.
+   * Holds the single {@link OffHeapStore} {@link #allocateSharedGroup1And2Stores} allocates, plus
+   * Group 2's byte offset within it (Group 1 always starts at offset 0 -- not itself stored here,
+   * since it's always zero). A plain value-holder, not an {@code OffHeapStore} wrapper itself --
+   * unrelated to the "bare fields vs. wrapper object" JIT-folding concern {@link #group1}'s javadoc
+   * discusses, since this is returned once at construction time (never held as a per-access hot
+   * field) and immediately unpacked by the caller into its own bare fields.
    */
-  static OffHeapStore allocateSharedGroup2Store(int totalGroup2Slots) {
-    return new UnsafeOffHeapStore(totalGroup2Slots, GROUP2_STRIDE, GROUP2_CACHE_LINE);
+  static final class SharedStores {
+    final OffHeapStore store;
+    final long group2BaseOffset;
+
+    private SharedStores(OffHeapStore store, long group2BaseOffset) {
+      this.store = store;
+      this.group2BaseOffset = group2BaseOffset;
+    }
   }
 
   /**
    * Converts a Group 1 slot offset (e.g. the running total of {@link #group1SlotCount} across
-   * partitions already placed into a shared store) into the byte {@code baseOffset} a
-   * subsequent-partition's constructor call must pass. Exposed so {@code BlockCache.distribute()}
-   * never needs to know {@link #GROUP1_STRIDE}/{@link #GROUP1_STRIDE_SHIFT} itself -- using this
-   * instead of reimplementing the shift keeps the two forever in lockstep, since both are driven by
-   * the identical constant.
+   * partitions already placed into a shared store) into the byte offset a given partition's own
+   * {@code group1BaseOffset} must be, relative to Group 1's own start (byte 0) within the combined
+   * store {@link #allocateSharedGroup1And2Stores} returns. Exposed so {@code
+   * BlockCache.distribute()} never needs to know {@link #GROUP1_STRIDE}/{@link
+   * #GROUP1_STRIDE_SHIFT} itself -- using this instead of reimplementing the shift keeps the two
+   * forever in lockstep, since both are driven by the identical constant.
    */
   static long group1SlotToByteOffset(int slotOffset) {
     return (long) slotOffset << GROUP1_STRIDE_SHIFT;
   }
 
-  /** Group 2 analogue of {@link #group1SlotToByteOffset}. */
+  /**
+   * Group 2 analogue of {@link #group1SlotToByteOffset} -- relative to Group 2's own start within
+   * the combined store, i.e. the caller must separately add {@link SharedStores#group2BaseOffset}
+   * to get that group's real absolute offset into the combined store (see {@code
+   * BlockCache.distribute()}'s usage).
+   */
   static long group2SlotToByteOffset(int slotOffset) {
     return (long) slotOffset << GROUP2_STRIDE_SHIFT;
   }
@@ -352,11 +468,11 @@ class Cache2<V extends Cache2.Val> {
 
   /**
    * Convenience constructor for an exclusively-owned {@code Cache2} instance: allocates its own
-   * private Group 1/Group 2 stores (via {@link #allocateSharedGroup1Store}/{@link
-   * #allocateSharedGroup2Store}, each sized for exactly this one instance), at base offset 0.
-   * Delegates to the primary constructor below. This is the constructor every existing caller
-   * (including all current tests) uses, and its behavior is unchanged from before shared-store
-   * support existed.
+   * private combined Group 1/Group 2 store (via {@link #allocateSharedGroup1And2Stores}, sized for
+   * exactly this one instance). Delegates to the primary constructor below. This is the constructor
+   * every existing caller (including all current tests) uses, and its behavior is unchanged from
+   * before shared-store support existed, apart from now picking its backing implementation per
+   * {@link #OFF_HEAP_STORE_MODE} rather than always using {@code UnsafeOffHeapStore}.
    *
    * @param capacity number of real slots
    * @param extraSentinelSlots additional sentinel slots beyond COLD_HEAD/COLD_TAIL (e.g. 2 for
@@ -368,10 +484,23 @@ class Cache2<V extends Cache2.Val> {
         capacity,
         extraSentinelSlots,
         initialValues,
-        allocateSharedGroup1Store(group1SlotCount(capacity)),
+        allocateSharedGroup1And2Stores(
+            group1SlotCount(capacity), group2SlotCount(capacity, extraSentinelSlots)));
+  }
+
+  private Cache2(
+      int capacity,
+      int extraSentinelSlots,
+      Iterable<? extends V> initialValues,
+      SharedStores stores) {
+    this(
+        capacity,
+        extraSentinelSlots,
+        initialValues,
+        stores.store,
         0,
-        allocateSharedGroup2Store(group2SlotCount(capacity, extraSentinelSlots)),
-        0);
+        stores.store,
+        stores.group2BaseOffset);
   }
 
   /**
