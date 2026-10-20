@@ -19,6 +19,33 @@ apply plugin: 'java-library'
 
 description = 'Apache Solr Core'
 
+// org.apache.solr.storage.UnsafeOffHeapStore (Cache2's off-heap backing, behind the OffHeapStore
+// abstraction) uses sun.misc.Unsafe directly, in preference to
+// MethodHandles.byteBufferViewVarHandle, which profiling showed carrying unexpectedly high
+// per-access overhead. javac emits a mandatory "Unsafe is internal proprietary API" warning for
+// this that is NOT gated by -Xlint:deprecation (and so is unaffected by the project-wide
+// "-Xlint:-deprecation" in lucene/gradle/java/javac.gradle) and cannot be suppressed via
+// @SuppressWarnings/forbiddenapis's suppressAnnotations -- only -XDignore.symbol.file (a javac
+// internal flag) silences it, and ONLY when compiling via the classic -source/-target +
+// classpath model. The project-wide "--release" flag (lucene/gradle/java/javac.gradle) compiles
+// against the frozen ct.sym API snapshot for that release instead -- a completely different
+// internal code path that resolves sun.misc.Unsafe before -XDignore.symbol.file's check point
+// ever runs, so the flag is silently ineffective whenever --release is present (confirmed via a
+// standalone javac invocation, independent of Gradle). Dropping back to -source/-target for just
+// this module restores -XDignore.symbol.file's effect; the resulting "system modules path not
+// set in conjunction with -source/-target" advisory warning is suppressed separately since it's
+// an unavoidable, known consequence of that combination, not a real issue. Scoped to this
+// module's compileJava only, not project-wide.
+compileJava {
+  options.compilerArgs -= ["--release", rootProject.minJavaVersion.toString()]
+  options.compilerArgs += [
+    "-source", rootProject.minJavaVersion.toString(),
+    "-target", rootProject.minJavaVersion.toString(),
+    "-Xlint:-options",
+    "-XDignore.symbol.file",
+  ]
+}
+
 dependencies {
   // Spotbugs Annotations are only needed for old findbugs
   // annotation usage like in Zookeeper during compilation time.
