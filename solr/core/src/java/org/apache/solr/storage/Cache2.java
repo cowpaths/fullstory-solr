@@ -123,8 +123,26 @@ class Cache2<V extends Cache2.Val> {
    * generation)} pair per 64-byte stride (at byte offsets 0 and {@link #GENERATION_OFFSET} within
    * the stride; the remaining 56 bytes are unused padding), indexed by real slot {@code
    * 1..capacity} (slot 0 reserved/unused but still addressable).
+   *
+   * <p>The store itself may be shared across every partition of a single {@link BlockCache} (see
+   * {@code BlockCache.distribute()}) rather than allocated exclusively for this one {@code Cache2}
+   * instance, in which case {@link #group1BaseOffset} is this instance's non-zero slice into it.
+   * Deliberately kept as two separate {@code private final} fields (a reference and a primitive
+   * {@code long}), NOT wrapped in a single pair object: an earlier draft of this change used a
+   * small {@code OffHeapRegion(store, baseOffset)} wrapper here, but that adds a second
+   * reference-field dereference to every single access (one hop to reach the wrapper, a second to
+   * reach its {@code store}/{@code baseOffset} fields) -- exactly the shape {@code
+   * solr/prodbench/DirectCaseBenchmark}'s rung 2 (MSEG_INSTANCE) measured as costly for a
+   * MemorySegment-backed store (an instance-field segment reference loses the JIT constant-folding
+   * a {@code static final} one gets), on top of rung 3's already-accepted array-indirection tax.
+   * Two bare fields avoids that extra hop entirely, matching the exact shape rung 3's {@code
+   * MsegPartitioned.Partition}/{@code UnsafePartitioned.Partition} benchmarked (a bare {@code final
+   * long partitionOffset} field, never absorbed into a wrapper object) -- the one shape confirmed
+   * not to add cost beyond the already-measured, accepted array-indirection tax.
    */
   private final OffHeapStore group1;
+
+  private final long group1BaseOffset;
 
   private static final int GROUP1_STRIDE = 64; // one cache line per slot; must be a power of 2
   private static final int GROUP1_STRIDE_SHIFT = Integer.numberOfTrailingZeros(GROUP1_STRIDE);
@@ -152,7 +170,10 @@ class Cache2<V extends Cache2.Val> {
    * (independent of numeric adjacency) is deferred, to be picked up together with the analogous
    * "shuffle initial slot distribution" idea deferred from the Group 1 round.
    */
+  /** See {@link #group1}'s javadoc for why this is a bare store + separate baseOffset field. */
   private final OffHeapStore group2;
+
+  private final long group2BaseOffset;
 
   private static final int GROUP2_CACHE_LINE = 64;
   private static final int GROUP2_STRIDE = 32; // 2 slots per 64-byte cache line; must be a power
@@ -187,6 +208,86 @@ class Cache2<V extends Cache2.Val> {
   static ByteBuffer allocateAlignedDirect(int slots, int stride, int alignment) {
     int needed = Math.multiplyExact(slots, stride);
     return ByteBuffer.allocateDirect(needed + 2 * (alignment - 1)).alignedSlice(alignment);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Shared-store support (BlockCache.distribute() pre-allocating one combined Group 1/Group 2
+  // store spanning every partition of a single BlockCache, rather than each Cache2/Partition
+  // allocating its own -- see BlockCache#distribute)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Number of Group 1 slots a {@code Cache2}/{@code Partition} of the given {@code capacity}
+   * occupies -- exactly the {@code slots} argument the single-partition constructor below passes to
+   * {@code new UnsafeOffHeapStore(...)}. Exposed so {@code BlockCache.distribute()} can sum this
+   * across all its partitions to size one shared Group 1 store up front.
+   */
+  static int group1SlotCount(int capacity) {
+    return capacity + 1;
+  }
+
+  /**
+   * Number of Group 2 slots (including this partition's own sentinels) a {@code Cache2}/{@code
+   * Partition} of the given {@code capacity} and {@code extraSentinelSlots} occupies. Mirrors the
+   * {@code sentinelBase}/{@code COLD_HEAD}/{@code COLD_TAIL}/{@code arrayLen} computation inlined
+   * in the constructor below -- kept as a single shared formula (called from both places) rather
+   * than duplicated, since {@code BlockCache.distribute()} must reproduce it exactly to size a
+   * shared store correctly.
+   */
+  static int group2SlotCount(int capacity, int extraSentinelSlots) {
+    int sentinelBase = capacity + 1;
+    if ((sentinelBase & 1) != 0) {
+      sentinelBase++;
+    }
+    int coldTail = sentinelBase + 2;
+    return coldTail + 1 + 2 * extraSentinelSlots;
+  }
+
+  /**
+   * Allocates one {@link OffHeapStore} sized to hold {@code totalGroup1Slots} Group 1 slots
+   * combined across every partition of a single {@link BlockCache} -- see {@code
+   * BlockCache.distribute()}, which sums {@link #group1SlotCount} across all its partitions to
+   * compute this total, then slices the result into one {@code (store, baseOffset)} pair per
+   * partition (each at a {@code baseOffset} that is itself a multiple of {@link #GROUP1_STRIDE}, so
+   * every partition's own slot-0-relative addressing continues to work unchanged).
+   */
+  static OffHeapStore allocateSharedGroup1Store(int totalGroup1Slots) {
+    return new UnsafeOffHeapStore(totalGroup1Slots, GROUP1_STRIDE, GROUP1_STRIDE);
+  }
+
+  /**
+   * Allocates one {@link OffHeapStore} sized to hold {@code totalGroup2Slots} Group 2 slots
+   * combined across every partition -- see {@link #allocateSharedGroup1Store}'s javadoc for the
+   * general shape; this is Group 2's analogue, using {@link #GROUP2_STRIDE}/{@link
+   * #GROUP2_CACHE_LINE} instead. Unlike Group 1, each partition's individual {@link
+   * #group2SlotCount} is not itself guaranteed even (indeed it never is: {@code coldTail} is always
+   * even, so {@code arrayLen = coldTail + 1 + 2*extraSentinelSlots} is always odd) -- {@code
+   * BlockCache.distribute()} must round each partition's own slot count up to the next even number
+   * before summing, so every partition's {@code baseOffset} into this shared store stays a multiple
+   * of {@link #GROUP2_CACHE_LINE} (64 bytes = 2 Group-2 slots), preserving the same "every even
+   * slot index starts a fresh cache line" invariant the single-partition case already depends on
+   * (see the constructor's own comment on this below). The one slot of padding this costs per
+   * partition boundary is a single unused 32-byte Group 2 slot -- negligible.
+   */
+  static OffHeapStore allocateSharedGroup2Store(int totalGroup2Slots) {
+    return new UnsafeOffHeapStore(totalGroup2Slots, GROUP2_STRIDE, GROUP2_CACHE_LINE);
+  }
+
+  /**
+   * Converts a Group 1 slot offset (e.g. the running total of {@link #group1SlotCount} across
+   * partitions already placed into a shared store) into the byte {@code baseOffset} a
+   * subsequent-partition's constructor call must pass. Exposed so {@code BlockCache.distribute()}
+   * never needs to know {@link #GROUP1_STRIDE}/{@link #GROUP1_STRIDE_SHIFT} itself -- using this
+   * instead of reimplementing the shift keeps the two forever in lockstep, since both are driven by
+   * the identical constant.
+   */
+  static long group1SlotToByteOffset(int slotOffset) {
+    return (long) slotOffset << GROUP1_STRIDE_SHIFT;
+  }
+
+  /** Group 2 analogue of {@link #group1SlotToByteOffset}. */
+  static long group2SlotToByteOffset(int slotOffset) {
+    return (long) slotOffset << GROUP2_STRIDE_SHIFT;
   }
 
   // ---------------------------------------------------------------------------
@@ -249,10 +350,12 @@ class Cache2<V extends Cache2.Val> {
   // ---------------------------------------------------------------------------
 
   /**
-   * Initializing constructor: wires {@code initialValues} into the LRU list in order (first value
-   * at the head, last at the tail). Equivalent to calling a no-arg constructor followed by
-   * insertAtTail for each value, but faster because no CAS is needed during single-threaded
-   * initialization.
+   * Convenience constructor for an exclusively-owned {@code Cache2} instance: allocates its own
+   * private Group 1/Group 2 stores (via {@link #allocateSharedGroup1Store}/{@link
+   * #allocateSharedGroup2Store}, each sized for exactly this one instance), at base offset 0.
+   * Delegates to the primary constructor below. This is the constructor every existing caller
+   * (including all current tests) uses, and its behavior is unchanged from before shared-store
+   * support existed.
    *
    * @param capacity number of real slots
    * @param extraSentinelSlots additional sentinel slots beyond COLD_HEAD/COLD_TAIL (e.g. 2 for
@@ -260,13 +363,60 @@ class Cache2<V extends Cache2.Val> {
    * @param initialValues Val objects in desired initial LRU order (head→tail)
    */
   Cache2(int capacity, int extraSentinelSlots, Iterable<? extends V> initialValues) {
+    this(
+        capacity,
+        extraSentinelSlots,
+        initialValues,
+        allocateSharedGroup1Store(group1SlotCount(capacity)),
+        0,
+        allocateSharedGroup2Store(group2SlotCount(capacity, extraSentinelSlots)),
+        0);
+  }
+
+  /**
+   * Initializing constructor: wires {@code initialValues} into the LRU list in order (first value
+   * at the head, last at the tail). Equivalent to calling a no-arg constructor followed by
+   * insertAtTail for each value, but faster because no CAS is needed during single-threaded
+   * initialization.
+   *
+   * <p>Accepts pre-built {@code (store, baseOffset)} pairs for Group 1/Group 2 rather than
+   * allocating its own, so a caller (e.g. {@code BlockCache.distribute()}) can pass in a slice of
+   * one store shared across many partitions instead of a store exclusively owned by this one
+   * instance -- see {@link #group1}'s javadoc for why these are two separate parameters rather than
+   * a single pair object. {@code group1Store} must have been sized via {@link
+   * #group1SlotCount}{@code (capacity)} slots; {@code group2Store} must have been sized via {@link
+   * #group2SlotCount}{@code (capacity, extraSentinelSlots)} slots. Both base offsets must
+   * themselves be aligned the same way {@link #allocateSharedGroup1Store}/{@link
+   * #allocateSharedGroup2Store} align their own stores (a multiple of {@link #GROUP1_STRIDE} /
+   * {@link #GROUP2_CACHE_LINE} respectively) -- the exclusively-owned convenience constructor above
+   * satisfies this trivially with base offset 0; a shared-store caller must guarantee it when
+   * slicing up the combined store.
+   *
+   * @param capacity number of real slots
+   * @param extraSentinelSlots additional sentinel slots beyond COLD_HEAD/COLD_TAIL (e.g. 2 for
+   *     {@link DualQueueCache}'s HOT_HEAD/HOT_TAIL)
+   * @param initialValues Val objects in desired initial LRU order (head→tail)
+   * @param group1Store this instance's Group 1 store (exclusively owned, or shared)
+   * @param group1BaseOffset this instance's byte offset into {@code group1Store}
+   * @param group2Store this instance's Group 2 store (exclusively owned, or shared)
+   * @param group2BaseOffset this instance's byte offset into {@code group2Store}
+   */
+  Cache2(
+      int capacity,
+      int extraSentinelSlots,
+      Iterable<? extends V> initialValues,
+      OffHeapStore group1Store,
+      long group1BaseOffset,
+      OffHeapStore group2Store,
+      long group2BaseOffset) {
     this.capacity = capacity;
     // Real slots start at refCount=0/generation=0 (the zero-initialized default), matching the
     // implicit-zero `new Val(i--, 0)` call this construction replaces. Sized for real slots
     // 1..capacity only (slot 0 reserved/unused but still addressable) -- sentinel slots never have
     // refCount/generation read by any live code path, so no sentinel coverage is needed here,
     // unlike group2 below.
-    this.group1 = new UnsafeOffHeapStore(capacity + 1, GROUP1_STRIDE, GROUP1_STRIDE);
+    this.group1 = group1Store;
+    this.group1BaseOffset = group1BaseOffset;
     // Sentinels are spaced 2 apart (not 1) in group2's index space, each leaving its odd-offset
     // "pair partner" slot permanently unused -- at group2's 2-slots-per-64-byte-line stride, this
     // guarantees every sentinel gets its own exclusive cache line, never sharing one with another
@@ -283,14 +433,17 @@ class Cache2<V extends Cache2.Val> {
     this.COLD_TAIL = sentinelBase + 2;
     int arrayLen = COLD_TAIL + 1 + 2 * extraSentinelSlots;
     this.payload = new Val[arrayLen];
+    assert arrayLen == group2SlotCount(capacity, extraSentinelSlots);
     // Must align to GROUP2_CACHE_LINE (64), not GROUP2_STRIDE (32): the cache-line-isolation
     // guarantee group2 exists for (and that the sentinel spacing above depends on) requires every
     // even slot index to start a fresh 64-byte line, which only holds if group2's own base is
     // 64-byte aligned -- 32-byte alignment alone is not sufficient (allocateDirect's underlying
     // native allocation is not guaranteed better than 32-byte aligned, and a
     // 32-byte-but-not-64-byte-aligned base would silently shift every "even slot starts a line"
-    // assumption off by one slot).
-    this.group2 = new UnsafeOffHeapStore(arrayLen, GROUP2_STRIDE, GROUP2_CACHE_LINE);
+    // assumption off by one slot). See this constructor's own javadoc for the equivalent
+    // requirement on a caller-supplied group2BaseOffset when the store is shared.
+    this.group2 = group2Store;
+    this.group2BaseOffset = group2BaseOffset;
     assert COLD_TAIL < arrayLen;
 
     // Placeholder sentinel Val objects for the cold queue sentinels -- next/prev live in group2,
@@ -473,9 +626,19 @@ class Cache2<V extends Cache2.Val> {
   // plain inherited instance methods. Cache2 itself is package-private, so this exposes nothing
   // beyond org.apache.solr.storage.
 
+  /** Byte offset of {@code slot} within {@link #group1}, including {@link #group1BaseOffset}. */
+  private long group1Offset(int slot) {
+    return ((long) slot << GROUP1_STRIDE_SHIFT) + group1BaseOffset;
+  }
+
+  /** Byte offset of {@code slot} within {@link #group2}, including {@link #group2BaseOffset}. */
+  private long group2Offset(int slot) {
+    return ((long) slot << GROUP2_STRIDE_SHIFT) + group2BaseOffset;
+  }
+
   /** Volatile read of {@code refCount} at {@code slot}. */
   int getRefCountVolatile(int slot) {
-    return group1.getIntVolatile((long) slot << GROUP1_STRIDE_SHIFT);
+    return group1.getIntVolatile(group1Offset(slot));
   }
 
   /**
@@ -485,7 +648,7 @@ class Cache2<V extends Cache2.Val> {
    * VarHandle.compareAndExchange}.
    */
   int compareAndExchangeRefCount(int slot, int expect, int update) {
-    return group1.compareAndExchangeInt((long) slot << GROUP1_STRIDE_SHIFT, expect, update);
+    return group1.compareAndExchangeInt(group1Offset(slot), expect, update);
   }
 
   /**
@@ -494,12 +657,12 @@ class Cache2<V extends Cache2.Val> {
    * VarHandle.compareAndSet}.
    */
   boolean compareAndSetRefCount(int slot, int expect, int update) {
-    return group1.compareAndSetInt((long) slot << GROUP1_STRIDE_SHIFT, expect, update);
+    return group1.compareAndSetInt(group1Offset(slot), expect, update);
   }
 
   /** Volatile read of {@code generation} at {@code slot}. */
   int getGenerationVolatile(int slot) {
-    return group1.getIntVolatile(((long) slot << GROUP1_STRIDE_SHIFT) + GENERATION_OFFSET);
+    return group1.getIntVolatile(group1Offset(slot) + GENERATION_OFFSET);
   }
 
   /**
@@ -517,7 +680,7 @@ class Cache2<V extends Cache2.Val> {
    * accessor.
    */
   long getRefCountAndGenerationVolatile(int slot) {
-    return group1.getLongVolatile((long) slot << GROUP1_STRIDE_SHIFT);
+    return group1.getLongVolatile(group1Offset(slot));
   }
 
   /**
@@ -527,7 +690,7 @@ class Cache2<V extends Cache2.Val> {
    * calls for the same slot are not supported and may lose updates.
    */
   int incrementAndGetGeneration(int slot) {
-    long offset = ((long) slot << GROUP1_STRIDE_SHIFT) + GENERATION_OFFSET;
+    long offset = group1Offset(slot) + GENERATION_OFFSET;
     int newGen = group1.getIntVolatile(offset) + 1;
     group1.putIntVolatile(offset, newGen);
     return newGen;
@@ -538,47 +701,47 @@ class Cache2<V extends Cache2.Val> {
   // ---------------------------------------------------------------------------
 
   int getNextVolatile(int slot) {
-    return group2.getIntVolatile((long) slot << GROUP2_STRIDE_SHIFT);
+    return group2.getIntVolatile(group2Offset(slot));
   }
 
   /**
    * Pre-publication-safe plain write -- used only before the slot is reachable by other threads.
    */
   void setNextPlain(int slot, int value) {
-    group2.putInt((long) slot << GROUP2_STRIDE_SHIFT, value);
+    group2.putInt(group2Offset(slot), value);
   }
 
   int compareAndExchangeNext(int slot, int expect, int update) {
-    return group2.compareAndExchangeInt((long) slot << GROUP2_STRIDE_SHIFT, expect, update);
+    return group2.compareAndExchangeInt(group2Offset(slot), expect, update);
   }
 
   boolean compareAndSetNext(int slot, int expect, int update) {
-    return group2.compareAndSetInt((long) slot << GROUP2_STRIDE_SHIFT, expect, update);
+    return group2.compareAndSetInt(group2Offset(slot), expect, update);
   }
 
   int getPrevVolatile(int slot) {
-    return group2.getIntVolatile(((long) slot << GROUP2_STRIDE_SHIFT) + PREV_OFFSET);
+    return group2.getIntVolatile(group2Offset(slot) + PREV_OFFSET);
   }
 
   /**
    * Pre-publication-safe plain write -- used only before the slot is reachable by other threads.
    */
   void setPrevPlain(int slot, int value) {
-    group2.putInt(((long) slot << GROUP2_STRIDE_SHIFT) + PREV_OFFSET, value);
+    group2.putInt(group2Offset(slot) + PREV_OFFSET, value);
   }
 
   void setPrevVolatile(int slot, int value) {
-    group2.putIntVolatile(((long) slot << GROUP2_STRIDE_SHIFT) + PREV_OFFSET, value);
+    group2.putIntVolatile(group2Offset(slot) + PREV_OFFSET, value);
   }
 
   /** Plain (non-atomic) read, matching today's ordinary field-access semantics. */
   long getLastUnpinNanos(int slot) {
-    return group2.getLong(((long) slot << GROUP2_STRIDE_SHIFT) + LAST_UNPIN_NANOS_OFFSET);
+    return group2.getLong(group2Offset(slot) + LAST_UNPIN_NANOS_OFFSET);
   }
 
   /** Plain (non-atomic) write, matching today's ordinary field-access semantics. */
   void setLastUnpinNanos(int slot, long value) {
-    group2.putLong(((long) slot << GROUP2_STRIDE_SHIFT) + LAST_UNPIN_NANOS_OFFSET, value);
+    group2.putLong(group2Offset(slot) + LAST_UNPIN_NANOS_OFFSET, value);
   }
 
   /**
@@ -596,15 +759,15 @@ class Cache2<V extends Cache2.Val> {
    * incorrect outcome.
    */
   long getNextAndPrevVolatile(int slot) {
-    return group2.getLongVolatile((long) slot << GROUP2_STRIDE_SHIFT);
+    return group2.getLongVolatile(group2Offset(slot));
   }
 
   boolean getFromHotVolatile(int slot) {
-    return group2.getIntVolatile(((long) slot << GROUP2_STRIDE_SHIFT) + FROM_HOT_OFFSET) != 0;
+    return group2.getIntVolatile(group2Offset(slot) + FROM_HOT_OFFSET) != 0;
   }
 
   void setFromHotVolatile(int slot, boolean value) {
-    group2.putIntVolatile(((long) slot << GROUP2_STRIDE_SHIFT) + FROM_HOT_OFFSET, value ? 1 : 0);
+    group2.putIntVolatile(group2Offset(slot) + FROM_HOT_OFFSET, value ? 1 : 0);
   }
 
   // ---------------------------------------------------------------------------
@@ -967,12 +1130,52 @@ class Cache2<V extends Cache2.Val> {
     /** Hot queue: tail sentinel. */
     private final int HOT_TAIL;
 
+    /**
+     * Convenience constructor for an exclusively-owned {@code DualQueueCache}: allocates its own
+     * private Group 1/Group 2 stores. This is the constructor every existing caller (including all
+     * current tests) uses, and its behavior is unchanged from before shared-store support existed.
+     */
     DualQueueCache(int capacity, Iterable<? extends V> initialValues) {
       super(capacity, 2, initialValues);
       // Continue the spaced-by-2 sentinel scheme from COLD_TAIL (see base constructor) so
-      // HOT_HEAD/HOT_TAIL each also get an exclusive cache line.
+      // HOT_HEAD/HOT_TAIL each also get an exclusive cache line. Assigned directly here (and
+      // identically in the other constructor below) rather than via a shared private helper
+      // method, since HOT_HEAD/HOT_TAIL are blank finals -- Java's definite-assignment rules for
+      // a final field require the assignment to appear directly in the constructor body (or a
+      // constructor this(...) chains to), not in an arbitrary instance method called from it.
       this.HOT_HEAD = COLD_TAIL + 2;
       this.HOT_TAIL = COLD_TAIL + 4;
+      initHotSentinelPayload();
+    }
+
+    /**
+     * Accepts pre-built {@code (store, baseOffset)} pairs for Group 1/Group 2, exactly like {@link
+     * Cache2}'s own wider constructor -- see its javadoc for sizing/alignment requirements ({@code
+     * extraSentinelSlots=2} is implicit here, matching this class's own HOT_HEAD/HOT_TAIL
+     * sentinels, so callers must have sized {@code group2Store} via {@code
+     * Cache2.group2SlotCount(capacity, 2)}).
+     */
+    DualQueueCache(
+        int capacity,
+        Iterable<? extends V> initialValues,
+        OffHeapStore group1Store,
+        long group1BaseOffset,
+        OffHeapStore group2Store,
+        long group2BaseOffset) {
+      super(
+          capacity, 2, initialValues, group1Store, group1BaseOffset, group2Store, group2BaseOffset);
+      // See the other constructor's comment on why this is duplicated rather than shared.
+      this.HOT_HEAD = COLD_TAIL + 2;
+      this.HOT_TAIL = COLD_TAIL + 4;
+      initHotSentinelPayload();
+    }
+
+    /**
+     * Shared tail of both constructors above -- everything after HOT_HEAD/HOT_TAIL themselves are
+     * assigned (which, being blank finals, cannot happen inside this method -- see the
+     * constructors' own comments).
+     */
+    private void initHotSentinelPayload() {
       assert HOT_TAIL < payload.length;
       // Placeholder sentinel Val objects for the hot queue -- next/prev live in group2.
       payload[HOT_HEAD] = new Val();
