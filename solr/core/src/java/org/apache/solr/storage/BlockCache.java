@@ -1506,11 +1506,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   /**
-   * Builds all of this {@code BlockCache}'s partitions, backed by ONE shared Group 1 store and ONE
-   * shared Group 2 store spanning every partition combined, rather than each {@code
-   * Partition}/{@code Cache2} allocating its own -- see {@code Cache2#allocateSharedGroup1Store}/
-   * {@code Cache2#allocateSharedGroup2Store}'s javadoc for the rationale and the Group-2-specific
-   * even-slot-count padding this requires per partition.
+   * Builds all of this {@code BlockCache}'s partitions, backed by ONE combined Group 1 + Group 2
+   * store spanning every partition of both groups combined, rather than each {@code
+   * Partition}/{@code Cache2} (or even each group) allocating its own -- see {@code
+   * Cache2#allocateSharedGroup1And2Stores}'s javadoc for the rationale (a single combined
+   * allocation is required for the {@code MemorySegment} path's one-shot JVM-wide claim) and the
+   * Group-2-specific even-slot-count padding this requires per partition.
    */
   private static Partition[] distribute(int nBlocks) {
     int nPartitions = computeNPartitions(nBlocks);
@@ -1518,38 +1519,43 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     int remainder = nBlocks % nPartitions;
 
     // Pass 1: compute every partition's capacity and Group 1/Group 2 slot counts up front, so the
-    // two shared stores can be allocated once, sized for the exact combined total -- this must be
-    // a separate pass from construction below, since both stores must exist in full before any
-    // Partition (which immediately writes into its slice at construction time) can be built.
+    // one combined shared store can be allocated once, sized for the exact combined total -- this
+    // must be a separate pass from construction below, since the store must exist in full before
+    // any Partition (which immediately writes into its slice at construction time) can be built.
     int[] capacities = new int[nPartitions];
     int totalGroup1Slots = 0;
     int totalGroup2Slots = 0;
-    // Running Group 2 slot offset into the shared store, in SLOTS (not bytes) -- converted to a
-    // byte baseOffset only once each partition's own slot count is known, in pass 2 below.
+    // Running Group 1/Group 2 slot offsets into the shared store, in SLOTS -- converted to real
+    // offsets only once every partition's slot count is known, in pass 2 below.
+    int[] group1SlotOffsets = new int[nPartitions];
     int[] group2SlotOffsets = new int[nPartitions];
     for (int i = 0; i < nPartitions; i++) {
       int count = base + (i < remainder ? 1 : 0);
       capacities[i] = count;
+      group1SlotOffsets[i] = totalGroup1Slots;
       totalGroup1Slots += Cache2.group1SlotCount(count);
       group2SlotOffsets[i] = totalGroup2Slots;
       int group2Slots = Cache2.group2SlotCount(count, /* extraSentinelSlots= */ 2);
-      // Group 2's per-partition slot count is always odd (see Cache2#allocateSharedGroup2Store's
-      // javadoc) -- round up to even so every partition's baseOffset below stays a multiple of
-      // GROUP2_CACHE_LINE (64 bytes = 2 Group-2 slots), preserving the "every even slot index
-      // starts a fresh cache line" invariant Cache2's own sentinel spacing depends on. The one
-      // slot of padding this costs per partition boundary is a single unused 32-byte slot.
+      // Group 2's per-partition slot count is always odd (see
+      // Cache2#allocateSharedGroup1And2Stores's javadoc) -- round up to even so every partition's
+      // baseOffset below stays a multiple of GROUP2_CACHE_LINE (64 bytes = 2 Group-2 slots),
+      // preserving the "every even slot index starts a fresh cache line" invariant Cache2's own
+      // sentinel spacing depends on. The one slot of padding this costs per partition boundary is
+      // a single unused 32-byte slot.
       if ((group2Slots & 1) != 0) {
         group2Slots++;
       }
       totalGroup2Slots += group2Slots;
     }
-    OffHeapStore sharedGroup1 = Cache2.allocateSharedGroup1Store(totalGroup1Slots);
-    OffHeapStore sharedGroup2 = Cache2.allocateSharedGroup2Store(totalGroup2Slots);
+    Cache2.SharedStores shared =
+        Cache2.allocateSharedGroup1And2Stores(totalGroup1Slots, totalGroup2Slots);
+    OffHeapStore sharedStore = shared.store;
 
-    // Pass 2: construct each Partition against its own slice of the two shared stores.
+    // Pass 2: construct each Partition against its own slice of the one shared store -- Group 1's
+    // slice starts at offset 0; Group 2's slice starts at shared.group2BaseOffset (Group 1's own
+    // total size), per Cache2#allocateSharedGroup1And2Stores's layout.
     Partition[] parts = new Partition[nPartitions];
     int offset = 0;
-    int group1SlotOffset = 0;
     for (int i = 0; i < nPartitions; i++) {
       int count = capacities[i];
       int from = offset;
@@ -1569,13 +1575,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
                   return new Val(i--);
                 }
               };
-      long group1BaseOffset = Cache2.group1SlotToByteOffset(group1SlotOffset);
-      long group2BaseOffset = Cache2.group2SlotToByteOffset(group2SlotOffsets[i]);
+      long group1BaseOffset = Cache2.group1SlotToOffset(group1SlotOffsets[i]);
+      long group2BaseOffset =
+          shared.group2BaseOffset + Cache2.group2SlotToOffset(group2SlotOffsets[i]);
       parts[i] =
           new Partition(
-              count, poolList, sharedGroup1, group1BaseOffset, sharedGroup2, group2BaseOffset);
+              count, poolList, sharedStore, group1BaseOffset, sharedStore, group2BaseOffset);
       offset += count;
-      group1SlotOffset += Cache2.group1SlotCount(count);
     }
     return parts;
   }
