@@ -92,13 +92,10 @@ class Cache2<V extends Cache2.Val> {
   // ---------------------------------------------------------------------------
   //
   // Both groups are backed by an OffHeapStore -- an abstraction over the raw memory op mechanism
-  // (see OffHeapStore's javadoc), currently always UnsafeOffHeapStore (sun.misc.Unsafe against a
-  // direct ByteBuffer's native base address), chosen experimentally in preference to
-  // MethodHandles.byteBufferViewVarHandle (which profiling showed carrying unexpectedly high
-  // per-access overhead, plausibly from VarHandle's bounds/liveness checking on every call) -- see
-  // solr/prodbench/FINDINGS.md for the investigation that selected it and the open question of
-  // whether a MemorySegment-backed OffHeapStore could close the (now well-characterized, modest)
-  // remaining gap.
+  // (see OffHeapStore's javadoc). Which concrete implementation backs a given instance (a
+  // MemorySegment-backed store, a plain ByteBuffer-backed store, or sun.misc.Unsafe) is selected
+  // by allocateSharedGroup1And2Stores, below, via the solr.cache2.offHeapStoreMode system
+  // property.
   //
   // Each store's stride is a power of 2, so slot -> byte-offset is a plain left shift
   // (slot << *_STRIDE_SHIFT) rather than a multiply -- safe from overflow without a per-access
@@ -123,35 +120,33 @@ class Cache2<V extends Cache2.Val> {
 
   /**
    * Group 1 (refCount/generation) storage -- see the class javadoc. One {@code (refCount,
-   * generation)} pair per 64-byte stride (at byte offsets 0 and {@link #GENERATION_OFFSET} within
-   * the stride; the remaining 56 bytes are unused padding), indexed by real slot {@code
-   * 1..capacity} (slot 0 reserved/unused but still addressable).
+   * generation)} pair per 64-byte stride (at offsets 0 and {@link #GENERATION_OFFSET} within the
+   * stride; the remaining 56 bytes are unused padding), indexed by real slot {@code 1..capacity}
+   * (slot 0 reserved/unused but still addressable).
    *
    * <p>The store itself may be shared across every partition of a single {@link BlockCache} (see
    * {@code BlockCache.distribute()}) rather than allocated exclusively for this one {@code Cache2}
    * instance, in which case {@link #group1BaseOffset} is this instance's non-zero slice into it.
    * Deliberately kept as two separate {@code private final} fields (a reference and a primitive
-   * {@code long}), NOT wrapped in a single pair object: an earlier draft of this change used a
-   * small {@code OffHeapRegion(store, baseOffset)} wrapper here, but that adds a second
+   * {@code long}), NOT wrapped in a single pair object: wrapping them would add a second
    * reference-field dereference to every single access (one hop to reach the wrapper, a second to
-   * reach its {@code store}/{@code baseOffset} fields) -- exactly the shape {@code
-   * solr/prodbench/DirectCaseBenchmark}'s rung 2 (MSEG_INSTANCE) measured as costly for a
-   * MemorySegment-backed store (an instance-field segment reference loses the JIT constant-folding
-   * a {@code static final} one gets), on top of rung 3's already-accepted array-indirection tax.
-   * Two bare fields avoids that extra hop entirely, matching the exact shape rung 3's {@code
-   * MsegPartitioned.Partition}/{@code UnsafePartitioned.Partition} benchmarked (a bare {@code final
-   * long partitionOffset} field, never absorbed into a wrapper object) -- the one shape confirmed
-   * not to add cost beyond the already-measured, accepted array-indirection tax.
+   * reach its {@code store}/{@code baseOffset} fields), which for a {@code MemorySegment}-backed
+   * store also costs the JIT constant-folding a {@code static final} segment reference otherwise
+   * gets. Two bare fields avoids that extra hop entirely.
    */
   private final OffHeapStore group1;
 
+  /** This instance's base offset into {@link #group1} -- see that field's javadoc. */
   private final long group1BaseOffset;
 
   private static final int GROUP1_STRIDE = 64; // one cache line per slot; must be a power of 2
   private static final int GROUP1_STRIDE_SHIFT = Integer.numberOfTrailingZeros(GROUP1_STRIDE);
+  // Per-slot shift into group1, in OffHeapStore's int-indexed units (4 bytes/int) rather than
+  // bytes.
+  private static final int GROUP1_SLOT_SHIFT = GROUP1_STRIDE_SHIFT - 2;
   // refCount's offset within the stride is 0, so it needs no named offset constant -- just the
   // raw slot base.
-  private static final int GENERATION_OFFSET = 4;
+  private static final int GENERATION_OFFSET = 1;
 
   /**
    * Group 2 (next/prev/fromHot/lastUnpinNanos) storage -- see the class javadoc. 2 slots per
@@ -172,21 +167,29 @@ class Cache2<V extends Cache2.Val> {
    * likely-adjacent-access slots. Randomizing/decorrelating which two slots pair up on a line
    * (independent of numeric adjacency) is deferred, to be picked up together with the analogous
    * "shuffle initial slot distribution" idea deferred from the Group 1 round.
+   *
+   * <p>See {@link #group1}'s javadoc for why this is a bare store + separate baseOffset field.
    */
-  /** See {@link #group1}'s javadoc for why this is a bare store + separate baseOffset field. */
   private final OffHeapStore group2;
 
+  /** This instance's base offset into {@link #group2} -- see that field's javadoc. */
   private final long group2BaseOffset;
 
   private static final int GROUP2_CACHE_LINE = 64;
   private static final int GROUP2_STRIDE = 32; // 2 slots per 64-byte cache line; must be a power
   // of 2
   private static final int GROUP2_STRIDE_SHIFT = Integer.numberOfTrailingZeros(GROUP2_STRIDE);
+  // Per-slot shift into group2, in OffHeapStore's int-indexed units (4 bytes/int) rather than
+  // bytes.
+  private static final int GROUP2_SLOT_SHIFT = GROUP2_STRIDE_SHIFT - 2;
   // next's offset within the stride is 0, so it needs no named offset constant -- just the raw
   // slot base.
-  private static final int PREV_OFFSET = 4;
-  private static final int FROM_HOT_OFFSET = 8;
-  private static final int LAST_UNPIN_NANOS_OFFSET = 16; // 8-byte-aligned within the 32B stride
+  private static final int PREV_OFFSET = 1;
+  private static final int FROM_HOT_OFFSET = 2;
+  // lastUnpinNanos is accessed via the long-typed getLong/putLong, whose index unit is 8 bytes
+  // (double PREV_OFFSET/FROM_HOT_OFFSET's 4-byte unit) -- offset 16 within the 32-byte stride is
+  // the 3rd 8-byte unit, i.e. long-index 2.
+  private static final int LAST_UNPIN_NANOS_LONG_OFFSET = 2;
 
   /**
    * Allocates a direct {@link ByteBuffer} of at least {@code slots * stride} bytes, aligned to a
@@ -306,19 +309,18 @@ class Cache2<V extends Cache2.Val> {
    * these totals, then slices the single returned store into one {@code (store, baseOffset)} pair
    * per group per partition.
    *
-   * <p>Combining Group 1 and Group 2 into a single allocation (rather than two separate ones, as an
-   * earlier version of this method did) is required for the {@code MemorySegment} path: a {@code
-   * MemorySegment}-backed store's one-shot, JVM-wide claim ({@link
+   * <p>Group 1 and Group 2 must be combined into a single allocation for the {@code MemorySegment}
+   * path: a {@code MemorySegment}-backed store's one-shot, JVM-wide claim ({@link
    * OffHeapStores#tryClaimMemorySegment}) can only ever be won once, by one caller, for one size --
    * so {@code BlockCache.distribute()} must make exactly one combined-size claim attempt covering
    * both groups, not two independent ones (where only whichever group's call happened to run first
    * would ever get real {@code MemorySegment} backing, and the other would always fall back).
    *
-   * <p>Returns a {@link SharedStores} holding the one store plus Group 2's byte {@code baseOffset}
-   * within it (Group 1 always starts at offset 0; Group 2 immediately follows, at an offset that is
-   * automatically a multiple of {@link #GROUP2_CACHE_LINE} since Group 1's own total size is
-   * already, by construction, a multiple of {@link #GROUP1_STRIDE} -- a stronger alignment than
-   * {@link #GROUP2_CACHE_LINE} requires).
+   * <p>Returns a {@link SharedStores} holding the one store plus Group 2's base offset within it
+   * (Group 1 always starts at offset 0; Group 2 immediately follows, at an offset that is
+   * automatically a multiple of {@link #GROUP2_SLOT_SHIFT}'s granularity since Group 1's own total
+   * size is already, by construction, a multiple of {@link #GROUP1_SLOT_SHIFT}'s -- a stronger
+   * alignment than Group 2 requires).
    */
   static SharedStores allocateSharedGroup1And2Stores(int totalGroup1Slots, int totalGroup2Slots) {
     long totalGroup1Bytes = (long) totalGroup1Slots << GROUP1_STRIDE_SHIFT;
@@ -363,12 +365,15 @@ class Cache2<V extends Cache2.Val> {
         }
         break;
     }
-    return new SharedStores(store, totalGroup1Bytes);
+    // Group 2's base offset is Group 1's own total size, in OffHeapStore's int-indexed units (4
+    // bytes/int) rather than bytes.
+    long group2BaseOffset = totalGroup1Bytes >>> 2;
+    return new SharedStores(store, group2BaseOffset);
   }
 
   /**
    * Holds the single {@link OffHeapStore} {@link #allocateSharedGroup1And2Stores} allocates, plus
-   * Group 2's byte offset within it (Group 1 always starts at offset 0 -- not itself stored here,
+   * Group 2's base offset within it (Group 1 always starts at offset 0 -- not itself stored here,
    * since it's always zero). A plain value-holder, not an {@code OffHeapStore} wrapper itself --
    * unrelated to the "bare fields vs. wrapper object" JIT-folding concern {@link #group1}'s javadoc
    * discusses, since this is returned once at construction time (never held as a per-access hot
@@ -386,25 +391,24 @@ class Cache2<V extends Cache2.Val> {
 
   /**
    * Converts a Group 1 slot offset (e.g. the running total of {@link #group1SlotCount} across
-   * partitions already placed into a shared store) into the byte offset a given partition's own
-   * {@code group1BaseOffset} must be, relative to Group 1's own start (byte 0) within the combined
-   * store {@link #allocateSharedGroup1And2Stores} returns. Exposed so {@code
-   * BlockCache.distribute()} never needs to know {@link #GROUP1_STRIDE}/{@link
-   * #GROUP1_STRIDE_SHIFT} itself -- using this instead of reimplementing the shift keeps the two
-   * forever in lockstep, since both are driven by the identical constant.
+   * partitions already placed into a shared store) into the offset a given partition's own {@code
+   * group1BaseOffset} must be, relative to Group 1's own start (offset 0) within the combined store
+   * {@link #allocateSharedGroup1And2Stores} returns. Exposed so {@code BlockCache.distribute()}
+   * never needs to know {@link #GROUP1_SLOT_SHIFT} itself -- using this instead of reimplementing
+   * the shift keeps the two forever in lockstep, since both are driven by the identical constant.
    */
-  static long group1SlotToByteOffset(int slotOffset) {
-    return (long) slotOffset << GROUP1_STRIDE_SHIFT;
+  static long group1SlotToOffset(int slotOffset) {
+    return (long) slotOffset << GROUP1_SLOT_SHIFT;
   }
 
   /**
-   * Group 2 analogue of {@link #group1SlotToByteOffset} -- relative to Group 2's own start within
-   * the combined store, i.e. the caller must separately add {@link SharedStores#group2BaseOffset}
-   * to get that group's real absolute offset into the combined store (see {@code
+   * Group 2 analogue of {@link #group1SlotToOffset} -- relative to Group 2's own start within the
+   * combined store, i.e. the caller must separately add {@link SharedStores#group2BaseOffset} to
+   * get that group's real absolute offset into the combined store (see {@code
    * BlockCache.distribute()}'s usage).
    */
-  static long group2SlotToByteOffset(int slotOffset) {
-    return (long) slotOffset << GROUP2_STRIDE_SHIFT;
+  static long group2SlotToOffset(int slotOffset) {
+    return (long) slotOffset << GROUP2_SLOT_SHIFT;
   }
 
   // ---------------------------------------------------------------------------
@@ -516,20 +520,19 @@ class Cache2<V extends Cache2.Val> {
    * a single pair object. {@code group1Store} must have been sized via {@link
    * #group1SlotCount}{@code (capacity)} slots; {@code group2Store} must have been sized via {@link
    * #group2SlotCount}{@code (capacity, extraSentinelSlots)} slots. Both base offsets must
-   * themselves be aligned the same way {@link #allocateSharedGroup1Store}/{@link
-   * #allocateSharedGroup2Store} align their own stores (a multiple of {@link #GROUP1_STRIDE} /
-   * {@link #GROUP2_CACHE_LINE} respectively) -- the exclusively-owned convenience constructor above
-   * satisfies this trivially with base offset 0; a shared-store caller must guarantee it when
-   * slicing up the combined store.
+   * themselves be aligned the same way {@link #allocateSharedGroup1And2Stores} aligns its own store
+   * (a multiple of each group's own per-slot stride) -- the exclusively-owned convenience
+   * constructor above satisfies this trivially with base offset 0; a shared-store caller must
+   * guarantee it when slicing up the combined store.
    *
    * @param capacity number of real slots
    * @param extraSentinelSlots additional sentinel slots beyond COLD_HEAD/COLD_TAIL (e.g. 2 for
    *     {@link DualQueueCache}'s HOT_HEAD/HOT_TAIL)
    * @param initialValues Val objects in desired initial LRU order (head→tail)
    * @param group1Store this instance's Group 1 store (exclusively owned, or shared)
-   * @param group1BaseOffset this instance's byte offset into {@code group1Store}
+   * @param group1BaseOffset this instance's base offset into {@code group1Store}
    * @param group2Store this instance's Group 2 store (exclusively owned, or shared)
-   * @param group2BaseOffset this instance's byte offset into {@code group2Store}
+   * @param group2BaseOffset this instance's base offset into {@code group2Store}
    */
   Cache2(
       int capacity,
@@ -756,14 +759,24 @@ class Cache2<V extends Cache2.Val> {
   // plain inherited instance methods. Cache2 itself is package-private, so this exposes nothing
   // beyond org.apache.solr.storage.
 
-  /** Byte offset of {@code slot} within {@link #group1}, including {@link #group1BaseOffset}. */
+  /**
+   * Offset of {@code slot}'s stride base within {@link #group1}, including {@link
+   * #group1BaseOffset} -- always even (every slot's stride is 16 ints, {@link #group1BaseOffset} is
+   * always a multiple of {@code 1 << GROUP1_SLOT_SHIFT}, i.e. 16), so halving it (via {@code >>>
+   * 1}) for a long-typed access is always exact, never truncating.
+   */
   private long group1Offset(int slot) {
-    return ((long) slot << GROUP1_STRIDE_SHIFT) + group1BaseOffset;
+    return ((long) slot << GROUP1_SLOT_SHIFT) + group1BaseOffset;
   }
 
-  /** Byte offset of {@code slot} within {@link #group2}, including {@link #group2BaseOffset}. */
+  /**
+   * Offset of {@code slot}'s stride base within {@link #group2}, including {@link
+   * #group2BaseOffset} -- always even, for the same reason {@link #group1Offset}'s result is (every
+   * slot's stride is 8 ints; {@link #group2BaseOffset} is always a multiple of {@code 1 <<
+   * GROUP2_SLOT_SHIFT}, i.e. 8, per {@code allocateSharedGroup1And2Stores}'s alignment guarantee).
+   */
   private long group2Offset(int slot) {
-    return ((long) slot << GROUP2_STRIDE_SHIFT) + group2BaseOffset;
+    return ((long) slot << GROUP2_SLOT_SHIFT) + group2BaseOffset;
   }
 
   /** Volatile read of {@code refCount} at {@code slot}. */
@@ -810,7 +823,7 @@ class Cache2<V extends Cache2.Val> {
    * accessor.
    */
   long getRefCountAndGenerationVolatile(int slot) {
-    return group1.getLongVolatile(group1Offset(slot));
+    return group1.getLongVolatile(group1Offset(slot) >>> 1);
   }
 
   /**
@@ -866,12 +879,12 @@ class Cache2<V extends Cache2.Val> {
 
   /** Plain (non-atomic) read, matching today's ordinary field-access semantics. */
   long getLastUnpinNanos(int slot) {
-    return group2.getLong(group2Offset(slot) + LAST_UNPIN_NANOS_OFFSET);
+    return group2.getLong((group2Offset(slot) >>> 1) + LAST_UNPIN_NANOS_LONG_OFFSET);
   }
 
   /** Plain (non-atomic) write, matching today's ordinary field-access semantics. */
   void setLastUnpinNanos(int slot, long value) {
-    group2.putLong(group2Offset(slot) + LAST_UNPIN_NANOS_OFFSET, value);
+    group2.putLong((group2Offset(slot) >>> 1) + LAST_UNPIN_NANOS_LONG_OFFSET, value);
   }
 
   /**
@@ -889,7 +902,7 @@ class Cache2<V extends Cache2.Val> {
    * incorrect outcome.
    */
   long getNextAndPrevVolatile(int slot) {
-    return group2.getLongVolatile(group2Offset(slot));
+    return group2.getLongVolatile(group2Offset(slot) >>> 1);
   }
 
   boolean getFromHotVolatile(int slot) {

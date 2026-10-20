@@ -26,8 +26,7 @@ import sun.misc.Unsafe;
 
 /**
  * {@link OffHeapStore} backed by raw {@code sun.misc.Unsafe} memory ops against a direct {@link
- * ByteBuffer}'s native base address -- today's shipped, benchmark-validated approach (see {@code
- * solr/prodbench/FINDINGS.md}), extracted unchanged from {@link Cache2}'s pre-{@link
+ * ByteBuffer}'s native base address, extracted unchanged from {@link Cache2}'s pre-{@link
  * OffHeapStore}-abstraction implementation.
  *
  * <p>Allocates its own dedicated {@link ByteBuffer} per instance (one per {@code
@@ -35,14 +34,18 @@ import sun.misc.Unsafe;
  * {@code org.apache.lucene.store.MemorySegmentOffHeapStore}), this one has no
  * fast-path/generic-path distinction, since {@code Unsafe}'s per-instance {@code final long
  * baseAddr} field carries none of the JIT constant-folding sensitivity a {@code MemorySegment}
- * reference does (see {@code solr/prodbench/FINDINGS.md}'s rung 2 finding) -- instance-field
- * addressing already performs identically to the would-be "fast path" for this implementation, so
- * there is nothing to gain from a Holder-pattern split here.
+ * reference does -- instance-field addressing already performs identically to the would-be "fast
+ * path" for this implementation, so there is nothing to gain from a Holder-pattern split here.
  *
  * <p>Deliberately kept in {@code solr/core} (not moved into Lucene alongside {@link OffHeapStore}):
  * {@code sun.misc.Unsafe} requires {@code solr/core/build.gradle}'s {@code -XDignore.symbol.file}
  * compiler override to suppress its mandatory "internal proprietary API" warning, a {@code
  * solr/core}-specific accommodation Lucene's build does not (and should not need to) carry.
+ *
+ * <p>{@code Unsafe} is natively byte-addressed, unlike {@code MemorySegmentOffHeapStore}'s {@code
+ * arrayElementVarHandle} (a scaled element index) -- so every accessor here converts {@link
+ * OffHeapStore}'s element-indexed {@code intIndex}/{@code longIndex} parameters (see that
+ * interface's javadoc) to a byte offset via a fixed left-shift before the {@code Unsafe} call.
  */
 final class UnsafeOffHeapStore implements OffHeapStore {
   private static final Unsafe UNSAFE = getUnsafe();
@@ -97,31 +100,31 @@ final class UnsafeOffHeapStore implements OffHeapStore {
   }
 
   @Override
-  public int getIntVolatile(long offset) {
-    return UNSAFE.getIntVolatile(null, baseAddr + offset);
+  public int getIntVolatile(long intIndex) {
+    return UNSAFE.getIntVolatile(null, baseAddr + (intIndex << 2));
   }
 
   @Override
-  public void putInt(long offset, int value) {
-    UNSAFE.putInt(null, baseAddr + offset, value);
+  public void putInt(long intIndex, int value) {
+    UNSAFE.putInt(null, baseAddr + (intIndex << 2), value);
   }
 
   @Override
-  public void putIntVolatile(long offset, int value) {
-    UNSAFE.putIntVolatile(null, baseAddr + offset, value);
+  public void putIntVolatile(long intIndex, int value) {
+    UNSAFE.putIntVolatile(null, baseAddr + (intIndex << 2), value);
   }
 
   @Override
-  public boolean compareAndSetInt(long offset, int expect, int update) {
-    return UNSAFE.compareAndSwapInt(null, baseAddr + offset, expect, update);
+  public boolean compareAndSetInt(long intIndex, int expect, int update) {
+    return UNSAFE.compareAndSwapInt(null, baseAddr + (intIndex << 2), expect, update);
   }
 
   @Override
-  public int compareAndExchangeInt(long offset, int expect, int update) {
+  public int compareAndExchangeInt(long intIndex, int expect, int update) {
     // sun.misc.Unsafe has no native compare-and-exchange (witness-returning CAS) -- emulate via
     // the standard getVolatile+compareAndSwap retry loop (the same technique j.u.c.a classes used
     // before VarHandle.compareAndExchange existed). See Cache2's original javadoc for detail.
-    long addr = baseAddr + offset;
+    long addr = baseAddr + (intIndex << 2);
     for (; ; ) {
       int cur = UNSAFE.getIntVolatile(null, addr);
       if (cur != expect) {
@@ -136,17 +139,17 @@ final class UnsafeOffHeapStore implements OffHeapStore {
   }
 
   @Override
-  public long getLongVolatile(long offset) {
-    return UNSAFE.getLongVolatile(null, baseAddr + offset);
+  public long getLongVolatile(long longIndex) {
+    return UNSAFE.getLongVolatile(null, baseAddr + (longIndex << 3));
   }
 
   @Override
-  public long getLong(long offset) {
-    return UNSAFE.getLong(null, baseAddr + offset);
+  public long getLong(long longIndex) {
+    return UNSAFE.getLong(null, baseAddr + (longIndex << 3));
   }
 
   @Override
-  public void putLong(long offset, long value) {
-    UNSAFE.putLong(null, baseAddr + offset, value);
+  public void putLong(long longIndex, long value) {
+    UNSAFE.putLong(null, baseAddr + (longIndex << 3), value);
   }
 }

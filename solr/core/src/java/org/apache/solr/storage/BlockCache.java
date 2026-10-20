@@ -1525,8 +1525,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     int[] capacities = new int[nPartitions];
     int totalGroup1Slots = 0;
     int totalGroup2Slots = 0;
-    // Running Group 1/Group 2 slot offsets into the shared store, in SLOTS (not bytes) --
-    // converted to byte offsets only once every partition's slot count is known, in pass 2 below.
+    // Running Group 1/Group 2 slot offsets into the shared store, in SLOTS -- converted to real
+    // offsets only once every partition's slot count is known, in pass 2 below.
     int[] group1SlotOffsets = new int[nPartitions];
     int[] group2SlotOffsets = new int[nPartitions];
     for (int i = 0; i < nPartitions; i++) {
@@ -1552,8 +1552,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     OffHeapStore sharedStore = shared.store;
 
     // Pass 2: construct each Partition against its own slice of the one shared store -- Group 1's
-    // slice starts at byte offset 0; Group 2's slice starts at shared.group2BaseOffset (Group 1's
-    // own total byte size), per Cache2#allocateSharedGroup1And2Stores's layout.
+    // slice starts at offset 0; Group 2's slice starts at shared.group2BaseOffset (Group 1's own
+    // total size), per Cache2#allocateSharedGroup1And2Stores's layout.
     Partition[] parts = new Partition[nPartitions];
     int offset = 0;
     for (int i = 0; i < nPartitions; i++) {
@@ -1575,9 +1575,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
                   return new Val(i--);
                 }
               };
-      long group1BaseOffset = Cache2.group1SlotToByteOffset(group1SlotOffsets[i]);
+      long group1BaseOffset = Cache2.group1SlotToOffset(group1SlotOffsets[i]);
       long group2BaseOffset =
-          shared.group2BaseOffset + Cache2.group2SlotToByteOffset(group2SlotOffsets[i]);
+          shared.group2BaseOffset + Cache2.group2SlotToOffset(group2SlotOffsets[i]);
       parts[i] =
           new Partition(
               count, poolList, sharedStore, group1BaseOffset, sharedStore, group2BaseOffset);
