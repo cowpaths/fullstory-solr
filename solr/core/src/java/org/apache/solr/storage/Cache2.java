@@ -342,6 +342,20 @@ class Cache2<V extends Cache2.Val> {
    * (falls back to the int-capped path) are exposed.
    */
   static SharedStores allocateSharedGroup1And2Stores(int totalGroup1Slots, int totalGroup2Slots) {
+    // totalGroup2Slots must be even for totalGroup2Bytes to be a multiple of GROUP1_STRIDE (64) --
+    // GROUP2_STRIDE is 32, half of GROUP1_STRIDE, so an odd slot count leaves a dangling half-
+    // GROUP1_STRIDE remainder that would silently truncate away when a fallback (Unsafe/ByteBuffer)
+    // path later recovers an int slot count via totalBytes / GROUP1_STRIDE, undersizing the real
+    // allocation by one Group 2 slot (32 bytes) and letting the last Group 2 sentinel write land
+    // past the actual buffer. Round up defensively here (the one shared choke point every caller
+    // goes through) rather than relying on every caller to pad its own totalGroup2Slots -- {@code
+    // BlockCache.distribute()} already pads per-partition for an unrelated reason (keeping each
+    // partition's own baseOffset cache-line-aligned) and happens to arrive here with an
+    // already-even sum, but the single-partition convenience constructor does not pad at all, so
+    // this check must not be caller-optional.
+    if ((totalGroup2Slots & 1) != 0) {
+      totalGroup2Slots++;
+    }
     long totalGroup1Bytes = (long) totalGroup1Slots << GROUP1_STRIDE_SHIFT;
     long totalGroup2Bytes = (long) totalGroup2Slots << GROUP2_STRIDE_SHIFT;
     long totalBytes = totalGroup1Bytes + totalGroup2Bytes;
