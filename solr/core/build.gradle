@@ -19,9 +19,10 @@ apply plugin: 'java-library'
 
 description = 'Apache Solr Core'
 
-// org.apache.solr.storage.Cache2 experimentally uses sun.misc.Unsafe directly (in preference to
+// org.apache.solr.storage.UnsafeOffHeapStore (Cache2's off-heap backing, behind the OffHeapStore
+// abstraction) uses sun.misc.Unsafe directly, in preference to
 // MethodHandles.byteBufferViewVarHandle, which profiling showed carrying unexpectedly high
-// per-access overhead). javac emits a mandatory "Unsafe is internal proprietary API" warning for
+// per-access overhead. javac emits a mandatory "Unsafe is internal proprietary API" warning for
 // this that is NOT gated by -Xlint:deprecation (and so is unaffected by the project-wide
 // "-Xlint:-deprecation" in lucene/gradle/java/javac.gradle) and cannot be suppressed via
 // @SuppressWarnings/forbiddenapis's suppressAnnotations -- only -XDignore.symbol.file (a javac

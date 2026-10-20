@@ -17,14 +17,10 @@
 
 package org.apache.solr.storage;
 
-import java.lang.reflect.Field;
-import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import org.apache.solr.common.util.SuppressForbidden;
-import sun.misc.Unsafe;
 
 /**
  * Fixed-capacity concurrent LRU cache.
@@ -92,58 +88,19 @@ class Cache2<V extends Cache2.Val> {
   // Off-heap storage: Group 1 (refCount/generation) and Group 2 (next/prev/fromHot/lastUnpinNanos)
   // ---------------------------------------------------------------------------
   //
-  // Both groups are backed by a single 64-byte-aligned direct ByteBuffer, accessed via raw
-  // sun.misc.Unsafe memory ops against the buffer's native base address -- experimentally, in
-  // preference to MethodHandles.byteBufferViewVarHandle (which profiling showed carrying
-  // unexpectedly high per-access overhead, plausibly from VarHandle's bounds/liveness checking on
-  // every call). allocateAlignedDirect() (below) handles the allocation/alignment/margin
-  // arithmetic shared by both groups; group1Addr/group2Addr (below) cache each group's base
-  // address once at construction, since re-deriving it (reflectively, via the Buffer.address
-  // field) on every access would defeat the purpose.
+  // Both groups are backed by an OffHeapStore -- an abstraction over the raw memory op mechanism
+  // (see OffHeapStore's javadoc), currently always UnsafeOffHeapStore (sun.misc.Unsafe against a
+  // direct ByteBuffer's native base address), chosen experimentally in preference to
+  // MethodHandles.byteBufferViewVarHandle (which profiling showed carrying unexpectedly high
+  // per-access overhead, plausibly from VarHandle's bounds/liveness checking on every call) -- see
+  // solr/prodbench/FINDINGS.md for the investigation that selected it and the open question of
+  // whether a MemorySegment-backed OffHeapStore could close the (now well-characterized, modest)
+  // remaining gap.
   //
   // Each store's stride is a power of 2, so slot -> byte-offset is a plain left shift
   // (slot << *_STRIDE_SHIFT) rather than a multiply -- safe from overflow without a per-access
   // check, since each constructor's one-time Math.multiplyExact(slots, STRIDE) already proves the
   // largest valid offset fits in an int.
-
-  private static final Unsafe UNSAFE = getUnsafe();
-
-  @SuppressForbidden(reason = "Needs access to sun.misc.Unsafe to avoid VarHandle access overhead")
-  private static Unsafe getUnsafe() {
-    try {
-      Field f = Unsafe.class.getDeclaredField("theUnsafe");
-      f.setAccessible(true);
-      return (Unsafe) f.get(null);
-    } catch (ReflectiveOperationException e) {
-      throw new ExceptionInInitializerError(e);
-    }
-  }
-
-  // Buffer.address is the JDK-internal long field every direct Buffer implementation (including
-  // a ByteBuffer.allocateDirect().alignedSlice(...) result, confirmed empirically to carry its own
-  // correctly-aligned address, not its unsliced parent's) stores its native base address in.
-  // Reading it via Unsafe.getLong(buffer, offset) -- rather than normal reflective Field.get(),
-  // which would need setAccessible(true) to succeed and (being a final field read through
-  // reflection on a non-constant field) is not guaranteed to observe the correct value in all
-  // circumstances -- requires no --add-opens: Unsafe.objectFieldOffset/getLong bypass the normal
-  // reflective access-check path entirely, the same way Lucene's own
-  // MappedByteBufferIndexInputProvider.unmapHackImpl() bypasses it to invoke Unsafe's internal
-  // buffer-cleaner method.
-  private static final long BUFFER_ADDRESS_FIELD_OFFSET = bufferAddressFieldOffset();
-
-  @SuppressForbidden(reason = "Needs access to sun.misc.Unsafe to avoid VarHandle access overhead")
-  private static long bufferAddressFieldOffset() {
-    try {
-      return UNSAFE.objectFieldOffset(Buffer.class.getDeclaredField("address"));
-    } catch (NoSuchFieldException e) {
-      throw new ExceptionInInitializerError(e);
-    }
-  }
-
-  /** The native base address of a direct {@link ByteBuffer}'s backing memory. */
-  private static long baseAddress(ByteBuffer direct) {
-    return UNSAFE.getLong(direct, BUFFER_ADDRESS_FIELD_OFFSET);
-  }
 
   static {
     // getRefCountAndGenerationVolatile()/getNextAndPrevVolatile() pack two adjacent ints (at
@@ -166,17 +123,8 @@ class Cache2<V extends Cache2.Val> {
    * generation)} pair per 64-byte stride (at byte offsets 0 and {@link #GENERATION_OFFSET} within
    * the stride; the remaining 56 bytes are unused padding), indexed by real slot {@code
    * 1..capacity} (slot 0 reserved/unused but still addressable).
-   *
-   * <p>Retained (not just its address) purely to keep the underlying native allocation alive -- the
-   * direct buffer's {@code Cleaner} runs when the {@code ByteBuffer} itself becomes unreachable, so
-   * dropping this reference while {@link #group1Addr} is still in use would risk the backing memory
-   * being freed out from under live {@code Unsafe} accesses. Never read from directly outside the
-   * constructor; all access goes through {@link #group1Addr}.
    */
-  private final ByteBuffer group1;
-
-  /** Cached {@link #baseAddress} of {@link #group1}, computed once at construction. */
-  private final long group1Addr;
+  private final OffHeapStore group1;
 
   private static final int GROUP1_STRIDE = 64; // one cache line per slot; must be a power of 2
   private static final int GROUP1_STRIDE_SHIFT = Integer.numberOfTrailingZeros(GROUP1_STRIDE);
@@ -204,10 +152,7 @@ class Cache2<V extends Cache2.Val> {
    * (independent of numeric adjacency) is deferred, to be picked up together with the analogous
    * "shuffle initial slot distribution" idea deferred from the Group 1 round.
    */
-  private final ByteBuffer group2;
-
-  /** Cached {@link #baseAddress} of {@link #group2}, computed once at construction. */
-  private final long group2Addr;
+  private final OffHeapStore group2;
 
   private static final int GROUP2_CACHE_LINE = 64;
   private static final int GROUP2_STRIDE = 32; // 2 slots per 64-byte cache line; must be a power
@@ -321,8 +266,7 @@ class Cache2<V extends Cache2.Val> {
     // 1..capacity only (slot 0 reserved/unused but still addressable) -- sentinel slots never have
     // refCount/generation read by any live code path, so no sentinel coverage is needed here,
     // unlike group2 below.
-    this.group1 = allocateAlignedDirect(capacity + 1, GROUP1_STRIDE, GROUP1_STRIDE);
-    this.group1Addr = baseAddress(group1);
+    this.group1 = new UnsafeOffHeapStore(capacity + 1, GROUP1_STRIDE, GROUP1_STRIDE);
     // Sentinels are spaced 2 apart (not 1) in group2's index space, each leaving its odd-offset
     // "pair partner" slot permanently unused -- at group2's 2-slots-per-64-byte-line stride, this
     // guarantees every sentinel gets its own exclusive cache line, never sharing one with another
@@ -346,8 +290,7 @@ class Cache2<V extends Cache2.Val> {
     // native allocation is not guaranteed better than 32-byte aligned, and a
     // 32-byte-but-not-64-byte-aligned base would silently shift every "even slot starts a line"
     // assumption off by one slot).
-    this.group2 = allocateAlignedDirect(arrayLen, GROUP2_STRIDE, GROUP2_CACHE_LINE);
-    this.group2Addr = baseAddress(group2);
+    this.group2 = new UnsafeOffHeapStore(arrayLen, GROUP2_STRIDE, GROUP2_CACHE_LINE);
     assert COLD_TAIL < arrayLen;
 
     // Placeholder sentinel Val objects for the cold queue sentinels -- next/prev live in group2,
@@ -532,7 +475,7 @@ class Cache2<V extends Cache2.Val> {
 
   /** Volatile read of {@code refCount} at {@code slot}. */
   int getRefCountVolatile(int slot) {
-    return UNSAFE.getIntVolatile(null, group1Addr + (slot << GROUP1_STRIDE_SHIFT));
+    return group1.getIntVolatile((long) slot << GROUP1_STRIDE_SHIFT);
   }
 
   /**
@@ -540,14 +483,9 @@ class Cache2<V extends Cache2.Val> {
    * {@code expect}, returning the witness value (the value observed immediately before this call,
    * which equals {@code expect} iff the exchange succeeded) -- same semantics as {@code
    * VarHandle.compareAndExchange}.
-   *
-   * <p>{@code sun.misc.Unsafe} has no native compare-and-exchange (witness-returning CAS) -- {@link
-   * #compareAndExchange} below emulates it via the standard getVolatile+compareAndSwap retry loop
-   * (the same technique {@code j.u.c.a} classes used before {@code VarHandle.compareAndExchange}
-   * existed).
    */
   int compareAndExchangeRefCount(int slot, int expect, int update) {
-    return compareAndExchange(group1Addr + (slot << GROUP1_STRIDE_SHIFT), expect, update);
+    return group1.compareAndExchangeInt((long) slot << GROUP1_STRIDE_SHIFT, expect, update);
   }
 
   /**
@@ -556,14 +494,12 @@ class Cache2<V extends Cache2.Val> {
    * VarHandle.compareAndSet}.
    */
   boolean compareAndSetRefCount(int slot, int expect, int update) {
-    return UNSAFE.compareAndSwapInt(
-        null, group1Addr + (slot << GROUP1_STRIDE_SHIFT), expect, update);
+    return group1.compareAndSetInt((long) slot << GROUP1_STRIDE_SHIFT, expect, update);
   }
 
   /** Volatile read of {@code generation} at {@code slot}. */
   int getGenerationVolatile(int slot) {
-    return UNSAFE.getIntVolatile(
-        null, group1Addr + (slot << GROUP1_STRIDE_SHIFT) + GENERATION_OFFSET);
+    return group1.getIntVolatile(((long) slot << GROUP1_STRIDE_SHIFT) + GENERATION_OFFSET);
   }
 
   /**
@@ -581,7 +517,7 @@ class Cache2<V extends Cache2.Val> {
    * accessor.
    */
   long getRefCountAndGenerationVolatile(int slot) {
-    return UNSAFE.getLongVolatile(null, group1Addr + (slot << GROUP1_STRIDE_SHIFT));
+    return group1.getLongVolatile((long) slot << GROUP1_STRIDE_SHIFT);
   }
 
   /**
@@ -591,31 +527,10 @@ class Cache2<V extends Cache2.Val> {
    * calls for the same slot are not supported and may lose updates.
    */
   int incrementAndGetGeneration(int slot) {
-    long addr = group1Addr + (slot << GROUP1_STRIDE_SHIFT) + GENERATION_OFFSET;
-    int newGen = UNSAFE.getIntVolatile(null, addr) + 1;
-    UNSAFE.putIntVolatile(null, addr, newGen);
+    long offset = ((long) slot << GROUP1_STRIDE_SHIFT) + GENERATION_OFFSET;
+    int newGen = group1.getIntVolatile(offset) + 1;
+    group1.putIntVolatile(offset, newGen);
     return newGen;
-  }
-
-  /**
-   * Emulates {@code VarHandle.compareAndExchange} semantics using {@code
-   * Unsafe.getIntVolatile}/{@code compareAndSwapInt}: returns the witness value observed
-   * immediately before this call, which equals {@code expect} iff the exchange succeeded. See
-   * {@link #compareAndExchangeRefCount} for why this emulation is necessary.
-   */
-  private static int compareAndExchange(long addr, int expect, int update) {
-    for (; ; ) {
-      int cur = UNSAFE.getIntVolatile(null, addr);
-      if (cur != expect) {
-        return cur;
-      }
-      if (UNSAFE.compareAndSwapInt(null, addr, expect, update)) {
-        return expect;
-      }
-      // Lost a race between the read above and the CAS (another thread changed, then possibly
-      // changed back, the value at addr) -- retry with a fresh read, exactly as a real hardware
-      // CMPXCHG witness-read would naturally reflect.
-    }
   }
 
   // ---------------------------------------------------------------------------
@@ -623,50 +538,47 @@ class Cache2<V extends Cache2.Val> {
   // ---------------------------------------------------------------------------
 
   int getNextVolatile(int slot) {
-    return UNSAFE.getIntVolatile(null, group2Addr + (slot << GROUP2_STRIDE_SHIFT));
+    return group2.getIntVolatile((long) slot << GROUP2_STRIDE_SHIFT);
   }
 
   /**
    * Pre-publication-safe plain write -- used only before the slot is reachable by other threads.
    */
   void setNextPlain(int slot, int value) {
-    UNSAFE.putInt(null, group2Addr + (slot << GROUP2_STRIDE_SHIFT), value);
+    group2.putInt((long) slot << GROUP2_STRIDE_SHIFT, value);
   }
 
   int compareAndExchangeNext(int slot, int expect, int update) {
-    return compareAndExchange(group2Addr + (slot << GROUP2_STRIDE_SHIFT), expect, update);
+    return group2.compareAndExchangeInt((long) slot << GROUP2_STRIDE_SHIFT, expect, update);
   }
 
   boolean compareAndSetNext(int slot, int expect, int update) {
-    return UNSAFE.compareAndSwapInt(
-        null, group2Addr + (slot << GROUP2_STRIDE_SHIFT), expect, update);
+    return group2.compareAndSetInt((long) slot << GROUP2_STRIDE_SHIFT, expect, update);
   }
 
   int getPrevVolatile(int slot) {
-    return UNSAFE.getIntVolatile(null, group2Addr + (slot << GROUP2_STRIDE_SHIFT) + PREV_OFFSET);
+    return group2.getIntVolatile(((long) slot << GROUP2_STRIDE_SHIFT) + PREV_OFFSET);
   }
 
   /**
    * Pre-publication-safe plain write -- used only before the slot is reachable by other threads.
    */
   void setPrevPlain(int slot, int value) {
-    UNSAFE.putInt(null, group2Addr + (slot << GROUP2_STRIDE_SHIFT) + PREV_OFFSET, value);
+    group2.putInt(((long) slot << GROUP2_STRIDE_SHIFT) + PREV_OFFSET, value);
   }
 
   void setPrevVolatile(int slot, int value) {
-    UNSAFE.putIntVolatile(null, group2Addr + (slot << GROUP2_STRIDE_SHIFT) + PREV_OFFSET, value);
+    group2.putIntVolatile(((long) slot << GROUP2_STRIDE_SHIFT) + PREV_OFFSET, value);
   }
 
   /** Plain (non-atomic) read, matching today's ordinary field-access semantics. */
   long getLastUnpinNanos(int slot) {
-    return UNSAFE.getLong(
-        null, group2Addr + (slot << GROUP2_STRIDE_SHIFT) + LAST_UNPIN_NANOS_OFFSET);
+    return group2.getLong(((long) slot << GROUP2_STRIDE_SHIFT) + LAST_UNPIN_NANOS_OFFSET);
   }
 
   /** Plain (non-atomic) write, matching today's ordinary field-access semantics. */
   void setLastUnpinNanos(int slot, long value) {
-    UNSAFE.putLong(
-        null, group2Addr + (slot << GROUP2_STRIDE_SHIFT) + LAST_UNPIN_NANOS_OFFSET, value);
+    group2.putLong(((long) slot << GROUP2_STRIDE_SHIFT) + LAST_UNPIN_NANOS_OFFSET, value);
   }
 
   /**
@@ -684,17 +596,15 @@ class Cache2<V extends Cache2.Val> {
    * incorrect outcome.
    */
   long getNextAndPrevVolatile(int slot) {
-    return UNSAFE.getLongVolatile(null, group2Addr + (slot << GROUP2_STRIDE_SHIFT));
+    return group2.getLongVolatile((long) slot << GROUP2_STRIDE_SHIFT);
   }
 
   boolean getFromHotVolatile(int slot) {
-    return UNSAFE.getIntVolatile(null, group2Addr + (slot << GROUP2_STRIDE_SHIFT) + FROM_HOT_OFFSET)
-        != 0;
+    return group2.getIntVolatile(((long) slot << GROUP2_STRIDE_SHIFT) + FROM_HOT_OFFSET) != 0;
   }
 
   void setFromHotVolatile(int slot, boolean value) {
-    UNSAFE.putIntVolatile(
-        null, group2Addr + (slot << GROUP2_STRIDE_SHIFT) + FROM_HOT_OFFSET, value ? 1 : 0);
+    group2.putIntVolatile(((long) slot << GROUP2_STRIDE_SHIFT) + FROM_HOT_OFFSET, value ? 1 : 0);
   }
 
   // ---------------------------------------------------------------------------
