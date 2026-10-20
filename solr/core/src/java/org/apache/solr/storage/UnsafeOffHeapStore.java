@@ -152,4 +152,9 @@ final class UnsafeOffHeapStore implements OffHeapStore {
   public void putLong(long longIndex, long value) {
     UNSAFE.putLong(null, baseAddr + (longIndex << 3), value);
   }
+
+  @Override
+  public long getAndSetLong(long longIndex, long value) {
+    return UNSAFE.getAndSetLong(null, baseAddr + (longIndex << 3), value);
+  }
 }

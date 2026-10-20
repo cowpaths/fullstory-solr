@@ -921,6 +921,20 @@ class Cache2<V extends Cache2.Val> {
   }
 
   /**
+   * Atomically sets {@code lastUnpinNanos} at {@code slot} to {@code value} and returns the
+   * previous value, as a single {@code VarHandle.getAndSet}-semantics operation -- see {@link
+   * OffHeapStore#getAndSetLong}. Used in place of a separate {@link #getLastUnpinNanos} + {@link
+   * #setLastUnpinNanos} pair purely to fuse two memory accesses into one (the same motivation as
+   * {@link #getRefCountAndGenerationVolatile}/{@link #getNextAndPrevVolatile}'s fused reads);
+   * {@code lastUnpinNanos} itself is still just a racy heuristic (see this class's Group 2 javadoc)
+   * -- nothing here depends on the read-then-write being atomic for correctness, only the fusion's
+   * performance benefit is the point.
+   */
+  long getAndSetLastUnpinNanos(int slot, long value) {
+    return group2.getAndSetLong((group2Offset(slot) >>> 1) + LAST_UNPIN_NANOS_LONG_OFFSET, value);
+  }
+
+  /**
    * Volatile read of {@code next} and {@code prev} at {@code slot} together, as a single 8-byte
    * access -- {@code next} in the low 32 bits, {@code prev} in the high 32 bits (native byte order;
    * both fields occupy one naturally-aligned {@code long}-sized region within the stride: offsets 0
@@ -1370,8 +1384,7 @@ class Cache2<V extends Cache2.Val> {
 
     @Override
     protected final boolean insertAtHead(int head, int slot, boolean recordAccess) {
-      long lastUnpin = getLastUnpinNanos(slot);
-      setLastUnpinNanos(slot, recordAccess ? System.nanoTime() : 0);
+      long lastUnpin = getAndSetLastUnpinNanos(slot, recordAccess ? System.nanoTime() : 0);
       boolean toHot = toHot(lastUnpin);
       setFromHotVolatile(slot, toHot);
       super.insertAtHead(toHot ? HOT_HEAD : head, slot, recordAccess);
