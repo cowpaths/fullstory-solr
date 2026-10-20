@@ -20,6 +20,7 @@ package org.apache.solr.storage;
 import java.lang.reflect.Field;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
+import org.apache.lucene.store.OffHeapStore;
 import org.apache.solr.common.util.SuppressForbidden;
 import sun.misc.Unsafe;
 
@@ -29,13 +30,19 @@ import sun.misc.Unsafe;
  * solr/prodbench/FINDINGS.md}), extracted unchanged from {@link Cache2}'s pre-{@link
  * OffHeapStore}-abstraction implementation.
  *
- * <p>Allocates its own dedicated {@link ByteBuffer} per instance (one per {@link
- * OffHeapStores#create} call) -- unlike the experimental {@code MemorySegment} implementation, this
- * one has no fast-path/generic-path distinction, since {@code Unsafe}'s per-instance {@code final
- * long baseAddr} field carries none of the JIT constant-folding sensitivity a {@code MemorySegment}
- * reference does (see {@code solr/prodbench/FINDINGS.md}'s rung 2 finding) -- instance-field
- * addressing already performs identically to the would-be "fast path" for this implementation, so
- * there is nothing to gain from a Holder-pattern split here.
+ * <p>Allocates its own dedicated {@link ByteBuffer} per instance (one per {@code
+ * UnsafeOffHeapStore} constructor call) -- unlike the {@code MemorySegment} implementation (see
+ * {@code org.apache.lucene.store.MemorySegmentOffHeapStore}), this one has no fast-path/generic-path
+ * distinction, since {@code Unsafe}'s per-instance {@code final long baseAddr} field carries none of
+ * the JIT constant-folding sensitivity a {@code MemorySegment} reference does (see {@code
+ * solr/prodbench/FINDINGS.md}'s rung 2 finding) -- instance-field addressing already performs
+ * identically to the would-be "fast path" for this implementation, so there is nothing to gain from
+ * a Holder-pattern split here.
+ *
+ * <p>Deliberately kept in {@code solr/core} (not moved into Lucene alongside {@link OffHeapStore}):
+ * {@code sun.misc.Unsafe} requires {@code solr/core/build.gradle}'s {@code -XDignore.symbol.file}
+ * compiler override to suppress its mandatory "internal proprietary API" warning, a
+ * {@code solr/core}-specific accommodation Lucene's build does not (and should not need to) carry.
  */
 final class UnsafeOffHeapStore implements OffHeapStore {
   private static final Unsafe UNSAFE = getUnsafe();

@@ -21,6 +21,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import org.apache.lucene.store.OffHeapStore;
 
 /**
  * Fixed-capacity concurrent LRU cache.

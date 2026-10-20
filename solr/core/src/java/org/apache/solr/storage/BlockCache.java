@@ -73,6 +73,7 @@ import org.apache.lucene.internal.hppc.LongObjectHashMap;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.BlockCacheMapping;
 import org.apache.lucene.store.BlockCacheMmapProvider;
+import org.apache.lucene.store.OffHeapStore;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
