@@ -1233,7 +1233,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private final long totalBytes;
   private final boolean alwaysPrepareWrite;
-  private volatile boolean firstAcquireLogged;
   private final AtomicLong prepareWriteFailures = new AtomicLong();
   private final LongAdder acquisitions = new LongAdder();
   private final LongAdder poolExhausted = new LongAdder();
@@ -1663,10 +1662,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * sets outHandle[0] to the encoded handle.
    */
   Val acquireNode(long[] outHandle) {
-    if (!firstAcquireLogged) {
-      firstAcquireLogged = true;
-      log.info("acquireNode first call, mapping={}", mapping);
-    }
     int i = tlrIndex();
     Partition p = partitions[i];
     Val v = p.acquireNode(outHandle);
