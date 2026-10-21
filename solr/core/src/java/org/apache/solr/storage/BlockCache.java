@@ -634,6 +634,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
     @Override
     public void onRequestClose(long startNanos) {
+      if (CACHE_REQUEST_SCOPED_BATCH) {
+        if (operationBatch.get() == this) {
+          operationBatch.remove();
+        }
+      }
       @SuppressWarnings("unchecked")
       Map.Entry<Object, Batch> extant =
           (Map.Entry<Object, Batch>) BATCH_ENTRY.getAndSet(this, CLOSED_ENTRY);
@@ -814,7 +819,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // Operation-level batch (e.g. merges, commits, core load): groups NodeRefStruct registrations
   // on the current thread into a single Batch, reducing PhantomReference count. Opened via
   // openBatchScope(). Static ThreadLocal: assumes one BlockCache per JVM (true in this deployment).
-  private static final ThreadLocal<SegmentScopedBatch> operationBatch = new ThreadLocal<>();
+  private static final ThreadLocal<Object> operationBatch = new ThreadLocal<>();
 
   private interface SegmentScopedBatch {
     Batch getBatch(long segmentId, boolean readOnce);
@@ -837,6 +842,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   static final boolean BATCH_REQUEST_SCOPED =
       EnvUtils.getPropertyAsBool("solr.core.batchRequestScoped", true);
 
+  static final boolean CACHE_REQUEST_SCOPED_BATCH =
+      EnvUtils.getPropertyAsBool("solr.core.cacheRequestScopedBatch", true);
+
   Closeable openBatchScope(boolean openSearcher) {
     if (openSearcher ? BATCH_SEARCHER_SEGMENT_SCOPED : BATCH_MERGE_SEGMENT_SCOPED) {
       return openBatchScopePerSegment(openSearcher);
@@ -849,26 +857,28 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     // thread-local, so plain map is fine
     LongObjectHashMap<Batch> segMap = new LongObjectHashMap<>();
     operationBatch.set(
-        (segId, readOnce) -> {
-          long key = readOnce ? 0 : segId;
-          int idx = segMap.indexOf(key);
-          Batch ret;
-          if (idx >= 0) {
-            ret = segMap.indexGet(idx);
-            if (ret.batchSize >= BATCH_ROLLOVER) {
-              // In practice we generally see only a handful per entry here, so this should be
-              // rare -- but merge workflows may share this per-segment path for some inputs, so
-              // rolling over (rather than just warning) costs us nothing and covers that case too.
-              ret.strongRef = CLOSED_SENTINEL;
-              ret = registerNewBatch(openSearcher);
-              segMap.indexReplace(idx, ret);
-            }
-          } else {
-            ret = registerNewBatch(openSearcher);
-            segMap.indexInsert(idx, key, ret);
-          }
-          return ret;
-        });
+        (SegmentScopedBatch)
+            (segId, readOnce) -> {
+              long key = readOnce ? 0 : segId;
+              int idx = segMap.indexOf(key);
+              Batch ret;
+              if (idx >= 0) {
+                ret = segMap.indexGet(idx);
+                if (ret.batchSize >= BATCH_ROLLOVER) {
+                  // In practice we generally see only a handful per entry here, so this should be
+                  // rare -- but merge workflows may share this per-segment path for some inputs, so
+                  // rolling over (rather than just warning) costs us nothing and covers that case
+                  // too.
+                  ret.strongRef = CLOSED_SENTINEL;
+                  ret = registerNewBatch(openSearcher);
+                  segMap.indexReplace(idx, ret);
+                }
+              } else {
+                ret = registerNewBatch(openSearcher);
+                segMap.indexInsert(idx, key, ret);
+              }
+              return ret;
+            });
     return () -> {
       operationBatch.remove();
       for (LongObjectHashMap.LongObjectCursor<Batch> c : segMap) {
@@ -909,15 +919,16 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private Closeable openBatchScopePlain(boolean openSearcher) {
     Batch[] batch = new Batch[] {registerNewBatch(openSearcher)};
     operationBatch.set(
-        (segId, readOnce) -> {
-          Batch ret = batch[0];
-          if (ret.batchSize >= BATCH_ROLLOVER) {
-            ret.strongRef = CLOSED_SENTINEL;
-            ret = registerNewBatch(openSearcher);
-            batch[0] = ret;
-          }
-          return ret;
-        });
+        (SegmentScopedBatch)
+            (segId, readOnce) -> {
+              Batch ret = batch[0];
+              if (ret.batchSize >= BATCH_ROLLOVER) {
+                ret.strongRef = CLOSED_SENTINEL;
+                ret = registerNewBatch(openSearcher);
+                batch[0] = ret;
+              }
+              return ret;
+            });
     return () -> {
       operationBatch.remove();
       batch[0].strongRef = CLOSED_SENTINEL;
@@ -973,9 +984,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   private NodeRefStruct batched(CachedCompressedIndexInput in) {
-    SegmentScopedBatch scopedBatch = operationBatch.get(); // scopedBatch takes precedence!
-    if (scopedBatch != null) {
-      Batch batch = scopedBatch.getBatch(in.segId(), in.rootKind.readOnce);
+    Object batchObject = operationBatch.get(); // scopedBatch takes precedence!
+    if (batchObject instanceof SegmentScopedBatch) {
+      Batch batch = ((SegmentScopedBatch) batchObject).getBatch(in.segId(), in.rootKind.readOnce);
       Object referent = batch.getLiveReferent();
       if (referent != null) {
         // Fast path: reuse cached batch (request or operation scope) on this thread.
@@ -986,23 +997,56 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         }
       }
     } else if (BATCH_REQUEST_SCOPED) {
-      SolrQueryRequest req;
-      SolrRequestInfo sri = SolrRequestInfo.getRequestInfo();
-      if (sri != null && (req = sri.getReq()) != null) {
-        Map<Object, Object> ctx = req.getContext();
-        BatchEntry b;
-        synchronized (ctx) {
-          b = (BatchEntry) ctx.computeIfAbsent(referentKey, batchInitFunction);
+      Map.Entry<Object, Batch> entry;
+      BatchEntry b;
+      if (batchObject == null) {
+        b = getBatchEntryFromRequest();
+        if (b == null || (entry = b.getBatch(this)) == null) {
+          return null;
         }
-        Map.Entry<Object, Batch> entry = b.getBatch(this);
-        if (entry != null) {
-          NodeRefStruct nrs = new NodeRefStruct();
-          if (entry.getValue().addToClose(nrs)) {
-            in.setBatchReferrent(entry.getKey(), b.missLatencyNanos);
-            return nrs;
+      } else {
+        // Best-effort: cached BatchEntry may actually belong to a different, still-open request
+        // (nested same-thread request, or cross-thread escape) -- reused anyway; accepted
+        // misattribution, not a bug. See getBatchEntryFromRequest().
+        b = (BatchEntry) batchObject;
+        entry = b.getBatch(this);
+        if (entry == null) {
+          // when operating off a stale cached batch, we must clear it and re-init BatchEntry
+          operationBatch.remove();
+          b = getBatchEntryFromRequest();
+          if (b == null || (entry = b.getBatch(this)) == null) {
+            return null;
           }
         }
       }
+      NodeRefStruct nrs = new NodeRefStruct();
+      if (entry.getValue().addToClose(nrs)) {
+        in.setBatchReferrent(entry.getKey(), b.missLatencyNanos);
+        return nrs;
+      }
+    } else {
+      assert batchObject == null;
+    }
+    return null;
+  }
+
+  private BatchEntry getBatchEntryFromRequest() {
+    SolrQueryRequest req;
+    SolrRequestInfo sri = SolrRequestInfo.getRequestInfo();
+    if (sri != null && (req = sri.getReq()) != null) {
+      Map<Object, Object> ctx = req.getContext();
+      BatchEntry ret;
+      synchronized (ctx) {
+        ret = (BatchEntry) ctx.computeIfAbsent(referentKey, batchInitFunction);
+      }
+      if (CACHE_REQUEST_SCOPED_BATCH) {
+        // Both call sites in batched() guarantee operationBatch.get() == null here already
+        // (either read as null there, or just explicitly cleared via operationBatch.remove()
+        // before this call), so there's nothing to avoid clobbering. Caching this per-thread
+        // (rather than per-request) is itself the accepted best-effort tradeoff -- see batched().
+        operationBatch.set(ret);
+      }
+      return ret;
     }
     return null;
   }
