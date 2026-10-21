@@ -32,6 +32,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
@@ -1055,27 +1056,42 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       return getLiveDocSet();
     }
 
-    DocSet answer;
-    if (!OPTIMISTIC_QUERY_LIMITED_CACHE_COMPUTATION
-        && QueryLimits.getCurrentLimits().isLimitsEnabled()) {
-      // If there is a possibility of timeout for this query, then don't reserve a computation slot.
-      // Further, we can't naively wait for an in progress computation to finish, because if we time
-      // out before it does then we won't even have partial results to provide. We could possibly
-      // wait for the query to finish in parallel with our own results and if they complete first
-      // use that instead, but we'll leave that to implement later.
-      answer = cache.get(query);
+    long start = System.nanoTime();
+    AtomicBoolean cacheHit = new AtomicBoolean(true);
+    DocSet answer = null;
+    try {
+      if (!OPTIMISTIC_QUERY_LIMITED_CACHE_COMPUTATION
+          && QueryLimits.getCurrentLimits().isLimitsEnabled()) {
+        // If there is a possibility of timeout for this query, then don't reserve a computation
+        // slot.
+        // Further, we can't naively wait for an in progress computation to finish, because if we
+        // time
+        // out before it does then we won't even have partial results to provide. We could possibly
+        // wait for the query to finish in parallel with our own results and if they complete first
+        // use that instead, but we'll leave that to implement later.
+        answer = cache.get(query);
 
-      // Not found in the cache so compute and put in the cache
-      if (answer == null) {
-        answer = getDocSetNC(query, null);
-        cache.put(query, answer);
+        // Not found in the cache so compute and put in the cache
+        if (answer == null) {
+          cacheHit.set(false);
+          answer = getDocSetNC(query, null);
+          cache.put(query, answer);
+        }
+      } else {
+        answer =
+            cache.computeIfAbsent(
+                query,
+                q -> {
+                  cacheHit.set(false);
+                  return getDocSetNC(q, null);
+                });
       }
-    } else {
-      answer = cache.computeIfAbsent(query, q -> getDocSetNC(q, null));
-    }
 
-    assert !(answer instanceof MutableBitDocSet) : "should not be mutable";
-    return answer;
+      assert !(answer instanceof MutableBitDocSet) : "should not be mutable";
+      return answer;
+    } finally {
+      addCacheStats(query, cacheHit.get(), answer != null ? answer.size() : -1, start);
+    }
   }
 
   private static final MatchAllDocsQuery MATCH_ALL_DOCS_QUERY = new MatchAllDocsQuery();
@@ -1496,6 +1512,36 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
    */
   public DocSet getDocSet(Query query) throws IOException {
     return getDocSet(query, null);
+  }
+
+  public static void addCacheStats(
+      Query key, boolean cacheHit, int docSetIdCount, long startTimeNanos) {
+    SolrRequestInfo reqInfo = SolrRequestInfo.getRequestInfo();
+
+    String keyString = key != null ? key.toString() : "null";
+    if (keyString.length() > 100) {
+      keyString = keyString.substring(0, 100) + "...";
+    }
+
+    if (reqInfo != null && reqInfo.getResponseBuilder() != null) {
+      org.apache.solr.common.util.NamedList<Object> stat =
+          new org.apache.solr.common.util.SimpleOrderedMap<>();
+
+      stat.add("key", keyString);
+
+      long elapsedMs =
+          java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNanos);
+      stat.add("time", elapsedMs);
+
+      stat.add("cacheHit", cacheHit);
+      stat.add("docSetIdCount", docSetIdCount);
+
+      if (reqInfo.getResponseBuilder().getFilterStatsTriggerType() != null) {
+        stat.add("triggerType", reqInfo.getResponseBuilder().getFilterStatsTriggerType());
+      }
+
+      reqInfo.getResponseBuilder().addFilterStats(stat);
+    }
   }
 
   /**
