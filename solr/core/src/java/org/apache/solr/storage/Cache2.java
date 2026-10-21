@@ -1261,6 +1261,7 @@ class Cache2<V extends Cache2.Val> {
       if (compareAndSetRefCount(candidate, 0, -1)) {
         return candidate;
       }
+      Thread.onSpinWait();
     }
     return NULL_SLOT;
   }
