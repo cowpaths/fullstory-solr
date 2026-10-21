@@ -1249,10 +1249,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // the reader had to wait for the block to be fetched and decompressed.
   private final LongAdder blocksDecompressedDemand = new LongAdder();
   // Latency of demand block loads (see blocksDecompressedDemand); a bare Timer beforehand so tests
-  // and other pre-registration callers of recordDecompressionDemand() still work.
-  private volatile Timer blocksDecompressedDemandTime = new Timer();
+  // and other pre-registration callers of recordDecompressionDemand() still work. Not volatile:
+  // initializeMetrics() swaps in the real Timer once, during CoreContainer load, which already
+  // happens-before any request-serving thread via Solr's own startup sequencing -- no separate
+  // visibility guarantee needed here.
+  private Timer blocksDecompressedDemandTime = new Timer();
   // where applicable. analogous to `blocksDecompressedDemandTime`, but batched per request.
-  private volatile Timer perRequestDemandTime = new Timer();
+  private Timer perRequestDemandTime = new Timer();
   // Asynchronous (readahead) decompressions: supply() called from BlockPreloader on the ioExec
   // thread pool, ahead of any reader request.
   private final LongAdder blocksDecompressedReadahead = new LongAdder();
