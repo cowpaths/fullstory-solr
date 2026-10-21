@@ -1107,7 +1107,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         l.unlock(stamp);
       }
       CACHED.setVolatile(c.cached, cacheBlockOrd, ret);
-      assert !isPopulated();
+      assert !populated;
       populated = true;
       if (waiting) {
         synchronized (this) {
@@ -1126,12 +1126,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
      */
     @SuppressWarnings("ReferenceEquality")
     public ByteBuffer join(BlockCache c, long[] waitNanos) {
-      if (!isPopulated()) {
+      if (!populated) {
         waiting = true;
         long startNanos = System.nanoTime();
         long remainingMillis = JOIN_TIMEOUT_MILLIS;
         synchronized (this) {
-          if (!isPopulated()) {
+          if (!populated) {
             for (; ; ) {
               try {
                 wait(remainingMillis);
@@ -1139,7 +1139,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
                 Thread.currentThread().interrupt();
                 throw new ThreadInterruptedException(e);
               }
-              if (isPopulated()) {
+              if (populated) {
                 break;
               }
               remainingMillis =
@@ -1169,7 +1169,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     public void completeExceptionally(BlockCache c, Throwable t) {
       assert cacheBlockOrd >= 0;
       CACHED.setVolatile(c.cached, cacheBlockOrd, EXCEPTION_SENTINEL);
-      assert !isPopulated();
+      assert !populated;
       populated = true;
       if (waiting) {
         synchronized (this) {
@@ -1956,7 +1956,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           closeSkippedPinned.increment();
           return false;
       }
-    } else if (lostCAS.isPopulated()) {
+    } else if (lostCAS.populated) {
       p.unpin(handle, false);
       closeSkippedPinned.increment();
       return false;
