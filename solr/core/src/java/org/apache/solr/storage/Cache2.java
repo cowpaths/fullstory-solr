@@ -997,12 +997,9 @@ class Cache2<V extends Cache2.Val> {
         Thread.onSpinWait();
         cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
       }
-      if (cur == REMOVED_LINK) {
-        return cur;
-      }
 
       // compareAndSetNext(slot, cur, reservation)
-      if (group2.compareAndSetInt(group2Offset, cur, reservation)) {
+      if (cur == REMOVED_LINK || group2.compareAndSetInt(group2Offset, cur, reservation)) {
         return cur;
       }
       Thread.onSpinWait();
