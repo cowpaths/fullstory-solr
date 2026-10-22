@@ -991,122 +991,77 @@ class Cache2<V extends Cache2.Val> {
    * takes advantage of this by passing the {@code next} half of a joint next/prev snapshot (see
    * {@link #getNextAndPrevVolatile}) instead of a dedicated read.
    */
-  private int reserve(long group2Offset, int reservation, int cur) {
+  private int reserve(int slot, int reservation, int cur) {
     for (; ; ) {
       while (cur == RESERVED_LINK) {
-        Thread.onSpinWait();
-        cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
+        if (reservation == REMOVED_LINK) {
+          Thread.yield();
+        }
+        cur = getNextVolatile(slot);
       }
       if (cur == REMOVED_LINK) {
         return cur;
       }
-
-      // compareAndSetNext(slot, cur, reservation)
-      if (group2.compareAndSetInt(group2Offset, cur, reservation)) {
+      int witness = compareAndExchangeNext(slot, cur, reservation);
+      if (witness == cur) {
         return cur;
       }
-      Thread.onSpinWait();
-      cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
+      cur = witness;
     }
   }
 
   protected boolean insertAtHead(int listHead, int slot, boolean recordAccess) {
-    // Hoisted for the same reason as pin()/unpin() (see those methods' comments): listHead's
-    // offset is used three times below (reserve()'s own argument, the getNextVolatile it used to
-    // wrap, and the final compareAndSetNext) and slot's offset twice -- each wrapper call below
-    // would otherwise recompute group2Offset(...) from scratch, even though this method has no
-    // loop of its own (unlike reserve()'s internal spin/retry loop, already hoisted).
-    long listHeadOffset = group2Offset(listHead);
-    long slotOffset = group2Offset(slot);
-    group2.putIntVolatile(slotOffset + PREV_OFFSET, listHead); // setPrevVolatile(slot, listHead)
-
-    // reserve(listHead, RESERVED_LINK, getNextVolatile(listHead))
-    int oldNext = reserve(listHeadOffset, RESERVED_LINK, group2.getIntVolatile(listHeadOffset));
-
+    setPrevVolatile(slot, listHead);
+    int oldNext = reserve(listHead, RESERVED_LINK, getNextVolatile(listHead));
     assert oldNext != REMOVED_LINK : "queue head sentinel should never be removed";
-    group2.putInt(slotOffset, oldNext); // setNextPlain(slot, oldNext)
+    setNextPlain(slot, oldNext);
     setPrevVolatile(oldNext, slot);
-
-    // compareAndSetNext(listHead, RESERVED_LINK, slot)
-    if (!group2.compareAndSetInt(listHeadOffset, RESERVED_LINK, slot)) {
+    if (!compareAndSetNext(listHead, RESERVED_LINK, slot)) {
       throw new IllegalStateException("unexpected concurrent modification of listHead.next");
     }
     return false;
   }
 
   private void removeFromList(int slot) {
-    // slot's offset is loop-invariant across the while loop below (only prevSlot changes there) --
-    // hoisted once and reused for the joint next+prev read, reserve()'s argument, and each retry's
-    // getPrevVolatile(slot)-equivalent read, same rationale as insertAtHead's hoist above.
-    long slotOffset = group2Offset(slot);
     // Joint initial read of next+prev (see getNextAndPrevVolatile) rather than two separate
     // volatile reads -- both are fed only as optimistic initial guesses below (reserve()'s cur,
     // and the prevSlot loop's first iteration), each independently re-validated/refreshed on
     // failure, so reading them together earlier than today's code does cannot change behavior,
     // only occasionally trade a slightly-more-likely-stale guess for an extra retry iteration.
-    long nextAndPrev = group2.getLongVolatile(slotOffset >>> 1); // getNextAndPrevVolatile(slot)
-
-    // reserve(slot, REMOVED_LINK, ...)
-    int oldNext = reserve(slotOffset, REMOVED_LINK, (int) nextAndPrev);
-
+    long nextAndPrev = getNextAndPrevVolatile(slot);
+    int oldNext = reserve(slot, REMOVED_LINK, (int) nextAndPrev);
     if (oldNext == REMOVED_LINK) {
       throw new IllegalStateException("already removed");
     }
     int prevSlot = (int) (nextAndPrev >>> 32);
-    // Unlike slotOffset above, prevSlot's offset is NOT loop-invariant (prevSlot itself changes on
-    // retry) -- recomputed fresh each iteration below, same as before this hoist.
-    long prevSlotOffset = group2Offset(prevSlot);
-
-    // compareAndSetNext(prevSlot, slot, RESERVED_LINK)
-    while (!group2.compareAndSetInt(prevSlotOffset, slot, RESERVED_LINK)) {
-      Thread.onSpinWait();
-      prevSlot = group2.getIntVolatile(slotOffset + PREV_OFFSET); // getPrevVolatile(slot)
-      prevSlotOffset = group2Offset(prevSlot);
+    while (!compareAndSetNext(prevSlot, slot, RESERVED_LINK)) {
+      Thread.yield();
+      prevSlot = getPrevVolatile(slot);
     }
     setPrevVolatile(oldNext, prevSlot);
-
-    // compareAndSetNext(prevSlot, RESERVED_LINK, oldNext)
-    if (!group2.compareAndSetInt(prevSlotOffset, RESERVED_LINK, oldNext)) {
+    if (!compareAndSetNext(prevSlot, RESERVED_LINK, oldNext)) {
       throw new IllegalStateException("unexpected concurrent modification during list removal");
     }
   }
 
   private void insertAtTail(int slot) {
-    // COLD_TAIL and slot are both loop-invariant across every iteration below (unlike predSlot,
-    // which is re-read fresh each retry) -- hoisted once, outside the loop entirely.
-    long coldTailOffset = group2Offset(COLD_TAIL);
-    long slotOffset = group2Offset(slot);
     for (; ; ) {
-      // getPrevVolatile(COLD_TAIL)
-      int predSlot = group2.getIntVolatile(coldTailOffset + PREV_OFFSET);
-
-      // predSlot's offset is used 2-3 times within this iteration (reserve()'s own argument, the
-      // getNextVolatile it used to wrap, and whichever compareAndSetNext below applies) -- hoisted
-      // once per iteration; it can't be hoisted further out than the loop body since predSlot
-      // itself changes across iterations.
-      long predSlotOffset = group2Offset(predSlot);
-
-      // reserve(predSlot, RESERVED_LINK, getNextVolatile(predSlot))
-      int oldNext = reserve(predSlotOffset, RESERVED_LINK, group2.getIntVolatile(predSlotOffset));
-
+      int predSlot = getPrevVolatile(COLD_TAIL);
+      int oldNext = reserve(predSlot, RESERVED_LINK, getNextVolatile(predSlot));
       if (oldNext != COLD_TAIL) {
         if (oldNext == REMOVED_LINK) {
           continue; // pred was concurrently removed; retry
         }
-
         // release reservation; pred is no longer tail's predecessor
-        // compareAndSetNext(predSlot, RESERVED_LINK, oldNext)
-        if (!group2.compareAndSetInt(predSlotOffset, RESERVED_LINK, oldNext)) {
+        if (!compareAndSetNext(predSlot, RESERVED_LINK, oldNext)) {
           throw new IllegalStateException();
         }
         continue;
       }
-      group2.putInt(slotOffset, COLD_TAIL); // setNextPlain(slot, COLD_TAIL)
-      group2.putIntVolatile(slotOffset + PREV_OFFSET, predSlot); // setPrevVolatile(slot, predSlot)
-      group2.putIntVolatile(coldTailOffset + PREV_OFFSET, slot); // setPrevVolatile(COLD_TAIL, slot)
-
-      // compareAndSetNext(predSlot, RESERVED_LINK, slot)
-      if (!group2.compareAndSetInt(predSlotOffset, RESERVED_LINK, slot)) {
+      setNextPlain(slot, COLD_TAIL);
+      setPrevVolatile(slot, predSlot);
+      setPrevVolatile(COLD_TAIL, slot);
+      if (!compareAndSetNext(predSlot, RESERVED_LINK, slot)) {
         throw new IllegalStateException("unexpected concurrent modification during tail insertion");
       }
       return;
@@ -1134,21 +1089,7 @@ class Cache2<V extends Cache2.Val> {
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
     int expectedGen = (int) (handle >>> 32);
-    // Hoisted once, manually, rather than relying on the JIT to CSE/LICM the equivalent repeated
-    // group1Offset(slot) calls inside getRefCountAndGenerationVolatile/getRefCountVolatile/
-    // compareAndExchangeRefCount/getGenerationVolatile below: pin()/unpin() are this class's two
-    // hottest methods by a wide margin (~9x more Group 1 CAS traffic than all other traffic
-    // combined, per this class's own javadoc), so their per-call cost in cold/C1/interpreted code
-    // (before C2 warmup, or after any deopt) matters disproportionately -- see profiling notes
-    // where this exact arithmetic showed up as non-negligible cost in these two methods
-    // specifically. group1 (the OffHeapStore reference) is still loaded once per call to each
-    // group1.xxx(...) method below, same as always -- only the slot->offset arithmetic itself is
-    // hoisted here.
-    long group1Offset = group1Offset(slot);
-
-    // getRefCountAndGenerationVolatile(slot)
-    long rcAndGen = group1.getLongVolatile(group1Offset >>> 1);
-
+    long rcAndGen = getRefCountAndGenerationVolatile(slot);
     if ((int) (rcAndGen >>> 32) != expectedGen) return -1;
     int rc = (int) rcAndGen;
     for (; ; ) {
@@ -1156,32 +1097,28 @@ class Cache2<V extends Cache2.Val> {
         case -1:
           return -1;
         case UNPIN_SENTINEL:
-          rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
+          rc = getRefCountVolatile(slot);
           continue;
       }
       assert rc >= 0;
-
-      // compareAndSetRefCount(slot, rc, rc + 1)
-      if (group1.compareAndSetInt(group1Offset, rc, rc + 1)) {
+      int witness = compareAndExchangeRefCount(slot, rc, rc + 1);
+      if (witness == rc) {
         break;
       } else {
-        Thread.onSpinWait();
-        rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
+        rc = witness;
       }
     }
     if (rc == 0) {
       // First pin: remove from the evictable list.
       removeFromList(slot);
     }
-
     // Check generation after acquiring the pin. The CAS above is a volatile read-modify-write
     // that establishes happens-before with the generation write preceding the volatile refCount
     // write in acquireNode, so this generation read is guaranteed to reflect the current
     // generation. If mismatched, the slot was recycled; unpin() correctly reverses the full pin
     // (including re-insertion into the LRU list for the rc==0 case via UNPIN_SENTINEL →
     // insertAtHead).
-    // getGenerationVolatile(slot)
-    if (group1.getIntVolatile(group1Offset + GENERATION_OFFSET) != expectedGen) {
+    if (getGenerationVolatile(slot) != expectedGen) {
       unpin(handle, false);
       return -1;
     }
@@ -1218,30 +1155,28 @@ class Cache2<V extends Cache2.Val> {
   int unpin(long handle, boolean recordAccess) {
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
-    // See pin()'s identical hoist above for why this is done manually here too.
-    long group1Offset = group1Offset(slot);
-    int rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
+    int rc = getRefCountVolatile(slot);
     for (; ; ) {
       if (rc == 1) {
-        // compareAndSetRefCount(slot, 1, UNPIN_SENTINEL)
-        if (group1.compareAndSetInt(group1Offset, 1, UNPIN_SENTINEL)) {
+        int witness = compareAndExchangeRefCount(slot, 1, UNPIN_SENTINEL);
+        if (witness == 1) {
           boolean toHot = insertAtHead(COLD_HEAD, slot, recordAccess);
-
-          // compareAndSetRefCount(slot, UNPIN_SENTINEL, 0)
-          if (!group1.compareAndSetInt(group1Offset, UNPIN_SENTINEL, 0)) {
+          if (!compareAndSetRefCount(slot, UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
           return toHot ? 1 : 0;
+        } else {
+          rc = witness;
         }
       } else {
         assert rc > 1 : "unexpected refCount: " + rc;
-        // compareAndSetRefCount(slot, rc, rc - 1)
-        if (group1.compareAndSetInt(group1Offset, rc, rc - 1)) {
+        int witness = compareAndExchangeRefCount(slot, rc, rc - 1);
+        if (witness == rc) {
           return -1;
+        } else {
+          rc = witness;
         }
       }
-      Thread.onSpinWait();
-      rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
     }
   }
 
@@ -1261,7 +1196,6 @@ class Cache2<V extends Cache2.Val> {
       if (compareAndSetRefCount(candidate, 0, -1)) {
         return candidate;
       }
-      Thread.onSpinWait();
     }
     return NULL_SLOT;
   }
@@ -1351,25 +1285,27 @@ class Cache2<V extends Cache2.Val> {
     for (; ; ) {
       if (rc == 1) {
         // Sole holder: use -1 as intermediate to block acquireTail during tail insertion.
-        if (compareAndSetRefCount(slot, 1, -1)) {
+        int witness = compareAndExchangeRefCount(slot, 1, -1);
+        if (witness == 1) {
           insertAtTail(slot);
           if (!compareAndSetRefCount(slot, -1, 0)) {
             throw new IllegalStateException("rc changed during insertAtTail in closeUnconditional");
           }
           return;
         }
+        rc = witness;
       } else if (rc > 1) {
         // A stale pin() raced: its CAS retry loop incremented rc past 1 before its post-CAS
         // generation check could call unpin(). Decrement our own pin and return; the stale
         // pinner's subsequent unpin() will see rc==1 and reinstate this slot in the LRU.
-        if (compareAndSetRefCount(slot, rc, rc - 1)) {
+        int witness = compareAndExchangeRefCount(slot, rc, rc - 1);
+        if (witness == rc) {
           return;
         }
+        rc = witness;
       } else {
         throw new IllegalStateException("unexpected rc=" + rc + " in closeUnconditional");
       }
-      Thread.onSpinWait();
-      rc = getRefCountVolatile(slot);
     }
   }
 
@@ -1461,7 +1397,7 @@ class Cache2<V extends Cache2.Val> {
       int candidate;
       boolean fromHot;
       long now = System.nanoTime();
-      for (; ; ) {
+      do {
         int coldCandidate = getPrevVolatile(COLD_TAIL);
         int hotCandidate = getPrevVolatile(HOT_TAIL);
         if (coldCandidate == COLD_HEAD) {
@@ -1487,11 +1423,7 @@ class Cache2<V extends Cache2.Val> {
                   < age(now, getLastUnpinNanos(hotCandidate)) >> HOT_EVICTION_SHIFT;
           candidate = fromHot ? hotCandidate : coldCandidate;
         }
-        if (compareAndSetRefCount(candidate, 0, -1)) {
-          break;
-        }
-        Thread.onSpinWait();
-      }
+      } while (!compareAndSetRefCount(candidate, 0, -1));
       if (coldCandidateTs != 0) {
         this.coldTs = coldCandidateTs;
       }
