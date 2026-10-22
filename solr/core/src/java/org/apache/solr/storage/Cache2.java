@@ -1040,26 +1040,25 @@ class Cache2<V extends Cache2.Val> {
   }
 
   private void insertAtTail(int slot) {
+    int predSlot;
     for (; ; ) {
-      int predSlot = getPrevVolatile(COLD_TAIL);
+      predSlot = getPrevVolatile(COLD_TAIL);
       int oldNext = reserve(predSlot, RESERVED_LINK, getNextVolatile(predSlot));
-      if (oldNext != COLD_TAIL) {
-        if (oldNext == REMOVED_LINK) {
-          continue; // pred was concurrently removed; retry
-        }
-        // release reservation; pred is no longer tail's predecessor
-        if (!compareAndSetNext(predSlot, RESERVED_LINK, oldNext)) {
-          throw new IllegalStateException();
-        }
-        continue;
+      if (oldNext == COLD_TAIL) {
+        break;
+      } else if (oldNext != REMOVED_LINK && !compareAndSetNext(predSlot, RESERVED_LINK, oldNext)) {
+        // if `oldNext == REMOVED_LINK` then pred was concurrently removed, and we
+        // have no reservation to release.
+        // Otherwise, if pred is no longer tail's predecessor and we're unable to release our
+        // reservation, it's a hard error.
+        throw new IllegalStateException();
       }
-      setNextPlain(slot, COLD_TAIL);
-      setPrevVolatile(slot, predSlot);
-      setPrevVolatile(COLD_TAIL, slot);
-      if (!compareAndSetNext(predSlot, RESERVED_LINK, slot)) {
-        throw new IllegalStateException("unexpected concurrent modification during tail insertion");
-      }
-      return;
+    }
+    setNextPlain(slot, COLD_TAIL);
+    setPrevVolatile(slot, predSlot);
+    setPrevVolatile(COLD_TAIL, slot);
+    if (!compareAndSetNext(predSlot, RESERVED_LINK, slot)) {
+      throw new IllegalStateException("unexpected concurrent modification during tail insertion");
     }
   }
 
