@@ -994,19 +994,14 @@ class Cache2<V extends Cache2.Val> {
   private int reserve(int slot, int reservation, int cur) {
     for (; ; ) {
       while (cur == RESERVED_LINK) {
-        if (reservation == REMOVED_LINK) {
-          Thread.yield();
-        }
+        Thread.onSpinWait();
         cur = getNextVolatile(slot);
       }
-      if (cur == REMOVED_LINK) {
+      if (cur == REMOVED_LINK || compareAndSetNext(slot, cur, reservation)) {
         return cur;
       }
-      int witness = compareAndExchangeNext(slot, cur, reservation);
-      if (witness == cur) {
-        return cur;
-      }
-      cur = witness;
+      Thread.onSpinWait();
+      cur = getNextVolatile(slot);
     }
   }
 
@@ -1035,7 +1030,7 @@ class Cache2<V extends Cache2.Val> {
     }
     int prevSlot = (int) (nextAndPrev >>> 32);
     while (!compareAndSetNext(prevSlot, slot, RESERVED_LINK)) {
-      Thread.yield();
+      Thread.onSpinWait();
       prevSlot = getPrevVolatile(slot);
     }
     setPrevVolatile(oldNext, prevSlot);
@@ -1101,11 +1096,11 @@ class Cache2<V extends Cache2.Val> {
           continue;
       }
       assert rc >= 0;
-      int witness = compareAndExchangeRefCount(slot, rc, rc + 1);
-      if (witness == rc) {
+      if (compareAndSetRefCount(slot, rc, rc + 1)) {
         break;
       } else {
-        rc = witness;
+        Thread.onSpinWait();
+        rc = getRefCountVolatile(slot);
       }
     }
     if (rc == 0) {
@@ -1158,25 +1153,21 @@ class Cache2<V extends Cache2.Val> {
     int rc = getRefCountVolatile(slot);
     for (; ; ) {
       if (rc == 1) {
-        int witness = compareAndExchangeRefCount(slot, 1, UNPIN_SENTINEL);
-        if (witness == 1) {
+        if (compareAndSetRefCount(slot, 1, UNPIN_SENTINEL)) {
           boolean toHot = insertAtHead(COLD_HEAD, slot, recordAccess);
           if (!compareAndSetRefCount(slot, UNPIN_SENTINEL, 0)) {
             throw new IllegalStateException();
           }
           return toHot ? 1 : 0;
-        } else {
-          rc = witness;
         }
       } else {
         assert rc > 1 : "unexpected refCount: " + rc;
-        int witness = compareAndExchangeRefCount(slot, rc, rc - 1);
-        if (witness == rc) {
+        if (compareAndSetRefCount(slot, rc, rc - 1)) {
           return -1;
-        } else {
-          rc = witness;
         }
       }
+      Thread.onSpinWait();
+      rc = getRefCountVolatile(slot);
     }
   }
 
@@ -1196,6 +1187,7 @@ class Cache2<V extends Cache2.Val> {
       if (compareAndSetRefCount(candidate, 0, -1)) {
         return candidate;
       }
+      Thread.onSpinWait();
     }
     return NULL_SLOT;
   }
@@ -1285,27 +1277,25 @@ class Cache2<V extends Cache2.Val> {
     for (; ; ) {
       if (rc == 1) {
         // Sole holder: use -1 as intermediate to block acquireTail during tail insertion.
-        int witness = compareAndExchangeRefCount(slot, 1, -1);
-        if (witness == 1) {
+        if (compareAndSetRefCount(slot, 1, -1)) {
           insertAtTail(slot);
           if (!compareAndSetRefCount(slot, -1, 0)) {
             throw new IllegalStateException("rc changed during insertAtTail in closeUnconditional");
           }
           return;
         }
-        rc = witness;
       } else if (rc > 1) {
         // A stale pin() raced: its CAS retry loop incremented rc past 1 before its post-CAS
         // generation check could call unpin(). Decrement our own pin and return; the stale
         // pinner's subsequent unpin() will see rc==1 and reinstate this slot in the LRU.
-        int witness = compareAndExchangeRefCount(slot, rc, rc - 1);
-        if (witness == rc) {
+        if (compareAndSetRefCount(slot, rc, rc - 1)) {
           return;
         }
-        rc = witness;
       } else {
         throw new IllegalStateException("unexpected rc=" + rc + " in closeUnconditional");
       }
+      Thread.onSpinWait();
+      rc = getRefCountVolatile(slot);
     }
   }
 
@@ -1397,7 +1387,7 @@ class Cache2<V extends Cache2.Val> {
       int candidate;
       boolean fromHot;
       long now = System.nanoTime();
-      do {
+      for (; ; ) {
         int coldCandidate = getPrevVolatile(COLD_TAIL);
         int hotCandidate = getPrevVolatile(HOT_TAIL);
         if (coldCandidate == COLD_HEAD) {
@@ -1423,7 +1413,11 @@ class Cache2<V extends Cache2.Val> {
                   < age(now, getLastUnpinNanos(hotCandidate)) >> HOT_EVICTION_SHIFT;
           candidate = fromHot ? hotCandidate : coldCandidate;
         }
-      } while (!compareAndSetRefCount(candidate, 0, -1));
+        if (compareAndSetRefCount(candidate, 0, -1)) {
+          break;
+        }
+        Thread.onSpinWait();
+      }
       if (coldCandidateTs != 0) {
         this.coldTs = coldCandidateTs;
       }
