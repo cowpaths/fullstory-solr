@@ -300,6 +300,9 @@ class Cache2<V extends Cache2.Val> {
   private static final OffHeapStoreMode OFF_HEAP_STORE_MODE =
       OffHeapStoreMode.fromSysprop(EnvUtils.getProperty("solr.cache2.offHeapStoreMode"));
 
+  private static final int YIELD_ONCE_PER =
+      Math.max(1, EnvUtils.getPropertyAsInteger("solr.cache2.yieldOncePer", 8));
+
   /**
    * Allocates ONE combined {@link OffHeapStore} sized to hold both Group 1 ({@code
    * totalGroup1Slots} slots) and Group 2 ({@code totalGroup2Slots} slots) storage for every
@@ -1003,14 +1006,24 @@ class Cache2<V extends Cache2.Val> {
         cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
       } else if (cur == RESERVED_LINK) {
         // isolate the case that can occasionally spin burst
-        do {
-          Thread.onSpinWait();
-          cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
-        } while (cur == RESERVED_LINK);
+        cur = spinOnReserved(group2Offset);
       } else {
         // assert cur == REMOVED_LINK
         return REMOVED_LINK;
       }
+    }
+  }
+
+  private int spinOnReserved(long group2Offset) {
+    for (; ; ) {
+      for (int i = YIELD_ONCE_PER; i > 0; i--) {
+        Thread.onSpinWait();
+        int cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
+        if (cur != RESERVED_LINK) {
+          return cur;
+        }
+      }
+      Thread.yield();
     }
   }
 
@@ -1062,9 +1075,8 @@ class Cache2<V extends Cache2.Val> {
     long prevSlotOffset = group2Offset(prevSlot);
 
     // compareAndSetNext(prevSlot, slot, RESERVED_LINK)
-    while (!group2.compareAndSetInt(prevSlotOffset, slot, RESERVED_LINK)) {
-      Thread.onSpinWait();
-      prevSlot = group2.getIntVolatile(slotOffset + PREV_OFFSET); // getPrevVolatile(slot)
+    if (!group2.compareAndSetInt(prevSlotOffset, slot, RESERVED_LINK)) {
+      prevSlot = spinOnPrevCAS(slot, slotOffset);
       prevSlotOffset = group2Offset(prevSlot);
     }
     setPrevVolatile(oldNext, prevSlot);
@@ -1072,6 +1084,21 @@ class Cache2<V extends Cache2.Val> {
     // compareAndSetNext(prevSlot, RESERVED_LINK, oldNext)
     if (!group2.compareAndSetInt(prevSlotOffset, RESERVED_LINK, oldNext)) {
       throw new IllegalStateException("unexpected concurrent modification during list removal");
+    }
+  }
+
+  private int spinOnPrevCAS(int slot, long slotOffset) {
+    for (; ; ) {
+      for (int i = YIELD_ONCE_PER; i > 0; i--) {
+        Thread.onSpinWait();
+        int prevSlot = group2.getIntVolatile(slotOffset + PREV_OFFSET); // getPrevVolatile(slot)
+
+        // compareAndSetNext(prevSlot, slot, RESERVED_LINK)
+        if (group2.compareAndSetInt(group2Offset(prevSlot), slot, RESERVED_LINK)) {
+          return prevSlot;
+        }
+      }
+      Thread.yield();
     }
   }
 
@@ -1162,7 +1189,10 @@ class Cache2<V extends Cache2.Val> {
         case -1:
           return -1;
         case UNPIN_SENTINEL:
-          rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
+          // UNPIN_SENTINEL means another thread's unpin() is in-flight on this slot
+          // (CAS to UNPIN_SENTINEL, insertAtHead(), CAS back to 0) -- analogous to
+          // reserve()'s RESERVED_LINK, not a self-resolving CAS failure
+          rc = spinOnUnpinSentinel(group1Offset);
           continue;
       }
       assert rc >= 0;
@@ -1192,6 +1222,19 @@ class Cache2<V extends Cache2.Val> {
       return -1;
     }
     return rc == 0 ? 1 : 0;
+  }
+
+  private int spinOnUnpinSentinel(long group1Offset) {
+    for (; ; ) {
+      for (int i = YIELD_ONCE_PER; i > 0; i--) {
+        Thread.onSpinWait();
+        int rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
+        if (rc != UNPIN_SENTINEL) {
+          return rc;
+        }
+      }
+      Thread.yield();
+    }
   }
 
   /**
