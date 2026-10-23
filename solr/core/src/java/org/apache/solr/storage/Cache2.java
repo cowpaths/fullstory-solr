@@ -21,7 +21,6 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.store.OffHeapStore;
 import org.apache.lucene.store.OffHeapStores;
 import org.apache.solr.common.util.EnvUtils;
@@ -993,35 +992,20 @@ class Cache2<V extends Cache2.Val> {
    * {@link #getNextAndPrevVolatile}) instead of a dedicated read.
    */
   private int reserve(long group2Offset, int reservation, int cur) {
-    int a = 0, b = 0;
     for (; ; ) {
-      switch (cur) {
-        case REMOVED_LINK:
-          REMOVED_SPIN.increment();
-          if (a != 0) RESERVED_SPIN.add(a);
-          if (b != 0) DEFAULT_SPIN.add(b);
-          return REMOVED_LINK;
-        case RESERVED_LINK:
-          a++;
-          break;
-        default:
-          // compareAndSetNext(slot, cur, reservation)
-          if (group2.compareAndSetInt(group2Offset, cur, reservation)) {
-            if (a != 0) RESERVED_SPIN.add(a);
-            if (b != 0) DEFAULT_SPIN.add(b);
-            return cur;
-          }
-          b++;
-          break;
+      if (cur >= 0) {
+        // compareAndSetNext(slot, cur, reservation)
+        if (group2.compareAndSetInt(group2Offset, cur, reservation)) {
+          return cur;
+        }
+      } else if (cur == REMOVED_LINK) {
+        return REMOVED_LINK;
       }
+      // at this point either `cur == RESERVED_LINK` or we lost the CAS; either way, retry
       Thread.onSpinWait();
       cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
     }
   }
-
-  static final LongAdder REMOVED_SPIN = new LongAdder();
-  static final LongAdder RESERVED_SPIN = new LongAdder();
-  static final LongAdder DEFAULT_SPIN = new LongAdder();
 
   protected boolean insertAtHead(int listHead, int slot, boolean recordAccess) {
     // Hoisted for the same reason as pin()/unpin() (see those methods' comments): listHead's
@@ -1089,40 +1073,42 @@ class Cache2<V extends Cache2.Val> {
     // which is re-read fresh each retry) -- hoisted once, outside the loop entirely.
     long coldTailOffset = group2Offset(COLD_TAIL);
     long slotOffset = group2Offset(slot);
+    int predSlot;
+    long predSlotOffset;
     for (; ; ) {
       // getPrevVolatile(COLD_TAIL)
-      int predSlot = group2.getIntVolatile(coldTailOffset + PREV_OFFSET);
+      predSlot = group2.getIntVolatile(coldTailOffset + PREV_OFFSET);
 
       // predSlot's offset is used 2-3 times within this iteration (reserve()'s own argument, the
       // getNextVolatile it used to wrap, and whichever compareAndSetNext below applies) -- hoisted
       // once per iteration; it can't be hoisted further out than the loop body since predSlot
       // itself changes across iterations.
-      long predSlotOffset = group2Offset(predSlot);
+      predSlotOffset = group2Offset(predSlot);
 
       // reserve(predSlot, RESERVED_LINK, getNextVolatile(predSlot))
       int oldNext = reserve(predSlotOffset, RESERVED_LINK, group2.getIntVolatile(predSlotOffset));
 
-      if (oldNext != COLD_TAIL) {
-        if (oldNext == REMOVED_LINK) {
-          continue; // pred was concurrently removed; retry
-        }
-
-        // release reservation; pred is no longer tail's predecessor
-        // compareAndSetNext(predSlot, RESERVED_LINK, oldNext)
-        if (!group2.compareAndSetInt(predSlotOffset, RESERVED_LINK, oldNext)) {
-          throw new IllegalStateException();
-        }
-        continue;
+      if (oldNext == COLD_TAIL) {
+        break;
       }
-      group2.putInt(slotOffset, COLD_TAIL); // setNextPlain(slot, COLD_TAIL)
-      group2.putIntVolatile(slotOffset + PREV_OFFSET, predSlot); // setPrevVolatile(slot, predSlot)
-      group2.putIntVolatile(coldTailOffset + PREV_OFFSET, slot); // setPrevVolatile(COLD_TAIL, slot)
 
-      // compareAndSetNext(predSlot, RESERVED_LINK, slot)
-      if (!group2.compareAndSetInt(predSlotOffset, RESERVED_LINK, slot)) {
-        throw new IllegalStateException("unexpected concurrent modification during tail insertion");
+      // compareAndSetNext(predSlot, RESERVED_LINK, oldNext)
+      if (oldNext != REMOVED_LINK
+          && !group2.compareAndSetInt(predSlotOffset, RESERVED_LINK, oldNext)) {
+        // if `oldNext == REMOVED_LINK` then pred was concurrently removed, and we
+        // have no reservation to release.
+        // Otherwise, if pred is no longer tail's predecessor and we're unable to release our
+        // reservation, it's a hard error.
+        throw new IllegalStateException();
       }
-      return;
+    }
+    group2.putInt(slotOffset, COLD_TAIL); // setNextPlain(slot, COLD_TAIL)
+    group2.putIntVolatile(slotOffset + PREV_OFFSET, predSlot); // setPrevVolatile(slot, predSlot)
+    group2.putIntVolatile(coldTailOffset + PREV_OFFSET, slot); // setPrevVolatile(COLD_TAIL, slot)
+
+    // compareAndSetNext(predSlot, RESERVED_LINK, slot)
+    if (!group2.compareAndSetInt(predSlotOffset, RESERVED_LINK, slot)) {
+      throw new IllegalStateException("unexpected concurrent modification during tail insertion");
     }
   }
 

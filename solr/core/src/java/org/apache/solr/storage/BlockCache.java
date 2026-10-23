@@ -1881,9 +1881,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     ew.put("closeSkippedPinned", closeSkippedPinned.sum());
     ew.put("acquisitions", acq);
     ew.put("hotAcquisitions", hotAcquisitions.sum());
-    ew.put("REMOVED_SPIN", Cache2.REMOVED_SPIN.sum());
-    ew.put("RESERVED_SPIN", Cache2.RESERVED_SPIN.sum());
-    ew.put("DEFAULT_SPIN", Cache2.DEFAULT_SPIN.sum());
     ew.put("poolExhausted", poolExhausted.sum());
     ew.put("pinnedBytes", pinnedBytes);
     ew.put("unpinnedBytes", totalBytes - pinnedBytes);
