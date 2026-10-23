@@ -1,0 +1,1376 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.solr.storage;
+
+import static org.apache.solr.storage.CompressingDirectory.BLOCK_SIZE_ESTIMATE;
+import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SHIFT;
+import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZE;
+import static org.apache.solr.storage.CompressingDirectory.DirectIOIndexOutput.HEADER_SIZE;
+import static org.apache.solr.storage.CompressingDirectory.readLengthFromHeader;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.channels.FileChannel;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.AbstractMap;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.concurrent.locks.StampedLock;
+import java.util.function.LongConsumer;
+import java.util.zip.CRC32;
+import org.apache.lucene.index.IndexFileNames;
+import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.internal.hppc.IntArrayList;
+import org.apache.lucene.internal.hppc.IntCursor;
+import org.apache.lucene.internal.hppc.LongArrayList;
+import org.apache.lucene.store.AlreadyClosedException;
+import org.apache.lucene.store.ByteArrayDataInput;
+import org.apache.lucene.store.ByteBufferGuard;
+import org.apache.lucene.store.IOContext;
+import org.apache.lucene.store.IndexInput;
+import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.store.LockFactory;
+import org.apache.lucene.store.MMapDirectory;
+import org.apache.lucene.store.MappedByteBufferIndexInputProvider;
+import org.apache.lucene.util.IOUtils;
+import org.apache.solr.common.util.EnvUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * An {@link MMapDirectory} that serves reads from a {@link BlockCache}-backed decompression layer
+ * when the underlying access file is absent. Compressed blocks are decompressed on demand and
+ * cached in the shared {@link BlockCache}; cached blocks are pinned for the duration of each read
+ * and evicted by the LRU when the pool is exhausted.
+ */
+public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchScope {
+
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+
+  /**
+   * Determines chunk size for mmapping files. {@code 1} yields 1 GiB chunks, but this may be set
+   * higher to stress-test buffer boundaries (as low as 15, which yields the min chunk size of 64
+   * KiB, equal to {@link CompressingDirectory#COMPRESSION_BLOCK_SIZE}).
+   */
+  private static final int MAP_BUF_DIVIDE_SHIFT = 1;
+
+  public static final int MAX_MAP_SIZE = Integer.MIN_VALUE >>> MAP_BUF_DIVIDE_SHIFT;
+  public static final int MAX_MAP_MASK = MAX_MAP_SIZE - 1;
+  public static final int MAX_MAP_SHIFT = Integer.numberOfTrailingZeros(MAX_MAP_SIZE);
+
+  /**
+   * Whether {@link AD2IndexInput#parseRootParams} issues two precise {@code MADV_WILLNEED} hints
+   * (exactly the header, then exactly the footer, each immediately before it's read) rather than
+   * letting the header/footer reads fault in cold. Defaults to {@code true}.
+   *
+   * <p>This is not a latency optimization -- the hint and the read it precedes are back-to-back in
+   * the same synchronous call for the same file, with no other work interleaved to overlap the
+   * hinted I/O against, so it doesn't make {@code parseRootParams} itself any faster. The goal is
+   * purely to bound the *amount* of data the kernel pulls in: an unhinted cold page fault on a
+   * large mmap'd file can trigger the kernel's own adaptive readahead heuristic to speculatively
+   * pull in a much larger window of adjacent compressed block content than this code path needs
+   * (that content is fetched/hinted separately, on demand, as blocks are actually read elsewhere)
+   * -- an explicit {@code MADV_WILLNEED} for an exact byte range does not expand beyond what's
+   * requested.
+   *
+   * <p>Defaults on because the header and footer are, barring the in-process {@code
+   * sharedEntry.cachedBlockOffsets} fast path a few lines above (which only helps a second open of
+   * the same file within the same process -- never on the first open of any file after a restart),
+   * always read regardless -- so the hint is never wasted, only ever either a no-op (kernel
+   * readahead wouldn't have over-fetched anyway) or a genuine reduction in redundant read
+   * throughput. The fixed cost is two extra cheap syscalls per file, not extra disk I/O. Still
+   * sysprop-gated in case some deployment's kernel/filesystem readahead behavior makes the hint
+   * itself undesirable for an unanticipated reason.
+   */
+  private static final boolean HINT_ROOT_PARAMS_HEADER_FOOTER =
+      EnvUtils.getPropertyAsBool("solr.accessDirectory2.hintRootParamsHeaderFooter", true);
+
+  private final long uuidMsb;
+  private final long uuidLsb;
+
+  @FunctionalInterface
+  interface FileLengthProvider {
+    long fileLength(String name) throws IOException;
+  }
+
+  private final Path compressedPath;
+  private final BlockCache cache;
+
+  @Override
+  public Closeable openBatchScope(boolean openSearcher) {
+    return cache.openBatchScope(openSearcher);
+  }
+
+  private final ExecutorService ioExec;
+  private final FileLengthProvider fileLengthProvider;
+  private final Future<?> deferredCloseTask;
+
+  /**
+   * Ref-counted wrapper around a shared {@code accessMapped} array. The map itself holds a +1 ref;
+   * each root {@link AD2IndexInput} open holds a +1 ref. Nodes are released only when the count
+   * reaches zero, so readers that opened a file before {@link #deleteFile} was called continue to
+   * get cache hits until they close.
+   */
+  private static final class NodesEntry {
+    private final AtomicLongArray nodes;
+    private final AtomicInteger refCount = new AtomicInteger(1); // +1 for pendingNodes map itself
+
+    // Cached file metadata — avoids reading header/footer from compressed file on subsequent opens.
+    private final long cachedLength;
+    private final long[] cachedBlockOffsets;
+
+    NodesEntry(AtomicLongArray nodes, long cachedLength, long[] cachedBlockOffsets) {
+      this.nodes = nodes;
+      this.cachedLength = cachedLength;
+      this.cachedBlockOffsets = cachedBlockOffsets;
+    }
+
+    void acquire() {
+      if (refCount.getAndIncrement() == 0) {
+        throw new AlreadyClosedException("attempt to open ref after file deletion");
+      }
+    }
+
+    void release(BlockCache cache) {
+      if (refCount.decrementAndGet() == 0) {
+        for (int i = nodes.length() - 1; i >= 0; i--) {
+          long node = nodes.getAndSet(i, BlockCache.NULL_HANDLE);
+          if (node != BlockCache.NULL_HANDLE) cache.close(node);
+        }
+      }
+    }
+  }
+
+  /**
+   * Shared {@code accessMapped} arrays pre-populated by {@link WriteThroughOutput} at write-close
+   * time. All root {@link AD2IndexInput} instances opened for the same file share the same array,
+   * so they all see the same cached blocks. Entries are removed in {@link #deleteFile} or {@link
+   * #rename}; nodes are released when the last open root input closes.
+   */
+  private final HashMap<String, NodesEntry> pendingNodes = new HashMap<>();
+
+  private UUID uuidForFile(String name) {
+    if (uuidMsb == 0 && uuidLsb == 0) {
+      // No directory-level UUID, fallback to absolutePath string
+      return BlockCache.rawMd5UUID(
+          compressedPath.resolve(name).toAbsolutePath().normalize().toString());
+    } else {
+      ByteBuffer hash = BlockCache.rawMd5(name);
+      return new UUID(uuidMsb ^ hash.getLong(), uuidLsb ^ hash.getLong());
+    }
+  }
+
+  @SuppressWarnings("try")
+  public AccessDirectory2(
+      Path coreRootDirectory,
+      Path path,
+      LockFactory lockFactory,
+      Path compressedPath,
+      BlockCache cache,
+      ExecutorService ioExec,
+      FileLengthProvider fileLengthProvider)
+      throws IOException {
+    super(path, lockFactory);
+    UUID uuid = BlockCache.refIdFromCoreProperties(coreRootDirectory, compressedPath, true);
+    if (uuid == null) {
+      this.uuidMsb = 0;
+      this.uuidLsb = 0;
+    } else {
+      this.uuidMsb = uuid.getMostSignificantBits();
+      this.uuidLsb = uuid.getLeastSignificantBits();
+    }
+    this.compressedPath = compressedPath;
+    this.cache = cache;
+    this.ioExec = ioExec;
+    this.fileLengthProvider = fileLengthProvider;
+
+    // Scan existing compressed files, open inputs, and group by segment.
+    Map<String, List<Map.Entry<String, AD2IndexInput>>> segToInputs = new HashMap<>();
+    List<String> segmentsFiles = new ArrayList<>();
+    List<AD2IndexInput> priorityInputs = new ArrayList<>();
+
+    String[] files = compressedPath.toFile().list();
+    if (files == null) {
+      files = new String[0];
+    }
+    List<IndexInput> toClose = new ArrayList<>(files.length);
+    for (String file : files) {
+      if (file.endsWith(".tmp")) continue;
+      if (file.startsWith("segments_")) {
+        segmentsFiles.add(file);
+        AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
+        if (input.blockOffsets() != null) {
+          toClose.add(input);
+          priorityInputs.add(input);
+        } else {
+          input.close();
+        }
+        continue;
+      }
+      if (!file.startsWith("_")) continue;
+      AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
+      toClose.add(input);
+      if (input.blockOffsets() != null && file.endsWith(".si")) {
+        priorityInputs.add(input);
+      } else {
+        String segName = IndexFileNames.parseSegmentName(file);
+        segToInputs
+            .computeIfAbsent(segName, k -> new ArrayList<>())
+            .add(new AbstractMap.SimpleImmutableEntry<>(file, input));
+      }
+    }
+
+    boolean submitted = false;
+    try {
+      // Issue MADV_WILLNEED hints inline so the kernel starts I/O immediately,
+      // before the async preload task begins decompressing.
+      // Rough segment ordering by generation (oldest first) — no file I/O needed.
+      final String[] roughSegOrder = segToInputs.keySet().toArray(new String[0]);
+      Arrays.sort(
+          roughSegOrder,
+          Comparator.comparingLong(s -> Long.parseLong(s.substring(1), Character.MAX_RADIX)));
+
+      // Priority files: hint blocks not already present (see hintCompressedRangeIfAbsent) so the
+      // kernel can start paging in their compressed data while this constructor moves on to
+      // hint/load other files, before Phase 1 below performs the actual (possibly blocking) load.
+      // A present block means hinting it would issue MADV_WILLNEED (and the disk I/O that
+      // follows) against compressed data BlockCache doesn't need -- its decompressed content is
+      // already resident, from either this process or a prior persisted run.
+      for (AD2IndexInput in : priorityInputs) {
+        int blockCount = in.blockOffsets().length - 1;
+        if (blockCount > 0) {
+          in.hintCompressedRangeIfAbsent(0, blockCount - 1);
+        }
+      }
+      // CFS/CFE boundary blocks, then other files' boundary blocks — in rough segment order.
+      // Only AD2IndexInput-backed files need hints; mirrored files are already on fast storage.
+      for (String segName : roughSegOrder) {
+        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+          AD2IndexInput in = e.getValue();
+          if (in.blockOffsets() == null) continue;
+          String name = e.getKey();
+          if (name.endsWith(".cfe")) {
+            int blockCount = in.blockOffsets().length - 1;
+            if (blockCount > 0) in.hintCompressedRangeIfAbsent(0, blockCount - 1);
+          } else if (name.endsWith(".cfs")) {
+            int lastIdx = in.blockOffsets().length - 2;
+            if (lastIdx <= 1) {
+              in.hintCompressedRangeIfAbsent(0, lastIdx);
+            } else {
+              in.hintCompressedRangeIfAbsent(0, 0);
+              in.hintCompressedRangeIfAbsent(lastIdx, lastIdx);
+            }
+          }
+        }
+      }
+      for (String segName : roughSegOrder) {
+        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+          AD2IndexInput in = e.getValue();
+          if (in.blockOffsets() == null) continue;
+          String name = e.getKey();
+          if (!name.endsWith(".cfs") && !name.endsWith(".cfe")) {
+            int lastIdx = in.blockOffsets().length - 2;
+            if (lastIdx <= 1) {
+              in.hintCompressedRangeIfAbsent(0, lastIdx);
+            } else {
+              in.hintCompressedRangeIfAbsent(0, 0);
+              in.hintCompressedRangeIfAbsent(lastIdx, lastIdx);
+            }
+          }
+        }
+      }
+
+      // Load CFE blocks inline and parse sub-file block indices.
+      // CFE files are small — if mirrored, parse directly; if AD2, load then parse.
+      HashMap<String, IntArrayList> cfsBlockIndexes = new HashMap<>();
+      for (String segName : roughSegOrder) {
+        AD2IndexInput cfeInput = null;
+        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+          if (e.getKey().endsWith(".cfe")) {
+            cfeInput = e.getValue();
+            break;
+          }
+        }
+        if (cfeInput != null) {
+          if (cfeInput.blockOffsets() != null) {
+            int cfeBlockCount = cfeInput.blockOffsets().length - 1;
+            for (int i = 0; i < cfeBlockCount; i++) {
+              AD2IndexInput.loadBlock(cfeInput, i);
+            }
+          }
+          IntArrayList blockIndexes =
+              BlockPreloader.parseCfeBlockIndexes(cfeInput, Integer.MAX_VALUE);
+          if (!blockIndexes.isEmpty()) {
+            cfsBlockIndexes.put(segName, blockIndexes);
+            // Find the CFS input and hint sub-file compressed ranges, coalescing adjacent blocks.
+            for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(segName)) {
+              AD2IndexInput cfsInput;
+              if (e.getKey().endsWith(".cfs") && (cfsInput = e.getValue()).blockOffsets() != null) {
+                int rangeStart = blockIndexes.get(0);
+                int rangeEnd = rangeStart;
+                for (int i = 1, size = blockIndexes.size(); i < size; i++) {
+                  int val = blockIndexes.get(i);
+                  if (val == rangeEnd + 1) {
+                    rangeEnd = val;
+                  } else {
+                    cfsInput.hintCompressedRangeIfAbsent(rangeStart, rangeEnd);
+                    rangeStart = val;
+                    rangeEnd = val;
+                  }
+                }
+                cfsInput.hintCompressedRangeIfAbsent(rangeStart, rangeEnd);
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // Phase 1: priority files (segments_N, .si) — all blocks (small, fully read)
+      for (AD2IndexInput in : priorityInputs) {
+        for (int idx = 0, blockCount = in.blockOffsets().length - 1; idx < blockCount; idx++) {
+          AD2IndexInput.loadBlock(in, idx);
+        }
+      }
+
+      // Order segments by ordinal from segments_N (best-effort; data is now cache-hot)
+      List<String> segOrder = new ArrayList<>(segToInputs.keySet());
+      if (!segmentsFiles.isEmpty() && !segOrder.isEmpty()) {
+        Map<String, Integer> segOrds = new HashMap<>();
+        for (String segmentsFile : segmentsFiles) {
+          try {
+            SegmentInfos infos = SegmentInfos.readCommit(this, segmentsFile);
+            for (int i = infos.size() - 1; i >= 0; i--) {
+              segOrds.put(infos.info(i).info.name, i);
+            }
+          } catch (Exception e) {
+            // best-effort; proceed with unordered segments
+          }
+        }
+        segOrder.sort(Comparator.comparingInt(s -> segOrds.getOrDefault(s, Integer.MAX_VALUE)));
+      }
+
+      // Phase 2: CFS boundary blocks (CFE already loaded inline)
+      for (String seg : segOrder) {
+        for (Map.Entry<String, AD2IndexInput> e : segToInputs.get(seg)) {
+          AD2IndexInput in;
+          if (e.getKey().endsWith(".cfs") && (in = e.getValue()).blockOffsets() != null) {
+            AD2IndexInput.loadBlock(in, 0);
+            int lastIdx = in.blockOffsets().length - 2;
+            if (lastIdx > 0) AD2IndexInput.loadBlock(in, lastIdx);
+          }
+        }
+      }
+
+      // Phase 3: all logical file boundary blocks in segment order —
+      // non-CFS files and CFS sub-files interleaved.
+      for (String seg : segOrder) {
+        List<Map.Entry<String, AD2IndexInput>> inputs = segToInputs.get(seg);
+        AD2IndexInput cfsInput = null;
+        for (Map.Entry<String, AD2IndexInput> e : inputs) {
+          String name = e.getKey();
+          if (name.endsWith(".cfs") && e.getValue().blockOffsets() != null) {
+            cfsInput = e.getValue();
+          } else if (!name.endsWith(".cfe") && e.getValue().blockOffsets() != null) {
+            // non-CFS file: load boundary blocks
+            AD2IndexInput in = e.getValue();
+            AD2IndexInput.loadBlock(in, 0);
+            int lastIdx = in.blockOffsets().length - 2;
+            if (lastIdx > 0) AD2IndexInput.loadBlock(in, lastIdx);
+          }
+        }
+        IntArrayList blockIndexes = cfsBlockIndexes.get(seg);
+        if (cfsInput != null && blockIndexes != null) {
+          for (IntCursor cursor : blockIndexes) {
+            AD2IndexInput.loadBlock(cfsInput, cursor.value);
+          }
+        }
+      }
+
+      // Defer closing inputs: wait an ample amount of time so that the main code loads its own
+      // copies of inputs and can inherit the structures we've prepopulated. If we close too
+      // early, refCount will drop to 0, triggering cleanup, and all our work is wasted!
+      deferredCloseTask =
+          ioExec.submit(
+              () -> {
+                try {
+                  Thread.sleep(30_000);
+                } catch (InterruptedException e) {
+                  Thread.currentThread().interrupt();
+                } finally {
+                  IOUtils.close(toClose);
+                }
+                return null;
+              });
+      submitted = true;
+    } finally {
+      if (!submitted) {
+        IOUtils.close(toClose);
+      }
+    }
+  }
+
+  @Override
+  public void close() throws IOException {
+    try {
+      deferredCloseTask.cancel(true);
+    } finally {
+      super.close();
+    }
+  }
+
+  /** Stores the shared {@code accessMapped} array for {@code name}, pre-populated by the writer. */
+  void storeNodes(
+      String name, AtomicLongArray sharedAccessMapped, long length, long[] blockOffsets) {
+    NodesEntry extant;
+    synchronized (pendingNodes) {
+      extant =
+          pendingNodes.putIfAbsent(name, new NodesEntry(sharedAccessMapped, length, blockOffsets));
+    }
+    if (extant != null) {
+      log.warn("unexpected extant `accessMapped` entry");
+    }
+  }
+
+  @Override
+  public void deleteFile(String name) throws IOException {
+    NodesEntry stale;
+    synchronized (pendingNodes) {
+      stale = pendingNodes.remove(name);
+    }
+    if (stale != null) {
+      stale.release(cache);
+    }
+    if (name.endsWith(".tmp") || Files.exists(getDirectory().resolve(name))) {
+      super.deleteFile(name);
+    }
+  }
+
+  @Override
+  public void rename(String source, String dest) throws IOException {
+    synchronized (pendingNodes) {
+      NodesEntry entry = pendingNodes.get(source);
+      if (entry == null) {
+        // *.tmp or files < compression block size
+        super.rename(source, dest);
+      } else {
+        if (pendingNodes.putIfAbsent(dest, entry) != null) {
+          throw new FileAlreadyExistsException(dest);
+        } else if (!pendingNodes.remove(source, entry)) {
+          throw new IOException("source entry unexpectedly changed: " + source);
+        }
+      }
+    }
+  }
+
+  @Override
+  public void sync(Collection<String> names) throws IOException {
+    List<String> present = null;
+    for (String name : names) {
+      if (Files.exists(getDirectory().resolve(name))) {
+        if (present == null) present = new ArrayList<>();
+        present.add(name);
+      }
+    }
+    if (present != null) super.sync(present);
+  }
+
+  @Override
+  public long fileLength(String name) throws IOException {
+    if (name.endsWith(".tmp")) {
+      return super.fileLength(name);
+    }
+    ensureOpen();
+    // Check for mirrored file on access directory
+    Path accessFile = getDirectory().resolve(name);
+    if (Files.exists(accessFile)) {
+      return Files.size(accessFile);
+    }
+    // Check cached metadata
+    synchronized (pendingNodes) {
+      NodesEntry entry = pendingNodes.get(name);
+      if (entry != null && entry.cachedBlockOffsets != null) {
+        return entry.cachedLength;
+      }
+    }
+    return readLengthFromHeader(compressedPath.resolve(name));
+  }
+
+  @Override
+  public IndexInput openInput(String name, IOContext context) throws IOException {
+    if (name.endsWith(".tmp")) {
+      return super.openInput(name, context);
+    }
+    // Small files (≤ 1 decompressed block) are fully decompressed to the access directory
+    // and served via ownedBufferFor, bypassing BlockCache. This avoids per-file random seeks
+    // on spinning disk and preserves monomorphic IndexInput dispatch for JIT optimization.
+    Path accessFile = getDirectory().resolve(name);
+    if (Files.exists(accessFile)) {
+      // Pre-existing mirrored file: mmap and serve directly — no compressed file parsing.
+      return new AD2IndexInput(name, this, accessFile);
+    }
+    NodesEntry sharedEntry;
+    synchronized (pendingNodes) {
+      sharedEntry = pendingNodes.get(name);
+      if (sharedEntry != null) {
+        sharedEntry.acquire(); // +1 for this root reader
+      }
+    }
+    // TODO: if `context.mergeInfo != null` we should preload the entire contents
+    AD2IndexInput in =
+        new AD2IndexInput(
+            compressedPath.resolve(name), this, sharedEntry, context.readOnce, pendingNodes);
+    if (in.length() <= COMPRESSION_BLOCK_SIZE) {
+      // Small file: mirror to access directory, mmap, and serve via ownedBufferFor.
+      mirrorFromInput(in, name);
+      return new AD2IndexInput(name, this, accessFile);
+    }
+    return in;
+  }
+
+  /**
+   * Decompresses a small compressed file (single block) to the access directory so it can be served
+   * directly via MMapDirectory. Closes the provided input after reading.
+   */
+  private void mirrorFromInput(AD2IndexInput in, String name) throws IOException {
+    try (in) {
+      byte[] buf = new byte[(int) in.length()];
+      in.readBytes(buf, 0, buf.length);
+      String tmpName;
+      try (IndexOutput out = super.createTempOutput(name, "mirror", IOContext.DEFAULT)) {
+        tmpName = out.getName();
+        out.writeBytes(buf, 0, buf.length);
+      }
+      try {
+        super.rename(tmpName, name);
+      } catch (FileAlreadyExistsException e) {
+        // Another thread won the race — our copy is redundant.
+        super.deleteFile(tmpName);
+      }
+    }
+  }
+
+  private static ByteBufferGuard.BufferCleaner unmapHack() {
+    Object hack = MappedByteBufferIndexInputProvider.unmapHackImpl();
+    if (hack instanceof ByteBufferGuard.BufferCleaner) {
+      return (ByteBufferGuard.BufferCleaner) hack;
+    } else {
+      throw new UnsupportedOperationException("unmap not available");
+    }
+  }
+
+  static final class AD2IndexInput extends CachedCompressedIndexInput {
+
+    /**
+     * Bundles the root-scoped compressed-file state that is otherwise redundantly copied onto every
+     * slice/clone of the same file: the compressed mmap buffers, their guard, their base addresses
+     * for MADV_WILLNEED hinting, and the lock guarding their unmap lifetime — or, for
+     * owned-buffer-only (pre-mirrored small-file) inputs, the single owned decompressed buffer
+     * instead. Exactly one of {@code ownedBlock} or the other four fields is non-null. One instance
+     * per root file, referenced (not copied) by every slice and clone.
+     */
+    private static final class CompressedInfo {
+      final ByteBufferGuard compressedGuard;
+      final ByteBuffer[] compressed;
+      final long[] compressedBaseAddresses;
+
+      // Guards compressed ByteBuffer lifetime. Root holds write lock on close; supply calls hold
+      // read lock. StampedLock.tryReadLock() returns 0 while a write lock is waiting, so in-flight
+      // supply calls drain before invalidateAndUnmap runs, and new tasks see 0 and throw rather
+      // than touching freed memory.
+      final StampedLock supplyLock;
+
+      final ByteBuffer ownedBlock;
+
+      CompressedInfo(
+          ByteBufferGuard compressedGuard,
+          ByteBuffer[] compressed,
+          long[] compressedBaseAddresses,
+          StampedLock supplyLock,
+          ByteBuffer ownedBlock) {
+        this.compressedGuard = compressedGuard;
+        this.compressed = compressed;
+        this.compressedBaseAddresses = compressedBaseAddresses;
+        this.supplyLock = supplyLock;
+        this.ownedBlock = ownedBlock;
+      }
+    }
+
+    private final CompressedInfo compressedInfo;
+    private final boolean isRoot;
+
+    /**
+     * Constructs a lightweight AD2IndexInput for a pre-mirrored small file. The decompressed data
+     * is served entirely from the mmap'd access-directory file via {@link #ownedBufferFor}; no
+     * compressed file parsing or BlockCache involvement.
+     */
+    private AD2IndexInput(String name, AccessDirectory2 dir, Path accessFile) throws IOException {
+      this(name, dir, mmapSingleFile(accessFile), false);
+    }
+
+    private static ByteBuffer mmapSingleFile(Path path) throws IOException {
+      try (FileChannel ch = FileChannel.open(path, StandardOpenOption.READ)) {
+        return ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size());
+      }
+    }
+
+    private static final AtomicLongArray EMPTY_ACCESS_MAPPED = new AtomicLongArray(0);
+
+    private AD2IndexInput(
+        String name, AccessDirectory2 dir, ByteBuffer ownedBlock, boolean readOnce) {
+      super(
+          name,
+          dir.cache,
+          null /*blobUUID — not needed for owned-buffer-only inputs*/,
+          ownedBlock.capacity(),
+          null /*blockOffsets*/,
+          new ByteBufferGuard("ad2-owned", unmapHack()),
+          CachedCompressedIndexInput.parseSegId(name),
+          EMPTY_ACCESS_MAPPED /*accessMapped — empty, ownedBufferFor handles all blocks*/,
+          RootKind.of(false, readOnce) /*not applicable for owned-buffer-only*/);
+      this.compressedInfo = new CompressedInfo(null, null, null, null, ownedBlock);
+      this.isRoot = true;
+      this.blockSupplier = null;
+      this.nodesEntry = null;
+    }
+
+    private final BlockPreloader.BlockSupplier blockSupplier;
+
+    // non-null for root inputs with tracked nodes; null otherwise
+    private final NodesEntry nodesEntry;
+
+    // -------------------------------------------------------------------------
+    // Root constructor (via this() delegation)
+    // -------------------------------------------------------------------------
+
+    AD2IndexInput(
+        Path source,
+        AccessDirectory2 dir,
+        NodesEntry sharedEntry,
+        boolean readOnce,
+        HashMap<String, NodesEntry> pendingNodes)
+        throws IOException {
+      this(
+          source.getFileName().toString(),
+          dir,
+          parseRootParams(
+              source,
+              sharedEntry,
+              pendingNodes,
+              dir.uuidForFile(source.getFileName().toString()),
+              dir.cache),
+          RootKind.of(source.getFileName().toString().endsWith(".cfs"), readOnce));
+    }
+
+    private static final class RootParams {
+      final long length;
+      final long[] blockOffsets;
+      final ByteBuffer[] compressed;
+      final AtomicLongArray accessMapped;
+      final NodesEntry entry; // null for empty files
+      final UUID blobUUID;
+      final long segId;
+
+      RootParams(
+          long length,
+          long[] blockOffsets,
+          ByteBuffer[] compressed,
+          AtomicLongArray accessMapped,
+          NodesEntry entry,
+          long segId,
+          UUID blobUUID) {
+        this.length = length;
+        this.blockOffsets = blockOffsets;
+        this.compressed = compressed;
+        this.accessMapped = accessMapped;
+        this.entry = entry;
+        this.blobUUID = blobUUID;
+        this.segId = segId;
+      }
+    }
+
+    private static RootParams parseRootParams(
+        Path source,
+        NodesEntry sharedEntry,
+        HashMap<String, NodesEntry> pendingNodes,
+        UUID blobUUID,
+        BlockCache cache)
+        throws IOException {
+      long segId = parseSegId(source.getFileName().toString());
+      // Check for cached metadata — avoids reading header/footer from compressed file (disk).
+      if (sharedEntry != null) {
+        long[] cached = sharedEntry.cachedBlockOffsets;
+        if (cached != null) {
+          long length = sharedEntry.cachedLength;
+          ByteBuffer[] compressed = mmapCompressedFile(source);
+          return new RootParams(
+              length, cached, compressed, sharedEntry.nodes, sharedEntry, segId, blobUUID);
+        }
+      }
+
+      ByteBuffer[] compressed = mmapCompressedFile(source);
+      long size =
+          compressed.length == 0
+              ? 0
+              : compressed[compressed.length - 1].limit()
+                  + ((long) (compressed.length - 1) << MAX_MAP_SHIFT);
+      if (size == 0) {
+        return new RootParams(0, null, compressed, null, null, segId, null);
+      }
+
+      if (HINT_ROOT_PARAMS_HEADER_FOOTER) {
+        // Precisely hint the header before touching it, rather than letting the kernel's own
+        // page-fault-time readahead heuristic decide how much to pull in: an explicit, exact-sized
+        // MADV_WILLNEED is bounded to the requested range, whereas a cold fault on a large mmap'd
+        // file can trigger the kernel's adaptive readahead to pull in a much larger window of
+        // adjacent compressed block content this code path has no present use for (that content is
+        // fetched/hinted separately, on demand, as blocks are actually read elsewhere). The goal
+        // here is reducing that redundant read throughput, not reducing latency.
+        cache.willneed(cache.baseAddress(compressed[0]), Math.min(size, HEADER_SIZE));
+      }
+
+      ByteBuffer initial = compressed[0];
+      long length = initial.getLong(0);
+      if (length >> COMPRESSION_BLOCK_SHIFT > Integer.MAX_VALUE) {
+        throw new IllegalArgumentException(
+            "file too long " + Long.toHexString(length) + ", " + source);
+      }
+      int blockDeltaFooterSize = initial.getInt(Long.BYTES);
+      int cBlockTypeId = initial.get(HEADER_SIZE - Integer.BYTES) & 0xff;
+      if (cBlockTypeId != CompressingDirectory.COMPRESSION_BLOCK_TYPE.id) {
+        throw new IllegalArgumentException(
+            "unrecognized compression block type id: " + cBlockTypeId);
+      }
+      int cTypeId = initial.get(HEADER_SIZE - Integer.BYTES + 1) & 0xff;
+      if (cTypeId != CompressingDirectory.COMPRESSION_TYPE.id) {
+        throw new IllegalArgumentException("unrecognized compression type id: " + cTypeId);
+      }
+      byte[] footer = new byte[blockDeltaFooterSize];
+      long blockDeltaFooterOffset = size - blockDeltaFooterSize;
+      if (HINT_ROOT_PARAMS_HEADER_FOOTER) {
+        // hint precisely that range before reading it; same reasoning as the header hint above.
+        hintCompressedRegion(compressed, cache, blockDeltaFooterOffset, blockDeltaFooterSize);
+      }
+      // Read footer from the mmap'd compressed data (may span multiple regions)
+      readFromCompressed(compressed, blockDeltaFooterOffset, footer, 0, blockDeltaFooterSize);
+      ByteArrayDataInput in = new ByteArrayDataInput(footer);
+
+      long blockOffset = HEADER_SIZE;
+      int lastBlockSize = BLOCK_SIZE_ESTIMATE;
+      int blockCount = (int) (((length - 1) >> COMPRESSION_BLOCK_SHIFT) + 1);
+      long[] blockOffsets = new long[blockCount + 1];
+      blockOffsets[0] = blockOffset;
+      for (int i = 1; i < blockCount; i++) {
+        int delta = in.readZInt();
+        int nextBlockSize = lastBlockSize + delta;
+        blockOffset += nextBlockSize;
+        blockOffsets[i] = blockOffset;
+        lastBlockSize = nextBlockSize;
+      }
+      blockOffsets[blockCount] = blockDeltaFooterOffset;
+
+      NodesEntry entry;
+      if (sharedEntry != null) {
+        // refCount already incremented by openInput before the constructor call
+        if (sharedEntry.nodes.length() != blockCount) {
+          throw new IllegalArgumentException("block count mismatch");
+        }
+        entry = sharedEntry;
+      } else {
+        // sharedEntry==null: either no pendingNodes entry, or a race — putIfAbsent decides winner
+        AtomicLongArray localAccessMapped = new AtomicLongArray(blockCount);
+        NodesEntry newEntry =
+            new NodesEntry(localAccessMapped, length, blockOffsets); // refCount=1 (for map)
+        NodesEntry existing;
+        synchronized (pendingNodes) {
+          existing = pendingNodes.putIfAbsent(source.getFileName().toString(), newEntry);
+        }
+        if (existing == null) {
+          newEntry.acquire(); // +1 for this reader
+          entry = newEntry;
+        } else {
+          existing.acquire(); // +1 for this reader
+          entry = existing;
+        }
+      }
+
+      return new RootParams(length, blockOffsets, compressed, entry.nodes, entry, segId, blobUUID);
+    }
+
+    private static ByteBuffer[] mmapCompressedFile(Path source) throws IOException {
+      try (FileChannel channel = FileChannel.open(source, StandardOpenOption.READ)) {
+        long compressedFileSize = channel.size();
+        if (compressedFileSize == 0) {
+          return new ByteBuffer[0];
+        }
+        ByteBuffer[] compressed =
+            new ByteBuffer[Math.toIntExact(((compressedFileSize - 1) >> MAX_MAP_SHIFT) + 1)];
+        long pos = 0;
+        long limit = MAX_MAP_SIZE;
+        for (int i = 0, lim = compressed.length; i < lim; i++) {
+          int size = (int) (Math.min(limit, compressedFileSize) - pos);
+          compressed[i] = channel.map(FileChannel.MapMode.READ_ONLY, pos, size);
+          pos = limit;
+          limit += MAX_MAP_SIZE;
+        }
+        return compressed;
+      }
+    }
+
+    /** Issues MADV_WILLNEED on a byte range within the compressed mmap, handling region spans. */
+    private static void hintCompressedRegion(
+        ByteBuffer[] compressed, BlockCache cache, long offset, long length) {
+      int regionIdx = (int) (offset >> MAX_MAP_SHIFT);
+      int regionEnd = (int) ((offset + length - 1) >> MAX_MAP_SHIFT);
+      if (regionIdx == regionEnd) {
+        long addr = cache.baseAddress(compressed[regionIdx]) + (offset & MAX_MAP_MASK);
+        cache.willneed(addr, length);
+      } else {
+        long pos = offset;
+        long end = offset + length;
+        for (int r = regionIdx; r <= regionEnd; r++) {
+          long regionStart = (long) r << MAX_MAP_SHIFT;
+          long segStart = Math.max(pos, regionStart);
+          long segEnd = Math.min(end, regionStart + MAX_MAP_SIZE);
+          long addr = cache.baseAddress(compressed[r]) + (segStart & MAX_MAP_MASK);
+          cache.willneed(addr, segEnd - segStart);
+          pos = segEnd;
+        }
+      }
+    }
+
+    /** Reads bytes from the compressed mmap into dst, handling region spans. */
+    private static void readFromCompressed(
+        ByteBuffer[] compressed, long offset, byte[] dst, int dstOff, int length) {
+      int remaining = length;
+      while (remaining > 0) {
+        int region = (int) (offset >> MAX_MAP_SHIFT);
+        int regionOffset = (int) (offset & MAX_MAP_MASK);
+        ByteBuffer buf = compressed[region].duplicate().position(regionOffset);
+        int available = buf.remaining();
+        int toRead = Math.min(available, remaining);
+        buf.get(dst, dstOff, toRead);
+        offset += toRead;
+        dstOff += toRead;
+        remaining -= toRead;
+      }
+    }
+
+    private AD2IndexInput(
+        String description, AccessDirectory2 dir, RootParams p, RootKind rootKind) {
+      super(
+          description,
+          dir.cache,
+          p.blobUUID,
+          p.length,
+          p.blockOffsets,
+          new ByteBufferGuard("ad2-decompressed", unmapHack()),
+          p.segId,
+          p.accessMapped,
+          rootKind);
+      ByteBufferGuard compressedGuard = new ByteBufferGuard("ad2-compressed", unmapHack());
+      ByteBuffer[] compressed = p.compressed;
+      long[] addrs = new long[p.compressed.length];
+      for (int i = 0; i < addrs.length; i++) {
+        addrs[i] = dir.cache.baseAddress(p.compressed[i]);
+      }
+      StampedLock supplyLock = new StampedLock();
+      this.compressedInfo =
+          new CompressedInfo(compressedGuard, compressed, addrs, supplyLock, null);
+      this.isRoot = true;
+      this.nodesEntry = p.entry;
+      blockSupplier =
+          (blockOffset, compressedLen, decompressedLen) -> {
+            long stamp = supplyLock.tryReadLock();
+            if (stamp == 0) throw new IOException("compressed buffers closed: " + this);
+            try {
+              return supplyFromBuffers(
+                  compressed, compressedGuard, blockOffset, compressedLen, decompressedLen);
+            } finally {
+              supplyLock.unlockRead(stamp);
+            }
+          };
+    }
+
+    // -------------------------------------------------------------------------
+    // Slice / clone constructor
+    // -------------------------------------------------------------------------
+
+    private AD2IndexInput(
+        String description, AD2IndexInput parent, long sliceOffset, long sliceLen) {
+      super(description, parent, sliceOffset, sliceLen, RootKind.inheritFrom(parent.rootKind));
+      this.compressedInfo = parent.compressedInfo;
+      this.isRoot = false;
+      this.nodesEntry = null;
+      blockSupplier = parent.blockSupplier;
+    }
+
+    // -------------------------------------------------------------------------
+    // CachedCompressedIndexInput abstract method implementations
+    // -------------------------------------------------------------------------
+
+    @Override
+    protected ByteBuffer ownedBufferFor(int blockIdx) {
+      ByteBuffer ownedBlock = compressedInfo.ownedBlock;
+      if (ownedBlock != null && blockIdx == 0) {
+        return ownedBlock.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+      }
+      return null;
+    }
+
+    @Override
+    protected void onCacheHit(int blockIdx, BlockCache.Val val, int seqAccessCount) {
+      super.onCacheHit(blockIdx, val, seqAccessCount);
+      if (HINT_ON_CACHE_HIT && rootKind == RootKind.SUB_SLICE && seqAccessCount > 0) {
+        // Start past current block — it's a hit, so its compressed data isn't needed.
+        expandCompressedReadahead(blockIdx, blockIdx + 1, seqAccessCount);
+      }
+    }
+
+    @Override
+    protected byte[] supply(int blockIdx, long blockOffset, int compressedLen, int decompressedLen)
+        throws IOException {
+      if (rootKind == RootKind.SUB_SLICE && (MIN_READ_AHEAD > 0 || seqAccessCount > 0)) {
+        // Include current block — it's a miss, its compressed data needs to be paged in.
+        expandCompressedReadahead(blockIdx, blockIdx, Math.max(MIN_READ_AHEAD, seqAccessCount));
+      } else if (ALWAYS_HINT_CURRENT_BLOCK) {
+        // No readahead, but still hint the current block so the kernel reads its
+        // full compressed range in one I/O rather than demand-faulting page by page.
+        hintCompressedRange(blockIdx, blockIdx);
+        readAheadTo = blockIdx;
+      }
+      return supplyFromBuffers(
+          compressedInfo.compressed,
+          compressedInfo.compressedGuard,
+          blockOffset,
+          compressedLen,
+          decompressedLen);
+    }
+
+    /**
+     * Expands the compressed file readahead window toward {@code blockIdx + batchSize}. Scans from
+     * {@code hintFromMin} (or {@code readAheadTo + 1}, whichever is further) and hints unpinnable
+     * blocks. Called on both cache hits and misses so the compressed data is paged in before the
+     * next miss needs it.
+     */
+    private void expandCompressedReadahead(int blockIdx, int hintFromMin, int seqAccessCount) {
+      int batchSize = Math.min(seqAccessCount, MAX_READ_AHEAD);
+      int target = Math.min(blockIdx + batchSize, sliceLastBlockIdx);
+      if (target > readAheadTo) {
+        int hintFrom = Math.max(readAheadTo + 1, hintFromMin);
+        int hintTo = -1;
+        int newReadAheadTo = target;
+        AtomicLongArray am = accessMapped();
+        BlockCache cache = cache();
+        for (int i = hintFrom; i <= target; i++) {
+          long extant = am.get(i);
+          if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) {
+            newReadAheadTo = i;
+            break;
+          }
+          hintTo = i;
+        }
+        if (hintTo >= hintFrom) {
+          hintCompressedRange(hintFrom, hintTo);
+        }
+        readAheadTo = newReadAheadTo;
+      }
+    }
+
+    /**
+     * Probe: {@code true} if block {@code idx}'s decompressed content is already resident in {@link
+     * BlockCache} (cached earlier this run, or a warm-start hit from a prior persisted run) -- the
+     * same {@code accessMapped}/{@link BlockCache#pinnable} check {@link #loadBlock} and {@link
+     * #expandCompressedReadahead} use before deciding whether to acquire/populate a slot, exposed
+     * standalone so callers can skip issuing a compressed-data hint for blocks that don't need one,
+     * without the side effect of acquiring/pinning a node.
+     *
+     * <p>Not read-only: on a warm-start hit not yet reflected in this instance's {@code
+     * accessMapped} (the common case the first time any given index is probed -- see below), this
+     * writes the discovered handle into {@code accessMapped} and calls {@link
+     * BlockCache#recordWarmStartHit}. {@link BlockCache#peekExtantHandle} itself also briefly
+     * pins/unpins the slot (to mark its {@code Val} populated -- see that method's doc comment for
+     * why that's required), so "read-only" only holds with respect to this input's own local
+     * bookkeeping being otherwise unaffected by a failed probe, not with respect to {@link
+     * BlockCache}'s internal pin state (which is restored before this method returns either way).
+     */
+    private boolean isPresent(int idx) {
+      AtomicLongArray accessMapped = accessMapped();
+      BlockCache cache = cache();
+      long extant = accessMapped.get(idx);
+      if (extant != BlockCache.NULL_HANDLE) {
+        return cache.pinnable(extant);
+      }
+      // accessMapped is a fresh, all-NULL_HANDLE array at this point in construction -- nothing
+      // has called acquireNode(..., blobUUID, idx) for this file yet, so a NULL_HANDLE entry here
+      // says nothing about whether the block was already persisted in a prior run. Peek the extant
+      // map directly to find out, without the other side effects of the full
+      // acquireNode(long[], UUID, int) path (e.g. this doesn't touch accessMapped itself).
+      long handle = cache.peekExtantHandle(blobUUID(), idx);
+      if (handle == BlockCache.NULL_HANDLE) {
+        return false;
+      }
+      // Found and still valid (peekExtantHandle already re-validated via pinnable()). Record the
+      // hit and publish the handle into accessMapped now, at the moment of discovery, so loadBlock
+      // later finds it via its own fast accessMapped/pinnable() check and never needs to consult
+      // the extant map itself (see loadBlock's own doc comment for why this matters).
+      if (accessMapped.compareAndSet(idx, BlockCache.NULL_HANDLE, handle)) {
+        cache.recordWarmStartHit();
+      }
+      // Either we just published it, or another thread concurrently resolved (and recorded) the
+      // same entry first -- present either way.
+      return true;
+    }
+
+    /**
+     * Like {@link #hintCompressedRange(int, int)}, but first splits {@code [fromIdx, toIdx]} into
+     * contiguous not-yet-{@link #isPresent}-blocks sub-runs and hints only those -- skipping
+     * compressed-data hints (and the disk I/O they trigger) for blocks already resident, whether
+     * from earlier this run or a warm-start hit from a prior persisted run.
+     */
+    private void hintCompressedRangeIfAbsent(int fromIdx, int toIdx) {
+      int hintFrom = -1;
+      for (int idx = fromIdx; idx <= toIdx; idx++) {
+        if (isPresent(idx)) {
+          if (hintFrom >= 0) {
+            hintCompressedRange(hintFrom, idx - 1);
+            hintFrom = -1;
+          }
+        } else if (hintFrom < 0) {
+          hintFrom = idx;
+        }
+      }
+      if (hintFrom >= 0) {
+        hintCompressedRange(hintFrom, toIdx);
+      }
+    }
+
+    /** Issues MADV_WILLNEED on compressed data for blocks [fromIdx, toIdx] inclusive. */
+    private void hintCompressedRange(int fromIdx, int toIdx) {
+      long[] blockOffsets = blockOffsets();
+      BlockCache cache = cache();
+      long from = blockOffsets[fromIdx];
+      long to = blockOffsets[toIdx + 1];
+      int regionIdx = (int) (from >> MAX_MAP_SHIFT);
+      int regionEnd = (int) (to >> MAX_MAP_SHIFT);
+      long[] compressedBaseAddresses = compressedInfo.compressedBaseAddresses;
+      if (regionIdx == regionEnd) {
+        long addr = compressedBaseAddresses[regionIdx] + (from & MAX_MAP_MASK);
+        cache.willneed(addr, to - from);
+      } else {
+        long pos = from;
+        for (int r = regionIdx; r <= regionEnd; r++) {
+          long regionStart = (long) r << MAX_MAP_SHIFT;
+          long segStart = Math.max(pos, regionStart);
+          long segEnd = Math.min(to, regionStart + MAX_MAP_SIZE);
+          long addr = compressedBaseAddresses[r] + (segStart & MAX_MAP_MASK);
+          cache.willneed(addr, segEnd - segStart);
+          pos = segEnd;
+        }
+      }
+    }
+
+    /**
+     * Outcome of {@link #loadBlock(AD2IndexInput, int)}: whether the block was already present
+     * (either previously cached this run, or a warm-start hit from a prior persisted run), had to
+     * be fetched/decompressed, or the cache was full. Lets callers that issue {@code MADV_WILLNEED}
+     * hints on the compressed source skip the hint entirely for blocks that turn out to already be
+     * resident -- hinting (and the disk I/O that follows) is only useful ahead of a genuine {@link
+     * #MISS}.
+     */
+    private enum LoadResult {
+      ALREADY_PRESENT,
+      MISS,
+      POOL_EXHAUSTED
+    }
+
+    /**
+     * Loads block {@code idx} of {@code in} into the cache if not already present. Returns {@link
+     * LoadResult#POOL_EXHAUSTED} if the cache is full (caller should stop issuing further loads);
+     * otherwise {@link LoadResult#ALREADY_PRESENT} or {@link LoadResult#MISS} depending on whether
+     * the block was already cached/warm-start-hit or had to be fetched and decompressed.
+     *
+     * <p><b>Precondition:</b> callers in this class's constructor always invoke {@link
+     * #isPresent}/{@link #hintCompressedRangeIfAbsent} over the same index range before calling
+     * this method, which already resolves any warm-start extant-map entry into {@code accessMapped}
+     * (see {@link #isPresent}). Because of that, this method deliberately does <em>not</em> consult
+     * the extant map itself on a miss here -- it falls straight through to the plain eviction-based
+     * {@link BlockCache#acquireNode(long[])}, not the extant-map-aware {@link
+     * BlockCache#acquireNode(long[], UUID, int)} overload, to avoid a second, redundant extant-map
+     * lookup for an index the hint phase has already resolved one way or the other. A hypothetical
+     * future caller that invokes {@code loadBlock} without a preceding presence check would still
+     * be correct (just miss out on a still-valid warm-start entry and decompress from source
+     * instead) -- not a correctness bug, just a lost optimization.
+     */
+    private static LoadResult loadBlock(AD2IndexInput in, int idx) throws IOException {
+      BlockCache cache = in.cache();
+      UUID blobUUID = in.blobUUID();
+      AtomicLongArray accessMapped = in.accessMapped();
+      long extant = accessMapped.get(idx);
+      if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) {
+        return LoadResult.ALREADY_PRESENT;
+      }
+      long[] nodeHandle = new long[1];
+      BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle);
+      if (toPopulateVal == null) return LoadResult.POOL_EXHAUSTED;
+      long toPopulate = nodeHandle[0];
+      LoadResult result;
+      if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
+        long[] blockOffsets = in.blockOffsets();
+        long blockOffset = blockOffsets[idx];
+        int compressedLen = (int) (blockOffsets[idx + 1] - blockOffset);
+        BlockPreloader.populateBuf(
+            blockOffset,
+            compressedLen,
+            idx,
+            in.decompressedLenFor(idx),
+            toPopulate,
+            toPopulateVal,
+            accessMapped,
+            cache,
+            in.blockSupplier,
+            blobUUID);
+        result = LoadResult.MISS;
+        cache.unpin(toPopulate, false);
+      } else {
+        cache.close(toPopulate, toPopulateVal);
+        // Another thread already raced us to populate this slot; from this caller's perspective
+        // the block is present either way (we don't know/care which of the two outcomes the
+        // winning thread hit).
+        result = LoadResult.ALREADY_PRESENT;
+      }
+      return result;
+    }
+
+    private static byte[] supplyFromBuffers(
+        ByteBuffer[] bufs,
+        ByteBufferGuard compressedGuard,
+        long blockOffset,
+        int compressedLen,
+        int decompressedLen)
+        throws IOException {
+      final byte[] preBuffer = new byte[compressedLen];
+      final byte[] decompressBuffer = new byte[decompressedLen + 7]; // +7 for decompressor headroom
+      ByteBuffer bb =
+          bufs[(int) (blockOffset >> MAX_MAP_SHIFT)]
+              .duplicate()
+              .position((int) (blockOffset & MAX_MAP_MASK));
+      int readOffset = 0;
+      int left = bb.remaining();
+      int toRead = compressedLen;
+      while (left < toRead) {
+        compressedGuard.getBytes(bb, preBuffer, readOffset, left);
+        toRead -= left;
+        readOffset += left;
+        blockOffset += left;
+        bb =
+            bufs[(int) (blockOffset >> MAX_MAP_SHIFT)]
+                .duplicate()
+                .position((int) (blockOffset & MAX_MAP_MASK));
+        left = bb.remaining();
+      }
+      compressedGuard.getBytes(bb, preBuffer, readOffset, toRead);
+      CompressingDirectory.decompress(preBuffer, 0, decompressedLen, decompressBuffer, 0);
+      return decompressBuffer;
+    }
+
+    @Override
+    protected AD2IndexInput cloneSlice(String description, long sliceOffset, long sliceLen) {
+      return new AD2IndexInput(description, this, sliceOffset, sliceLen);
+    }
+
+    @Override
+    protected ByteBuffer doClose(RootInfo rootInfo) throws IOException {
+      if (!isRoot) return null;
+      if (compressedInfo.ownedBlock != null) {
+        // Owned-buffer-only input: return the mmap'd buffer for unmapping by CCII.close().
+        return compressedInfo.ownedBlock;
+      }
+      if (nodesEntry != null) {
+        nodesEntry.release(rootInfo.cache);
+      }
+      // Acquire exclusive lock and never release — drains in-flight supplyFromBuffers calls,
+      // and all subsequent tryReadLock() calls return 0, preventing access to freed memory.
+      compressedInfo.supplyLock.writeLock();
+      compressedInfo.compressedGuard.invalidateAndUnmap(compressedInfo.compressed);
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Write-through output: captures uncompressed blocks into the BlockCache at write time.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * An {@link IndexOutput} that forwards all writes to a delegate (the {@link CompressingDirectory}
+   * output) while simultaneously capturing each {@link
+   * CompressingDirectory#COMPRESSION_BLOCK_SIZE}-byte chunk into a {@link BlockCache.Val}. When
+   * closed, the collected nodes are handed to {@link AccessDirectory2#storeNodes} so that the first
+   * {@link #openInput} call on this file finds a warm cache.
+   *
+   * <p>This avoids writing an uncompressed copy to the access-path {@link MMapDirectory}.
+   */
+  static final class WriteThroughOutput extends IndexOutput
+      implements LongConsumer, CompressingDirectory.SizeReportingIndexOutput {
+
+    private final IndexOutput delegate;
+    // Non-null in the real (CompressingDirectory-backed) call path; delegate.getFilePointer() is
+    // the fallback for any hypothetical delegate that doesn't report compressed on-disk size.
+    private final CompressingDirectory.SizeReportingIndexOutput delegateSizeReporting;
+    private final AccessDirectory2 dir;
+    private final String name;
+    private final byte[] blockBuf = new byte[COMPRESSION_BLOCK_SIZE];
+    private int blockBufPos = 0;
+    private final LongArrayList nodeSlots = new LongArrayList();
+    private final LongArrayList blockOffsets = new LongArrayList();
+    private final CRC32 crc = new CRC32();
+
+    WriteThroughOutput(String name, IndexOutput delegate, AccessDirectory2 dir) {
+      super("WriteThroughOutput(" + name + ")", name);
+      this.delegate = delegate;
+      if (delegate instanceof CompressingDirectory.ChunkedOutput) {
+        ((CompressingDirectory.ChunkedOutput) delegate).setChunkCallback(this);
+      }
+      this.delegateSizeReporting =
+          delegate instanceof CompressingDirectory.SizeReportingIndexOutput
+              ? (CompressingDirectory.SizeReportingIndexOutput) delegate
+              : null;
+      this.dir = dir;
+      this.name = name;
+    }
+
+    @Override
+    public long getBytesWritten() {
+      return delegateSizeReporting != null
+          ? delegateSizeReporting.getBytesWritten()
+          : delegate.getFilePointer();
+    }
+
+    @Override
+    public void accept(long value) {
+      blockOffsets.add(value);
+    }
+
+    @Override
+    public void writeByte(byte b) throws IOException {
+      blockBuf[blockBufPos++] = b;
+      if (blockBufPos == COMPRESSION_BLOCK_SIZE) {
+        captureBlock(COMPRESSION_BLOCK_SIZE);
+      }
+      crc.update(b);
+      delegate.writeByte(b);
+    }
+
+    @Override
+    public void writeBytes(byte[] src, int offset, int len) throws IOException {
+      int remaining = len;
+      int srcOff = offset;
+      while (remaining > 0) {
+        int space = COMPRESSION_BLOCK_SIZE - blockBufPos;
+        int copy = Math.min(space, remaining);
+        System.arraycopy(src, srcOff, blockBuf, blockBufPos, copy);
+        blockBufPos += copy;
+        srcOff += copy;
+        remaining -= copy;
+        if (blockBufPos == COMPRESSION_BLOCK_SIZE) {
+          captureBlock(COMPRESSION_BLOCK_SIZE);
+        }
+      }
+      crc.update(src, offset, len);
+      delegate.writeBytes(src, offset, len);
+    }
+
+    private void captureBlock(int len) {
+      long[] nodeHandle = new long[1];
+      BlockCache.Val nodeVal = dir.cache.acquireNode(nodeHandle);
+      long node = nodeHandle[0];
+      if (nodeVal != null) {
+        try {
+          nodeVal.populate(blockBuf, 0, len, dir.uuidForFile(name), nodeSlots.size(), dir.cache);
+        } finally {
+          dir.cache.unpin(node, false);
+        }
+        dir.cache.recordPrepopulated();
+      }
+      nodeSlots.add(node); // NULL_HANDLE = cache exhausted; cold on first read
+      blockBufPos = 0;
+    }
+
+    @Override
+    public long getFilePointer() {
+      return delegate.getFilePointer();
+    }
+
+    @Override
+    public long getChecksum() throws IOException {
+      return crc.getValue();
+    }
+
+    @Override
+    public void close() throws IOException {
+      long length;
+      try (delegate) {
+        if (blockBufPos > 0) {
+          if (nodeSlots.isEmpty()) {
+            // Small file (single partial block): write directly to the access directory
+            // as a mirrored file, bypassing BlockCache entirely.
+            try (IndexOutput out = dir.createOutput(name, IOContext.DEFAULT)) {
+              out.writeBytes(blockBuf, 0, blockBufPos);
+            }
+            return;
+          }
+          captureBlock(blockBufPos); // partial last block
+        }
+        length = delegate.getFilePointer();
+      }
+      int blockCount = nodeSlots.size();
+      AtomicLongArray sharedAccessMapped = new AtomicLongArray(blockCount);
+      for (int i = 0; i < blockCount; i++) {
+        sharedAccessMapped.set(i, nodeSlots.get(i));
+      }
+
+      // Build blockOffsets from the cumulative bytesWritten reported by the callback.
+      // bytesWritten already includes HEADER_SIZE, so callback values are absolute file offsets.
+      // blockOffsets[0] = HEADER_SIZE; blockOffsets[i+1] = callback[i].
+      // blockOffsets[blockCount] = footer offset.
+      long[] offsets = new long[blockCount + 1];
+      offsets[0] = HEADER_SIZE;
+      for (int i = 0; i < blockOffsets.size(); i++) {
+        offsets[i + 1] = blockOffsets.get(i);
+      }
+
+      dir.storeNodes(name, sharedAccessMapped, length, offsets);
+    }
+  }
+}

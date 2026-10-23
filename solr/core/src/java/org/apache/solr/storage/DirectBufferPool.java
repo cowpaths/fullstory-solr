@@ -23,6 +23,35 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
+/**
+ * TODO: this pool only ever grows (see {@link #get()}'s allocate-on-miss path) and never shrinks --
+ * {@code maxPoolSize} merely caps how many idle buffers are *retained* on {@link #release}, it
+ * never reclaims already-allocated native memory. Investigated (not yet acted on) whether {@link
+ * BlockCache}'s existing mmap'd, page-aligned, bounded-capacity storage could serve as a drop-in
+ * replacement source of direct-IO-compatible buffers instead -- confirmed via a standalone test
+ * that a file-backed {@code MappedByteBuffer} (same {@code DirectByteBuffer} JDK class as {@link
+ * java.nio.ByteBuffer#allocateDirect}) works correctly as the source buffer for an O_DIRECT {@code
+ * FileChannel.write()} to an unrelated file. Open design questions if pursued: BlockCache's {@code
+ * acquireNode()} can return {@code null} under pinning pressure (unlike this pool, which always
+ * succeeds by growing -- would need a one-off unpooled-buffer fallback), and a borrowed-but-never-
+ * {@code populate()}d slot would need a release path (e.g. treat like a lost CAS race: {@code
+ * acquireNode()} then {@code BlockCache.close(handle)} without populating). Lifecycle is not a
+ * concern here -- {@code AsyncDirectWriteHelper}'s 2 buffers have a clear, prompt unpin/close via
+ * its own explicit lifecycle, actually *shorter* than standard BlockCache usage, which has no such
+ * hook and relies on GC-driven unpin (NodeRefStruct finalization).
+ *
+ * <p>BlockCache is not always available/applicable, though (e.g. {@code
+ * solr.teeDirectory.useBlockCache=false}, or {@code CompressingDirectory}'s separate tiny {@code
+ * initialBlockBufferPool}, sized to the raw filesystem block size -- a poor fit for BlockCache's
+ * much larger slots). So this would need to become an interface ({@code get()}/{@code
+ * release(ByteBuffer)}, both already this class's full public surface) with two implementations --
+ * this class, kept as the fallback, and a new BlockCache-backed one -- selected per {@code
+ * DirectBufferPool} construction site based on whether a BlockCache instance is actually available
+ * there (e.g. already plumbed through from {@code TeeDirectoryFactory.NodeLevelTeeDirectoryState}
+ * for {@code CompressingDirectory}'s own {@code mainBufferPool}, which -- unlike {@code
+ * initialBlockBufferPool} -- is sized to match {@code COMPRESSION_BLOCK_SIZE} and would be the
+ * actual intended beneficiary).
+ */
 public class DirectBufferPool {
   private final ConcurrentLinkedQueue<ByteBuffer> pool = new ConcurrentLinkedQueue<>();
   private final int size;
