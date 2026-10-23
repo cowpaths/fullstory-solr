@@ -993,15 +993,15 @@ class Cache2<V extends Cache2.Val> {
    */
   private int reserve(long group2Offset, int reservation, int cur) {
     for (; ; ) {
-      while (cur == RESERVED_LINK) {
-        Thread.onSpinWait();
-        cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
+      if (cur >= 0) {
+        // compareAndSetNext(slot, cur, reservation)
+        if (group2.compareAndSetInt(group2Offset, cur, reservation)) {
+          return cur;
+        }
+      } else if (cur == REMOVED_LINK) {
+        return REMOVED_LINK;
       }
-
-      // compareAndSetNext(slot, cur, reservation)
-      if (cur == REMOVED_LINK || group2.compareAndSetInt(group2Offset, cur, reservation)) {
-        return cur;
-      }
+      // at this point either `cur == RESERVED_LINK` or we lost the CAS; either way, retry
       Thread.onSpinWait();
       cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
     }
