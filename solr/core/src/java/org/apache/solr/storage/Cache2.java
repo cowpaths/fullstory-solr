@@ -1073,42 +1073,40 @@ class Cache2<V extends Cache2.Val> {
     // which is re-read fresh each retry) -- hoisted once, outside the loop entirely.
     long coldTailOffset = group2Offset(COLD_TAIL);
     long slotOffset = group2Offset(slot);
-    int predSlot;
-    long predSlotOffset;
     for (; ; ) {
       // getPrevVolatile(COLD_TAIL)
-      predSlot = group2.getIntVolatile(coldTailOffset + PREV_OFFSET);
+      int predSlot = group2.getIntVolatile(coldTailOffset + PREV_OFFSET);
 
       // predSlot's offset is used 2-3 times within this iteration (reserve()'s own argument, the
       // getNextVolatile it used to wrap, and whichever compareAndSetNext below applies) -- hoisted
       // once per iteration; it can't be hoisted further out than the loop body since predSlot
       // itself changes across iterations.
-      predSlotOffset = group2Offset(predSlot);
+      long predSlotOffset = group2Offset(predSlot);
 
       // reserve(predSlot, RESERVED_LINK, getNextVolatile(predSlot))
       int oldNext = reserve(predSlotOffset, RESERVED_LINK, group2.getIntVolatile(predSlotOffset));
 
-      if (oldNext == COLD_TAIL) {
-        break;
-      }
+      if (oldNext != COLD_TAIL) {
+        if (oldNext == REMOVED_LINK) {
+          continue; // pred was concurrently removed; retry
+        }
 
-      // compareAndSetNext(predSlot, RESERVED_LINK, oldNext)
-      if (oldNext != REMOVED_LINK
-          && !group2.compareAndSetInt(predSlotOffset, RESERVED_LINK, oldNext)) {
-        // if `oldNext == REMOVED_LINK` then pred was concurrently removed, and we
-        // have no reservation to release.
-        // Otherwise, if pred is no longer tail's predecessor and we're unable to release our
-        // reservation, it's a hard error.
-        throw new IllegalStateException();
+        // release reservation; pred is no longer tail's predecessor
+        // compareAndSetNext(predSlot, RESERVED_LINK, oldNext)
+        if (!group2.compareAndSetInt(predSlotOffset, RESERVED_LINK, oldNext)) {
+          throw new IllegalStateException();
+        }
+        continue;
       }
-    }
-    group2.putInt(slotOffset, COLD_TAIL); // setNextPlain(slot, COLD_TAIL)
-    group2.putIntVolatile(slotOffset + PREV_OFFSET, predSlot); // setPrevVolatile(slot, predSlot)
-    group2.putIntVolatile(coldTailOffset + PREV_OFFSET, slot); // setPrevVolatile(COLD_TAIL, slot)
+      group2.putInt(slotOffset, COLD_TAIL); // setNextPlain(slot, COLD_TAIL)
+      group2.putIntVolatile(slotOffset + PREV_OFFSET, predSlot); // setPrevVolatile(slot, predSlot)
+      group2.putIntVolatile(coldTailOffset + PREV_OFFSET, slot); // setPrevVolatile(COLD_TAIL, slot)
 
-    // compareAndSetNext(predSlot, RESERVED_LINK, slot)
-    if (!group2.compareAndSetInt(predSlotOffset, RESERVED_LINK, slot)) {
-      throw new IllegalStateException("unexpected concurrent modification during tail insertion");
+      // compareAndSetNext(predSlot, RESERVED_LINK, slot)
+      if (!group2.compareAndSetInt(predSlotOffset, RESERVED_LINK, slot)) {
+        throw new IllegalStateException("unexpected concurrent modification during tail insertion");
+      }
+      return;
     }
   }
 
