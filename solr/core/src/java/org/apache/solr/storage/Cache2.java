@@ -21,6 +21,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.LongAdder;
 import org.apache.lucene.store.OffHeapStore;
 import org.apache.lucene.store.OffHeapStores;
 import org.apache.solr.common.util.EnvUtils;
@@ -992,23 +993,35 @@ class Cache2<V extends Cache2.Val> {
    * {@link #getNextAndPrevVolatile}) instead of a dedicated read.
    */
   private int reserve(long group2Offset, int reservation, int cur) {
+    int a = 0, b = 0;
     for (; ; ) {
-      while (cur == RESERVED_LINK) {
-        Thread.onSpinWait();
-        cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
-      }
-      if (cur == REMOVED_LINK) {
-        return cur;
-      }
-
-      // compareAndSetNext(slot, cur, reservation)
-      if (group2.compareAndSetInt(group2Offset, cur, reservation)) {
-        return cur;
+      switch (cur) {
+        case REMOVED_LINK:
+          REMOVED_SPIN.increment();
+          if (a != 0) RESERVED_SPIN.add(a);
+          if (b != 0) DEFAULT_SPIN.add(b);
+          return REMOVED_LINK;
+        case RESERVED_LINK:
+          a++;
+          break;
+        default:
+          // compareAndSetNext(slot, cur, reservation)
+          if (group2.compareAndSetInt(group2Offset, cur, reservation)) {
+            if (a != 0) RESERVED_SPIN.add(a);
+            if (b != 0) DEFAULT_SPIN.add(b);
+            return cur;
+          }
+          b++;
+          break;
       }
       Thread.onSpinWait();
       cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
     }
   }
+
+  static final LongAdder REMOVED_SPIN = new LongAdder();
+  static final LongAdder RESERVED_SPIN = new LongAdder();
+  static final LongAdder DEFAULT_SPIN = new LongAdder();
 
   protected boolean insertAtHead(int listHead, int slot, boolean recordAccess) {
     // Hoisted for the same reason as pin()/unpin() (see those methods' comments): listHead's
