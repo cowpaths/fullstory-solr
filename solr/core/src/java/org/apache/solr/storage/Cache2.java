@@ -479,6 +479,17 @@ class Cache2<V extends Cache2.Val> {
   private static final long VERY_STALE = TimeUnit.DAYS.toNanos(365);
 
   /**
+   * Minimum plausible age (nanos since last unpin) for a genuinely-used cold-tail candidate in
+   * {@code DualQueueCache.acquireTail}. {@code coldCandidate}/{@code hotCandidate} are read as two
+   * independent volatile reads, so another thread can pin+unpin the just-read {@code coldCandidate}
+   * in between, writing a brand-new real {@code lastUnpinNanos} before this thread reads it -- an
+   * implausibly fresh age here means that happened. Matters because an unlucky hit can trigger a
+   * too-early {@code hotAcquisitions} (see {@code BlockCache#extantMap}'s javadoc), prematurely
+   * dropping still-useful warm-start data -- not merely a one-off wrong eviction choice.
+   */
+  private static final long MIN_PLAUSIBLE_AGE_NANOS = TimeUnit.SECONDS.toNanos(5);
+
+  /**
    * Returns the age (nanos since last unpin) of a slot given its {@code lastUnpinNanos} stamp.
    * Returns a large sentinel age for never-used slots ({@code lastUnpinNanos == 0}) so they are
    * always preferred for eviction over any slot that has been genuinely used.
@@ -1369,7 +1380,12 @@ class Cache2<V extends Cache2.Val> {
       // can pin() again: pin()'s pre-CAS generation check will then fail, so a stale pinner cannot
       // successfully pin -- or hang in join() -- after this slot has been recycled.
       // insertAtTail() below splices directly into the cold list without going through
-      // DualQueueCache.insertAtHead(), so reset(slot) must be called explicitly here too.
+      // DualQueueCache.insertAtHead(), so reset(slot) must be called explicitly here too. (A
+      // stale fromHot bit left over from before this close() needs no equivalent fix: the
+      // generation bump below invalidates every extant handle for this slot, so the only way back
+      // into circulation is a future acquireTail() eviction, which always freshly derives fromHot
+      // from actual queue membership regardless of whatever was left over -- same reasoning as
+      // closeUnconditional(), which never touches fromHot at all.)
       reset(slot);
       payload[slot].reset();
       incrementAndGetGeneration(slot);
@@ -1531,7 +1547,14 @@ class Cache2<V extends Cache2.Val> {
           coldCandidateTs = getLastUnpinNanos(coldCandidate);
           fromHot =
               age(now, coldCandidateTs)
-                  < age(now, getLastUnpinNanos(hotCandidate)) >> HOT_EVICTION_SHIFT;
+                      < age(now, getLastUnpinNanos(hotCandidate)) >> HOT_EVICTION_SHIFT
+                  // See MIN_PLAUSIBLE_AGE_NANOS's javadoc: only reached (coldCandidateTs != 0,
+                  // since age(now, 0) == VERY_STALE can never satisfy the comparison above) when
+                  // the age comparison above would otherwise pick hot -- an implausibly-fresh
+                  // coldCandidateTs there means coldCandidate was concurrently pinned+unpinned
+                  // since the getPrevVolatile(COLD_TAIL) read above, inverting that comparison.
+                  // Veto it.
+                  && now - coldCandidateTs >= MIN_PLAUSIBLE_AGE_NANOS;
           candidate = fromHot ? hotCandidate : coldCandidate;
         }
         if (compareAndSetRefCount(candidate, 0, -1)) {
@@ -1539,7 +1562,10 @@ class Cache2<V extends Cache2.Val> {
         }
         Thread.onSpinWait();
       }
-      if (coldCandidateTs != 0) {
+      // Also guard the coldTs memoization against the same race (see MIN_PLAUSIBLE_AGE_NANOS's
+      // javadoc): an implausibly-fresh raw sample must not be allowed to pollute this
+      // partition-wide threshold for every future toHot() call.
+      if (coldCandidateTs != 0 && now - coldCandidateTs >= MIN_PLAUSIBLE_AGE_NANOS) {
         this.coldTs = coldCandidateTs;
       }
       setFromHotVolatile(candidate, fromHot);
