@@ -1007,36 +1007,19 @@ class Cache2<V extends Cache2.Val> {
    */
   private int reserve(long group2Offset, int reservation, int cur) {
     for (; ; ) {
-//      if (cur == RESERVED_LINK) {
-//        // isolate the case that can occasionally spin burst
-//        cur = spinOnReserved(group2Offset);
-//      }
       while (cur == RESERVED_LINK) {
-        Thread.onSpinWait();
+        Thread.onSpinWait(); // multi-op inflight on other thread
         cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
       }
       if (cur == REMOVED_LINK) {
         return REMOVED_LINK;
       }
-      // compareAndSetNext(slot, cur, reservation)
-      if (group2.compareAndSetInt(group2Offset, cur, reservation)) {
+      // compareAndExchangeNext(slot, cur, reservation)
+      int witness = group2.compareAndExchangeInt(group2Offset, cur, reservation);
+      if (witness == cur) {
         return cur;
       }
-      Thread.onSpinWait();
-      cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
-    }
-  }
-
-  private int spinOnReserved(long group2Offset) {
-    for (; ; ) {
-      for (int i = YIELD_ONCE_PER; i > 0; i--) {
-        Thread.onSpinWait();
-        int cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
-        if (cur != RESERVED_LINK) {
-          return cur;
-        }
-      }
-      Thread.yield();
+      cur = witness;
     }
   }
 
@@ -1089,7 +1072,7 @@ class Cache2<V extends Cache2.Val> {
 
     // compareAndSetNext(prevSlot, slot, RESERVED_LINK)
     while (!group2.compareAndSetInt(prevSlotOffset, slot, RESERVED_LINK)) {
-      Thread.onSpinWait();
+      Thread.onSpinWait(); // removal or insertion, maybe in-flight. we have to re-read either way
       prevSlot = group2.getIntVolatile(slotOffset + PREV_OFFSET); // getPrevVolatile(slot)
       prevSlotOffset = group2Offset(prevSlot);
     }
@@ -1098,21 +1081,6 @@ class Cache2<V extends Cache2.Val> {
     // compareAndSetNext(prevSlot, RESERVED_LINK, oldNext)
     if (!group2.compareAndSetInt(prevSlotOffset, RESERVED_LINK, oldNext)) {
       throw new IllegalStateException("unexpected concurrent modification during list removal");
-    }
-  }
-
-  private int spinOnPrevCAS(int slot, long slotOffset) {
-    for (; ; ) {
-      for (int i = YIELD_ONCE_PER; i > 0; i--) {
-        Thread.onSpinWait();
-        int prevSlot = group2.getIntVolatile(slotOffset + PREV_OFFSET); // getPrevVolatile(slot)
-
-        // compareAndSetNext(prevSlot, slot, RESERVED_LINK)
-        if (group2.compareAndSetInt(group2Offset(prevSlot), slot, RESERVED_LINK)) {
-          return prevSlot;
-        }
-      }
-      Thread.yield();
     }
   }
 
@@ -1198,27 +1166,29 @@ class Cache2<V extends Cache2.Val> {
 
     if ((int) (rcAndGen >>> 32) != expectedGen) return -1;
     int rc = (int) rcAndGen;
+    incRefCount:
     for (; ; ) {
-      switch (rc) {
-        case -1:
-          return -1;
-        case UNPIN_SENTINEL:
-          // UNPIN_SENTINEL means another thread's unpin() is in-flight on this slot
-          // (CAS to UNPIN_SENTINEL, insertAtHead(), CAS back to 0) -- analogous to
-          // reserve()'s RESERVED_LINK, not a self-resolving CAS failure
-          Thread.onSpinWait();
-          rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
-          continue;
-      }
-      assert rc >= 0;
-
-      // compareAndSetRefCount(slot, rc, rc + 1)
-      if (group1.compareAndSetInt(group1Offset, rc, rc + 1)) {
-        break;
-      } else {
-        Thread.onSpinWait();
+      while (rc == UNPIN_SENTINEL) {
+        Thread.onSpinWait(); // multi-op inflight on other thread
         rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
       }
+      if (rc == -1) {
+        return -1;
+      }
+      // rc should now be >= 0
+
+      do {
+        // compareAndExchangeRefCount(slot, rc, rc + 1)
+        int witness = group1.compareAndExchangeInt(group1Offset, rc, rc + 1);
+        if (witness == rc) {
+          break incRefCount;
+        }
+        // refCount is only ever incremented by single ops, so it always makes sense to retry
+        // immediately without even any Thread.onSpinWait() -- unless witness < 0 (rc became -1 or
+        // UNPIN_SENTINEL), in which case rc must be updated before looping back to the outer loop,
+        // which handles both of those cases
+        rc = witness;
+      } while (rc >= 0);
     }
     if (rc == 0) {
       // First pin: remove from the evictable list.
@@ -1237,19 +1207,6 @@ class Cache2<V extends Cache2.Val> {
       return -1;
     }
     return rc == 0 ? 1 : 0;
-  }
-
-  private int spinOnUnpinSentinel(long group1Offset) {
-    for (; ; ) {
-      for (int i = YIELD_ONCE_PER; i > 0; i--) {
-        Thread.onSpinWait();
-        int rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
-        if (rc != UNPIN_SENTINEL) {
-          return rc;
-        }
-      }
-      Thread.yield();
-    }
   }
 
   /**
@@ -1286,9 +1243,10 @@ class Cache2<V extends Cache2.Val> {
     long group1Offset = group1Offset(slot);
     int rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
     for (; ; ) {
+      int witness;
       if (rc == 1) {
-        // compareAndSetRefCount(slot, 1, UNPIN_SENTINEL)
-        if (group1.compareAndSetInt(group1Offset, 1, UNPIN_SENTINEL)) {
+        // compareAndExchangeRefCount(slot, 1, UNPIN_SENTINEL)
+        if ((witness = group1.compareAndExchangeInt(group1Offset, 1, UNPIN_SENTINEL)) == 1) {
           boolean toHot = insertAtHead(COLD_HEAD, slot, recordAccess);
 
           // compareAndSetRefCount(slot, UNPIN_SENTINEL, 0)
@@ -1299,13 +1257,13 @@ class Cache2<V extends Cache2.Val> {
         }
       } else {
         assert rc > 1 : "unexpected refCount: " + rc;
-        // compareAndSetRefCount(slot, rc, rc - 1)
-        if (group1.compareAndSetInt(group1Offset, rc, rc - 1)) {
+        // compareAndExchangeRefCount(slot, rc, rc - 1)
+        if ((witness = group1.compareAndExchangeInt(group1Offset, rc, rc - 1)) == rc) {
           return -1;
         }
       }
-      Thread.onSpinWait();
-      rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
+      // refCount is only every updated in a single shot, so always retry immediately (no spinwait)
+      rc = witness;
     }
   }
 
@@ -1325,6 +1283,8 @@ class Cache2<V extends Cache2.Val> {
       if (compareAndSetRefCount(candidate, 0, -1)) {
         return candidate;
       }
+      // def not just immediate retry, because in-flight op that changed refCount
+      // needs time to update COLD_TAIL as well
       Thread.onSpinWait();
     }
     return NULL_SLOT;
@@ -1418,9 +1378,10 @@ class Cache2<V extends Cache2.Val> {
     assert slot >= 1 && slot <= capacity;
     int rc = getRefCountVolatile(slot);
     for (; ; ) {
+      int witness;
       if (rc == 1) {
         // Sole holder: use -1 as intermediate to block acquireTail during tail insertion.
-        if (compareAndSetRefCount(slot, 1, -1)) {
+        if ((witness = compareAndExchangeRefCount(slot, 1, -1)) == 1) {
           insertAtTail(slot);
           if (!compareAndSetRefCount(slot, -1, 0)) {
             throw new IllegalStateException("rc changed during insertAtTail in closeUnconditional");
@@ -1431,14 +1392,13 @@ class Cache2<V extends Cache2.Val> {
         // A stale pin() raced: its CAS retry loop incremented rc past 1 before its post-CAS
         // generation check could call unpin(). Decrement our own pin and return; the stale
         // pinner's subsequent unpin() will see rc==1 and reinstate this slot in the LRU.
-        if (compareAndSetRefCount(slot, rc, rc - 1)) {
+        if ((witness = compareAndExchangeRefCount(slot, rc, rc - 1)) == rc) {
           return;
         }
       } else {
         throw new IllegalStateException("unexpected rc=" + rc + " in closeUnconditional");
       }
-      Thread.onSpinWait();
-      rc = getRefCountVolatile(slot);
+      rc = witness;
     }
   }
 
@@ -1566,6 +1526,10 @@ class Cache2<V extends Cache2.Val> {
         if (compareAndSetRefCount(candidate, 0, -1)) {
           break;
         }
+        // def don't just immediately retry; as you can see (we are doing it here!) we set
+        // refcount = -1 _before_ updating tails! so if we're not able to claim our chosen
+        // candidate we at least need _something_ to give the race winner a chance to update
+        // so we don't just read the same values again.
         Thread.onSpinWait();
       }
       // Also guard the coldTs memoization against the same race (see MIN_PLAUSIBLE_AGE_NANOS's
