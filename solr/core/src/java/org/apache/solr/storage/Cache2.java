@@ -1007,9 +1007,13 @@ class Cache2<V extends Cache2.Val> {
    */
   private int reserve(long group2Offset, int reservation, int cur) {
     for (; ; ) {
-      if (cur == RESERVED_LINK) {
-        // isolate the case that can occasionally spin burst
-        cur = spinOnReserved(group2Offset);
+//      if (cur == RESERVED_LINK) {
+//        // isolate the case that can occasionally spin burst
+//        cur = spinOnReserved(group2Offset);
+//      }
+      while (cur == RESERVED_LINK) {
+        Thread.onSpinWait();
+        cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
       }
       if (cur == REMOVED_LINK) {
         return REMOVED_LINK;
@@ -1084,8 +1088,9 @@ class Cache2<V extends Cache2.Val> {
     long prevSlotOffset = group2Offset(prevSlot);
 
     // compareAndSetNext(prevSlot, slot, RESERVED_LINK)
-    if (!group2.compareAndSetInt(prevSlotOffset, slot, RESERVED_LINK)) {
-      prevSlot = spinOnPrevCAS(slot, slotOffset);
+    while (!group2.compareAndSetInt(prevSlotOffset, slot, RESERVED_LINK)) {
+      Thread.onSpinWait();
+      prevSlot = group2.getIntVolatile(slotOffset + PREV_OFFSET); // getPrevVolatile(slot)
       prevSlotOffset = group2Offset(prevSlot);
     }
     setPrevVolatile(oldNext, prevSlot);
@@ -1201,7 +1206,8 @@ class Cache2<V extends Cache2.Val> {
           // UNPIN_SENTINEL means another thread's unpin() is in-flight on this slot
           // (CAS to UNPIN_SENTINEL, insertAtHead(), CAS back to 0) -- analogous to
           // reserve()'s RESERVED_LINK, not a self-resolving CAS failure
-          rc = spinOnUnpinSentinel(group1Offset);
+          Thread.onSpinWait();
+          rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
           continue;
       }
       assert rc >= 0;
