@@ -1560,10 +1560,10 @@ class Cache2<V extends Cache2.Val> {
         // so we don't just read the same values again.
         if (fromHot) {
           hotCandidate = boundedWaitUntilNot(hotPrevOffset, hotCandidate, group2);
-          coldCandidate = getPrevVolatile(COLD_TAIL);
+          coldCandidate = group2.getIntVolatile(coldPrevOffset);
         } else {
           coldCandidate = boundedWaitUntilNot(coldPrevOffset, coldCandidate, group2);
-          hotCandidate = getPrevVolatile(HOT_TAIL);
+          hotCandidate = group2.getIntVolatile(hotPrevOffset);
         }
       }
       // Also guard the coldTs memoization against the same race (see MIN_PLAUSIBLE_AGE_NANOS's

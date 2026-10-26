@@ -914,7 +914,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * matter here since operation-scoped batches close deterministically via try-with-resources) and
    * comfortably above typical merge needs, to avoid excessive Batch/pool-slot churn.
    */
-  private static final int BATCH_ROLLOVER = 1024;
+  private static final int BATCH_ROLLOVER =
+      EnvUtils.getPropertyAsInteger("solr.blockCache.maxBatchSize", 1024);
 
   private Closeable openBatchScopePlain(boolean openSearcher) {
     Batch[] batch = new Batch[] {registerNewBatch(openSearcher)};
