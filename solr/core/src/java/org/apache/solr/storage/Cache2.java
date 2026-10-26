@@ -134,7 +134,7 @@ class Cache2<V extends Cache2.Val> {
    * store also costs the JIT constant-folding a {@code static final} segment reference otherwise
    * gets. Two bare fields avoids that extra hop entirely.
    */
-  private final OffHeapStore group1;
+  protected final OffHeapStore group1;
 
   /** This instance's base offset into {@link #group1} -- see that field's javadoc. */
   private final long group1BaseOffset;
@@ -170,7 +170,7 @@ class Cache2<V extends Cache2.Val> {
    *
    * <p>See {@link #group1}'s javadoc for why this is a bare store + separate baseOffset field.
    */
-  private final OffHeapStore group2;
+  protected final OffHeapStore group2;
 
   /** This instance's base offset into {@link #group2} -- see that field's javadoc. */
   private final long group2BaseOffset;
@@ -299,6 +299,9 @@ class Cache2<V extends Cache2.Val> {
 
   private static final OffHeapStoreMode OFF_HEAP_STORE_MODE =
       OffHeapStoreMode.fromSysprop(EnvUtils.getProperty("solr.cache2.offHeapStoreMode"));
+
+  private static final int YIELD_ONCE_PER =
+      Math.max(1, EnvUtils.getPropertyAsInteger("solr.cache2.yieldOncePer", 8));
 
   /**
    * Allocates ONE combined {@link OffHeapStore} sized to hold both Group 1 ({@code
@@ -809,7 +812,7 @@ class Cache2<V extends Cache2.Val> {
    * always a multiple of {@code 1 << GROUP1_SLOT_SHIFT}, i.e. 16), so halving it (via {@code >>>
    * 1}) for a long-typed access is always exact, never truncating.
    */
-  private long group1Offset(int slot) {
+  protected long group1Offset(int slot) {
     return ((long) slot << GROUP1_SLOT_SHIFT) + group1BaseOffset;
   }
 
@@ -819,7 +822,7 @@ class Cache2<V extends Cache2.Val> {
    * slot's stride is 8 ints; {@link #group2BaseOffset} is always a multiple of {@code 1 <<
    * GROUP2_SLOT_SHIFT}, i.e. 8, per {@code allocateSharedGroup1And2Stores}'s alignment guarantee).
    */
-  private long group2Offset(int slot) {
+  protected long group2Offset(int slot) {
     return ((long) slot << GROUP2_SLOT_SHIFT) + group2BaseOffset;
   }
 
@@ -1004,9 +1007,8 @@ class Cache2<V extends Cache2.Val> {
    */
   private int reserve(long group2Offset, int reservation, int cur) {
     for (; ; ) {
-      while (cur == RESERVED_LINK) {
-        Thread.yield(); // multi-op inflight on other thread
-        cur = group2.getIntVolatile(group2Offset); // getNextVolatile(slot)
+      if (cur == RESERVED_LINK) {
+        cur = waitUntilNot(group2Offset, RESERVED_LINK, group2);
       }
       if (cur == REMOVED_LINK) {
         return REMOVED_LINK;
@@ -1067,18 +1069,11 @@ class Cache2<V extends Cache2.Val> {
     // retry) -- recomputed fresh each iteration below, same as before this hoist.
     long prevSlotOffset = group2Offset(prevSlot);
 
-    int witness = group2.compareAndExchangeInt(prevSlotOffset, slot, RESERVED_LINK);
     // compareAndSetNext(prevSlot, slot, RESERVED_LINK)
-    while (witness != slot) {
+    while (!group2.compareAndSetInt(prevSlotOffset, slot, RESERVED_LINK)) {
       // removal of preceding slot, or insertion before this slot
-      if (witness == RESERVED_LINK) {
-        Thread.yield(); // in-flight op, backoff more aggressively
-      } else {
-        Thread.onSpinWait(); // expect ~stable state, recheck ~immediately
-      }
-      prevSlot = group2.getIntVolatile(slotOffset + PREV_OFFSET); // getPrevVolatile(slot)
+      prevSlot = boundedWaitUntilNot(slotOffset + PREV_OFFSET, prevSlot, group2);
       prevSlotOffset = group2Offset(prevSlot);
-      witness = group2.compareAndExchangeInt(prevSlotOffset, slot, RESERVED_LINK);
     }
     setPrevVolatile(oldNext, prevSlot);
 
@@ -1172,9 +1167,8 @@ class Cache2<V extends Cache2.Val> {
     int rc = (int) rcAndGen;
     incRefCount:
     for (; ; ) {
-      while (rc == UNPIN_SENTINEL) {
-        Thread.yield(); // multi-op inflight on other thread
-        rc = group1.getIntVolatile(group1Offset); // getRefCountVolatile(slot)
+      if (rc == UNPIN_SENTINEL) {
+        rc = waitUntilNot(group1Offset, UNPIN_SENTINEL, group1);
       }
       if (rc == -1) {
         return -1;
@@ -1211,6 +1205,33 @@ class Cache2<V extends Cache2.Val> {
       return -1;
     }
     return rc == 0 ? 1 : 0;
+  }
+
+  protected static int waitUntilNot(long groupOffset, int excludeValue, OffHeapStore group) {
+    for (; ; ) {
+      for (int i = YIELD_ONCE_PER; i > 0; i--) {
+        Thread.onSpinWait();
+        int candidate = group.getIntVolatile(groupOffset);
+        if (candidate != excludeValue) {
+          return candidate;
+        }
+      }
+      Thread.yield();
+    }
+  }
+
+  protected static int boundedWaitUntilNot(long groupOffset, int excludeValue, OffHeapStore group) {
+    for (int i = YIELD_ONCE_PER; i > 0; i--) {
+      for (int j = YIELD_ONCE_PER; j > 0; j--) {
+        Thread.onSpinWait();
+        int candidate = group.getIntVolatile(groupOffset);
+        if (candidate != excludeValue) {
+          return candidate;
+        }
+      }
+      Thread.yield();
+    }
+    return excludeValue;
   }
 
   /**
@@ -1283,15 +1304,16 @@ class Cache2<V extends Cache2.Val> {
    * <p>Returns {@link #NULL_SLOT} if the list is empty (all slots are pinned).
    */
   protected int acquireTail() {
-    for (int candidate; (candidate = getPrevVolatile(COLD_TAIL)) != COLD_HEAD; ) {
+    final long prevOffset = group2Offset(COLD_TAIL) + PREV_OFFSET;
+    for (int candidate = group2.getIntVolatile(prevOffset); ; ) {
+      if (candidate == COLD_HEAD) {
+        return NULL_SLOT;
+      }
       if (compareAndSetRefCount(candidate, 0, -1)) {
         return candidate;
       }
-      // def not just immediate retry, because in-flight op that changed refCount
-      // needs time to update COLD_TAIL as well
-      Thread.yield();
+      candidate = boundedWaitUntilNot(prevOffset, candidate, group2);
     }
-    return NULL_SLOT;
   }
 
   /**
@@ -1493,10 +1515,12 @@ class Cache2<V extends Cache2.Val> {
       long coldCandidateTs;
       int candidate;
       boolean fromHot;
+      long coldPrevOffset = group2Offset(COLD_TAIL) + PREV_OFFSET;
+      long hotPrevOffset = group2Offset(HOT_TAIL) + PREV_OFFSET;
       long now = System.nanoTime();
+      int coldCandidate = group2.getIntVolatile(coldPrevOffset);
+      int hotCandidate = group2.getIntVolatile(hotPrevOffset);
       for (; ; ) {
-        int coldCandidate = getPrevVolatile(COLD_TAIL);
-        int hotCandidate = getPrevVolatile(HOT_TAIL);
         if (coldCandidate == COLD_HEAD) {
           // cold queue is empty
           if (hotCandidate == HOT_HEAD) {
@@ -1534,7 +1558,13 @@ class Cache2<V extends Cache2.Val> {
         // refcount = -1 _before_ updating tails! so if we're not able to claim our chosen
         // candidate we at least need _something_ to give the race winner a chance to update
         // so we don't just read the same values again.
-        Thread.yield();
+        if (fromHot) {
+          hotCandidate = boundedWaitUntilNot(hotPrevOffset, hotCandidate, group2);
+          coldCandidate = getPrevVolatile(COLD_TAIL);
+        } else {
+          coldCandidate = boundedWaitUntilNot(coldPrevOffset, coldCandidate, group2);
+          hotCandidate = getPrevVolatile(HOT_TAIL);
+        }
       }
       // Also guard the coldTs memoization against the same race (see MIN_PLAUSIBLE_AGE_NANOS's
       // javadoc): an implausibly-fresh raw sample must not be allowed to pollute this
