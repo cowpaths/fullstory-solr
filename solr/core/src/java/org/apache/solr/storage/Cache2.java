@@ -82,9 +82,7 @@ class Cache2<V extends Cache2.Val> {
   // ---------------------------------------------------------------------------
 
   static class Val {
-    void reset(BlockCache c) {
-      // TODO: not ideal that we're passing BlockCache to the base type here. This is hacky,
-      //  but it is our only usage so we'll leave it for now.
+    void reset() {
       // no-op default impl;
     }
   }
@@ -1321,8 +1319,8 @@ class Cache2<V extends Cache2.Val> {
   /**
    * Hook for subclasses to reset per-slot state they maintain outside {@link Val} (e.g. in {@link
    * #group2}, whose contents base {@code Cache2} has no need to know). Called from {@link
-   * #acquireNode(BlockCache, long[])} and {@link #close(BlockCache, long)} on every slot recycle,
-   * alongside {@link Val#reset(BlockCache)}. No-op by default.
+   * #acquireNode(long[])} and {@link #close(long)} on every slot recycle, alongside {@link
+   * Val#reset()}. No-op by default.
    */
   protected void reset(int slot) {
     // no-op default impl; see DualQueueCache's override.
@@ -1334,9 +1332,7 @@ class Cache2<V extends Cache2.Val> {
    * outHandle} unmodified) if all slots are pinned.
    */
   @SuppressWarnings("unchecked")
-  V acquireNode(BlockCache c, long[] outHandle) {
-    // TODO: not ideal that we're passing BlockCache to the base type here. This is hacky,
-    //  but it is our only usage so we'll leave it for now.
+  V acquireNode(long[] outHandle) {
     int slot = acquireTail();
     if (slot == NULL_SLOT) {
       return null;
@@ -1347,7 +1343,7 @@ class Cache2<V extends Cache2.Val> {
     int newGen = incrementAndGetGeneration(slot);
     reset(slot);
     Val p = payload[slot];
-    p.reset(c);
+    p.reset();
     if (!compareAndSetRefCount(slot, -1, 1)) {
       throw new IllegalStateException();
     }
@@ -1362,9 +1358,7 @@ class Cache2<V extends Cache2.Val> {
    * existing refCount if the slot was already evicted or pinned (best-effort; caller need not
    * retry).
    */
-  int close(BlockCache c, long handle) {
-    // TODO: not ideal that we're passing BlockCache to the base type here. This is hacky,
-    //  but it is our only usage so we'll leave it for now.
+  int close(long handle) {
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
     int ret = compareAndExchangeRefCount(slot, 0, -1);
@@ -1385,7 +1379,7 @@ class Cache2<V extends Cache2.Val> {
       // from actual queue membership regardless of whatever was left over -- same reasoning as
       // closeUnconditional(), which never touches fromHot at all.)
       reset(slot);
-      payload[slot].reset(c);
+      payload[slot].reset();
       incrementAndGetGeneration(slot);
       insertAtTail(slot);
       // refCount -> 0 makes reclaimable
