@@ -23,12 +23,13 @@ import org.apache.solr.SolrTestCaseJ4;
 /**
  * Regression test: {@code lastUnpinNanos} lives in {@code Cache2}'s off-heap Group 2 storage, not
  * as a {@code Val} field, so {@code Val.reset()} alone cannot clear it on slot recycle. Both {@link
- * Cache2#acquireNode(long[])} and {@link Cache2#close(long)} must explicitly zero it via {@code
- * setLastUnpinNanos(slot, 0)}; without that, a recycled slot would carry its previous occupant's
- * timestamp into the new occupant's first {@code toHot()} decision (incorrectly promoting a
- * first-time entry to the hot queue) and into {@code acquireTail()}'s staleness comparison (the
- * slot would read as "fresher" than it should, i.e. not maximally stale, which {@code
- * lastUnpinNanos == 0} is specifically meant to represent for never-yet-unpinned slots).
+ * Cache2#acquireNode(BlockCache, long[])} and {@link Cache2#close(BlockCache, long)} must
+ * explicitly zero it via {@code setLastUnpinNanos(slot, 0)}; without that, a recycled slot would
+ * carry its previous occupant's timestamp into the new occupant's first {@code toHot()} decision
+ * (incorrectly promoting a first-time entry to the hot queue) and into {@code acquireTail()}'s
+ * staleness comparison (the slot would read as "fresher" than it should, i.e. not maximally stale,
+ * which {@code lastUnpinNanos == 0} is specifically meant to represent for never-yet-unpinned
+ * slots).
  */
 public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
 
@@ -59,7 +60,7 @@ public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
 
     long[] handle = new long[1];
     for (int i = 0; i < capacity; i++) {
-      Cache2.Val v = cache.acquireNode(handle);
+      Cache2.Val v = cache.acquireNode(null, handle);
       assertNotNull("expected " + capacity + " evictable slots, failed at i=" + i, v);
       int slot = (int) handle[0] & ((1 << 20) - 1); // SLOT_MASK, mirrored from Cache2
       assertEquals(
@@ -70,9 +71,10 @@ public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
   }
 
   /**
-   * Same check for {@link Cache2#close(long)}'s recycle path: a slot closed back to the pool must
-   * also read back lastUnpinNanos==0, since it re-enters the cold list via {@code insertAtTail()}
-   * directly (bypassing {@code DualQueueCache.insertAtHead()}'s own fresh-timestamp write).
+   * Same check for {@link Cache2#close(BlockCache, long)}'s recycle path: a slot closed back to the
+   * pool must also read back lastUnpinNanos==0, since it re-enters the cold list via {@code
+   * insertAtTail()} directly (bypassing {@code DualQueueCache.insertAtHead()}'s own fresh-timestamp
+   * write).
    *
    * <p>{@code close()} only actually recycles a slot that is evictable ({@code refCount==0}), so
    * the slot must be unpinned first; the poisoned value is written only after that (and after
@@ -84,14 +86,14 @@ public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
     Cache2.DualQueueCache<Cache2.Val> cache = newCache(capacity);
 
     long[] handle = new long[1];
-    assertNotNull(cache.acquireNode(handle));
+    assertNotNull(cache.acquireNode(null, handle));
     long h = handle[0];
     int slot = (int) h & ((1 << 20) - 1);
 
     cache.unpin(h, false); // make the slot evictable (refCount -> 0); required for close() to act
     cache.setLastUnpinNanos(slot, 555555555L); // poison after unpin's own write
 
-    assertEquals("close() should have recycled the now-evictable slot", 0, cache.close(h));
+    assertEquals("close() should have recycled the now-evictable slot", 0, cache.close(null, h));
     assertEquals("close() must zero lastUnpinNanos on recycle", 0L, cache.getLastUnpinNanos(slot));
   }
 }

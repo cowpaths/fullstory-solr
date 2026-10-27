@@ -56,7 +56,7 @@ import org.apache.solr.common.util.EnvUtils;
  * I/O-completion threads that drive list-splice writes).
  *
  * <p>The LRU semantics, pin/unpin reference-count protocol, and hot/cold dual-queue logic are
- * identical to {@link Cache} and {@link Cache.DualQueueCache}.
+ * identical to {@link Cache} and {@link Cache2.DualQueueCache}.
  *
  * <p><b>LRU invariant:</b> a slot is in the doubly-linked list if and only if its {@code refCount}
  * is 0 (evictable). Pinned slots (refCount &gt; 0) are spliced out of the list.
@@ -72,7 +72,7 @@ import org.apache.solr.common.util.EnvUtils;
  *
  * <p>The capacity is fixed at construction. {@link #acquireNode} writes an opaque {@code long}
  * handle encoding the slot index and a generation counter into a caller-supplied {@code long[1]}
- * array. {@link BlockCache#encodeHandle} ORs in the partition index to form the full
+ * array. {@code BlockCache#encodeHandle} ORs in the partition index to form the full
  * cross-partition handle stored in {@code accessMapped}.
  */
 class Cache2<V extends Cache2.Val> {
@@ -82,7 +82,9 @@ class Cache2<V extends Cache2.Val> {
   // ---------------------------------------------------------------------------
 
   static class Val {
-    void reset() {
+    void reset(BlockCache c) {
+      // TODO: not ideal that we're passing BlockCache to the base type here. This is hacky,
+      //  but it is our only usage so we'll leave it for now.
       // no-op default impl;
     }
   }
@@ -1319,8 +1321,8 @@ class Cache2<V extends Cache2.Val> {
   /**
    * Hook for subclasses to reset per-slot state they maintain outside {@link Val} (e.g. in {@link
    * #group2}, whose contents base {@code Cache2} has no need to know). Called from {@link
-   * #acquireNode(long[])} and {@link #close(long)} on every slot recycle, alongside {@link
-   * Val#reset()}. No-op by default.
+   * #acquireNode(BlockCache, long[])} and {@link #close(BlockCache, long)} on every slot recycle,
+   * alongside {@link Val#reset(BlockCache)}. No-op by default.
    */
   protected void reset(int slot) {
     // no-op default impl; see DualQueueCache's override.
@@ -1332,7 +1334,9 @@ class Cache2<V extends Cache2.Val> {
    * outHandle} unmodified) if all slots are pinned.
    */
   @SuppressWarnings("unchecked")
-  V acquireNode(long[] outHandle) {
+  V acquireNode(BlockCache c, long[] outHandle) {
+    // TODO: not ideal that we're passing BlockCache to the base type here. This is hacky,
+    //  but it is our only usage so we'll leave it for now.
     int slot = acquireTail();
     if (slot == NULL_SLOT) {
       return null;
@@ -1343,7 +1347,7 @@ class Cache2<V extends Cache2.Val> {
     int newGen = incrementAndGetGeneration(slot);
     reset(slot);
     Val p = payload[slot];
-    p.reset();
+    p.reset(c);
     if (!compareAndSetRefCount(slot, -1, 1)) {
       throw new IllegalStateException();
     }
@@ -1358,7 +1362,9 @@ class Cache2<V extends Cache2.Val> {
    * existing refCount if the slot was already evicted or pinned (best-effort; caller need not
    * retry).
    */
-  int close(long handle) {
+  int close(BlockCache c, long handle) {
+    // TODO: not ideal that we're passing BlockCache to the base type here. This is hacky,
+    //  but it is our only usage so we'll leave it for now.
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
     int ret = compareAndExchangeRefCount(slot, 0, -1);
@@ -1379,7 +1385,7 @@ class Cache2<V extends Cache2.Val> {
       // from actual queue membership regardless of whatever was left over -- same reasoning as
       // closeUnconditional(), which never touches fromHot at all.)
       reset(slot);
-      payload[slot].reset();
+      payload[slot].reset(c);
       incrementAndGetGeneration(slot);
       insertAtTail(slot);
       // refCount -> 0 makes reclaimable
