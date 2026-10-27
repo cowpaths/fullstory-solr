@@ -1116,11 +1116,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     void reset() {
       // fromHot is intentionally NOT reset: acquireTail() sets it before resetPayload() is called,
       // and BlockCache.acquireNode() reads it immediately after to update hotAcquisitions.
-      CACHED.setVolatile(this, (ByteBuffer) null);
+      cached = null;
     }
 
     boolean isPopulated() {
-      return CACHED.getVolatile(this) != null;
+      return cached != null;
     }
 
     ByteBuffer populate(byte[] arr, int off, int len, UUID blobUUID, int blockIdx, BlockCache c) {
@@ -1156,7 +1156,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         l.unlock(stamp);
       }
       synchronized (this) {
-        CACHED.setVolatile(this, ret);
+        cached = ret;
         notifyAll();
       }
       return ret;
@@ -1171,13 +1171,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
      */
     @SuppressWarnings("ReferenceEquality")
     public ByteBuffer join(BlockCache c, long[] waitNanos) {
-      ByteBuffer ret = (ByteBuffer) CACHED.getVolatile(this);
+      ByteBuffer ret = cached;
       if (ret == null) {
         long startNanos = System.nanoTime();
         InterruptedException ie = null;
         synchronized (this) {
           for (long remainingMillis = JOIN_TIMEOUT_MILLIS;
-              (ret = (ByteBuffer) CACHED.getVolatile(this)) == null && remainingMillis > 0;
+              (ret = cached) == null && remainingMillis > 0;
               remainingMillis =
                   JOIN_TIMEOUT_MILLIS - ((System.nanoTime() - startNanos) / 1_000_000)) {
             try {
@@ -1202,7 +1202,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       }
       if (ret == POPULATED_SENTINEL) {
         ret = c.slice(cacheBlockOrd).asReadOnlyBuffer();
-        CACHED.setVolatile(this, ret);
+        cached = ret;
       } else if (ret == EXCEPTION_SENTINEL) {
         throw new CompletionException("other thread exception in buffer population", null);
       }
@@ -1671,7 +1671,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
     // on last unpin, clear the cached ByteBuffer. recreating is cheap.
     Val v = p.getPayload(handle);
-    ByteBuffer cur = (ByteBuffer) Val.CACHED.getVolatile(v);
+    ByteBuffer cur = v.cached;
     if (cur != null && cur != EXCEPTION_SENTINEL) {
       // CAS ensures we never clobber EXCEPTION_SENTINEL; if it loses, cached is already
       // null or sentinel, both fine. Worst case of a benign loss: another slice() call.
@@ -1752,7 +1752,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         // this Val sees populated=true immediately and join() fast-paths to the slice without
         // ever entering the synchronized notify machinery (which exists only for the async cold
         // path where one thread fetches while others wait).
-        Val.CACHED.setVolatile(v, POPULATED_SENTINEL);
+        v.cached = POPULATED_SENTINEL;
         outHandle[0] = handle;
         return v;
       }
@@ -1770,10 +1770,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * whether a {@code MADV_WILLNEED} hint against its *compressed* source would be wasted -- not to
    * actually read the cached data themselves right now. Unlike a plain {@link #pinnable} check,
    * this pins the slot just long enough to mark its {@code Val} populated (mirroring {@link
-   * #acquireNode(long[], UUID, int)}'s own {@code Val.CACHED.setVolatile(v, POPULATED_SENTINEL)}),
-   * then immediately unpins: callers typically stash the returned handle for a real reader to
-   * consume later (e.g. into {@code accessMapped}), and that reader's {@link Val#join} blocks on
-   * {@link Val#isPopulated()} being {@code true} -- never set for a slot that was only ever {@link
+   * #acquireNode(long[], UUID, int)}'s own {@code v.cached = POPULATED_SENTINEL}), then immediately
+   * unpins: callers typically stash the returned handle for a real reader to consume later (e.g.
+   * into {@code accessMapped}), and that reader's {@link Val#join} blocks on {@link
+   * Val#isPopulated()} being {@code true} -- never set for a slot that was only ever {@link
    * #pinnable}-checked, never pinned. Skipping this step would leave it unpopulated, so a later
    * real read would {@code pin()} successfully (generation still matches) but then hang in {@code
    * join()} until its 30s timeout, since nothing would ever be in flight to populate and notify it.
@@ -1784,7 +1784,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     long handle = Integer.toUnsignedLong(handleLow); // generation=0, matches acquireNode's encoding
     Val v = pin(handle);
     if (v == null) return NULL_HANDLE;
-    Val.CACHED.setVolatile(v, POPULATED_SENTINEL);
+    v.cached = POPULATED_SENTINEL;
     unpin(handle, false);
     return handle;
   }
