@@ -56,7 +56,7 @@ import org.apache.solr.common.util.EnvUtils;
  * I/O-completion threads that drive list-splice writes).
  *
  * <p>The LRU semantics, pin/unpin reference-count protocol, and hot/cold dual-queue logic are
- * identical to {@link Cache} and {@link Cache.DualQueueCache}.
+ * identical to {@link Cache} and {@link Cache2.DualQueueCache}.
  *
  * <p><b>LRU invariant:</b> a slot is in the doubly-linked list if and only if its {@code refCount}
  * is 0 (evictable). Pinned slots (refCount &gt; 0) are spliced out of the list.
@@ -72,7 +72,7 @@ import org.apache.solr.common.util.EnvUtils;
  *
  * <p>The capacity is fixed at construction. {@link #acquireNode} writes an opaque {@code long}
  * handle encoding the slot index and a generation counter into a caller-supplied {@code long[1]}
- * array. {@link BlockCache#encodeHandle} ORs in the partition index to form the full
+ * array. {@code BlockCache#encodeHandle} ORs in the partition index to form the full
  * cross-partition handle stored in {@code accessMapped}.
  */
 class Cache2<V extends Cache2.Val> {
