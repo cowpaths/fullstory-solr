@@ -1179,25 +1179,20 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       ByteBuffer ret = cached;
       if (ret == null) {
         long startNanos = System.nanoTime();
-        InterruptedException ie = null;
-        synchronized (this) {
-          for (long remainingMillis = JOIN_TIMEOUT_MILLIS;
-              (ret = cached) == null && remainingMillis > 0;
-              remainingMillis =
-                  JOIN_TIMEOUT_MILLIS - ((System.nanoTime() - startNanos) / 1_000_000)) {
-            try {
+        try {
+          synchronized (this) {
+            for (long remainingMillis = JOIN_TIMEOUT_MILLIS;
+                (ret = cached) == null && remainingMillis > 0;
+                remainingMillis =
+                    JOIN_TIMEOUT_MILLIS - ((System.nanoTime() - startNanos) / 1_000_000)) {
               wait(remainingMillis);
-            } catch (InterruptedException e) {
-              ie = e;
-              break;
             }
           }
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          throw new ThreadInterruptedException(e);
         }
         if (ret == null) {
-          if (ie != null) {
-            Thread.currentThread().interrupt();
-            throw new ThreadInterruptedException(ie);
-          }
           throw new IllegalStateException(
               "join() timed out: Val was never populated (possible populate() caller crash)");
         }
