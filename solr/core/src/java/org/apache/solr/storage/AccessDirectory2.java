@@ -230,10 +230,10 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         if (file.endsWith(".tmp")) continue;
         if (file.startsWith("segments_")) {
           AD2IndexInput input = (AD2IndexInput) openInput(file, IOContext.DEFAULT);
+          segmentsFiles.add(file);
           if (input.blockOffsets() != null) {
             toClose.add(input);
             priorityInputs.add(input);
-            segmentsFiles.add(file);
           } else {
             input.close();
           }
