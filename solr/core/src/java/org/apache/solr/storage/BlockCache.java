@@ -1117,6 +1117,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       // fromHot is intentionally NOT reset: acquireTail() sets it before resetPayload() is called,
       // and BlockCache.acquireNode() reads it immediately after to update hotAcquisitions.
       cached = null;
+      super.reset();
     }
 
     boolean isPopulated() {
@@ -1155,9 +1156,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       } finally {
         l.unlock(stamp);
       }
+      Object extant;
       synchronized (this) {
-        cached = ret;
+        extant = CACHED.getAndSet(this, ret);
         notifyAll();
+      }
+      if (extant != null) {
+        throw new IllegalStateException("clobbered unexpected value in `cached`");
       }
       return ret;
     }
@@ -1217,7 +1222,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         extant = CACHED.getAndSet(this, EXCEPTION_SENTINEL);
         notifyAll();
       }
-      assert extant == null;
+      if (extant != null) {
+        throw new IllegalStateException("clobbered unexpected value in `cached`");
+      }
     }
   }
 
@@ -1965,7 +1972,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           closeSkippedPinned.increment();
           return false;
       }
-    } else if (lostCAS.isPopulated()) {
+    } else if (lostCAS.cached != null) {
       p.unpin(handle, false);
       closeSkippedPinned.increment();
       return false;
