@@ -1677,7 +1677,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                 }
                 long toPopulate = nodeHandle[0];
                 if (accessMapped.compareAndSet(i, extant, toPopulate)) {
-                  if (v.isPopulated()) {
+                  if (v.isPopulated(cache)) {
                     cache.recordWarmStartHit();
                   } else {
                     int dl = decompressedLenFor.applyAsInt(i);
