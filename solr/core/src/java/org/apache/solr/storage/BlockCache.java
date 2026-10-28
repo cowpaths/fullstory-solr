@@ -1201,7 +1201,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         }
       }
       if (ret == POPULATED_SENTINEL) {
-        ret = c.slice(cacheBlockOrd).asReadOnlyBuffer();
+        ret = c.sliceRO(cacheBlockOrd);
         cached = ret;
       } else if (ret == EXCEPTION_SENTINEL) {
         throw new CompletionException("other thread exception in buffer population", null);
@@ -1254,6 +1254,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // ---------------------------------------------------------------------------
 
   private final ByteBuffer[] pool;
+  private final ByteBuffer[] poolRO;
 
   private final int nPartitions;
   private final Partition[] partitions;
@@ -1332,6 +1333,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.mapping = m;
     log.info("BlockCache ephemeral mapping: {}", m);
     this.pool = m.dataPool();
+    this.poolRO =
+        Arrays.stream(this.pool).map(ByteBuffer::asReadOnlyBuffer).toArray(ByteBuffer[]::new);
     this.metaBuf = null;
     this.alwaysPrepareWrite = false;
     this.extantMap = null;
@@ -1377,6 +1380,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.mapping = m;
     log.info("BlockCache persistent mapping: {}", m);
     this.pool = m.dataPool();
+    this.poolRO =
+        Arrays.stream(this.pool).map(ByteBuffer::asReadOnlyBuffer).toArray(ByteBuffer[]::new);
     this.metaBuf = mb;
     int trailerOffset = nBlocks * META_BYTES_PER_BLOCK;
     long storedId = mb.getLong(trailerOffset);
@@ -2131,6 +2136,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private ByteBuffer slice(int cacheBlockOrd) {
     return pool[cacheBlockOrd >> POOL_SHIFT].slice(
+        (cacheBlockOrd & POOL_MASK) * COMPRESSION_BLOCK_SIZE, COMPRESSION_BLOCK_SIZE);
+  }
+
+  private ByteBuffer sliceRO(int cacheBlockOrd) {
+    return poolRO[cacheBlockOrd >> POOL_SHIFT].slice(
         (cacheBlockOrd & POOL_MASK) * COMPRESSION_BLOCK_SIZE, COMPRESSION_BLOCK_SIZE);
   }
 }
