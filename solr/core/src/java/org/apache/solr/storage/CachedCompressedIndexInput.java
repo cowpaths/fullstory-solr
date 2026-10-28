@@ -1336,6 +1336,12 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   // NodeRefStruct
   // ---------------------------------------------------------------------------
 
+  private static final int MAX_DEFERRED_UNPIN =
+      Integer.highestOneBit(
+          Math.max(
+              0, EnvUtils.getPropertyAsInteger("solr.compressingDirectory.maxDeferredUnpin", 128)));
+  private static final int DEFERRED_UNPIN_MASK = MAX_DEFERRED_UNPIN - 1;
+
   /**
    * Per-{@link CachedCompressedIndexInput}-instance struct tracking the currently pinned {@link
    * BlockCache.Val} and sequential-access statistics.
@@ -1351,6 +1357,10 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     private int currentBlockIdx = -1;
     private int sequentialAccessCount = 0;
 
+    private int deferredUnpinIdx = -1;
+    private final long[] deferredUnpin =
+        MAX_DEFERRED_UNPIN == 0 ? null : new long[MAX_DEFERRED_UNPIN];
+
     NodeRefStruct() {
       super();
     }
@@ -1365,7 +1375,16 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       int extant = currentBlockIdx < 0 ? ~currentBlockIdx : currentBlockIdx;
       long toUnpin = currentNode;
       if (toUnpin != BlockCache.NULL_HANDLE) {
-        cache.unpin(toUnpin);
+        if (MAX_DEFERRED_UNPIN == 0) {
+          cache.unpin(toUnpin);
+        } else {
+          int idx = (++deferredUnpinIdx) & DEFERRED_UNPIN_MASK;
+          long overflow = deferredUnpin[idx];
+          deferredUnpin[idx] = toUnpin;
+          if (overflow != BlockCache.NULL_HANDLE) {
+            cache.unpin(overflow);
+          }
+        }
       }
       currentNode = node;
       currentBlockIdx = blockIdx;
@@ -1395,6 +1414,18 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         currentNode = BlockCache.NULL_HANDLE;
         currentBlockIdx = ~currentBlockIdx;
         blockCache.unpin(toUnpin);
+      }
+      if (MAX_DEFERRED_UNPIN != 0) {
+        for (int i =
+                (deferredUnpin[DEFERRED_UNPIN_MASK] == BlockCache.NULL_HANDLE)
+                    ? deferredUnpinIdx
+                    : DEFERRED_UNPIN_MASK;
+            i >= 0;
+            i--) {
+          blockCache.unpin(deferredUnpin[i]);
+          deferredUnpin[i] = BlockCache.NULL_HANDLE;
+        }
+        deferredUnpinIdx = -1;
       }
     }
   }
