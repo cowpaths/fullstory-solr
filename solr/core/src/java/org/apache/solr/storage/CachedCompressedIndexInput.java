@@ -53,6 +53,7 @@ import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.store.ByteBufferGuard;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RandomAccessInput;
+import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.BitUtil;
 import org.apache.lucene.util.CollectionUtil;
 import org.apache.solr.common.util.EnvUtils;
@@ -1340,7 +1341,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       Integer.highestOneBit(
           Math.max(
               0, EnvUtils.getPropertyAsInteger("solr.compressingDirectory.maxDeferredUnpin", 128)));
-  private static final int DEFERRED_UNPIN_MASK = MAX_DEFERRED_UNPIN - 1;
+  private static final int MAX_DEFERRED_MASK = MAX_DEFERRED_UNPIN - 1;
+  private static final long[] INITIAL = new long[1];
 
   /**
    * Per-{@link CachedCompressedIndexInput}-instance struct tracking the currently pinned {@link
@@ -1358,8 +1360,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     private int sequentialAccessCount = 0;
 
     private int deferredUnpinIdx = -1;
-    private final long[] deferredUnpin =
-        MAX_DEFERRED_UNPIN == 0 ? null : new long[MAX_DEFERRED_UNPIN];
+    private int deferredMask = -1;
+    private long[] deferredUnpin = INITIAL;
 
     NodeRefStruct() {
       super();
@@ -1378,7 +1380,18 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         if (MAX_DEFERRED_UNPIN == 0) {
           cache.unpin(toUnpin);
         } else {
-          int idx = (++deferredUnpinIdx) & DEFERRED_UNPIN_MASK;
+          int idx = deferredUnpinIdx + 1;
+          if (idx > deferredMask) {
+            if (deferredMask == MAX_DEFERRED_MASK) {
+              idx &= MAX_DEFERRED_MASK;
+            } else {
+              // resize
+              int newSize = deferredUnpin.length << 1;
+              deferredUnpin = ArrayUtil.growExact(deferredUnpin, newSize);
+              deferredMask = newSize - 1;
+            }
+          }
+          deferredUnpinIdx = idx;
           long overflow = deferredUnpin[idx];
           deferredUnpin[idx] = toUnpin;
           if (overflow != BlockCache.NULL_HANDLE) {
@@ -1415,11 +1428,11 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         currentBlockIdx = ~currentBlockIdx;
         blockCache.unpin(toUnpin);
       }
-      if (MAX_DEFERRED_UNPIN != 0) {
+      if (MAX_DEFERRED_UNPIN != 0 && deferredMask >= 0) {
         for (int i =
-                (deferredUnpin[DEFERRED_UNPIN_MASK] == BlockCache.NULL_HANDLE)
+                (deferredUnpin[deferredMask] == BlockCache.NULL_HANDLE)
                     ? deferredUnpinIdx
-                    : DEFERRED_UNPIN_MASK;
+                    : deferredMask;
             i >= 0;
             i--) {
           blockCache.unpin(deferredUnpin[i]);
