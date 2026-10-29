@@ -1340,7 +1340,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private static final int MAX_DEFERRED_UNPIN =
       Integer.highestOneBit(
           Math.max(
-              0, EnvUtils.getPropertyAsInteger("solr.compressingDirectory.maxDeferredUnpin", 128)));
+              0, EnvUtils.getPropertyAsInteger("solr.compressingDirectory.maxDeferredUnpin", 0)));
   private static final int MAX_DEFERRED_MASK = MAX_DEFERRED_UNPIN - 1;
   private static final long[] INITIAL = new long[1];
 
