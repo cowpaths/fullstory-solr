@@ -306,7 +306,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
    * current. {@link #seqAccessCount} and {@link #readAheadTo} reflect the updated state for this
    * access. No-op by default; overridden by subclasses for additional readahead behavior.
    */
-  protected void onCacheHit(int blockIdx, BlockCache.Val val, int seqAccessCount) {}
+  protected void onCacheHit(int blockIdx, int seqAccessCount) {}
 
   /**
    * Returns a directly-owned (pre-mapped, cache-bypassing) {@link ByteBuffer} for the given block
@@ -554,7 +554,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         // Single-block file: skip registration, use singleton.
         currentNodeRef = OWNED_BLOCK_ZERO;
       } else {
-        setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, -1);
+        setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, -1);
       }
       postBuffer = owned;
       postBufferBaseline = 0;
@@ -565,27 +565,26 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     }
     long cached = rootInfo.accessMapped.get(blockIdx);
     boolean uninitialized;
-    BlockCache.Val cachedVal;
+    int cacheBlockOrd;
     if ((uninitialized = cached == BlockCache.NULL_HANDLE)
-        || (cachedVal = rootInfo.cache.pin(cached)) == null) {
+        || (cacheBlockOrd = rootInfo.cache.pin(cached)) < 0) {
       if (!uninitialized) {
         rootInfo.cache.recordFailedPin();
       }
       cacheMiss(cached, blockIdx);
     } else {
-      cacheHit(blockIdx, cached, cachedVal, 0);
+      cacheHit(blockIdx, cached, cacheBlockOrd, 0);
     }
   }
 
   private final long[] cacheHitBlockNanos = BlockCache.BATCH_REQUEST_SCOPED ? new long[1] : null;
 
-  private void cacheHit(int blockIdx, long cached, BlockCache.Val cachedVal, int type)
-      throws IOException {
+  private void cacheHit(int blockIdx, long cached, int cacheBlockOrd, int type) throws IOException {
     ByteBuffer buf;
     long waitNanos;
     if (BlockCache.BATCH_REQUEST_SCOPED) cacheHitBlockNanos[0] = 0;
     try {
-      buf = cachedVal.join(rootInfo.cache, cacheHitBlockNanos);
+      buf = rootInfo.cache.join(cacheBlockOrd, cacheHitBlockNanos);
       waitNanos = BlockCache.BATCH_REQUEST_SCOPED ? cacheHitBlockNanos[0] : 0;
     } catch (Throwable e) {
       rootInfo.cache.unpin(cached);
@@ -594,7 +593,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       }
       throw e;
     }
-    setCurrentNode(cached, blockIdx, cachedVal, type);
+    setCurrentNode(cached, blockIdx, type);
     if (waitNanos > 0 && missLatencyNanos != null) {
       missLatencyNanos.add(waitNanos);
     }
@@ -605,13 +604,13 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
     floatViews = null;
   }
 
-  private void setCurrentNode(long node, int blockIdx, BlockCache.Val val, int type) {
+  private void setCurrentNode(long node, int blockIdx, int type) {
     seqAccessCount = nodeRef().setCurrentNode(node, blockIdx, rootInfo.cache);
     if (seqAccessCount == -1) {
       readAheadTo = sliceFirstBlockIdx();
     }
     if (type == 0) {
-      onCacheHit(blockIdx, val, seqAccessCount);
+      onCacheHit(blockIdx, seqAccessCount);
     }
   }
 
@@ -655,17 +654,17 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
             : COMPRESSION_BLOCK_SIZE;
 
     long[] nodeHandle = new long[1];
-    BlockCache.Val nodeVal = cache.acquireNode(nodeHandle, rootInfo.blobUUID, blockIdx);
-    if (nodeVal != null) {
+    final int cacheBlockOrd = cache.acquireNode(nodeHandle, rootInfo.blobUUID, blockIdx);
+    if (cacheBlockOrd >= 0) {
       long node = nodeHandle[0];
       long extant = accessMapped.compareAndExchange(blockIdx, cached, node);
       if (extant == cached) {
         ByteBuffer buf;
         long elapsedNanos = -1L;
-        if (nodeVal.isPopulated(cache)) {
+        if (cache.isPopulated(cacheBlockOrd)) {
           // Warm-start hit: pool buffer already holds valid data from a previous run.
           cache.recordWarmStartHit();
-          buf = nodeVal.join(cache, null);
+          buf = cache.join(cacheBlockOrd, null);
         } else {
           // We won the race: fetch from backend and populate the node.
           if (VERBOSE && log.isInfoEnabled()) {
@@ -681,9 +680,11 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
           long start = System.nanoTime();
           try {
             byte[] heapBuf = supply(blockIdx, blockOffset, compressedLen, decompressedLen);
-            buf = nodeVal.populate(heapBuf, 0, decompressedLen, rootInfo.blobUUID, blockIdx, cache);
+            buf =
+                cache.populate(
+                    cacheBlockOrd, heapBuf, 0, decompressedLen, rootInfo.blobUUID, blockIdx);
           } catch (Throwable t) {
-            nodeVal.completeExceptionally(cache, t);
+            cache.completeExceptionally(cacheBlockOrd, t);
             accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);
             cache.unpin(node);
             cache.close(node);
@@ -693,7 +694,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
             cache.recordDecompressionDemand(elapsedNanos);
           }
         }
-        setCurrentNode(node, blockIdx, null, 2);
+        setCurrentNode(node, blockIdx, 2);
         if (elapsedNanos != -1L && missLatencyNanos != null) {
           missLatencyNanos.add(elapsedNanos);
         }
@@ -705,11 +706,11 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
         return;
       } else {
         // Another thread won the race; wait for its result.
-        cache.close(node, nodeVal);
-        BlockCache.Val extantVal = cache.pin(extant);
-        if (extantVal != null) {
+        cache.close(node, cacheBlockOrd);
+        final int extantCacheBlockOrd = cache.pin(extant);
+        if (extantCacheBlockOrd >= 0) {
           cache.recordCasRaceLoss();
-          cacheHit(blockIdx, extant, extantVal, 1);
+          cacheHit(blockIdx, extant, extantCacheBlockOrd, 1);
           return;
         }
       }
@@ -735,7 +736,7 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
       cache.recordDecompressionDemand(elapsedNanos);
     }
     ByteBuffer heapBuf = ByteBuffer.wrap(supplied, 0, decompressedLen);
-    setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, null, 3);
+    setCurrentNode(BlockCache.NULL_HANDLE, blockIdx, 3);
     if (missLatencyNanos != null) {
       missLatencyNanos.add(elapsedNanos);
     }
@@ -1343,8 +1344,8 @@ abstract class CachedCompressedIndexInput extends IndexInput implements RandomAc
   private static final int MAX_DEFERRED_MASK = MAX_DEFERRED_UNPIN - 1;
 
   /**
-   * Per-{@link CachedCompressedIndexInput}-instance struct tracking the currently pinned {@link
-   * BlockCache.Val} and sequential-access statistics.
+   * Per-{@link CachedCompressedIndexInput}-instance struct tracking the currently pinned cache node
+   * and sequential-access statistics.
    */
   static final class NodeRefStruct extends BlockCache.RetainedRef<Object> {
 

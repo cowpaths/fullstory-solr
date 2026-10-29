@@ -48,23 +48,23 @@ public class TestBlockCache extends SolrTestCaseJ4 {
   // Deterministic tests
   // ---------------------------------------------------------------------------
 
-  /** All blocks pinned: acquireNode() must return NULL_HANDLE rather than spin forever. */
+  /** All blocks pinned: acquireNode() must return -1 rather than spin forever. */
   public void testAllPinned() throws IOException {
     Path tmpDir = createTempDir();
     try (BlockCache cache =
         new BlockCache(2L * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
       long[] h = new long[1];
-      assertNotNull(cache.acquireNode(h));
+      assertTrue(cache.acquireNode(h) >= 0);
       long n1 = h[0];
-      assertNotNull(cache.acquireNode(h));
+      assertTrue(cache.acquireNode(h) >= 0);
       long n2 = h[0];
-      assertNull("expected null when all blocks pinned", cache.acquireNode(h));
+      assertTrue("expected -1 when all blocks pinned", cache.acquireNode(h) < 0);
 
       // Unpin one; now a block is evictable.
       cache.unpin(n1);
-      assertNotNull(cache.acquireNode(h));
+      assertTrue(cache.acquireNode(h) >= 0);
       long n3 = h[0];
-      assertNull("expected null with n2 and n3 both pinned", cache.acquireNode(h));
+      assertTrue("expected -1 with n2 and n3 both pinned", cache.acquireNode(h) < 0);
 
       cache.unpin(n2);
       cache.unpin(n3);
@@ -83,29 +83,30 @@ public class TestBlockCache extends SolrTestCaseJ4 {
     try (BlockCache cache =
         new BlockCache(2L * COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
       long[] h = new long[1];
-      BlockCache.Val v1 = cache.acquireNode(h);
+      int cacheBlockOrd1 = cache.acquireNode(h);
       long n1 = h[0];
-      BlockCache.Val v2 = cache.acquireNode(h);
+      int cacheBlockOrd2 = cache.acquireNode(h);
       long n2 = h[0];
-      assertNotNull(v1);
-      assertNotNull(v2);
-      v1.populate(dummy, 0, 0, null, 0, cache);
-      v2.populate(expect, 0, COMPRESSION_BLOCK_SIZE, null, 0, cache); // put real data in
+      assertTrue(cacheBlockOrd1 >= 0);
+      assertTrue(cacheBlockOrd2 >= 0);
+      cache.populate(cacheBlockOrd1, dummy, 0, 0, null, 0);
+      cache.populate(
+          cacheBlockOrd2, expect, 0, COMPRESSION_BLOCK_SIZE, null, 0); // put real data in
 
       // Unpin both; n2 was acquired last so it sits at the LRU head.
       cache.unpin(n1);
       cache.unpin(n2);
 
       // Explicitly close n2 — should push its buffer to the tail (highest eviction priority).
-      ByteBuffer n2Buf = v2.join(cache, null);
+      ByteBuffer n2Buf = cache.join(cacheBlockOrd2, null);
       cache.close(n2);
 
       // Next acquisition should reclaim n2's buffer from the tail.
-      BlockCache.Val v3 = cache.acquireNode(h);
+      int cacheBlockOrd3 = cache.acquireNode(h);
       long n3 = h[0];
-      assertNotNull(v3);
-      ByteBuffer n3Buf = v3.populate(dummy, 0, 0, null, 0, cache);
-      assertSame(n3Buf, v3.join(cache, null));
+      assertTrue(cacheBlockOrd3 >= 0);
+      ByteBuffer n3Buf = cache.populate(cacheBlockOrd3, dummy, 0, 0, null, 0);
+      assertSame(n3Buf, cache.join(cacheBlockOrd3, null));
       assertNotSame(n2Buf, n3Buf);
       byte[] rtx = new byte[COMPRESSION_BLOCK_SIZE];
       n3Buf.clear().get(rtx);
@@ -124,26 +125,26 @@ public class TestBlockCache extends SolrTestCaseJ4 {
     r.nextBytes(dummy);
     try (BlockCache cache = new BlockCache(COMPRESSION_BLOCK_SIZE, tmpDir.resolve("cache.tmp"))) {
       long[] h = new long[1];
-      BlockCache.Val v1 = cache.acquireNode(h);
+      int cacheBlockOrd1 = cache.acquireNode(h);
       long n1 = h[0];
-      assertNotNull(v1);
-      ByteBuffer n1Buf = v1.populate(dummy, 0, COMPRESSION_BLOCK_SIZE, null, 0, cache);
-      assertSame(n1Buf, v1.join(cache, null));
+      assertTrue(cacheBlockOrd1 >= 0);
+      ByteBuffer n1Buf = cache.populate(cacheBlockOrd1, dummy, 0, COMPRESSION_BLOCK_SIZE, null, 0);
+      assertSame(n1Buf, cache.join(cacheBlockOrd1, null));
       cache.unpin(n1); // now evictable
 
       // Evict n1 by acquiring the only block.
-      BlockCache.Val v2 = cache.acquireNode(h);
+      int cacheBlockOrd2 = cache.acquireNode(h);
       long n2 = h[0];
-      assertNotNull(v2);
-      ByteBuffer n2Buf = v2.populate(new byte[0], 0, 0, null, 0, cache);
-      assertSame(n2Buf, v2.join(cache, null));
+      assertTrue(cacheBlockOrd2 >= 0);
+      ByteBuffer n2Buf = cache.populate(cacheBlockOrd2, new byte[0], 0, 0, null, 0);
+      assertSame(n2Buf, cache.join(cacheBlockOrd2, null));
       assertNotSame(n1Buf, n2Buf); // different wrappers
       byte[] rtx = new byte[COMPRESSION_BLOCK_SIZE];
       n2Buf.clear().get(rtx);
       assertArrayEquals(dummy, rtx); // should have same backing bytes
 
       // n1 is dead — pin must fail.
-      assertNull("pin() on evicted node should return null", cache.pin(n1));
+      assertTrue("pin() on evicted node should return -1", cache.pin(n1) < 0);
 
       cache.unpin(n2);
     }
@@ -177,10 +178,10 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       byte[] sentinel = new byte[Integer.BYTES];
       for (int idx = 0; idx < nBlocks; idx++) {
         UUID uuid = new UUID(0, idx);
-        BlockCache.Val v = cache.acquireNode(h, uuid, 0);
-        assertNotNull(v);
+        int cacheBlockOrd = cache.acquireNode(h, uuid, 0);
+        assertTrue(cacheBlockOrd >= 0);
         ByteBuffer.wrap(sentinel).putInt(0, idx);
-        v.populate(sentinel, 0, Integer.BYTES, uuid, 0, cache);
+        cache.populate(cacheBlockOrd, sentinel, 0, Integer.BYTES, uuid, 0);
         cache.unpin(h[0]);
       }
     }
@@ -210,33 +211,34 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                         int idx = r.nextInt(valCount);
                         UUID uuid = new UUID(0, idx);
                         long handle = handles.get(idx);
-                        BlockCache.Val v;
-                        if (handle != BlockCache.NULL_HANDLE && (v = cache.pin(handle)) != null) {
-                          ByteBuffer join = v.join(cache, null);
+                        int cacheBlockOrd;
+                        if (handle != BlockCache.NULL_HANDLE
+                            && (cacheBlockOrd = cache.pin(handle)) >= 0) {
+                          ByteBuffer join = cache.join(cacheBlockOrd, null);
                           assertEquals(idx, join.getInt(0));
                           cache.unpin(handle);
                         } else {
-                          v = cache.acquireNode(h, uuid, 0);
-                          if (v != null) {
+                          cacheBlockOrd = cache.acquireNode(h, uuid, 0);
+                          if (cacheBlockOrd >= 0) {
                             long extant = handles.compareAndExchange(idx, handle, h[0]);
                             if (extant == handle) {
                               handle = h[0];
-                              if (v.isPopulated(cache)) {
-                                ByteBuffer join = v.join(cache, null);
+                              if (cache.isPopulated(cacheBlockOrd)) {
+                                ByteBuffer join = cache.join(cacheBlockOrd, null);
                                 assertEquals(idx, join.getInt(0));
                               } else {
                                 byte[] arr =
                                     ByteBuffer.allocate(Integer.BYTES).putInt(0, idx).array();
-                                v.populate(arr, 0, Integer.BYTES, uuid, 0, cache);
+                                cache.populate(cacheBlockOrd, arr, 0, Integer.BYTES, uuid, 0);
                               }
                             } else {
-                              cache.close(h[0], v);
-                              v = cache.pin(extant);
-                              if (v == null) {
+                              cache.close(h[0], cacheBlockOrd);
+                              cacheBlockOrd = cache.pin(extant);
+                              if (cacheBlockOrd < 0) {
                                 continue; // whatever
                               }
                               handle = extant;
-                              ByteBuffer join = v.join(cache, null);
+                              ByteBuffer join = cache.join(cacheBlockOrd, null);
                               assertEquals(idx, join.getInt(0));
                             }
                             cache.unpin(handle);
@@ -286,16 +288,16 @@ public class TestBlockCache extends SolrTestCaseJ4 {
   }
 
   /**
-   * Regression test: {@link BlockCache#peekExtantHandle} must mark the returned slot's {@link
-   * BlockCache.Val} populated, not just confirm it's pinnable. {@code AccessDirectory2} stashes the
-   * handle this returns directly into {@code accessMapped} for a later real reader to consume via
-   * {@code pin()} + {@link BlockCache.Val#join}; {@code join()} blocks on {@code populated} being
-   * {@code true} and is never notified for a slot that was only peeked (no fetch is ever in flight
-   * to populate and notify it) -- so if {@code peekExtantHandle} failed to set that flag, a real
-   * reader of a peeked-but-not-yet-otherwise-accessed warm-start block would pin successfully but
-   * then hang in {@code join()} for its full timeout before failing. This test only checks {@code
-   * isPopulated()} directly (not an actual {@code join()} call) specifically so a regression here
-   * reports as a fast, clear assertion failure instead of a slow timeout.
+   * Regression test: {@link BlockCache#peekExtantHandle} must mark the returned slot populated, not
+   * just confirm it's pinnable. {@code AccessDirectory2} stashes the handle this returns directly
+   * into {@code accessMapped} for a later real reader to consume via {@code pin()} + {@link
+   * BlockCache#join}; {@code join()} blocks on {@code populated} being {@code true} and is never
+   * notified for a slot that was only peeked (no fetch is ever in flight to populate and notify it)
+   * -- so if {@code peekExtantHandle} failed to set that flag, a real reader of a
+   * peeked-but-not-yet-otherwise-accessed warm-start block would pin successfully but then hang in
+   * {@code join()} for its full timeout before failing. This test only checks {@code isPopulated()}
+   * directly (not an actual {@code join()} call) specifically so a regression here reports as a
+   * fast, clear assertion failure instead of a slow timeout.
    */
   public void testPeekExtantHandleMarksPopulated() throws IOException {
     int nBlocks = 2;
@@ -314,26 +316,27 @@ public class TestBlockCache extends SolrTestCaseJ4 {
     ByteBuffer.wrap(sentinel).putInt(0, 42);
     try (BlockCache cache = new BlockCache(cachePath)) {
       long[] h = new long[1];
-      BlockCache.Val v = cache.acquireNode(h, uuid, 0);
-      assertNotNull(v);
-      v.populate(sentinel, 0, Integer.BYTES, uuid, 0, cache);
+      int cacheBlockOrd = cache.acquireNode(h, uuid, 0);
+      assertTrue(cacheBlockOrd >= 0);
+      cache.populate(cacheBlockOrd, sentinel, 0, Integer.BYTES, uuid, 0);
       cache.unpin(h[0]);
     }
 
-    // Reopen (warm start): a fresh BlockCache/Val population, generation==0, extant map built from
-    // the persisted backing file -- peekExtantHandle is the only thing that has touched this slot
-    // so far this process.
+    // Reopen (warm start): a fresh BlockCache, generation==0, extant map built from the persisted
+    // backing file -- peekExtantHandle is the only thing that has touched this slot so far this
+    // process.
     try (BlockCache cache = new BlockCache(cachePath)) {
       long handle = cache.peekExtantHandle(uuid, 0);
       assertTrue("expected a valid warm-start handle", handle != BlockCache.NULL_HANDLE);
 
-      BlockCache.Val v = cache.pin(handle);
-      assertNotNull("peeked handle should still be pinnable immediately after the peek", v);
+      int cacheBlockOrd = cache.pin(handle);
+      assertTrue(
+          "peeked handle should still be pinnable immediately after the peek", cacheBlockOrd >= 0);
       try {
         assertTrue(
-            "peekExtantHandle must mark the slot's Val populated, or a real reader's join() would"
-                + " hang waiting for a fetch that will never happen",
-            v.isPopulated(cache));
+            "peekExtantHandle must mark the slot populated, or a real reader's join() would hang"
+                + " waiting for a fetch that will never happen",
+            cache.isPopulated(cacheBlockOrd));
       } finally {
         cache.unpin(handle);
       }
@@ -391,12 +394,12 @@ public class TestBlockCache extends SolrTestCaseJ4 {
 
                       // --- Cache hit path: try to pin the existing node ---
                       long existing = slots.get(slotIdx);
-                      BlockCache.Val existingVal = null;
+                      int existingCacheBlockOrd = -1;
                       if (existing != BlockCache.NULL_HANDLE
-                          && (existingVal = cache.pin(existing)) != null) {
+                          && (existingCacheBlockOrd = cache.pin(existing)) >= 0) {
                         hits.increment();
                         // Verify that the sentinel written at acquire time is intact.
-                        assertEquals(slotIdx, existingVal.join(cache, null).getInt(0));
+                        assertEquals(slotIdx, cache.join(existingCacheBlockOrd, null).getInt(0));
                         if (r.nextInt(8) == 0) {
                           // Explicit close: unpin, vacate slot, close.
                           cache.unpin(existing);
@@ -412,8 +415,8 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                       }
 
                       // --- Cache miss path: acquire a new node (evicts LRU if needed) ---
-                      BlockCache.Val nodeVal = cache.acquireNode(nodeHandle);
-                      if (nodeVal == null) {
+                      int cacheBlockOrd = cache.acquireNode(nodeHandle);
+                      if (cacheBlockOrd < 0) {
                         exhausted.increment();
                         continue;
                       }
@@ -421,7 +424,7 @@ public class TestBlockCache extends SolrTestCaseJ4 {
                       acquired.increment();
                       // Write sentinel via populate() before publishing.
                       ByteBuffer.wrap(sentinelBuf).putInt(0, slotIdx);
-                      nodeVal.populate(sentinelBuf, 0, Integer.BYTES, null, 0, cache);
+                      cache.populate(cacheBlockOrd, sentinelBuf, 0, Integer.BYTES, null, 0);
                       cache.unpin(node);
                       // Publish to slot; old occupant (if any) will be evicted via normal LRU.
                       long prev = slots.getAndSet(slotIdx, node);

@@ -129,18 +129,18 @@ class BlockPreloader {
     if ((extant == BlockCache.NULL_HANDLE || !cache.pinnable(extant))
         && permits.tryAcquire(timeoutMillis)) {
       long[] nodeHandle = new long[1];
-      BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle, blobUUID, idx);
-      if (toPopulateVal == null) {
+      final int cacheBlockOrd = cache.acquireNode(nodeHandle, blobUUID, idx);
+      if (cacheBlockOrd < 0) {
         permits.release();
         return false;
       }
-      long toPopulate = nodeHandle[0];
+      final long toPopulate = nodeHandle[0];
       try {
         ioExec.submit(
             () -> {
               try {
                 if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-                  if (toPopulateVal.isPopulated(cache)) {
+                  if (cache.isPopulated(cacheBlockOrd)) {
                     cache.recordWarmStartHit();
                   } else {
                     long blockOffset = blockOffsets[idx];
@@ -151,7 +151,7 @@ class BlockPreloader {
                         idx,
                         decompressedLen,
                         toPopulate,
-                        toPopulateVal,
+                        cacheBlockOrd,
                         accessMapped,
                         cache,
                         supplier,
@@ -161,7 +161,7 @@ class BlockPreloader {
                   cache.unpin(toPopulate, false);
                 } else {
                   cache.recordCasRaceLoss();
-                  cache.close(toPopulate, toPopulateVal);
+                  cache.close(toPopulate, cacheBlockOrd);
                 }
               } catch (Throwable t) {
                 if (!(t instanceof IOException))
@@ -213,11 +213,11 @@ class BlockPreloader {
                 long extant = accessMapped.get(idx);
                 if (extant != BlockCache.NULL_HANDLE && cache.pinnable(extant)) continue;
                 long[] nodeHandle = new long[1];
-                BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle, blobUUID, idx);
-                if (toPopulateVal == null) return null; // cache full — stop
-                long toPopulate = nodeHandle[0];
+                final int cacheBlockOrd = cache.acquireNode(nodeHandle, blobUUID, idx);
+                if (cacheBlockOrd < 0) return null; // cache full — stop
+                final long toPopulate = nodeHandle[0];
                 if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
-                  if (toPopulateVal.isPopulated(cache)) {
+                  if (cache.isPopulated(cacheBlockOrd)) {
                     cache.recordWarmStartHit();
                   } else {
                     long blockOffset = blockOffsets[idx];
@@ -228,7 +228,7 @@ class BlockPreloader {
                         idx,
                         decompressedLen.applyAsInt(idx),
                         toPopulate,
-                        toPopulateVal,
+                        cacheBlockOrd,
                         accessMapped,
                         cache,
                         supplier,
@@ -237,7 +237,7 @@ class BlockPreloader {
                   cache.unpin(toPopulate, false);
                 } else {
                   cache.recordCasRaceLoss();
-                  cache.close(toPopulate, toPopulateVal);
+                  cache.close(toPopulate, cacheBlockOrd);
                 }
               }
             } catch (Throwable t) {
@@ -271,7 +271,7 @@ class BlockPreloader {
       int blockIdx,
       int decompressedLen,
       long node,
-      BlockCache.Val nodeVal,
+      int cacheBlockOrd,
       AtomicLongArray accessMapped,
       BlockCache cache,
       BlockSupplier supplier,
@@ -281,10 +281,10 @@ class BlockPreloader {
     ByteBuffer buf;
     try {
       byte[] heapBuf = supplier.supply(blockOffset, compressedLen, decompressedLen);
-      buf = nodeVal.populate(heapBuf, 0, decompressedLen, blobUUID, blockIdx, cache);
-      cache.releaseHint(nodeVal);
+      buf = cache.populate(cacheBlockOrd, heapBuf, 0, decompressedLen, blobUUID, blockIdx);
+      cache.releaseHint(cacheBlockOrd);
     } catch (Throwable t) {
-      nodeVal.completeExceptionally(cache, t);
+      cache.completeExceptionally(cacheBlockOrd, t);
       accessMapped.compareAndSet(blockIdx, node, BlockCache.NULL_HANDLE);
       cache.unpin(node);
       cache.close(node);

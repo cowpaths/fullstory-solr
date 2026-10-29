@@ -1202,12 +1202,12 @@ public class GCSDirectory extends SizeAwareDirectory {
       // Pre-warm the block cache with the uncompressed block while it's already in memory,
       // so readers get a cache hit instead of a GCS round-trip.
       long[] nodeHandle = new long[1];
-      BlockCache.Val cacheNodeVal = dir.cache.acquireNode(nodeHandle);
+      final int cacheBlockOrd = dir.cache.acquireNode(nodeHandle);
       long cacheNode = nodeHandle[0];
-      if (cacheNodeVal != null) {
+      if (cacheBlockOrd >= 0) {
         try {
-          cacheNodeVal.populate(
-              compressBuffer, 0, COMPRESSION_BLOCK_SIZE, uuid, cachedNodes.size(), dir.cache);
+          dir.cache.populate(
+              cacheBlockOrd, compressBuffer, 0, COMPRESSION_BLOCK_SIZE, uuid, cachedNodes.size());
         } finally {
           // release writer's pin; node enters LRU, ready for readers
           dir.cache.unpin(cacheNode, false);
@@ -1671,13 +1671,13 @@ public class GCSDirectory extends SizeAwareDirectory {
                   continue; // already cached — bytes discarded
                 }
                 long[] nodeHandle = new long[1];
-                BlockCache.Val v = cache.acquireNode(nodeHandle, blobUUID, i);
-                if (v == null) {
+                final int cacheBlockOrd = cache.acquireNode(nodeHandle, blobUUID, i);
+                if (cacheBlockOrd < 0) {
                   return null; // cache full — stop
                 }
                 long toPopulate = nodeHandle[0];
                 if (accessMapped.compareAndSet(i, extant, toPopulate)) {
-                  if (v.isPopulated(cache)) {
+                  if (cache.isPopulated(cacheBlockOrd)) {
                     cache.recordWarmStartHit();
                   } else {
                     int dl = decompressedLenFor.applyAsInt(i);
@@ -1689,7 +1689,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                         i,
                         dl,
                         toPopulate,
-                        v,
+                        cacheBlockOrd,
                         accessMapped,
                         cache,
                         (a, b, c) -> decomp,
@@ -1697,7 +1697,7 @@ public class GCSDirectory extends SizeAwareDirectory {
                   }
                   cache.unpin(toPopulate, false);
                 } else {
-                  cache.close(toPopulate, v);
+                  cache.close(toPopulate, cacheBlockOrd);
                 }
               }
             } catch (IOException e) {
