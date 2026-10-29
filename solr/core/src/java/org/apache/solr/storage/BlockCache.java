@@ -55,6 +55,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -1106,7 +1107,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
 
     boolean isPopulated(BlockCache c) {
-      return CACHED.getVolatile(c.cached, cacheBlockOrd) != null;
+      return CACHED.getVolatile(c.cached, cacheBlockOrd) instanceof ByteBuffer;
     }
 
     ByteBuffer populate(byte[] arr, int off, int len, UUID blobUUID, int blockIdx, BlockCache c) {
@@ -1141,18 +1142,14 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       } finally {
         l.unlock(stamp);
       }
-      Object extant;
-      synchronized (this) {
-        extant = CACHED.getAndSet(c.cached, cacheBlockOrd, ret);
-        notifyAll();
-      }
+      Object extant = CACHED.getAndSet(c.cached, cacheBlockOrd, ret);
       if (extant != null) {
-        throw new IllegalStateException("clobbered unexpected value in `cached`");
+        ((CountDownLatch) extant).countDown();
       }
       return ret;
     }
 
-    private static final long JOIN_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(30);
+    private static final long JOIN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(30);
 
     /**
      * Waits for this node's buffer to be populated, blocking if necessary.
@@ -1161,30 +1158,41 @@ public class BlockCache implements Closeable, SolrMetricProducer {
      */
     @SuppressWarnings("ReferenceEquality")
     public ByteBuffer join(BlockCache c, long[] waitNanos) {
-      ByteBuffer ret = (ByteBuffer) CACHED.getVolatile(c.cached, cacheBlockOrd);
-      if (ret == null) {
+      ByteBuffer ret;
+      Object extant = CACHED.getVolatile(c.cached, cacheBlockOrd);
+      block:
+      if (!(extant instanceof ByteBuffer)) {
+        CountDownLatch cdl;
+        if (extant != null) {
+          cdl = (CountDownLatch) extant;
+        } else {
+          CountDownLatch ours = new CountDownLatch(1);
+          extant = CACHED.compareAndExchange(c.cached, cacheBlockOrd, null, ours);
+          if (extant == null) {
+            cdl = ours;
+          } else if (extant instanceof CountDownLatch) {
+            cdl = (CountDownLatch) extant;
+          } else {
+            ret = (ByteBuffer) extant;
+            break block;
+          }
+        }
         long startNanos = System.nanoTime();
         try {
-          synchronized (this) {
-            for (long remainingMillis = JOIN_TIMEOUT_MILLIS;
-                (ret = (ByteBuffer) CACHED.getVolatile(c.cached, cacheBlockOrd)) == null
-                    && remainingMillis > 0;
-                remainingMillis =
-                    JOIN_TIMEOUT_MILLIS - ((System.nanoTime() - startNanos) / 1_000_000)) {
-              wait(remainingMillis);
-            }
+          if (!cdl.await(JOIN_TIMEOUT_NANOS, TimeUnit.NANOSECONDS)) {
+            throw new IllegalStateException(
+                "join() timed out: Val was never populated (possible populate() caller crash)");
           }
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
           throw new ThreadInterruptedException(e);
         }
-        if (ret == null) {
-          throw new IllegalStateException(
-              "join() timed out: Val was never populated (possible populate() caller crash)");
-        }
+        ret = (ByteBuffer) CACHED.getVolatile(c.cached, cacheBlockOrd);
         if (waitNanos != null) {
           waitNanos[0] = System.nanoTime() - startNanos;
         }
+      } else {
+        ret = (ByteBuffer) extant;
       }
       if (ret == POPULATED_SENTINEL) {
         ret = c.sliceRO(cacheBlockOrd);
@@ -1198,13 +1206,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     /** Marks this node as failed, unblocking any threads waiting in {@link #join}. */
     public void completeExceptionally(BlockCache c, Throwable t) {
       assert cacheBlockOrd >= 0;
-      Object extant;
-      synchronized (this) {
-        extant = CACHED.getAndSet(c.cached, cacheBlockOrd, EXCEPTION_SENTINEL);
-        notifyAll();
-      }
+      Object extant = CACHED.getAndSet(c.cached, cacheBlockOrd, EXCEPTION_SENTINEL);
       if (extant != null) {
-        throw new IllegalStateException("clobbered unexpected value in `cached`");
+        ((CountDownLatch) extant).countDown();
       }
     }
   }
@@ -1255,9 +1259,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * slot reuse by {@link #acquireNode(long[])}, since {@link Val#reset()} has no reference back to
    * the owning {@code BlockCache}.
    */
-  private final ByteBuffer[] cached;
+  private final Object[] cached;
 
-  private static final VarHandle CACHED = MethodHandles.arrayElementVarHandle(ByteBuffer[].class);
+  private static final VarHandle CACHED = MethodHandles.arrayElementVarHandle(Object[].class);
 
   private final int nPartitions;
   private final Partition[] partitions;
@@ -1338,7 +1342,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.pool = m.dataPool();
     this.poolRO =
         Arrays.stream(this.pool).map(ByteBuffer::asReadOnlyBuffer).toArray(ByteBuffer[]::new);
-    this.cached = new ByteBuffer[nBlocks];
+    this.cached = new Object[nBlocks];
     this.metaBuf = null;
     this.alwaysPrepareWrite = false;
     this.extantMap = null;
@@ -1386,7 +1390,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.pool = m.dataPool();
     this.poolRO =
         Arrays.stream(this.pool).map(ByteBuffer::asReadOnlyBuffer).toArray(ByteBuffer[]::new);
-    this.cached = new ByteBuffer[nBlocks];
+    this.cached = new Object[nBlocks];
     this.metaBuf = mb;
     int trailerOffset = nBlocks * META_BYTES_PER_BLOCK;
     long storedId = mb.getLong(trailerOffset);
@@ -1683,8 +1687,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     }
     // on last unpin, clear the cached ByteBuffer. recreating is cheap.
     Val v = p.getPayload(handle);
-    ByteBuffer cur = (ByteBuffer) CACHED.getVolatile(cached, v.cacheBlockOrd);
-    if (cur != null && cur != EXCEPTION_SENTINEL) {
+    Object cur = CACHED.getVolatile(cached, v.cacheBlockOrd);
+    if (cur instanceof ByteBuffer && cur != EXCEPTION_SENTINEL) {
       // CAS ensures we never clobber EXCEPTION_SENTINEL; if it loses, cached is already
       // null or sentinel, both fine. Worst case of a benign loss: another slice() call.
       CACHED.compareAndSet(cached, v.cacheBlockOrd, cur, POPULATED_SENTINEL);
