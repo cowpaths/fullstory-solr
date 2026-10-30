@@ -460,7 +460,8 @@ class Cache2<V extends Cache2.Val> {
   // Slot 0 is reserved and never allocated; NULL_SLOT doubles as the null handle sentinel.
   static final int NULL_SLOT = 0;
 
-  private static final int SLOT_MASK = (1 << 20) - 1;
+  /** Masks the local slot number (1..capacity) encoded in the low bits of a handle. */
+  static final int SLOT_MASK = (1 << 20) - 1;
 
   /** Cold queue: head sentinel (most-recently-used end). Index = {@code capacity + 1}. */
   protected final int COLD_HEAD;

@@ -61,7 +61,7 @@ public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
     for (int i = 0; i < capacity; i++) {
       Cache2.Val v = cache.acquireNode(handle);
       assertNotNull("expected " + capacity + " evictable slots, failed at i=" + i, v);
-      int slot = (int) handle[0] & ((1 << 20) - 1); // SLOT_MASK, mirrored from Cache2
+      int slot = (int) handle[0] & Cache2.SLOT_MASK;
       assertEquals(
           "acquireNode() must zero lastUnpinNanos on recycle, slot=" + slot,
           0L,
@@ -86,7 +86,7 @@ public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
     long[] handle = new long[1];
     assertNotNull(cache.acquireNode(handle));
     long h = handle[0];
-    int slot = (int) h & ((1 << 20) - 1);
+    int slot = (int) h & Cache2.SLOT_MASK;
 
     cache.unpin(h, false); // make the slot evictable (refCount -> 0); required for close() to act
     cache.setLastUnpinNanos(slot, 555555555L); // poison after unpin's own write
