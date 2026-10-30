@@ -208,7 +208,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // Node
   // ---------------------------------------------------------------------------
 
-  private static final ByteBuffer EXCEPTION_SENTINEL = ByteBuffer.allocate(0);
+  private static final ByteBuffer EXCEPTION_SENTINEL =
+      ByteBuffer.allocateDirect(0).asReadOnlyBuffer();
 
   public void decrementOutstandingRefs() {
     refsCollected.increment();
@@ -1064,7 +1065,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     return holdRefs3[partIdx].tryRelease(slot);
   }
 
-  private static final ByteBuffer POPULATED_SENTINEL = ByteBuffer.allocateDirect(0);
+  private static final ByteBuffer POPULATED_SENTINEL =
+      ByteBuffer.allocateDirect(0).asReadOnlyBuffer();
 
   /**
    * A cache entry: wraps a decompressed block buffer and carries a reference count for safe
