@@ -130,6 +130,7 @@ import org.apache.solr.request.LocalSolrQueryRequest;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.security.AllowListUrlChecker;
+import org.apache.solr.storage.GCSDirectory;
 import org.apache.solr.update.CommitUpdateCommand;
 import org.apache.solr.update.UpdateShardHandler;
 import org.apache.solr.util.FileUtils;
@@ -2044,7 +2045,10 @@ public class IndexFetcher {
 
     DirectoryFile(Directory tmpIndexDir, String saveAs) throws IOException {
       this.saveAs = saveAs;
-      this.copy2Dir = tmpIndexDir;
+      // For GCS-backed directories, use rawDirectoryView so received bytes (raw offset files)
+      // are written directly to local disk instead of being re-uploaded as new GCS blobs.
+      // For non-GCS directories rawDirectoryView returns the directory unchanged.
+      this.copy2Dir = GCSDirectory.rawDirectoryView(tmpIndexDir);
       outStream = copy2Dir.createOutput(this.saveAs, DirectoryFactory.IOCONTEXT_NO_CACHE);
     }
 
