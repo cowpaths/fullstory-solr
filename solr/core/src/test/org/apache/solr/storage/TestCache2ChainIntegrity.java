@@ -17,8 +17,6 @@
 package org.apache.solr.storage;
 
 import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.List;
 import org.apache.solr.SolrTestCaseJ4;
 
 /**
@@ -81,7 +79,7 @@ public class TestCache2ChainIntegrity extends SolrTestCaseJ4 {
     int minAcceptableGap = 2; // matches the empirically-observed worst case for this threshold
 
     for (int iter = 0; iter < 10; iter++) {
-      Cache2.DualQueueCache<Cache2.Val> cache = newCache(capacity);
+      Cache2.DualQueueCache cache = newCache(capacity);
       int[] chainOrder = new int[capacity];
       int cur = cache.getNextVolatile(cache.COLD_HEAD);
       for (int i = 0; i < capacity; i++) {
@@ -170,12 +168,8 @@ public class TestCache2ChainIntegrity extends SolrTestCaseJ4 {
         goodPq <= maxPq);
   }
 
-  private static Cache2.DualQueueCache<Cache2.Val> newCache(int capacity) {
-    List<Cache2.Val> initialValues = new ArrayList<>(capacity);
-    for (int i = 0; i < capacity; i++) {
-      initialValues.add(new Cache2.Val());
-    }
-    return new Cache2.DualQueueCache<>(capacity, initialValues);
+  private static Cache2.DualQueueCache newCache(int capacity) {
+    return new Cache2.DualQueueCache(capacity);
   }
 
   /**
@@ -186,7 +180,7 @@ public class TestCache2ChainIntegrity extends SolrTestCaseJ4 {
    * from {@code COLD_TAIL}, asserting it retraces the exact same sequence in reverse (i.e. {@code
    * next}/{@code prev} are true inverses, not just that {@code next} alone forms a valid cycle).
    */
-  private void checkChainIntegrity(Cache2.DualQueueCache<Cache2.Val> cache, int capacity) {
+  private void checkChainIntegrity(Cache2.DualQueueCache cache, int capacity) {
     int[] forwardOrder = new int[capacity];
     boolean[] seen = new boolean[capacity + 1];
     int cur = cache.getNextVolatile(cache.COLD_HEAD);
