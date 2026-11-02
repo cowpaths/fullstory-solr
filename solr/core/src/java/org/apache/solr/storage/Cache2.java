@@ -28,8 +28,7 @@ import org.apache.solr.common.util.EnvUtils;
 /**
  * Fixed-capacity concurrent LRU cache.
  *
- * <p>Two field clusters live in off-heap {@link ByteBuffer}s rather than as {@link Val} instance
- * fields:
+ * <p>Two field clusters live in off-heap {@link ByteBuffer}s:
  *
  * <ul>
  *   <li>{@code refCount}/{@code generation} ("Group 1", in {@link #group1}) -- carries roughly 9x
@@ -42,18 +41,14 @@ import org.apache.solr.common.util.EnvUtils;
  *       #group2}) -- touched only on genuine first-pin/last-unpin list transitions. Stored 2 slots
  *       per 64-byte line (lower-traffic tier than Group 1, so a looser packing is an acceptable
  *       tradeoff for roughly a third of the memory cost of 1-per-line). Unlike Group 1, covers
- *       every addressable slot, sentinels included: sentinel {@link Val}s are the literal
- *       list-boundary pointers, with their {@code next}/{@code prev} read and written on
- *       essentially every list operation.
+ *       every addressable slot, sentinels included: sentinel slots are the literal list-boundary
+ *       pointers, with their {@code next}/{@code prev} read and written on essentially every list
+ *       operation.
  * </ul>
  *
- * <p>Colocating either group with the other, or with {@link Val}'s own residual fields (as earlier
- * versions of this class did), meant unrelated fields with very different traffic profiles shared a
- * cache line -- Group 1's hot CAS traffic needlessly invalidating Group 2's much colder
- * reads/writes and vice versa, and (for {@code BlockCache.Val} specifically) Group 2's write
- * traffic needlessly invalidating reads of {@code cacheBlockOrd}, which is read on essentially
- * every cache hit by an unrelated thread population (query-serving threads, as opposed to the
- * I/O-completion threads that drive list-splice writes).
+ * <p>Colocating either group with the other (as earlier versions of this class did) meant unrelated
+ * fields with very different traffic profiles shared a cache line -- Group 1's hot CAS traffic
+ * needlessly invalidating Group 2's much colder reads/writes and vice versa.
  *
  * <p>The LRU semantics, pin/unpin reference-count protocol, and hot/cold dual-queue logic are
  * identical to {@link Cache} and {@link Cache2.DualQueueCache}.
@@ -66,8 +61,8 @@ import org.apache.solr.common.util.EnvUtils;
  *       N&rarr;N+1, N&gt;0) are pure refcount increments.
  *   <li>{@link #unpin}: last unpin (result=0) inserts the slot at the list head (most-recently
  *       used); higher unpins are pure refcount decrements.
- *   <li>{@link #acquireNode}: evicts the tail slot, resets its payload via {@link Val#reset(int)},
- *       and returns it pinned (refCount=1).
+ *   <li>{@link #acquireNode}: evicts the tail slot, resets its per-slot state via {@link
+ *       #reset(int)}, and returns it pinned (refCount=1).
  * </ul>
  *
  * <p>The capacity is fixed at construction. {@link #acquireNode} writes an opaque {@code long}
@@ -75,17 +70,7 @@ import org.apache.solr.common.util.EnvUtils;
  * array. {@code BlockCache#encodeHandle} ORs in the partition index to form the full
  * cross-partition handle stored in {@code accessMapped}.
  */
-class Cache2<V extends Cache2.Val> {
-
-  // ---------------------------------------------------------------------------
-  // Val hierarchy
-  // ---------------------------------------------------------------------------
-
-  static class Val {
-    void reset() {
-      // no-op default impl;
-    }
-  }
+class Cache2 {
 
   // ---------------------------------------------------------------------------
   // Off-heap storage: Group 1 (refCount/generation) and Group 2 (next/prev/fromHot/lastUnpinNanos)
@@ -506,13 +491,11 @@ class Cache2<V extends Cache2.Val> {
   final int capacity;
 
   /**
-   * Payload for all slot indices 0..arrayLen-1. Slot 0 is reserved (null). Real slots are
+   * Total number of addressable slot indices 0..totalSlots-1. Slot 0 is reserved. Real slots are
    * 1..capacity. Sentinel slots (COLD_HEAD, COLD_TAIL, and optionally HOT_HEAD, HOT_TAIL) occupy
-   * the remaining indices, holding placeholder {@link Val} objects (their {@code next}/{@code prev}
-   * live in {@link #group2}, indexed the same way as any other slot). Elements are set at
-   * construction and never swapped.
+   * the remaining indices.
    */
-  final Val[] payload;
+  final int totalSlots;
 
   // ---------------------------------------------------------------------------
   // Constructor
@@ -529,37 +512,23 @@ class Cache2<V extends Cache2.Val> {
    * @param capacity number of real slots
    * @param extraSentinelSlots additional sentinel slots beyond COLD_HEAD/COLD_TAIL (e.g. 2 for
    *     {@link DualQueueCache}'s HOT_HEAD/HOT_TAIL)
-   * @param initialValues Val objects in desired initial LRU order (head→tail)
    */
-  Cache2(int capacity, int extraSentinelSlots, Iterable<? extends V> initialValues) {
+  Cache2(int capacity, int extraSentinelSlots) {
     this(
         capacity,
         extraSentinelSlots,
-        initialValues,
         allocateSharedGroup1And2Stores(
             group1SlotCount(capacity), group2SlotCount(capacity, extraSentinelSlots)));
   }
 
-  private Cache2(
-      int capacity,
-      int extraSentinelSlots,
-      Iterable<? extends V> initialValues,
-      SharedStores stores) {
-    this(
-        capacity,
-        extraSentinelSlots,
-        initialValues,
-        stores.store,
-        0,
-        stores.store,
-        stores.group2BaseOffset);
+  private Cache2(int capacity, int extraSentinelSlots, SharedStores stores) {
+    this(capacity, extraSentinelSlots, stores.store, 0, stores.store, stores.group2BaseOffset);
   }
 
   /**
-   * Initializing constructor: wires {@code initialValues} into the LRU list in order (first value
-   * at the head, last at the tail). Equivalent to calling a no-arg constructor followed by
-   * insertAtTail for each value, but faster because no CAS is needed during single-threaded
-   * initialization.
+   * Initializing constructor: links slots 1..capacity into the cold-queue chain at construction
+   * time. Equivalent to calling a no-arg constructor followed by insertAtTail for each slot, but
+   * faster because no CAS is needed during single-threaded initialization.
    *
    * <p>Accepts pre-built {@code (store, baseOffset)} pairs for Group 1/Group 2 rather than
    * allocating its own, so a caller (e.g. {@code BlockCache.distribute()}) can pass in a slice of
@@ -576,7 +545,6 @@ class Cache2<V extends Cache2.Val> {
    * @param capacity number of real slots
    * @param extraSentinelSlots additional sentinel slots beyond COLD_HEAD/COLD_TAIL (e.g. 2 for
    *     {@link DualQueueCache}'s HOT_HEAD/HOT_TAIL)
-   * @param initialValues Val objects in desired initial LRU order (head→tail)
    * @param group1Store this instance's Group 1 store (exclusively owned, or shared)
    * @param group1BaseOffset this instance's base offset into {@code group1Store}
    * @param group2Store this instance's Group 2 store (exclusively owned, or shared)
@@ -585,17 +553,15 @@ class Cache2<V extends Cache2.Val> {
   Cache2(
       int capacity,
       int extraSentinelSlots,
-      Iterable<? extends V> initialValues,
       OffHeapStore group1Store,
       long group1BaseOffset,
       OffHeapStore group2Store,
       long group2BaseOffset) {
     this.capacity = capacity;
-    // Real slots start at refCount=0/generation=0 (the zero-initialized default), matching the
-    // implicit-zero `new Val(i--, 0)` call this construction replaces. Sized for real slots
-    // 1..capacity only (slot 0 reserved/unused but still addressable) -- sentinel slots never have
-    // refCount/generation read by any live code path, so no sentinel coverage is needed here,
-    // unlike group2 below.
+    // Real slots start at refCount=0/generation=0 (the zero-initialized default). Sized for real
+    // slots 1..capacity only (slot 0 reserved/unused but still addressable) -- sentinel slots
+    // never have refCount/generation read by any live code path, so no sentinel coverage is
+    // needed here, unlike group2 below.
     this.group1 = group1Store;
     this.group1BaseOffset = group1BaseOffset;
     // Sentinels are spaced 2 apart (not 1) in group2's index space, each leaving its odd-offset
@@ -613,7 +579,7 @@ class Cache2<V extends Cache2.Val> {
     this.COLD_HEAD = sentinelBase;
     this.COLD_TAIL = sentinelBase + 2;
     int arrayLen = COLD_TAIL + 1 + 2 * extraSentinelSlots;
-    this.payload = new Val[arrayLen];
+    this.totalSlots = arrayLen;
     assert arrayLen == group2SlotCount(capacity, extraSentinelSlots);
     // Must align to GROUP2_CACHE_LINE (64), not GROUP2_STRIDE (32): the cache-line-isolation
     // guarantee group2 exists for (and that the sentinel spacing above depends on) requires every
@@ -627,30 +593,13 @@ class Cache2<V extends Cache2.Val> {
     this.group2BaseOffset = group2BaseOffset;
     assert COLD_TAIL < arrayLen;
 
-    // Placeholder sentinel Val objects for the cold queue sentinels -- next/prev live in group2,
-    // indexed by COLD_HEAD/COLD_TAIL directly; these objects are never read. DualQueueCache
-    // initializes HOT_HEAD / HOT_TAIL sentinel Vals in its own constructor.
-    this.payload[COLD_HEAD] = new Val();
-    this.payload[COLD_TAIL] = new Val();
-
-    // Pass 1: populate payload[] sequentially, slot = 1..capacity. This ordering is load-bearing
-    // and must NOT change -- BlockCache.distribute()'s reverse-order Val construction and
-    // buildExtantMap()'s warm-start slot-number reconstruction formula both depend on it.
-    int slot = 1;
-    for (V v : initialValues) {
-      if (slot > capacity) throw new IllegalArgumentException("too many initial values");
-      payload[slot] = v;
-      slot++;
-    }
-
-    // Pass 2: link slots 1..capacity into the cold-queue chain (COLD_HEAD <-> ... <-> COLD_TAIL)
-    // in a randomized stride order rather than sequential slot order. Chain position determines
+    // Link slots 1..capacity into the cold-queue chain (COLD_HEAD <-> ... <-> COLD_TAIL) in a
+    // randomized stride order rather than sequential slot order. Chain position determines
     // acquisition order (acquireTail() always takes from the COLD_TAIL end), so sequential linking
     // would mean a burst of initial/warm-up acquisitions drains physically-adjacent slots in
     // immediate succession -- the same kind of temporal/physical adjacency correlation that
     // motivated group1's/group2's cache-line-aware layouts in the first place, except here it's an
-    // artifact of link order rather than slot-number assignment. Does NOT affect
-    // payload[]/cacheBlockOrd/buildExtantMap, all governed solely by pass 1 above.
+    // artifact of link order rather than slot-number assignment.
     int stride = choosePermutationStride(capacity);
     int prevIdx = COLD_HEAD;
     // random starting slot, from 1 (index 0 is unused)
@@ -976,13 +925,8 @@ class Cache2<V extends Cache2.Val> {
   }
 
   // ---------------------------------------------------------------------------
-  // Payload access / reset hook
+  // Reset hook
   // ---------------------------------------------------------------------------
-
-  @SuppressWarnings("unchecked")
-  final V getPayload(long handle) {
-    return (V) payload[(int) handle & SLOT_MASK];
-  }
 
   /** True if the slot identified by {@code handle} was most recently routed to the hot queue. */
   final boolean fromHot(long handle) {
@@ -1240,7 +1184,7 @@ class Cache2<V extends Cache2.Val> {
    * appears live and pinnable (refCount &ge; 0, not evicted, generation matches). No CAS is
    * performed; may race with concurrent eviction. Suitable for best-effort preload skip checks.
    */
-  Val pinnable(long handle) {
+  boolean pinnable(long handle) {
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
     int expectedGen = (int) (handle >>> 32);
@@ -1248,9 +1192,9 @@ class Cache2<V extends Cache2.Val> {
     switch ((int) rcAndGen) {
       case UNPIN_SENTINEL:
       case -1:
-        return null;
+        return false;
       default:
-        return (int) (rcAndGen >>> 32) == expectedGen ? payload[slot] : null;
+        return (int) (rcAndGen >>> 32) == expectedGen;
     }
   }
 
@@ -1298,9 +1242,9 @@ class Cache2<V extends Cache2.Val> {
   // ---------------------------------------------------------------------------
 
   /**
-   * Acquires a pinned slot whose payload is ready to be used. Evicts the least-recently-used
-   * evictable slot from the tail of the list, resets its payload via {@link Val#reset(int)}, and
-   * returns it pinned (refCount=1) and not yet in the list.
+   * Acquires a pinned slot whose per-slot state is ready to be reused. Evicts the
+   * least-recently-used evictable slot from the tail of the list, resets it via {@link
+   * #reset(int)}, and returns it pinned (refCount=1) and not yet in the list.
    *
    * <p>Returns {@link #NULL_SLOT} if the list is empty (all slots are pinned).
    */
@@ -1318,10 +1262,9 @@ class Cache2<V extends Cache2.Val> {
   }
 
   /**
-   * Hook for subclasses to reset per-slot state they maintain outside {@link Val} (e.g. in {@link
-   * #group2}, whose contents base {@code Cache2} has no need to know). Called from {@link
-   * #acquireNode(long[])} and {@link #close(long)} on every slot recycle, alongside {@link
-   * Val#reset()}. No-op by default.
+   * Hook for subclasses to reset per-slot state they maintain (e.g. in {@link #group2}, whose
+   * contents base {@code Cache2} has no need to know). Called from {@link #acquireNode(long[])} and
+   * {@link #close(long)} on every slot recycle. No-op by default.
    */
   protected void reset(int slot) {
     // no-op default impl; see DualQueueCache's override.
@@ -1329,27 +1272,24 @@ class Cache2<V extends Cache2.Val> {
 
   /**
    * Evicts the LRU slot, resets it, and returns it pinned (refCount=1). Writes the opaque handle
-   * (generation&lt;&lt;32|slot) into {@code outHandle[0]}. Returns {@code null} (and leaves {@code
+   * (generation&lt;&lt;32|slot) into {@code outHandle[0]}. Returns {@code false} (and leaves {@code
    * outHandle} unmodified) if all slots are pinned.
    */
-  @SuppressWarnings("unchecked")
-  V acquireNode(long[] outHandle) {
+  boolean acquireNode(long[] outHandle) {
     int slot = acquireTail();
     if (slot == NULL_SLOT) {
-      return null;
+      return false;
     }
     removeFromList(slot);
     // NOTE: generation increment here is safe because we hold an effective lock
     // on this slot here and this is the only place generation is modified.
     int newGen = incrementAndGetGeneration(slot);
     reset(slot);
-    Val p = payload[slot];
-    p.reset();
     if (!compareAndSetRefCount(slot, -1, 1)) {
       throw new IllegalStateException();
     }
     outHandle[0] = (long) newGen << 32 | slot;
-    return (V) p;
+    return true;
   }
 
   /**
@@ -1380,7 +1320,6 @@ class Cache2<V extends Cache2.Val> {
       // from actual queue membership regardless of whatever was left over -- same reasoning as
       // closeUnconditional(), which never touches fromHot at all.)
       reset(slot);
-      payload[slot].reset();
       incrementAndGetGeneration(slot);
       insertAtTail(slot);
       // refCount -> 0 makes reclaimable
@@ -1429,7 +1368,7 @@ class Cache2<V extends Cache2.Val> {
     }
   }
 
-  static class DualQueueCache<V extends Val> extends Cache2<V> {
+  static class DualQueueCache extends Cache2 {
 
     /** Running memoization of last seen non-zero cold queue timestamp */
     private volatile long coldTs;
@@ -1445,8 +1384,8 @@ class Cache2<V extends Cache2.Val> {
      * private Group 1/Group 2 stores. This is the constructor every existing caller (including all
      * current tests) uses, and its behavior is unchanged from before shared-store support existed.
      */
-    DualQueueCache(int capacity, Iterable<? extends V> initialValues) {
-      super(capacity, 2, initialValues);
+    DualQueueCache(int capacity) {
+      super(capacity, 2);
       // Continue the spaced-by-2 sentinel scheme from COLD_TAIL (see base constructor) so
       // HOT_HEAD/HOT_TAIL each also get an exclusive cache line. Assigned directly here (and
       // identically in the other constructor below) rather than via a shared private helper
@@ -1455,7 +1394,7 @@ class Cache2<V extends Cache2.Val> {
       // constructor this(...) chains to), not in an arbitrary instance method called from it.
       this.HOT_HEAD = COLD_TAIL + 2;
       this.HOT_TAIL = COLD_TAIL + 4;
-      initHotSentinelPayload();
+      initHotSentinels();
     }
 
     /**
@@ -1467,17 +1406,15 @@ class Cache2<V extends Cache2.Val> {
      */
     DualQueueCache(
         int capacity,
-        Iterable<? extends V> initialValues,
         OffHeapStore group1Store,
         long group1BaseOffset,
         OffHeapStore group2Store,
         long group2BaseOffset) {
-      super(
-          capacity, 2, initialValues, group1Store, group1BaseOffset, group2Store, group2BaseOffset);
+      super(capacity, 2, group1Store, group1BaseOffset, group2Store, group2BaseOffset);
       // See the other constructor's comment on why this is duplicated rather than shared.
       this.HOT_HEAD = COLD_TAIL + 2;
       this.HOT_TAIL = COLD_TAIL + 4;
-      initHotSentinelPayload();
+      initHotSentinels();
     }
 
     /**
@@ -1485,11 +1422,9 @@ class Cache2<V extends Cache2.Val> {
      * assigned (which, being blank finals, cannot happen inside this method -- see the
      * constructors' own comments).
      */
-    private void initHotSentinelPayload() {
-      assert HOT_TAIL < payload.length;
-      // Placeholder sentinel Val objects for the hot queue -- next/prev live in group2.
-      payload[HOT_HEAD] = new Val();
-      payload[HOT_TAIL] = new Val();
+    private void initHotSentinels() {
+      assert HOT_TAIL < totalSlots;
+      // next/prev for the hot queue sentinels live in group2.
       setNextPlain(HOT_HEAD, HOT_TAIL);
       setPrevPlain(HOT_TAIL, HOT_HEAD);
     }

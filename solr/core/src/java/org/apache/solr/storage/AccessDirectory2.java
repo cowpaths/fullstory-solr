@@ -982,8 +982,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
     }
 
     @Override
-    protected void onCacheHit(int blockIdx, BlockCache.Val val, int seqAccessCount) {
-      super.onCacheHit(blockIdx, val, seqAccessCount);
+    protected void onCacheHit(int blockIdx, int seqAccessCount) {
+      super.onCacheHit(blockIdx, seqAccessCount);
       if (HINT_ON_CACHE_HIT && rootKind == RootKind.SUB_SLICE && seqAccessCount > 0) {
         // Start past current block — it's a hit, so its compressed data isn't needed.
         expandCompressedReadahead(blockIdx, blockIdx + 1, seqAccessCount);
@@ -1174,8 +1174,8 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         return LoadResult.ALREADY_PRESENT;
       }
       long[] nodeHandle = new long[1];
-      BlockCache.Val toPopulateVal = cache.acquireNode(nodeHandle);
-      if (toPopulateVal == null) return LoadResult.POOL_EXHAUSTED;
+      final int cacheBlockOrd = cache.acquireNode(nodeHandle);
+      if (cacheBlockOrd < 0) return LoadResult.POOL_EXHAUSTED;
       long toPopulate = nodeHandle[0];
       LoadResult result;
       if (accessMapped.compareAndSet(idx, extant, toPopulate)) {
@@ -1188,7 +1188,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
             idx,
             in.decompressedLenFor(idx),
             toPopulate,
-            toPopulateVal,
+            cacheBlockOrd,
             accessMapped,
             cache,
             in.blockSupplier,
@@ -1196,7 +1196,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
         result = LoadResult.MISS;
         cache.unpin(toPopulate, false);
       } else {
-        cache.close(toPopulate, toPopulateVal);
+        cache.close(toPopulate, cacheBlockOrd);
         // Another thread already raced us to populate this slot; from this caller's perspective
         // the block is present either way (we don't know/care which of the two outcomes the
         // winning thread hit).
@@ -1267,7 +1267,7 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
   /**
    * An {@link IndexOutput} that forwards all writes to a delegate (the {@link CompressingDirectory}
    * output) while simultaneously capturing each {@link
-   * CompressingDirectory#COMPRESSION_BLOCK_SIZE}-byte chunk into a {@link BlockCache.Val}. When
+   * CompressingDirectory#COMPRESSION_BLOCK_SIZE}-byte chunk into the {@link BlockCache}. When
    * closed, the collected nodes are handed to {@link AccessDirectory2#storeNodes} so that the first
    * {@link #openInput} call on this file finds a warm cache.
    *
@@ -1345,11 +1345,12 @@ public class AccessDirectory2 extends MMapDirectory implements BlockCacheBatchSc
 
     private void captureBlock(int len) {
       long[] nodeHandle = new long[1];
-      BlockCache.Val nodeVal = dir.cache.acquireNode(nodeHandle);
+      final int cacheBlockOrd = dir.cache.acquireNode(nodeHandle);
       long node = nodeHandle[0];
-      if (nodeVal != null) {
+      if (cacheBlockOrd >= 0) {
         try {
-          nodeVal.populate(blockBuf, 0, len, dir.uuidForFile(name), nodeSlots.size(), dir.cache);
+          dir.cache.populate(
+              cacheBlockOrd, blockBuf, 0, len, dir.uuidForFile(name), nodeSlots.size());
         } finally {
           dir.cache.unpin(node, false);
         }

@@ -16,8 +16,6 @@
  */
 package org.apache.solr.storage;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -33,12 +31,8 @@ import org.apache.solr.SolrTestCaseJ4;
  */
 public class TestCache2Group2Accessors extends SolrTestCaseJ4 {
 
-  private static Cache2<Cache2.Val> newCache(int capacity) {
-    List<Cache2.Val> initialValues = new ArrayList<>(capacity);
-    for (int i = 0; i < capacity; i++) {
-      initialValues.add(new Cache2.Val());
-    }
-    return new Cache2<>(capacity, 0, initialValues);
+  private static Cache2 newCache(int capacity) {
+    return new Cache2(capacity, 0);
   }
 
   /**
@@ -49,8 +43,8 @@ public class TestCache2Group2Accessors extends SolrTestCaseJ4 {
    */
   public void testNoAliasing() {
     int capacity = 200;
-    Cache2<Cache2.Val> cache = newCache(capacity);
-    int length = cache.payload.length;
+    Cache2 cache = newCache(capacity);
+    int length = cache.totalSlots;
 
     for (int slot = 0; slot < length; slot++) {
       cache.setNextPlain(slot, slot * 4 + 1);
@@ -72,7 +66,7 @@ public class TestCache2Group2Accessors extends SolrTestCaseJ4 {
 
   /** CAS/compareAndExchange semantics on {@code next}: success, failure, and witness value. */
   public void testNextCasSemantics() {
-    Cache2<Cache2.Val> cache = newCache(10);
+    Cache2 cache = newCache(10);
     int slot = 5;
 
     assertTrue(cache.compareAndSetNext(slot, cache.getNextVolatile(slot), 42));
@@ -96,7 +90,7 @@ public class TestCache2Group2Accessors extends SolrTestCaseJ4 {
    * single-threaded aliasing).
    */
   public void testConcurrentCasOnSameSlot() throws Exception {
-    Cache2<Cache2.Val> cache = newCache(10);
+    Cache2 cache = newCache(10);
     int slot = 5;
     int nThreads = 16;
     int itersPerThread = 5000;

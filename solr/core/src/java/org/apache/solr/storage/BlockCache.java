@@ -55,6 +55,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -1068,160 +1069,129 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   private static final ByteBuffer POPULATED_SENTINEL =
       ByteBuffer.allocateDirect(0).asReadOnlyBuffer();
 
+  private static final long JOIN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(30);
+
   /**
-   * A cache entry: wraps a decompressed block buffer and carries a reference count for safe
-   * concurrent eviction.
-   *
-   * <p>Lifecycle:
+   * Lifecycle of a cache entry, identified by {@code cacheBlockOrd} (the flat global block index
+   * into {@link #pool}/{@link #cached}/{@link #mapping}):
    *
    * <ol>
-   *   <li>Returned by {@link BlockCache#acquireNode(long[])} pinned (refCount=1), <em>not</em> in
-   *       the LRU list.
-   *   <li>Caller populates the buffer and publishes the node (e.g. via an {@link
-   *       java.util.concurrent.atomic.AtomicLongArray} slot). The node is still pinned.
-   *   <li>Subsequent callers call {@link BlockCache#pin(long)}, which either re-pins (refCount&gt;0
-   *       → increment only) or first-pins (refCount=0 → remove from list + increment).
-   *   <li>Each caller eventually calls {@link BlockCache#unpin(long)}. The last unpin (refCount→0)
-   *       inserts the node at the LRU head (most-recently-used, lowest eviction priority).
-   *   <li>When evicted by {@link BlockCache#acquireNode(long[])}, refCount is set to -1
-   *       permanently. Any reader that encounters the node via a stale slot sees the negative
-   *       count, fails {@link BlockCache#pin(long)}, and falls back to loading.
+   *   <li>Returned (as a pinned handle) by {@link #acquireNode(long[])}, refCount=1, <em>not</em>
+   *       in the LRU list.
+   *   <li>Caller populates the buffer (via {@link #populate}) and publishes the handle (e.g. via an
+   *       {@link java.util.concurrent.atomic.AtomicLongArray} slot). The node is still pinned.
+   *   <li>Subsequent callers call {@link #pin(long)}, which either re-pins (refCount&gt;0 →
+   *       increment only) or first-pins (refCount=0 → remove from list + increment).
+   *   <li>Each caller eventually calls {@link #unpin(long)}. The last unpin (refCount→0) inserts
+   *       the node at the LRU head (most-recently-used, lowest eviction priority).
+   *   <li>When evicted by {@link #acquireNode(long[])}, refCount is set to -1 permanently. Any
+   *       reader that encounters the node via a stale slot sees the negative count, fails {@link
+   *       #pin(long)}, and falls back to loading.
    * </ol>
    */
-  public static final class Val extends Cache2.Val {
+  boolean isPopulated(int cacheBlockOrd) {
+    return CACHED.getVolatile(cached, cacheBlockOrd) instanceof ByteBuffer;
+  }
 
-    private static final VarHandle CACHED;
-
-    static {
-      try {
-        CACHED = MethodHandles.lookup().findVarHandle(Val.class, "cached", ByteBuffer.class);
-      } catch (ReflectiveOperationException e) {
-        throw new Error(e);
-      }
+  ByteBuffer populate(
+      int cacheBlockOrd, byte[] arr, int off, int len, UUID blobUUID, int blockIdx) {
+    assert cacheBlockOrd >= 0;
+    ByteBuffer ret = slice(cacheBlockOrd);
+    StampedLock l = closeLock;
+    long stamp = l.tryReadLock();
+    if (stamp == 0) {
+      throw new AlreadyClosedException("blockcache shutting down");
     }
-
-    private final int cacheBlockOrd;
-
-    // Holds BlockCache.Val.populate()/join()'s cached decompressed buffer, and doubles as the
-    // populated/failed signal (null == not yet populated; POPULATED_SENTINEL/a real buffer/
-    // EXCEPTION_SENTINEL == populated, in their respective senses -- see join()). Coprime initial
-    // slot distribution (see Cache2's own javadoc) makes false sharing between this field and a
-    // physically-adjacent, logically-unrelated slot's Val implausible, so this lives directly on
-    // Val rather than in a side array indexed by cacheBlockOrd.
-    private volatile ByteBuffer cached;
-
-    Val(int cacheBlockOrd) {
-      this.cacheBlockOrd = cacheBlockOrd;
-    }
-
-    @Override
-    void reset() {
-      // fromHot is intentionally NOT reset: acquireTail() sets it before resetPayload() is called,
-      // and BlockCache.acquireNode() reads it immediately after to update hotAcquisitions.
-      cached = null;
-      super.reset();
-    }
-
-    boolean isPopulated() {
-      return cached != null;
-    }
-
-    ByteBuffer populate(byte[] arr, int off, int len, UUID blobUUID, int blockIdx, BlockCache c) {
-      assert cacheBlockOrd >= 0;
-      ByteBuffer ret = c.slice(cacheBlockOrd);
-      StampedLock l = c.closeLock;
-      long stamp = l.tryReadLock();
-      if (stamp == 0) {
-        throw new AlreadyClosedException("blockcache shutting down");
+    try {
+      ByteBuffer meta = metaBuf;
+      int metaBase = meta == null ? -1 : cacheBlockOrd * META_BYTES_PER_BLOCK;
+      if (metaBase >= 0) {
+        // Sentinel blockIdx=-1 written before msb for strict safety: even under adversarial
+        // write reordering, no entry can be committed with a garbage blockIdx.
+        // Any crash before the commit writes (msb + lsb + real blockIdx) leaves this slot with
+        // blockIdx=-1; buildExtantMap skips it.
+        meta.putInt(metaBase + 16, -1);
       }
-      try {
-        ByteBuffer meta = c.metaBuf;
-        int metaBase = meta == null ? -1 : cacheBlockOrd * META_BYTES_PER_BLOCK;
-        if (metaBase >= 0) {
-          // Sentinel blockIdx=-1 written before msb for strict safety: even under adversarial
-          // write reordering, no entry can be committed with a garbage blockIdx.
-          // Any crash before the commit writes (msb + lsb + real blockIdx) leaves this slot with
-          // blockIdx=-1; buildExtantMap skips it.
-          meta.putInt(metaBase + 16, -1);
-        }
-        // NOTE: for consistency between `populate()` and on-demand restore
-        // in `join()`, we call `clear()` here, _not_ `flip()`.
-        // It is the responsibility of the buffer lease recipient to duplicate
-        // and set proper limit and byte order.
-        ret = ret.put(arr, off, len).clear().asReadOnlyBuffer();
-        if (metaBase >= 0) {
-          meta.putLong(metaBase, blobUUID.getMostSignificantBits());
-          meta.putLong(metaBase + 8, blobUUID.getLeastSignificantBits());
-          // Commit: blockIdx != -1 acts as the "entry is valid" signal.
-          meta.putInt(metaBase + 16, blockIdx);
-        }
-      } finally {
-        l.unlock(stamp);
+      // NOTE: for consistency between `populate()` and on-demand restore
+      // in `join()`, we call `clear()` here, _not_ `flip()`.
+      // It is the responsibility of the buffer lease recipient to duplicate
+      // and set proper limit and byte order.
+      ret = ret.put(arr, off, len).clear().asReadOnlyBuffer();
+      if (metaBase >= 0) {
+        meta.putLong(metaBase, blobUUID.getMostSignificantBits());
+        meta.putLong(metaBase + 8, blobUUID.getLeastSignificantBits());
+        // Commit: blockIdx != -1 acts as the "entry is valid" signal.
+        meta.putInt(metaBase + 16, blockIdx);
       }
-      Object extant;
-      synchronized (this) {
-        extant = CACHED.getAndSet(this, ret);
-        notifyAll();
-      }
+    } finally {
+      l.unlock(stamp);
+    }
+    Object extant = CACHED.getAndSet(cached, cacheBlockOrd, ret);
+    if (extant != null) {
+      ((CountDownLatch) extant).countDown();
+    }
+    return ret;
+  }
+
+  /**
+   * Waits for {@code cacheBlockOrd}'s buffer to be populated, blocking if necessary.
+   *
+   * @throws CompletionException if population failed
+   */
+  @SuppressWarnings("ReferenceEquality")
+  ByteBuffer join(int cacheBlockOrd, long[] waitNanos) {
+    ByteBuffer ret;
+    Object extant = CACHED.getVolatile(cached, cacheBlockOrd);
+    block:
+    if (!(extant instanceof ByteBuffer)) {
+      CountDownLatch cdl;
       if (extant != null) {
-        throw new IllegalStateException("clobbered unexpected value in `cached`");
-      }
-      return ret;
-    }
-
-    private static final long JOIN_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(30);
-
-    /**
-     * Waits for this node's buffer to be populated, blocking if necessary.
-     *
-     * @throws CompletionException if population failed
-     */
-    @SuppressWarnings("ReferenceEquality")
-    public ByteBuffer join(BlockCache c, long[] waitNanos) {
-      ByteBuffer ret = cached;
-      if (ret == null) {
-        long startNanos = System.nanoTime();
-        try {
-          synchronized (this) {
-            for (long remainingMillis = JOIN_TIMEOUT_MILLIS;
-                (ret = cached) == null && remainingMillis > 0;
-                remainingMillis =
-                    JOIN_TIMEOUT_MILLIS - ((System.nanoTime() - startNanos) / 1_000_000)) {
-              wait(remainingMillis);
-            }
-          }
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          throw new ThreadInterruptedException(e);
+        cdl = (CountDownLatch) extant;
+      } else {
+        CountDownLatch ours = new CountDownLatch(1);
+        extant = CACHED.compareAndExchange(cached, cacheBlockOrd, null, ours);
+        if (extant == null) {
+          cdl = ours;
+        } else if (extant instanceof CountDownLatch) {
+          cdl = (CountDownLatch) extant;
+        } else {
+          ret = (ByteBuffer) extant;
+          break block;
         }
-        if (ret == null) {
+      }
+      long startNanos = System.nanoTime();
+      try {
+        if (!cdl.await(JOIN_TIMEOUT_NANOS, TimeUnit.NANOSECONDS)) {
           throw new IllegalStateException(
-              "join() timed out: Val was never populated (possible populate() caller crash)");
+              "join() timed out: cacheBlockOrd was never populated (possible populate() caller"
+                  + " crash)");
         }
-        if (waitNanos != null) {
-          waitNanos[0] = System.nanoTime() - startNanos;
-        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new ThreadInterruptedException(e);
       }
-      if (ret == POPULATED_SENTINEL) {
-        ret = c.sliceRO(cacheBlockOrd);
-        cached = ret;
-      } else if (ret == EXCEPTION_SENTINEL) {
-        throw new CompletionException("other thread exception in buffer population", null);
+      ret = (ByteBuffer) CACHED.getVolatile(cached, cacheBlockOrd);
+      if (waitNanos != null) {
+        waitNanos[0] = System.nanoTime() - startNanos;
       }
-      return ret;
+    } else {
+      ret = (ByteBuffer) extant;
     }
+    if (ret == POPULATED_SENTINEL) {
+      ret = sliceRO(cacheBlockOrd);
+      CACHED.setVolatile(cached, cacheBlockOrd, ret);
+    } else if (ret == EXCEPTION_SENTINEL) {
+      throw new CompletionException("other thread exception in buffer population", null);
+    }
+    return ret;
+  }
 
-    /** Marks this node as failed, unblocking any threads waiting in {@link #join}. */
-    public void completeExceptionally(BlockCache c, Throwable t) {
-      assert cacheBlockOrd >= 0;
-      Object extant;
-      synchronized (this) {
-        extant = CACHED.getAndSet(this, EXCEPTION_SENTINEL);
-        notifyAll();
-      }
-      if (extant != null) {
-        throw new IllegalStateException("clobbered unexpected value in `cached`");
-      }
+  /** Marks {@code cacheBlockOrd} as failed, unblocking any threads waiting in {@link #join}. */
+  void completeExceptionally(int cacheBlockOrd, Throwable t) {
+    assert cacheBlockOrd >= 0;
+    Object extant = CACHED.getAndSet(cached, cacheBlockOrd, EXCEPTION_SENTINEL);
+    if (extant != null) {
+      ((CountDownLatch) extant).countDown();
     }
   }
 
@@ -1229,7 +1199,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // Partition
   // ---------------------------------------------------------------------------
 
-  private static final class Partition extends Cache2.DualQueueCache<Val> {
+  private static final class Partition extends Cache2.DualQueueCache {
     // These counters are striped across partitions purely to reduce contention — they are NOT
     // per-partition metrics. Only the global sum across all partitions is meaningful. Individual
     // partitions may go negative (e.g. when pinSwap applies both a pin delta and an unpin delta
@@ -1240,14 +1210,26 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     private final LongAdder unpinnedToHot = new LongAdder();
     private final LongAdder unpinnedToCold = new LongAdder();
 
+    /**
+     * Exclusive upper bound of the global {@code cacheBlockOrd} range this partition owns --
+     * matches {@code curPartEnd} in {@link #buildExtantMap}. Local slot {@code s} (1-indexed, per
+     * {@code handle & SLOT_MASK}) maps to {@code cacheBlockOrd = to - s}.
+     */
+    private final int to;
+
     Partition(
         int capacity,
-        Iterable<BlockCache.Val> pool,
+        int to,
         OffHeapStore group1Store,
         long group1BaseOffset,
         OffHeapStore group2Store,
         long group2BaseOffset) {
-      super(capacity, pool, group1Store, group1BaseOffset, group2Store, group2BaseOffset);
+      super(capacity, group1Store, group1BaseOffset, group2Store, group2BaseOffset);
+      this.to = to;
+    }
+
+    private int cacheBlockOrdOf(long handle) {
+      return to - ((int) handle & Cache2.SLOT_MASK);
     }
   }
 
@@ -1257,6 +1239,19 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private final ByteBuffer[] pool;
   private final ByteBuffer[] poolRO;
+
+  /**
+   * Holds {@link #populate}/{@link #join}'s cached decompressed buffer, indexed directly by {@code
+   * cacheBlockOrd} (the same flat global block index already used for {@link #pool}/{@link
+   * #mapping}).
+   *
+   * <p>Access via the {@link #CACHED} VarHandle for volatile semantics, matching the
+   * array-of-primitives pattern used elsewhere in this class (cf. {@code accessMapped}). Cleared on
+   * slot reuse by {@link #acquireNode(long[])}.
+   */
+  private final Object[] cached;
+
+  private static final VarHandle CACHED = MethodHandles.arrayElementVarHandle(Object[].class);
 
   private final int nPartitions;
   private final Partition[] partitions;
@@ -1337,6 +1332,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.pool = m.dataPool();
     this.poolRO =
         Arrays.stream(this.pool).map(ByteBuffer::asReadOnlyBuffer).toArray(ByteBuffer[]::new);
+    this.cached = new Object[nBlocks];
     this.metaBuf = null;
     this.alwaysPrepareWrite = false;
     this.extantMap = null;
@@ -1384,6 +1380,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.pool = m.dataPool();
     this.poolRO =
         Arrays.stream(this.pool).map(ByteBuffer::asReadOnlyBuffer).toArray(ByteBuffer[]::new);
+    this.cached = new Object[nBlocks];
     this.metaBuf = mb;
     int trailerOffset = nBlocks * META_BYTES_PER_BLOCK;
     long storedId = mb.getLong(trailerOffset);
@@ -1457,7 +1454,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       int blockIdx = metaBuf.getInt(base + 16);
       if (blockIdx == -1) continue; // in-progress write (populate() did not commit)
 
-      // 1-indexed; matches reverse-order Val insertion in distribute()
+      // 1-indexed; matches Partition.cacheBlockOrdOf's (to - slot) formula in distribute()
       int localSlot = curPartEnd - i;
 
       int handleLow32 = (curPart << PART_SHIFT) | localSlot;
@@ -1592,29 +1589,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     int offset = 0;
     for (int i = 0; i < nPartitions; i++) {
       int count = capacities[i];
-      int from = offset;
       int to = offset + count;
-      Iterable<Val> poolList =
-          () ->
-              new Iterator<Val>() {
-                int i = to - 1;
-
-                @Override
-                public boolean hasNext() {
-                  return i >= from;
-                }
-
-                @Override
-                public Val next() {
-                  return new Val(i--);
-                }
-              };
       long group1BaseOffset = Cache2.group1SlotToOffset(group1SlotOffsets[i]);
       long group2BaseOffset =
           shared.group2BaseOffset + Cache2.group2SlotToOffset(group2SlotOffsets[i]);
       parts[i] =
-          new Partition(
-              count, poolList, sharedStore, group1BaseOffset, sharedStore, group2BaseOffset);
+          new Partition(count, to, sharedStore, group1BaseOffset, sharedStore, group2BaseOffset);
       offset += count;
     }
     return parts;
@@ -1636,20 +1616,22 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   /**
    * Pins the slot identified by {@code handle}. Routes to the owning partition decoded from the
-   * handle. Returns {@code null} if the slot is permanently dead, otherwise the pinned {@link Val}.
+   * handle. Returns {@code -1} if the slot is permanently dead, otherwise the pinned slot's {@code
+   * cacheBlockOrd} (always &ge;0). Note: unrelated to {@link Cache2#pin}'s own {@code int} return,
+   * which encodes first-pin/re-pin/dead state rather than an ordinal.
    */
-  Val pin(long handle) {
+  int pin(long handle) {
     Partition p = partitions[partOf(handle)];
     switch (p.pin(handle)) {
       case -1:
-        return null;
+        return -1;
       case 0:
         p.repinHits.increment();
-        return p.getPayload(handle);
+        return p.cacheBlockOrdOf(handle);
       default:
-        Val v = p.getPayload(handle);
+        final int cacheBlockOrd = p.cacheBlockOrdOf(handle);
         (p.fromHot(handle) ? p.pinnedFromHot : p.pinnedFromCold).increment();
-        return v;
+        return cacheBlockOrd;
     }
   }
 
@@ -1657,7 +1639,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * Non-mutating optimistic check: returns {@code true} if the handle appears live and pinnable.
    */
   boolean pinnable(long handle) {
-    return partitions[partOf(handle)].pinnable(handle) != null;
+    return partitions[partOf(handle)].pinnable(handle);
   }
 
   /** Releases a pin on the slot identified by {@code handle}. */
@@ -1679,91 +1661,101 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         return;
     }
     // on last unpin, clear the cached ByteBuffer. recreating is cheap.
-    Val v = p.getPayload(handle);
-    ByteBuffer cur = v.cached;
-    if (cur != null && cur != EXCEPTION_SENTINEL) {
+    final int cacheBlockOrd = p.cacheBlockOrdOf(handle);
+    Object cur = CACHED.getVolatile(cached, cacheBlockOrd);
+    if (cur instanceof ByteBuffer && cur != EXCEPTION_SENTINEL) {
       // CAS ensures we never clobber EXCEPTION_SENTINEL; if it loses, cached is already
       // null or sentinel, both fine. Worst case of a benign loss: another slice() call.
-      Val.CACHED.compareAndSet(v, cur, POPULATED_SENTINEL);
+      CACHED.compareAndSet(cached, cacheBlockOrd, cur, POPULATED_SENTINEL);
     }
   }
 
   /**
-   * Acquires a pinned slot from a randomly chosen partition. Returns {@code null} if the partition
-   * is exhausted (outHandle[0] remains {@link #NULL_HANDLE}); otherwise returns the {@link Val} and
-   * sets outHandle[0] to the encoded handle.
+   * Acquires a pinned slot from a randomly chosen partition. Returns {@code -1} if the partition is
+   * exhausted (outHandle[0] remains {@link #NULL_HANDLE}); otherwise returns the pinned slot's
+   * {@code cacheBlockOrd} and sets outHandle[0] to the encoded handle.
    */
-  Val acquireNode(long[] outHandle) {
+  int acquireNode(long[] outHandle) {
     int i = tlrIndex();
     Partition p = partitions[i];
-    Val v = p.acquireNode(outHandle);
-    if (v != null) {
-      // cached is already cleared by Val.reset() (run by p.acquireNode() above).
-      acquisitions.increment();
-      // Acquiring a new slot pins it (pinnedFromHot/pinnedFromCold below), but this is not
-      // a cache hit. Since writeMetrics computes hits = repinHits + pinnedFromHot + pinnedFromCold,
-      // we offset the upcoming pinnedFrom* increment so it doesn't inflate the hit count.
-      p.repinHits.decrement();
-      if (p.fromHot(outHandle[0])) {
-        hotAcquisitions.increment();
-        p.pinnedFromHot.increment();
-        if (extantMap != null) {
-          // First-ever hot acquisition: every slot in THIS partition has now been allocated at
-          // least once since extantMap was built (see the field javadoc for why this signal is
-          // precise), so this partition's share of extantMap has served its purpose. This triggers
-          // on the first partition to reach that point, not all of them -- other partitions may
-          // still have virgin slots with useful entries, but assuming roughly balanced load across
-          // partitions, the bulk of the benefit is already captured by the time any one finishes.
-          // The null guard just prevents redundant writes on every subsequent hot acquisition.
-          extantMap = null;
-        }
-      } else {
-        p.pinnedFromCold.increment();
-      }
-      if (alwaysPrepareWrite || (outHandle[0] >>> 32) > 1) {
-        int ret = mapping.prepareWrite(v.cacheBlockOrd);
-        if (ret != 0) {
-          long n = prepareWriteFailures.incrementAndGet();
-          if (n == 1 || n % 1000 == 0) {
-            log.warn("prepareWrite failure #{}: ret={} blockIdx={}", n, ret, v.cacheBlockOrd);
-          }
-        }
-      }
-      outHandle[0] = encodeHandle(i, outHandle[0]);
-      return v;
-    } else {
+    if (!p.acquireNode(outHandle)) {
       poolExhausted.increment();
-      return null;
+      return -1;
     }
+    // cacheBlockOrdOf only reads the slot bits of outHandle[0], so resolving it here (before
+    // encodeHandle ORs in the partition bits below) is equivalent to resolving it after.
+    final int cacheBlockOrd = p.cacheBlockOrdOf(outHandle[0]);
+    // A plain (non-volatile) write is fine: even though refCount is already CAS'd to 1 by this
+    // point (inside p.acquireNode() above), no other thread can have a handle that passes pin()'s
+    // generation check yet -- the bumped generation hasn't been shared with anyone outside this
+    // thread (it's only about to be written into outHandle, a method-local belonging to our
+    // caller). The slot stays effectively private to us until we (or our caller) publish it via a
+    // later volatile/atomic op (accessMapped.compareAndSet/Exchange, or populate()'s own volatile
+    // writes) -- any thread that performs the matching volatile read is guaranteed to see this
+    // plain write too.
+    cached[cacheBlockOrd] = null;
+    acquisitions.increment();
+    // Acquiring a new slot pins it (pinnedFromHot/pinnedFromCold below), but this is not
+    // a cache hit. Since writeMetrics computes hits = repinHits + pinnedFromHot + pinnedFromCold,
+    // we offset the upcoming pinnedFrom* increment so it doesn't inflate the hit count.
+    p.repinHits.decrement();
+    if (p.fromHot(outHandle[0])) {
+      hotAcquisitions.increment();
+      p.pinnedFromHot.increment();
+      if (extantMap != null) {
+        // First-ever hot acquisition: every slot in THIS partition has now been allocated at
+        // least once since extantMap was built (see the field javadoc for why this signal is
+        // precise), so this partition's share of extantMap has served its purpose. This triggers
+        // on the first partition to reach that point, not all of them -- other partitions may
+        // still have virgin slots with useful entries, but assuming roughly balanced load across
+        // partitions, the bulk of the benefit is already captured by the time any one finishes.
+        // The null guard just prevents redundant writes on every subsequent hot acquisition.
+        extantMap = null;
+      }
+    } else {
+      p.pinnedFromCold.increment();
+    }
+    if (alwaysPrepareWrite || (outHandle[0] >>> 32) > 1) {
+      int ret = mapping.prepareWrite(cacheBlockOrd);
+      if (ret != 0) {
+        long n = prepareWriteFailures.incrementAndGet();
+        if (n == 1 || n % 1000 == 0) {
+          log.warn("prepareWrite failure #{}: ret={} blockIdx={}", n, ret, cacheBlockOrd);
+        }
+      }
+    }
+    outHandle[0] = encodeHandle(i, outHandle[0]);
+    return cacheBlockOrd;
   }
 
   /**
    * Variant of {@link #acquireNode(long[])} that first checks the extant map for a pre-existing
-   * warm cache entry matching {@code (blobUUID, blockIdx)}. On a hit, the returned {@link Val}
-   * already contains valid decompressed data, so the caller can skip the fetch+decompress step.
+   * warm cache entry matching {@code (blobUUID, blockIdx)}. On a hit, the returned {@code
+   * cacheBlockOrd} already has valid decompressed data, so the caller can skip the fetch+decompress
+   * step.
    *
    * <p>Falls through to the normal eviction-based acquire if the extant map has no entry or the
    * backing file was not present at startup (ephemeral cache).
    */
-  Val acquireNode(long[] outHandle, UUID blobUUID, int blockIdx) {
+  int acquireNode(long[] outHandle, UUID blobUUID, int blockIdx) {
     int handleLow = extantMapLookup(extantMap, blobUUID, blockIdx);
     if (handleLow > 0) {
       // Attempt to pin the pre-existing slot at generation=0 (upper 32 bits zero). If the slot
       // was evicted and recycled since startup, its generation will have advanced past 0 and
-      // pin() returns null, in which case we fall through to the normal eviction-based acquire.
+      // pin() returns -1, in which case we fall through to the normal eviction-based acquire.
       // Generation wraps back to 0 after 2^32 evictions of the same slot (~4 billion), which
       // is not a realistic scenario within a single process lifetime.
-      long handle = Integer.toUnsignedLong(handleLow);
-      Val v = pin(handle);
-      if (v != null) {
+      final long handle = Integer.toUnsignedLong(handleLow);
+      final int cacheBlockOrd = pin(handle);
+      if (cacheBlockOrd >= 0) {
         // Signal to callers that the pool buffer already holds valid data from a previous run;
         // they can skip populate(). Set before publishing the handle, so any thread that obtains
-        // this Val sees populated=true immediately and join() fast-paths to the slice without
-        // ever entering the synchronized notify machinery (which exists only for the async cold
-        // path where one thread fetches while others wait).
-        v.cached = POPULATED_SENTINEL;
+        // this cacheBlockOrd sees it populated immediately and join() fast-paths to the slice
+        // without ever entering the latch machinery (which exists only for the async cold path
+        // where one thread fetches while others wait).
+        CACHED.setVolatile(cached, cacheBlockOrd, POPULATED_SENTINEL);
         outHandle[0] = handle;
-        return v;
+        return cacheBlockOrd;
       }
     }
     return acquireNode(outHandle);
@@ -1778,22 +1770,22 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * <p>Intended for callers that want to know whether a block is already resident purely to decide
    * whether a {@code MADV_WILLNEED} hint against its *compressed* source would be wasted -- not to
    * actually read the cached data themselves right now. Unlike a plain {@link #pinnable} check,
-   * this pins the slot just long enough to mark its {@code Val} populated (mirroring {@link
-   * #acquireNode(long[], UUID, int)}'s own {@code v.cached = POPULATED_SENTINEL}), then immediately
+   * this pins the slot just long enough to mark it populated (mirroring {@link #acquireNode(long[],
+   * UUID, int)}'s own {@code CACHED.setVolatile(..., POPULATED_SENTINEL)}), then immediately
    * unpins: callers typically stash the returned handle for a real reader to consume later (e.g.
-   * into {@code accessMapped}), and that reader's {@link Val#join} blocks on {@link
-   * Val#isPopulated()} being {@code true} -- never set for a slot that was only ever {@link
-   * #pinnable}-checked, never pinned. Skipping this step would leave it unpopulated, so a later
-   * real read would {@code pin()} successfully (generation still matches) but then hang in {@code
-   * join()} until its 30s timeout, since nothing would ever be in flight to populate and notify it.
+   * into {@code accessMapped}), and that reader's {@link #join} blocks on {@link #isPopulated}
+   * being {@code true} -- never set for a slot that was only ever {@link #pinnable}-checked, never
+   * pinned. Skipping this step would leave it unpopulated, so a later real read would {@code pin()}
+   * successfully (generation still matches) but then hang in {@code join()} until its 30s timeout,
+   * since nothing would ever be in flight to populate and notify it.
    */
   long peekExtantHandle(UUID blobUUID, int blockIdx) {
     int handleLow = extantMapLookup(extantMap, blobUUID, blockIdx);
     if (handleLow <= 0) return NULL_HANDLE;
     long handle = Integer.toUnsignedLong(handleLow); // generation=0, matches acquireNode's encoding
-    Val v = pin(handle);
-    if (v == null) return NULL_HANDLE;
-    v.cached = POPULATED_SENTINEL;
+    int cacheBlockOrd = pin(handle);
+    if (cacheBlockOrd < 0) return NULL_HANDLE;
+    CACHED.setVolatile(cached, cacheBlockOrd, POPULATED_SENTINEL);
     unpin(handle, false);
     return handle;
   }
@@ -1903,8 +1895,8 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     casRaceLoss.increment();
   }
 
-  void releaseHint(Val v) {
-    mapping.release(v.cacheBlockOrd);
+  void releaseHint(int cacheBlockOrd) {
+    mapping.release(cacheBlockOrd);
   }
 
   void recordWarmStartHit() {
@@ -1949,12 +1941,17 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * ultimately not needed (e.g. lost CAS race).
    */
   boolean close(long handle) {
-    return close(handle, null);
+    return close(handle, -1);
   }
 
-  boolean close(long handle, BlockCache.Val lostCAS) {
+  /**
+   * @param lostCASCacheBlockOrd {@code cacheBlockOrd} of a slot whose acquisition won the slot but
+   *     lost a subsequent CAS race to publish it (e.g. {@code accessMapped.compareAndSet}), or
+   *     {@code -1} for a plain close with no such race to account for.
+   */
+  boolean close(long handle, int lostCASCacheBlockOrd) {
     Partition p = partitions[partOf(handle)];
-    if (lostCAS == null) {
+    if (lostCASCacheBlockOrd < 0) {
       // Read fromHot() before the close. Only relevant for the non-unconditional path where the
       // slot is in the evictable list (refCount=0); unconditional slots are pinned and not in
       // any queue.
@@ -1974,7 +1971,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           closeSkippedPinned.increment();
           return false;
       }
-    } else if (lostCAS.cached != null) {
+    } else if (isPopulated(lostCASCacheBlockOrd)) {
       p.unpin(handle, false);
       closeSkippedPinned.increment();
       return false;
