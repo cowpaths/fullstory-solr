@@ -445,8 +445,18 @@ class Cache2 {
   // Slot 0 is reserved and never allocated; NULL_SLOT doubles as the null handle sentinel.
   static final int NULL_SLOT = 0;
 
-  /** Masks the local slot number (1..capacity) encoded in the low bits of a handle. */
-  static final int SLOT_MASK = (1 << 20) - 1;
+  /**
+   * Masks the local slot number (1..capacity) encoded in the low bits of a handle, and thereby caps
+   * a single {@code Cache2}/{@code Partition}'s capacity at {@code SLOT_MASK} slots. Derives from
+   * {@code BlockCache.PART_SHIFT} (slot bits must occupy exactly the low {@code PART_SHIFT} bits of
+   * {@code BlockCache}'s combined {@code (partitionIndex << PART_SHIFT) | localSlot} encoding for
+   * the two layers to compose correctly) -- {@code PART_SHIFT} is the independent variable (sized
+   * off available CPU count, see its own javadoc), so this value varies inversely with it: fewer
+   * partitions means more bits, and therefore more headroom, here. Guaranteed at least {@code (1 <<
+   * 24) - 1} (~16.7M slots, i.e. 4 TiB/partition at the default 256 KiB block size), since {@code
+   * PART_SHIFT} is clamped to at most 8 partition-index bits.
+   */
+  static final int SLOT_MASK = (1 << BlockCache.PART_SHIFT) - 1;
 
   /** Cold queue: head sentinel (most-recently-used end). Index = {@code capacity + 1}. */
   protected final int COLD_HEAD;
