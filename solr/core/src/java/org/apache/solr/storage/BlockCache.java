@@ -131,39 +131,41 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // ---------------------------------------------------------------------------
 
   /**
-   * Number of bits reserved for the partition index in the handle's low 32 bits (the remaining
-   * {@code PART_SHIFT} bits, below it, address the local slot -- see {@link Cache2#SLOT_MASK},
-   * which derives from this). Sized to the number of bits needed to address {@code
-   * solr.blockCache.nPartitions} partitions (default: {@link Runtime#availableProcessors()},
-   * rounded up to the next power of 2), clamped to {@code [1, 8]} -- i.e. 2 to 256 partitions'
-   * worth of index space (even a single-partition cache reserves 1 bit; a literal 0-bit reservation
-   * would require shifting a 32-bit value by 32, which Java defines as a no-op rather than zero --
-   * not worth the extra complexity to support, since even 1 reserved bit still leaves {@code
-   * Cache2#SLOT_MASK} at ~2^31, far beyond any real capacity need). Deliberately <b>not</b> clamped
-   * to a hardcoded bit count independent of CPU count: a small-core-count host has no use for 256
-   * partitions' worth of reserved index bits, and every bit not spent on the partition index is a
-   * bit of extra per-partition slot-addressing headroom instead -- see {@link #distribute}'s
-   * overflow check, which fails fast rather than silently aliasing slots if actual capacity ever
-   * exceeds it.
+   * Target partition count: {@code solr.blockCache.nPartitions} if set, else {@link
+   * Runtime#availableProcessors()}. Not persisted -- read fresh from the environment at class-init
+   * time on every process start, with no compatibility constraint across restarts (handle encoding
+   * is never written to the backing file; see {@link #PART_SHIFT}).
    *
-   * <p>Computed once, at class-init time, purely from runtime environment (CPU count) and an
-   * optional sysprop override -- not persisted anywhere, and free to differ from one process
-   * lifetime to the next (e.g. after a host resize) with no migration concern, since handles
-   * encoded with it are never written to the backing file; only {@code (blobUUID, blockIdx)} pairs
-   * are (see {@link #buildExtantMap}), and handles are always freshly re-derived from partition
-   * geometry computed at startup.
+   * <p>The sole input to both {@link #PART_SHIFT} (how many bits the handle encoding reserves for
+   * the partition index) and {@link #computeNPartitions} (how many partitions actually get
+   * created). Both must derive from this same value: {@code PART_SHIFT} fixes an upper bound on
+   * addressable partitions, so {@code computeNPartitions} has to respect that same bound rather
+   * than computing its own independently.
+   */
+  private static final int REQUESTED_PARTITIONS =
+      Math.max(
+          1,
+          EnvUtils.getPropertyAsInteger(
+              "solr.blockCache.nPartitions", Runtime.getRuntime().availableProcessors()));
+
+  /**
+   * Number of bits the handle encoding reserves for the partition index, occupying the high bits
+   * above {@code PART_SHIFT} (the low {@code PART_SHIFT} bits address the local slot -- see {@link
+   * Cache2#SLOT_MASK}, which derives from this value). Sized to exactly the bits needed to address
+   * {@link #REQUESTED_PARTITIONS} partitions (rounded up to the next power of 2), clamped to {@code
+   * [1, 8]} bits -- i.e. supports 2 to 256 partitions. A host with few cores therefore reserves few
+   * bits for partitioning and gets correspondingly more per-partition slot capacity (via {@link
+   * Cache2#SLOT_MASK}); {@link #distribute}'s overflow check fails fast rather than silently
+   * aliasing slots if actual capacity ever exceeds what's addressable.
    */
   static final int PART_SHIFT = computePartShift();
 
   private static int computePartShift() {
-    int cpus = Runtime.getRuntime().availableProcessors();
-    int requested = Math.max(1, EnvUtils.getPropertyAsInteger("solr.blockCache.nPartitions", cpus));
-    // Bits needed to address `requested` partitions, i.e. ceil(log2(requested)), clamped to
-    // [1, 8] (2..256 partitions' worth of index space). Integer.SIZE - numberOfLeadingZeros(n - 1)
-    // is the standard bit trick for ceil(log2(n)): correct at exact powers of 2 (no off-by-one)
-    // because it's phrased in terms of n-1, not n, and correct at n=1 too (numberOfLeadingZeros(0)
-    // == 32, giving 0 -- which the clamp below then raises to the 1-bit floor).
-    int partitionBits = Integer.SIZE - Integer.numberOfLeadingZeros(requested - 1);
+    // Bits needed to address REQUESTED_PARTITIONS partitions, i.e. ceil(log2(n)), clamped to
+    // [1, 8]. Integer.SIZE - numberOfLeadingZeros(n - 1) is the standard bit trick for
+    // ceil(log2(n)), correct both at exact powers of 2 and at n=1 (numberOfLeadingZeros(0) == 32,
+    // giving 0, which the clamp below then raises to the 1-bit floor).
+    int partitionBits = Integer.SIZE - Integer.numberOfLeadingZeros(REQUESTED_PARTITIONS - 1);
     partitionBits = Math.min(8, Math.max(1, partitionBits));
     return Integer.SIZE - partitionBits;
   }
@@ -1659,12 +1661,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   private static int computeNPartitions(int nBlocks) {
-    int cpus = Runtime.getRuntime().availableProcessors();
-    // Clamp to MAX_PARTITIONS: PART_SHIFT only reserves 32-PART_SHIFT bits for the partition
-    // index, so more partitions than that would silently wrap/alias in encodeHandle/partOf. Real
-    // hardware core counts are nowhere near this ceiling (see PART_SHIFT's javadoc), so this is a
-    // defensive cap, not an expected real-world constraint.
-    int n = Integer.highestOneBit(Math.min(Math.max(1, cpus), MAX_PARTITIONS));
+    // Actual partition count never exceeds MAX_PARTITIONS: PART_SHIFT's bit budget bounds how
+    // many partitions the handle encoding can address at all.
+    int n = Integer.highestOneBit(Math.min(REQUESTED_PARTITIONS, MAX_PARTITIONS));
     if (n > nBlocks / n) {
       // small number of blocks relative to processors; fallback to single partition
       return 1;
