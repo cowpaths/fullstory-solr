@@ -38,6 +38,7 @@ import org.apache.solr.core.SolrCore;
 import org.apache.solr.handler.ReplicationHandler;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.response.SolrQueryResponse;
+import org.apache.solr.storage.GCSDirectory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -107,13 +108,17 @@ public abstract class ReplicationAPIBase extends JerseyResource {
                     DirectoryFactory.DirContext.DEFAULT,
                     solrCore.getSolrConfig().indexConfig.lockType);
         SegmentInfos infos = SegmentInfos.readCommit(dir, commit.getSegmentsFileName());
+        // For GCS-backed directories, serve raw offset files rather than decompressed GCS content.
+        // fileLength() and openInput() on rawDir return the on-disk offset file size/bytes,
+        // which must match what DirectoryFileStream.write() actually sends over the wire.
+        Directory rawDir = GCSDirectory.rawDirectoryView(dir);
         for (SegmentCommitInfo commitInfo : infos) {
           for (String file : commitInfo.files()) {
             CoreReplicationAPI.FileMetaData metaData = new CoreReplicationAPI.FileMetaData();
             metaData.name = file;
-            metaData.size = dir.fileLength(file);
+            metaData.size = rawDir.fileLength(file);
 
-            try (final IndexInput in = dir.openInput(file, IOContext.READONCE)) {
+            try (final IndexInput in = rawDir.openInput(file, IOContext.READONCE)) {
               try {
                 long checksum = CodecUtil.retrieveChecksum(in);
                 metaData.checksum = checksum;
@@ -129,10 +134,10 @@ public abstract class ReplicationAPIBase extends JerseyResource {
         // add the segments_N file
         CoreReplicationAPI.FileMetaData fileMetaData = new CoreReplicationAPI.FileMetaData();
         fileMetaData.name = infos.getSegmentsFileName();
-        fileMetaData.size = dir.fileLength(infos.getSegmentsFileName());
+        fileMetaData.size = rawDir.fileLength(infos.getSegmentsFileName());
         if (infos.getId() != null) {
           try (final IndexInput in =
-              dir.openInput(infos.getSegmentsFileName(), IOContext.READONCE)) {
+              rawDir.openInput(infos.getSegmentsFileName(), IOContext.READONCE)) {
             try {
               fileMetaData.checksum = CodecUtil.retrieveChecksum(in);
             } catch (Exception e) {

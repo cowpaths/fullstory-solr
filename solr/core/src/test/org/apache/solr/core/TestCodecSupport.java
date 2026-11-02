@@ -245,7 +245,12 @@ public class TestCodecSupport extends SolrTestCaseJ4 {
 
     try {
       CoreDescriptor cd =
-          new CoreDescriptor(newCoreName, testSolrHome.resolve(newCoreName), coreContainer);
+          new CoreDescriptor(
+              newCoreName,
+              testSolrHome.resolve(newCoreName),
+              coreContainer,
+              CoreDescriptor.CORE_DATADIR,
+              createTempDir(newCoreName).toString());
       c =
           new SolrCore(
               coreContainer,
