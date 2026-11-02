@@ -733,8 +733,12 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
     return new BatchEntry(new LongAdder(), anchor, batch, perRequestDemandTime);
   }
 
+  // v2: ordinal 0 is reserved (cacheBlockOrd == slot directly, no "- 1"), so the data and
+  // metadata regions are each one block wider than a v1 file of the same nBlocks -- the seed
+  // string is versioned so a v1 file can never validate under the v2 nBlocks-recovery formula
+  // (and vice versa), rather than being silently misinterpreted as a (differently-sized) v2 file.
   private static final long CACHE_VALIDATION_MAGIC =
-      rawMd5("org.apache.solr.storage.BlockCache#CACHE_VALIDATION_MAGIC").getLong();
+      rawMd5("org.apache.solr.storage.BlockCache#CACHE_VALIDATION_MAGICv2").getLong();
 
   /**
    * Metadata bytes per cache block in the persistent backing file: 16-byte UUID + 4-byte blockIdx.
@@ -1257,9 +1261,14 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
 
   private volatile SolrMetricsContext solrMetricsContext;
 
-  /** Returns the total backing-file size in bytes required to hold {@code nBlocks} blocks. */
+  /**
+   * Returns the total backing-file size in bytes required to hold {@code nBlocks} usable blocks.
+   * One extra block of data+metadata is always included beyond {@code nBlocks} (ordinal 0,
+   * reserved/unused -- see {@link #cacheBlockOrdOf}), so the file actually spans {@code nBlocks +
+   * 1} blocks' worth of data and metadata, plus the trailer.
+   */
   static long backingFileBytes(int nBlocks) {
-    return (long) nBlocks * (COMPRESSION_BLOCK_SIZE + META_BYTES_PER_BLOCK) + TRAILER_BYTES;
+    return (long) (nBlocks + 1) * (COMPRESSION_BLOCK_SIZE + META_BYTES_PER_BLOCK) + TRAILER_BYTES;
   }
 
   /**
@@ -1277,7 +1286,9 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    */
   private BlockCache(int nBlocks, long targetBytes, Path backingFile) throws IOException {
     super(nBlocks, computeNPartitions(nBlocks));
-    long dataSize = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
+    // Data region (and cached/pool below) is sized for nBlocks+1 blocks: ordinal 0 is reserved,
+    // unused, so that cacheBlockOrd == slot directly -- see cacheBlockOrdOf's javadoc.
+    long dataSize = (long) (nBlocks + 1) * COMPRESSION_BLOCK_SIZE;
     try (FileChannel fc =
         FileChannel.open(
             backingFile,
@@ -1289,7 +1300,9 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
     }
     BlockCacheMapping m;
     try {
-      m = BlockCacheMmapProvider.getDefault().open(backingFile, COMPRESSION_BLOCK_SIZE, nBlocks);
+      m =
+          BlockCacheMmapProvider.getDefault()
+              .open(backingFile, COMPRESSION_BLOCK_SIZE, nBlocks + 1);
     } finally {
       Files.delete(backingFile);
     }
@@ -1298,7 +1311,7 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
     this.pool = m.dataPool();
     this.poolRO =
         Arrays.stream(this.pool).map(ByteBuffer::asReadOnlyBuffer).toArray(ByteBuffer[]::new);
-    this.cached = new Object[nBlocks];
+    this.cached = new Object[nBlocks + 1];
     this.metaBuf = null;
     this.alwaysPrepareWrite = false;
     this.extantMap = null;
@@ -1327,7 +1340,9 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
   private static int computeNBlocksFromBackingFile(Path existingBackingFile) throws IOException {
     long fileSize = Files.size(existingBackingFile);
     long dataPerBlock = (long) COMPRESSION_BLOCK_SIZE + META_BYTES_PER_BLOCK;
-    int nBlocks = Math.toIntExact((fileSize - TRAILER_BYTES) / dataPerBlock);
+    // The file spans nBlocks+1 blocks' worth of data+metadata (see backingFileBytes's javadoc),
+    // so the usable nBlocks recovered here is one less than the raw per-block division.
+    int nBlocks = Math.toIntExact((fileSize - TRAILER_BYTES) / dataPerBlock) - 1;
     if (nBlocks <= 0) {
       throw new IOException(
           "BlockCache backing file too small (" + fileSize + " bytes): " + existingBackingFile);
@@ -1342,8 +1357,10 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    */
   private BlockCache(int nBlocks, Path existingBackingFile) throws IOException {
     super(nBlocks, computeNPartitions(nBlocks));
-    long dataSize = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
-    long metaSize = (long) nBlocks * META_BYTES_PER_BLOCK + TRAILER_BYTES;
+    // Data and metadata regions are each sized for nBlocks+1 blocks: ordinal 0 is reserved,
+    // unused -- see cacheBlockOrdOf's javadoc.
+    long dataSize = (long) (nBlocks + 1) * COMPRESSION_BLOCK_SIZE;
+    long metaSize = (long) (nBlocks + 1) * META_BYTES_PER_BLOCK + TRAILER_BYTES;
     MappedByteBuffer mb;
     try (FileChannel fc =
         FileChannel.open(existingBackingFile, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
@@ -1352,15 +1369,15 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
     mb.order(ByteOrder.LITTLE_ENDIAN);
     BlockCacheMapping m =
         BlockCacheMmapProvider.getDefault()
-            .open(existingBackingFile, COMPRESSION_BLOCK_SIZE, nBlocks);
+            .open(existingBackingFile, COMPRESSION_BLOCK_SIZE, nBlocks + 1);
     this.mapping = m;
     log.info("BlockCache persistent mapping: {}", m);
     this.pool = m.dataPool();
     this.poolRO =
         Arrays.stream(this.pool).map(ByteBuffer::asReadOnlyBuffer).toArray(ByteBuffer[]::new);
-    this.cached = new Object[nBlocks];
+    this.cached = new Object[nBlocks + 1];
     this.metaBuf = mb;
-    int trailerOffset = nBlocks * META_BYTES_PER_BLOCK;
+    int trailerOffset = (nBlocks + 1) * META_BYTES_PER_BLOCK;
     long storedId = mb.getLong(trailerOffset);
     long storedSig = mb.getLong(trailerOffset + 8);
     boolean valid = (storedId ^ storedSig) == CACHE_VALIDATION_MAGIC;
@@ -1405,9 +1422,8 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    * Reads the metadata region and returns a sorted extant map of pre-existing valid cache entries.
    * Each entry is a triplet {@code [uuidMsb, uuidLsb, (blockIdx << 32 | handleLow32)]} sorted
    * ascending by {@code (uuidMsb, uuidLsb)} for binary-search access in {@code acquireNode}. {@code
-   * handleLow32} encodes {@code (partIdx << Cache2.PART_SHIFT) | slot} for the slot that holds
-   * global block {@code i}, so the warm-start path can call {@link #pin} directly with generation=0
-   * in the upper 32 bits.
+   * handleLow32} encodes {@code (partIdx << Cache2.PART_SHIFT) | slot} for the given global slot,
+   * so the warm-start path can call {@link #pin} directly with generation=0 in the upper 32 bits.
    *
    * <p>For a 340 GiB (usable) cache the on-disk metadata is ~27 MiB; the extant map is ~32 MiB.
    * Built on-heap (see return statement) since that's the better fit for the radix sort's
@@ -1415,26 +1431,26 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    *
    * <p>Instance method (not static): reads this instance's own {@code partitionEnd} (populated by
    * {@code Cache2}'s constructor, already run by the time this is called) to resolve each global
-   * block index {@code i}'s owning partition.
+   * slot's owning partition.
    */
   private ByteBuffer buildExtantMap(int nBlocks, ByteBuffer metaBuf) {
     long[] ret = new long[nBlocks * 3];
     int j = 0;
     int curPart = 0;
-    int curPartEnd = partitionEnd[0]; // exclusive; i == curPartEnd triggers advance
-    for (int i = 0; i < nBlocks; i++) {
-      if (i == curPartEnd) {
+    int curPartEnd = partitionEnd[0]; // inclusive upper bound of curPart's slots
+    // slot doubles as both the global 1-indexed slot number and (since cacheBlockOrd == slot
+    // directly -- see cacheBlockOrdOf) the metadata region's block ordinal; ordinal/slot 0 is
+    // reserved and never iterated.
+    for (int slot = 1; slot <= nBlocks; slot++) {
+      if (slot > curPartEnd) {
         curPartEnd = partitionEnd[++curPart];
       }
-      int base = i * META_BYTES_PER_BLOCK;
+      int base = slot * META_BYTES_PER_BLOCK;
       long uuidMsb = metaBuf.getLong(base);
       long uuidLsb = metaBuf.getLong(base + 8);
       if (uuidMsb == 0 && uuidLsb == 0) continue; // uninitialized entry
       int blockIdx = metaBuf.getInt(base + 16);
       if (blockIdx == -1) continue; // in-progress write (populate() did not commit)
-
-      // Global block index i maps to global (1-indexed) slot i+1, uniformly across partitions.
-      int slot = i + 1;
 
       int handleLow32 = (curPart << PART_SHIFT) | slot;
       ret[j++] = uuidMsb;
@@ -1536,11 +1552,14 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
   // ---------------------------------------------------------------------------
 
   /**
-   * cacheBlockOrd corresponding to a handle's encoded slot -- uniformly {@code slot - 1} across
-   * every partition (slot 0 is reserved globally, not per-partition).
+   * cacheBlockOrd corresponding to a handle's encoded slot -- identical to the slot itself. {@code
+   * pool}/{@code cached}/{@code metaBuf} are all sized {@code capacity + 1} (one wasted ordinal,
+   * matching {@link Cache2}'s own reserved slot 0) precisely so this mapping needs no arithmetic:
+   * slot 0 is globally reserved and never assigned to a real handle, so ordinal 0 is simply never
+   * touched.
    */
   private static int cacheBlockOrdOf(long handle) {
-    return ((int) handle & SLOT_MASK) - 1;
+    return (int) handle & SLOT_MASK;
   }
 
   /**
@@ -1561,13 +1580,6 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
         (fromHot(handle) ? pinnedFromHot : pinnedFromCold).increment();
         return cacheBlockOrd;
     }
-  }
-
-  /**
-   * Non-mutating optimistic check: returns {@code true} if the handle appears live and pinnable.
-   */
-  boolean pinnable(long handle) {
-    return pinnableSlot(handle);
   }
 
   /** Releases a pin on the slot identified by {@code handle}. */
@@ -2034,7 +2046,9 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
           } else {
             mapping.force(); // sync all data
             int nBlocks = (int) (totalBytes / COMPRESSION_BLOCK_SIZE);
-            int trailerOffset = nBlocks * META_BYTES_PER_BLOCK;
+            // +1: the metadata region (like the data region) is sized for nBlocks+1 blocks,
+            // ordinal 0 reserved -- see cacheBlockOrdOf's javadoc.
+            int trailerOffset = (nBlocks + 1) * META_BYTES_PER_BLOCK;
             metaBuf.force(); // sync all metadata
             metaBuf.putLong(trailerOffset + 8, randomId ^ CACHE_VALIDATION_MAGIC);
             metaBuf.force(); // record validation

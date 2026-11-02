@@ -512,9 +512,9 @@ class Cache2 {
   /**
    * Exclusive upper bound of the global real-slot range each partition owns, indexed by partition
    * index: partition {@code i}'s real slots are {@code (i == 0 ? 0 : partitionEnd[i - 1]) + 1 ..
-   * partitionEnd[i]}. Used by {@code BlockCache} to resolve {@code cacheBlockOrd} (= slot - 1,
-   * uniformly) and is purely a derived convenience -- partition boundaries are otherwise only
-   * needed internally, for sizing each partition's own chain during construction.
+   * partitionEnd[i]}. Used by {@code BlockCache} to resolve each slot's owning partition (e.g. in
+   * {@code buildExtantMap}) and is purely a derived convenience -- partition boundaries are
+   * otherwise only needed internally, for sizing each partition's own chain during construction.
    */
   final int[] partitionEnd;
 
@@ -858,9 +858,9 @@ class Cache2 {
    * atomic (one consistent point-in-time snapshot of both fields, vs. two independent loads that
    * could observe an interleaved write in between) and, on platforms where a volatile load is not
    * free (e.g. {@code ldar} on aarch64), half the load-acquire cost. Callers that need both fields
-   * together (e.g. {@link #pin}'s initial fast-bail check, {@link #pinnable}) should prefer this
-   * over two separate calls; callers that only need one field should keep using the single-field
-   * accessor.
+   * together (e.g. {@link #pinSlot}'s initial fast-bail check, {@link #pinnable}) should prefer
+   * this over two separate calls; callers that only need one field should keep using the
+   * single-field accessor.
    */
   long getRefCountAndGenerationVolatile(int slot) {
     return group1.getLongVolatile(group1Offset(slot) >>> 1);
@@ -1240,7 +1240,7 @@ class Cache2 {
    * appears live and pinnable (refCount &ge; 0, not evicted, generation matches). No CAS is
    * performed; may race with concurrent eviction. Suitable for best-effort preload skip checks.
    */
-  boolean pinnableSlot(long handle) {
+  boolean pinnable(long handle) {
     int slot = (int) handle & SLOT_MASK;
     assert slot >= 1 && slot <= capacity;
     int expectedGen = (int) (handle >>> 32);
@@ -1392,10 +1392,10 @@ class Cache2 {
    * Recycles a slot back to the tail of the eviction list. Used when a slot was acquired (pinned,
    * refCount=1 from acquireNode) but ultimately not needed (e.g. lost CAS race).
    *
-   * <p>Normally the caller is the only pinner, but a stale {@link #pin} that passed its pre-CAS
+   * <p>Normally the caller is the only pinner, but a stale {@link #pinSlot} that passed its pre-CAS
    * generation check before the slot was recycled may have raced and bumped refCount above 1. In
    * that case we decrement our own pin and return; the stale pinner's post-CAS generation mismatch
-   * will call {@link #unpin} and drive refCount to 0, reinserting the slot into the LRU.
+   * will call {@link #unpinSlot} and drive refCount to 0, reinserting the slot into the LRU.
    */
   void closeUnconditional(long handle) {
     int slot = (int) handle & SLOT_MASK;
