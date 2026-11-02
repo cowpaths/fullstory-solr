@@ -32,7 +32,7 @@ import org.apache.solr.SolrTestCaseJ4;
 public class TestCache2Group2Accessors extends SolrTestCaseJ4 {
 
   private static Cache2 newCache(int capacity) {
-    return new Cache2(capacity, 0);
+    return new Cache2(capacity, 1, 0);
   }
 
   /**

@@ -74,7 +74,6 @@ import org.apache.lucene.internal.hppc.LongObjectHashMap;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.BlockCacheMapping;
 import org.apache.lucene.store.BlockCacheMmapProvider;
-import org.apache.lucene.store.OffHeapStore;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.ThreadInterruptedException;
 import org.apache.solr.common.MapWriter;
@@ -105,13 +104,13 @@ import org.slf4j.LoggerFactory;
  * caller is expected to decompress the block into a temporary heap buffer and serve the read
  * uncached.
  *
- * <p>Pin/unpin semantics and the LRU list protocol are inherited from {@link Cache2}.
- *
- * <p>The pool is split across N independent {@link Cache2.DualQueueCache} instances (one per CPU,
- * rounded to the next power of two). Acquire routes to a randomly chosen partition via {@link
- * ThreadLocalRandom}; pin and unpin route to the owning partition decoded from the handle.
+ * <p>Pin/unpin semantics and the LRU list protocol are inherited from {@link Cache2}, which this
+ * class extends directly: there is exactly one {@code Cache2.DualQueueCache} instance (this one),
+ * internally striped into N partitions (one per CPU, rounded to the next power of two) to reduce
+ * LRU-list contention. Acquire routes to a randomly chosen partition via {@link ThreadLocalRandom};
+ * pin and unpin route to the owning partition decoded from the handle.
  */
-public class BlockCache implements Closeable, SolrMetricProducer {
+public class BlockCache extends Cache2.DualQueueCache implements Closeable, SolrMetricProducer {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
@@ -124,54 +123,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       EnvUtils.getPropertyAsBool("solr.blockCache.persistence", true);
 
   // ---------------------------------------------------------------------------
-  // Handle encoding: (generation << 32) | (partitionIndex << PART_SHIFT) | localSlot
+  // Handle encoding: (generation << 32) | (partitionIndex << Cache2.PART_SHIFT) | slot
   //
   // Cache2.acquireNode() returns an opaque long encoding (generation, slot); BlockCache ORs in
   // the partition index at bits PART_SHIFT..31 to form the full handle stored in accessMapped.
   // ---------------------------------------------------------------------------
-
-  /**
-   * Target partition count: {@code solr.blockCache.nPartitions} if set, else {@link
-   * Runtime#availableProcessors()}. Not persisted -- read fresh from the environment at class-init
-   * time on every process start, with no compatibility constraint across restarts (handle encoding
-   * is never written to the backing file; see {@link #PART_SHIFT}).
-   *
-   * <p>The sole input to both {@link #PART_SHIFT} (how many bits the handle encoding reserves for
-   * the partition index) and {@link #computeNPartitions} (how many partitions actually get
-   * created). Both must derive from this same value: {@code PART_SHIFT} fixes an upper bound on
-   * addressable partitions, so {@code computeNPartitions} has to respect that same bound rather
-   * than computing its own independently.
-   */
-  private static final int REQUESTED_PARTITIONS =
-      Math.max(
-          1,
-          EnvUtils.getPropertyAsInteger(
-              "solr.blockCache.nPartitions", Runtime.getRuntime().availableProcessors()));
-
-  /**
-   * Number of bits the handle encoding reserves for the partition index, occupying the high bits
-   * above {@code PART_SHIFT} (the low {@code PART_SHIFT} bits address the local slot -- see {@link
-   * Cache2#SLOT_MASK}, which derives from this value). Sized to exactly the bits needed to address
-   * {@link #REQUESTED_PARTITIONS} partitions (rounded up to the next power of 2), clamped to {@code
-   * [1, 8]} bits -- i.e. supports 2 to 256 partitions. A host with few cores therefore reserves few
-   * bits for partitioning and gets correspondingly more per-partition slot capacity (via {@link
-   * Cache2#SLOT_MASK}); {@link #distribute}'s overflow check fails fast rather than silently
-   * aliasing slots if actual capacity ever exceeds what's addressable.
-   */
-  static final int PART_SHIFT = computePartShift();
-
-  private static int computePartShift() {
-    // Bits needed to address REQUESTED_PARTITIONS partitions, i.e. ceil(log2(n)), clamped to
-    // [1, 8]. Integer.SIZE - numberOfLeadingZeros(n - 1) is the standard bit trick for
-    // ceil(log2(n)), correct both at exact powers of 2 and at n=1 (numberOfLeadingZeros(0) == 32,
-    // giving 0, which the clamp below then raises to the 1-bit floor).
-    int partitionBits = Integer.SIZE - Integer.numberOfLeadingZeros(REQUESTED_PARTITIONS - 1);
-    partitionBits = Math.min(8, Math.max(1, partitionBits));
-    return Integer.SIZE - partitionBits;
-  }
-
-  /** Exclusive upper bound on partition count imposed by {@link #PART_SHIFT}'s bit budget. */
-  private static final int MAX_PARTITIONS = 1 << (32 - PART_SHIFT);
 
   /**
    * Sentinel handle meaning "no cached block". Zero is safe because {@link Cache2} never allocates
@@ -239,10 +195,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         log.error("unable to remove entry for {}", uniquenessKey);
       }
     }
-  }
-
-  private int partOf(long handle) {
-    return ((int) handle) >>> PART_SHIFT;
   }
 
   // ---------------------------------------------------------------------------
@@ -1236,44 +1188,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   // ---------------------------------------------------------------------------
-  // Partition
-  // ---------------------------------------------------------------------------
-
-  private static final class Partition extends Cache2.DualQueueCache {
-    // These counters are striped across partitions purely to reduce contention — they are NOT
-    // per-partition metrics. Only the global sum across all partitions is meaningful. Individual
-    // partitions may go negative (e.g. when pinSwap applies both a pin delta and an unpin delta
-    // from different partitions to a single partition). Reads in writeMetrics sum all partitions.
-    private final LongAdder repinHits = new LongAdder();
-    private final LongAdder pinnedFromHot = new LongAdder();
-    private final LongAdder pinnedFromCold = new LongAdder();
-    private final LongAdder unpinnedToHot = new LongAdder();
-    private final LongAdder unpinnedToCold = new LongAdder();
-
-    /**
-     * Exclusive upper bound of the global {@code cacheBlockOrd} range this partition owns --
-     * matches {@code curPartEnd} in {@link #buildExtantMap}. Local slot {@code s} (1-indexed, per
-     * {@code handle & SLOT_MASK}) maps to {@code cacheBlockOrd = to - s}.
-     */
-    private final int to;
-
-    Partition(
-        int capacity,
-        int to,
-        OffHeapStore group1Store,
-        long group1BaseOffset,
-        OffHeapStore group2Store,
-        long group2BaseOffset) {
-      super(capacity, group1Store, group1BaseOffset, group2Store, group2BaseOffset);
-      this.to = to;
-    }
-
-    private int cacheBlockOrdOf(long handle) {
-      return to - ((int) handle & Cache2.SLOT_MASK);
-    }
-  }
-
-  // ---------------------------------------------------------------------------
   // Construction
   // ---------------------------------------------------------------------------
 
@@ -1293,8 +1207,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   private static final VarHandle CACHED = MethodHandles.arrayElementVarHandle(Object[].class);
 
-  private final int nPartitions;
-  private final Partition[] partitions;
+  private final LongAdder repinHits = new LongAdder();
+  private final LongAdder pinnedFromHot = new LongAdder();
+  private final LongAdder pinnedFromCold = new LongAdder();
+  private final LongAdder unpinnedToHot = new LongAdder();
+  private final LongAdder unpinnedToCold = new LongAdder();
 
   private final long totalBytes;
   private final boolean alwaysPrepareWrite;
@@ -1350,7 +1267,16 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * immediately after mapping and does not outlive the JVM. No metadata or trailer is maintained.
    */
   public BlockCache(long targetBytes, Path backingFile) throws IOException {
-    int nBlocks = Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE);
+    this(Math.toIntExact(targetBytes / COMPRESSION_BLOCK_SIZE), targetBytes, backingFile);
+  }
+
+  /**
+   * {@code nBlocks} is split out into its own parameter (rather than recomputed from {@code
+   * targetBytes} below) purely so it can be passed to {@code super(...)} as this constructor's
+   * required first statement.
+   */
+  private BlockCache(int nBlocks, long targetBytes, Path backingFile) throws IOException {
+    super(nBlocks, computeNPartitions(nBlocks));
     long dataSize = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     try (FileChannel fc =
         FileChannel.open(
@@ -1376,8 +1302,6 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     this.metaBuf = null;
     this.alwaysPrepareWrite = false;
     this.extantMap = null;
-    this.partitions = distribute(nBlocks);
-    this.nPartitions = partitions.length;
     this.holdRefs3 =
         initHoldRefs3(
             nPartitions, Math.max(1, Math.min(HOLD_REF_POOL_SIZE, nBlocks << 6) / nPartitions));
@@ -1397,6 +1321,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * data region is still used.
    */
   public BlockCache(Path existingBackingFile) throws IOException {
+    this(computeNBlocksFromBackingFile(existingBackingFile), existingBackingFile);
+  }
+
+  private static int computeNBlocksFromBackingFile(Path existingBackingFile) throws IOException {
     long fileSize = Files.size(existingBackingFile);
     long dataPerBlock = (long) COMPRESSION_BLOCK_SIZE + META_BYTES_PER_BLOCK;
     int nBlocks = Math.toIntExact((fileSize - TRAILER_BYTES) / dataPerBlock);
@@ -1404,6 +1332,16 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       throw new IOException(
           "BlockCache backing file too small (" + fileSize + " bytes): " + existingBackingFile);
     }
+    return nBlocks;
+  }
+
+  /**
+   * {@code nBlocks} is split out into its own parameter (see the ephemeral constructor's identical
+   * comment) so it can be passed to {@code super(...)} as this constructor's required first
+   * statement.
+   */
+  private BlockCache(int nBlocks, Path existingBackingFile) throws IOException {
+    super(nBlocks, computeNPartitions(nBlocks));
     long dataSize = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     long metaSize = (long) nBlocks * META_BYTES_PER_BLOCK + TRAILER_BYTES;
     MappedByteBuffer mb;
@@ -1426,11 +1364,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     long storedId = mb.getLong(trailerOffset);
     long storedSig = mb.getLong(trailerOffset + 8);
     boolean valid = (storedId ^ storedSig) == CACHE_VALIDATION_MAGIC;
-    this.partitions = distribute(nBlocks);
-    this.nPartitions = partitions.length;
     if (ENABLE_CACHE_PERSISTENCE && valid) {
       this.alwaysPrepareWrite = true;
-      this.extantMap = buildExtantMap(nBlocks, mb, partitions);
+      this.extantMap = buildExtantMap(nBlocks, mb);
     } else {
       log.warn(
           "BlockCache backing file {} failed validation (storedId={} sig={}); cold start",
@@ -1469,23 +1405,26 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * Reads the metadata region and returns a sorted extant map of pre-existing valid cache entries.
    * Each entry is a triplet {@code [uuidMsb, uuidLsb, (blockIdx << 32 | handleLow32)]} sorted
    * ascending by {@code (uuidMsb, uuidLsb)} for binary-search access in {@code acquireNode}. {@code
-   * handleLow32} encodes {@code (partIdx << PART_SHIFT) | localSlot} for the slot that holds global
-   * block {@code i}, so the warm-start path can call {@link #pin} directly with generation=0 in the
-   * upper 32 bits.
+   * handleLow32} encodes {@code (partIdx << Cache2.PART_SHIFT) | slot} for the slot that holds
+   * global block {@code i}, so the warm-start path can call {@link #pin} directly with generation=0
+   * in the upper 32 bits.
    *
    * <p>For a 340 GiB (usable) cache the on-disk metadata is ~27 MiB; the extant map is ~32 MiB.
    * Built on-heap (see return statement) since that's the better fit for the radix sort's
    * sequential scans; copied to a direct buffer for the caller to retain long-term.
+   *
+   * <p>Instance method (not static): reads this instance's own {@code partitionEnd} (populated by
+   * {@code Cache2}'s constructor, already run by the time this is called) to resolve each global
+   * block index {@code i}'s owning partition.
    */
-  private static ByteBuffer buildExtantMap(
-      int nBlocks, ByteBuffer metaBuf, Partition[] partitions) {
+  private ByteBuffer buildExtantMap(int nBlocks, ByteBuffer metaBuf) {
     long[] ret = new long[nBlocks * 3];
     int j = 0;
     int curPart = 0;
-    int curPartEnd = partitions[0].capacity; // exclusive; i == curPartEnd triggers advance
+    int curPartEnd = partitionEnd[0]; // exclusive; i == curPartEnd triggers advance
     for (int i = 0; i < nBlocks; i++) {
       if (i == curPartEnd) {
-        curPartEnd += partitions[++curPart].capacity;
+        curPartEnd = partitionEnd[++curPart];
       }
       int base = i * META_BYTES_PER_BLOCK;
       long uuidMsb = metaBuf.getLong(base);
@@ -1494,10 +1433,10 @@ public class BlockCache implements Closeable, SolrMetricProducer {
       int blockIdx = metaBuf.getInt(base + 16);
       if (blockIdx == -1) continue; // in-progress write (populate() did not commit)
 
-      // 1-indexed; matches Partition.cacheBlockOrdOf's (to - slot) formula in distribute()
-      int localSlot = curPartEnd - i;
+      // Global block index i maps to global (1-indexed) slot i+1, uniformly across partitions.
+      int slot = i + 1;
 
-      int handleLow32 = (curPart << PART_SHIFT) | localSlot;
+      int handleLow32 = (curPart << PART_SHIFT) | slot;
       ret[j++] = uuidMsb;
       ret[j++] = uuidLsb;
       ret[j++] = ((long) blockIdx << 32) | (handleLow32 & 0xFFFFFFFFL);
@@ -1577,92 +1516,13 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   /**
-   * Builds all of this {@code BlockCache}'s partitions, backed by ONE combined Group 1 + Group 2
-   * store spanning every partition of both groups combined, rather than each {@code
-   * Partition}/{@code Cache2} (or even each group) allocating its own -- see {@code
-   * Cache2#allocateSharedGroup1And2Stores}'s javadoc for the rationale (a single combined
-   * allocation is required for the {@code MemorySegment} path's one-shot JVM-wide claim) and the
-   * Group-2-specific even-slot-count padding this requires per partition.
+   * Number of independent eviction-list partitions to stripe this cache's slots into, given a total
+   * of {@code nBlocks} real slots. Never exceeds {@link Cache2#MAX_PARTITIONS} ({@link
+   * Cache2#PART_SHIFT}'s bit budget bounds how many partitions the handle encoding can address at
+   * all), and falls back to a single partition when {@code nBlocks} is small relative to the
+   * requested partition count (not worth striping a tiny cache).
    */
-  private static Partition[] distribute(int nBlocks) {
-    int nPartitions = computeNPartitions(nBlocks);
-    int base = nBlocks / nPartitions;
-    int remainder = nBlocks % nPartitions;
-    // base+1 (the largest any single partition's capacity can be, per the distribution below)
-    // must fit in PART_SHIFT bits, or handle encoding would silently alias two different slots
-    // onto the same bit pattern -- fail fast with actionable guidance instead of corrupting the
-    // cache's LRU/refcount bookkeeping.
-    if (base + 1 > Cache2.SLOT_MASK) {
-      throw new IllegalStateException(
-          "cache capacity too large for available partitioning: "
-              + nBlocks
-              + " blocks across "
-              + nPartitions
-              + " partitions would need up to "
-              + (base + 1)
-              + " slots/partition, exceeding the "
-              + Cache2.SLOT_MASK
-              + "-slot-per-partition limit (PART_SHIFT="
-              + PART_SHIFT
-              + "). Reduce solr.blockCache.byteSize, increase solr.compressionBlockKilobytes (fewer,"
-              + " larger blocks means fewer total slots to distribute), or run on a host with more"
-              + " CPUs (more, smaller partitions).");
-    }
-
-    // Pass 1: compute every partition's capacity and Group 1/Group 2 slot counts up front, so the
-    // one combined shared store can be allocated once, sized for the exact combined total -- this
-    // must be a separate pass from construction below, since the store must exist in full before
-    // any Partition (which immediately writes into its slice at construction time) can be built.
-    int[] capacities = new int[nPartitions];
-    int totalGroup1Slots = 0;
-    int totalGroup2Slots = 0;
-    // Running Group 1/Group 2 slot offsets into the shared store, in SLOTS -- converted to real
-    // offsets only once every partition's slot count is known, in pass 2 below.
-    int[] group1SlotOffsets = new int[nPartitions];
-    int[] group2SlotOffsets = new int[nPartitions];
-    for (int i = 0; i < nPartitions; i++) {
-      int count = base + (i < remainder ? 1 : 0);
-      capacities[i] = count;
-      group1SlotOffsets[i] = totalGroup1Slots;
-      totalGroup1Slots += Cache2.group1SlotCount(count);
-      group2SlotOffsets[i] = totalGroup2Slots;
-      int group2Slots = Cache2.group2SlotCount(count, /* extraSentinelSlots= */ 2);
-      // Group 2's per-partition slot count is always odd (see
-      // Cache2#allocateSharedGroup1And2Stores's javadoc) -- round up to even so every partition's
-      // baseOffset below stays a multiple of GROUP2_CACHE_LINE (64 bytes = 2 Group-2 slots),
-      // preserving the "every even slot index starts a fresh cache line" invariant Cache2's own
-      // sentinel spacing depends on. The one slot of padding this costs per partition boundary is
-      // a single unused 32-byte slot.
-      if ((group2Slots & 1) != 0) {
-        group2Slots++;
-      }
-      totalGroup2Slots += group2Slots;
-    }
-    Cache2.SharedStores shared =
-        Cache2.allocateSharedGroup1And2Stores(totalGroup1Slots, totalGroup2Slots);
-    OffHeapStore sharedStore = shared.store;
-
-    // Pass 2: construct each Partition against its own slice of the one shared store -- Group 1's
-    // slice starts at offset 0; Group 2's slice starts at shared.group2BaseOffset (Group 1's own
-    // total size), per Cache2#allocateSharedGroup1And2Stores's layout.
-    Partition[] parts = new Partition[nPartitions];
-    int offset = 0;
-    for (int i = 0; i < nPartitions; i++) {
-      int count = capacities[i];
-      int to = offset + count;
-      long group1BaseOffset = Cache2.group1SlotToOffset(group1SlotOffsets[i]);
-      long group2BaseOffset =
-          shared.group2BaseOffset + Cache2.group2SlotToOffset(group2SlotOffsets[i]);
-      parts[i] =
-          new Partition(count, to, sharedStore, group1BaseOffset, sharedStore, group2BaseOffset);
-      offset += count;
-    }
-    return parts;
-  }
-
   private static int computeNPartitions(int nBlocks) {
-    // Actual partition count never exceeds MAX_PARTITIONS: PART_SHIFT's bit budget bounds how
-    // many partitions the handle encoding can address at all.
     int n = Integer.highestOneBit(Math.min(REQUESTED_PARTITIONS, MAX_PARTITIONS));
     if (n > nBlocks / n) {
       // small number of blocks relative to processors; fallback to single partition
@@ -1676,22 +1536,29 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // ---------------------------------------------------------------------------
 
   /**
-   * Pins the slot identified by {@code handle}. Routes to the owning partition decoded from the
-   * handle. Returns {@code -1} if the slot is permanently dead, otherwise the pinned slot's {@code
-   * cacheBlockOrd} (always &ge;0). Note: unrelated to {@link Cache2#pin}'s own {@code int} return,
-   * which encodes first-pin/re-pin/dead state rather than an ordinal.
+   * cacheBlockOrd corresponding to a handle's encoded slot -- uniformly {@code slot - 1} across
+   * every partition (slot 0 is reserved globally, not per-partition).
+   */
+  private static int cacheBlockOrdOf(long handle) {
+    return ((int) handle & SLOT_MASK) - 1;
+  }
+
+  /**
+   * Pins the slot identified by {@code handle}. Returns {@code -1} if the slot is permanently dead,
+   * otherwise the pinned slot's {@code cacheBlockOrd} (always &ge;0). Note: unrelated to {@link
+   * Cache2#pinSlot}'s own {@code int} return, which encodes first-pin/re-pin/dead state rather than
+   * an ordinal.
    */
   int pin(long handle) {
-    Partition p = partitions[partOf(handle)];
-    switch (p.pin(handle)) {
+    switch (pinSlot(handle)) {
       case -1:
         return -1;
       case 0:
-        p.repinHits.increment();
-        return p.cacheBlockOrdOf(handle);
+        repinHits.increment();
+        return cacheBlockOrdOf(handle);
       default:
-        final int cacheBlockOrd = p.cacheBlockOrdOf(handle);
-        (p.fromHot(handle) ? p.pinnedFromHot : p.pinnedFromCold).increment();
+        final int cacheBlockOrd = cacheBlockOrdOf(handle);
+        (fromHot(handle) ? pinnedFromHot : pinnedFromCold).increment();
         return cacheBlockOrd;
     }
   }
@@ -1700,7 +1567,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    * Non-mutating optimistic check: returns {@code true} if the handle appears live and pinnable.
    */
   boolean pinnable(long handle) {
-    return partitions[partOf(handle)].pinnable(handle);
+    return pinnableSlot(handle);
   }
 
   /** Releases a pin on the slot identified by {@code handle}. */
@@ -1710,19 +1577,18 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   @SuppressWarnings({"ReferenceEquality", "fallthrough"})
   void unpin(long handle, boolean recordAccess) {
-    Partition p = partitions[partOf(handle)];
-    switch (p.unpin(handle, recordAccess)) {
+    switch (unpinSlot(handle, recordAccess)) {
       case 1:
-        p.unpinnedToHot.increment();
+        unpinnedToHot.increment();
         break;
       case 0:
-        p.unpinnedToCold.increment();
+        unpinnedToCold.increment();
         break;
       default:
         return;
     }
     // on last unpin, clear the cached ByteBuffer. recreating is cheap.
-    final int cacheBlockOrd = p.cacheBlockOrdOf(handle);
+    final int cacheBlockOrd = cacheBlockOrdOf(handle);
     Object cur = CACHED.getVolatile(cached, cacheBlockOrd);
     if (cur instanceof ByteBuffer && cur != EXCEPTION_SENTINEL) {
       // CAS ensures we never clobber EXCEPTION_SENTINEL; if it loses, cached is already
@@ -1738,31 +1604,30 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    */
   int acquireNode(long[] outHandle) {
     int i = tlrIndex();
-    Partition p = partitions[i];
-    if (!p.acquireNode(outHandle)) {
+    if (!acquireNode(i, outHandle)) {
       poolExhausted.increment();
       return -1;
     }
     // cacheBlockOrdOf only reads the slot bits of outHandle[0], so resolving it here (before
     // encodeHandle ORs in the partition bits below) is equivalent to resolving it after.
-    final int cacheBlockOrd = p.cacheBlockOrdOf(outHandle[0]);
+    final int cacheBlockOrd = cacheBlockOrdOf(outHandle[0]);
     // A plain (non-volatile) write is fine: even though refCount is already CAS'd to 1 by this
-    // point (inside p.acquireNode() above), no other thread can have a handle that passes pin()'s
-    // generation check yet -- the bumped generation hasn't been shared with anyone outside this
-    // thread (it's only about to be written into outHandle, a method-local belonging to our
-    // caller). The slot stays effectively private to us until we (or our caller) publish it via a
-    // later volatile/atomic op (accessMapped.compareAndSet/Exchange, or populate()'s own volatile
-    // writes) -- any thread that performs the matching volatile read is guaranteed to see this
-    // plain write too.
+    // point (inside acquireNode(i, outHandle) above), no other thread can have a handle that
+    // passes pin()'s generation check yet -- the bumped generation hasn't been shared with anyone
+    // outside this thread (it's only about to be written into outHandle, a method-local belonging
+    // to our caller). The slot stays effectively private to us until we (or our caller) publish it
+    // via a later volatile/atomic op (accessMapped.compareAndSet/Exchange, or populate()'s own
+    // volatile writes) -- any thread that performs the matching volatile read is guaranteed to see
+    // this plain write too.
     cached[cacheBlockOrd] = null;
     acquisitions.increment();
     // Acquiring a new slot pins it (pinnedFromHot/pinnedFromCold below), but this is not
     // a cache hit. Since writeMetrics computes hits = repinHits + pinnedFromHot + pinnedFromCold,
     // we offset the upcoming pinnedFrom* increment so it doesn't inflate the hit count.
-    p.repinHits.decrement();
-    if (p.fromHot(outHandle[0])) {
+    repinHits.decrement();
+    if (fromHot(outHandle[0])) {
       hotAcquisitions.increment();
-      p.pinnedFromHot.increment();
+      pinnedFromHot.increment();
       if (extantMap != null) {
         // First-ever hot acquisition: every slot in THIS partition has now been allocated at
         // least once since extantMap was built (see the field javadoc for why this signal is
@@ -1774,7 +1639,7 @@ public class BlockCache implements Closeable, SolrMetricProducer {
         extantMap = null;
       }
     } else {
-      p.pinnedFromCold.increment();
+      pinnedFromCold.increment();
     }
     if (alwaysPrepareWrite || (outHandle[0] >>> 32) > 1) {
       int ret = mapping.prepareWrite(cacheBlockOrd);
@@ -1883,15 +1748,11 @@ public class BlockCache implements Closeable, SolrMetricProducer {
 
   public void writeMetrics(MapWriter.EntryWriter ew) throws IOException {
     long prep = prepopulated.sum();
-    long repinHitsL = 0, pinnedFromHotL = 0, pinnedFromColdL = 0;
-    long unpinnedToHotL = 0, unpinnedToColdL = 0;
-    for (Partition p : partitions) {
-      repinHitsL += p.repinHits.sum();
-      pinnedFromHotL += p.pinnedFromHot.sum();
-      pinnedFromColdL += p.pinnedFromCold.sum();
-      unpinnedToHotL += p.unpinnedToHot.sum();
-      unpinnedToColdL += p.unpinnedToCold.sum();
-    }
+    long repinHitsL = repinHits.sum();
+    long pinnedFromHotL = pinnedFromHot.sum();
+    long pinnedFromColdL = pinnedFromCold.sum();
+    long unpinnedToHotL = unpinnedToHot.sum();
+    long unpinnedToColdL = unpinnedToCold.sum();
     long h = repinHitsL + pinnedFromHotL + pinnedFromColdL;
     long pinned = pinnedFromHotL + pinnedFromColdL - unpinnedToHotL - unpinnedToColdL;
     long hotUnpin = unpinnedToHotL - pinnedFromHotL;
@@ -2011,18 +1872,17 @@ public class BlockCache implements Closeable, SolrMetricProducer {
    *     {@code -1} for a plain close with no such race to account for.
    */
   boolean close(long handle, int lostCASCacheBlockOrd) {
-    Partition p = partitions[partOf(handle)];
     if (lostCASCacheBlockOrd < 0) {
       // Read fromHot() before the close. Only relevant for the non-unconditional path where the
       // slot is in the evictable list (refCount=0); unconditional slots are pinned and not in
       // any queue.
-      boolean fromHot = p.fromHot(handle);
-      switch (p.close(handle)) {
+      boolean fromHot = fromHot(handle);
+      switch (closeSlot(handle)) {
         case 0:
           if (fromHot) {
-            p.repinHits.decrement(); // offset pinnedFromHot so it doesn't inflate hits
-            p.pinnedFromHot.increment();
-            p.unpinnedToCold.increment();
+            repinHits.decrement(); // offset pinnedFromHot so it doesn't inflate hits
+            pinnedFromHot.increment();
+            unpinnedToCold.increment();
           }
           break;
         case -1:
@@ -2033,12 +1893,12 @@ public class BlockCache implements Closeable, SolrMetricProducer {
           return false;
       }
     } else if (isPopulated(lostCASCacheBlockOrd)) {
-      p.unpin(handle, false);
+      unpinSlot(handle, false);
       closeSkippedPinned.increment();
       return false;
     } else {
-      p.unpinnedToCold.increment();
-      p.closeUnconditional(handle);
+      unpinnedToCold.increment();
+      closeUnconditional(handle);
     }
     closedCount.increment();
     return true;

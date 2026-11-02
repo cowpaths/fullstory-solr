@@ -20,17 +20,17 @@ import org.apache.solr.SolrTestCaseJ4;
 
 /**
  * Regression test: {@code lastUnpinNanos} lives in {@code Cache2}'s off-heap Group 2 storage. Both
- * {@link Cache2#acquireNode(long[])} and {@link Cache2#close(long)} must explicitly zero it via
- * {@code setLastUnpinNanos(slot, 0)}; without that, a recycled slot would carry its previous
+ * {@link Cache2#acquireNode(int, long[])} and {@link Cache2#closeSlot(long)} must explicitly zero
+ * it via {@code setLastUnpinNanos(slot, 0)}; without that, a recycled slot would carry its previous
  * occupant's timestamp into the new occupant's first {@code toHot()} decision (incorrectly
  * promoting a first-time entry to the hot queue) and into {@code acquireTail()}'s staleness
  * comparison (the slot would read as "fresher" than it should, i.e. not maximally stale, which
- * {@code lastUnpinNanos == 0} is specifically meant to represent for never-yet-unpinned slots).
+ * {@code lastUnpinNanos == 0} is specifically meant to represent for never-yet- unpinned slots).
  */
 public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
 
   private static Cache2.DualQueueCache newCache(int capacity) {
-    return new Cache2.DualQueueCache(capacity);
+    return new Cache2.DualQueueCache(capacity, 1);
   }
 
   /**
@@ -52,7 +52,7 @@ public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
 
     long[] handle = new long[1];
     for (int i = 0; i < capacity; i++) {
-      boolean acquired = cache.acquireNode(handle);
+      boolean acquired = cache.acquireNode(0, handle);
       assertTrue("expected " + capacity + " evictable slots, failed at i=" + i, acquired);
       int slot = (int) handle[0] & Cache2.SLOT_MASK;
       assertEquals(
@@ -63,28 +63,31 @@ public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
   }
 
   /**
-   * Same check for {@link Cache2#close(long)}'s recycle path: a slot closed back to the pool must
-   * also read back lastUnpinNanos==0, since it re-enters the cold list via {@code insertAtTail()}
-   * directly (bypassing {@code DualQueueCache.insertAtHead()}'s own fresh-timestamp write).
+   * Same check for {@link Cache2#closeSlot(long)}'s recycle path: a slot closed back to the pool
+   * must also read back lastUnpinNanos==0, since it re-enters the cold list via {@code
+   * insertAtTail()} directly (bypassing {@code DualQueueCache.insertAtHead()}'s own fresh-
+   * timestamp write).
    *
-   * <p>{@code close()} only actually recycles a slot that is evictable ({@code refCount==0}), so
-   * the slot must be unpinned first; the poisoned value is written only after that (and after
-   * {@code unpin()}'s own {@code insertAtHead()} write), simulating staleness accumulated while the
-   * slot sat idle in the cold list before being explicitly closed.
+   * <p>{@code closeSlot()} only actually recycles a slot that is evictable ({@code refCount==0}),
+   * so the slot must be unpinned first; the poisoned value is written only after that (and after
+   * {@code unpinSlot()}'s own {@code insertAtHead()} write), simulating staleness accumulated while
+   * the slot sat idle in the cold list before being explicitly closed.
    */
   public void testCloseClearsPoisonedLastUnpinNanos() {
     int capacity = 4;
     Cache2.DualQueueCache cache = newCache(capacity);
 
     long[] handle = new long[1];
-    assertTrue(cache.acquireNode(handle));
+    assertTrue(cache.acquireNode(0, handle));
     long h = handle[0];
     int slot = (int) h & Cache2.SLOT_MASK;
 
-    cache.unpin(h, false); // make the slot evictable (refCount -> 0); required for close() to act
+    // make the slot evictable (refCount -> 0); required for closeSlot() to act
+    cache.unpinSlot(h, false);
     cache.setLastUnpinNanos(slot, 555555555L); // poison after unpin's own write
 
-    assertEquals("close() should have recycled the now-evictable slot", 0, cache.close(h));
-    assertEquals("close() must zero lastUnpinNanos on recycle", 0L, cache.getLastUnpinNanos(slot));
+    assertEquals("closeSlot() should have recycled the now-evictable slot", 0, cache.closeSlot(h));
+    assertEquals(
+        "closeSlot() must zero lastUnpinNanos on recycle", 0L, cache.getLastUnpinNanos(slot));
   }
 }
