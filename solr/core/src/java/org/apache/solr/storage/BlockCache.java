@@ -127,11 +127,51 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   // Handle encoding: (generation << 32) | (partitionIndex << PART_SHIFT) | localSlot
   //
   // Cache2.acquireNode() returns an opaque long encoding (generation, slot); BlockCache ORs in
-  // the partition index at bits 20-31 to form the full handle stored in accessMapped.
+  // the partition index at bits PART_SHIFT..31 to form the full handle stored in accessMapped.
   // ---------------------------------------------------------------------------
 
-  /** Number of bits reserved for the local slot within a partition (supports up to 1M slots). */
-  static final int PART_SHIFT = 20;
+  /**
+   * Target partition count: {@code solr.blockCache.nPartitions} if set, else {@link
+   * Runtime#availableProcessors()}. Not persisted -- read fresh from the environment at class-init
+   * time on every process start, with no compatibility constraint across restarts (handle encoding
+   * is never written to the backing file; see {@link #PART_SHIFT}).
+   *
+   * <p>The sole input to both {@link #PART_SHIFT} (how many bits the handle encoding reserves for
+   * the partition index) and {@link #computeNPartitions} (how many partitions actually get
+   * created). Both must derive from this same value: {@code PART_SHIFT} fixes an upper bound on
+   * addressable partitions, so {@code computeNPartitions} has to respect that same bound rather
+   * than computing its own independently.
+   */
+  private static final int REQUESTED_PARTITIONS =
+      Math.max(
+          1,
+          EnvUtils.getPropertyAsInteger(
+              "solr.blockCache.nPartitions", Runtime.getRuntime().availableProcessors()));
+
+  /**
+   * Number of bits the handle encoding reserves for the partition index, occupying the high bits
+   * above {@code PART_SHIFT} (the low {@code PART_SHIFT} bits address the local slot -- see {@link
+   * Cache2#SLOT_MASK}, which derives from this value). Sized to exactly the bits needed to address
+   * {@link #REQUESTED_PARTITIONS} partitions (rounded up to the next power of 2), clamped to {@code
+   * [1, 8]} bits -- i.e. supports 2 to 256 partitions. A host with few cores therefore reserves few
+   * bits for partitioning and gets correspondingly more per-partition slot capacity (via {@link
+   * Cache2#SLOT_MASK}); {@link #distribute}'s overflow check fails fast rather than silently
+   * aliasing slots if actual capacity ever exceeds what's addressable.
+   */
+  static final int PART_SHIFT = computePartShift();
+
+  private static int computePartShift() {
+    // Bits needed to address REQUESTED_PARTITIONS partitions, i.e. ceil(log2(n)), clamped to
+    // [1, 8]. Integer.SIZE - numberOfLeadingZeros(n - 1) is the standard bit trick for
+    // ceil(log2(n)), correct both at exact powers of 2 and at n=1 (numberOfLeadingZeros(0) == 32,
+    // giving 0, which the clamp below then raises to the 1-bit floor).
+    int partitionBits = Integer.SIZE - Integer.numberOfLeadingZeros(REQUESTED_PARTITIONS - 1);
+    partitionBits = Math.min(8, Math.max(1, partitionBits));
+    return Integer.SIZE - partitionBits;
+  }
+
+  /** Exclusive upper bound on partition count imposed by {@link #PART_SHIFT}'s bit budget. */
+  private static final int MAX_PARTITIONS = 1 << (32 - PART_SHIFT);
 
   /**
    * Sentinel handle meaning "no cached block". Zero is safe because {@link Cache2} never allocates
@@ -1548,6 +1588,26 @@ public class BlockCache implements Closeable, SolrMetricProducer {
     int nPartitions = computeNPartitions(nBlocks);
     int base = nBlocks / nPartitions;
     int remainder = nBlocks % nPartitions;
+    // base+1 (the largest any single partition's capacity can be, per the distribution below)
+    // must fit in PART_SHIFT bits, or handle encoding would silently alias two different slots
+    // onto the same bit pattern -- fail fast with actionable guidance instead of corrupting the
+    // cache's LRU/refcount bookkeeping.
+    if (base + 1 > Cache2.SLOT_MASK) {
+      throw new IllegalStateException(
+          "cache capacity too large for available partitioning: "
+              + nBlocks
+              + " blocks across "
+              + nPartitions
+              + " partitions would need up to "
+              + (base + 1)
+              + " slots/partition, exceeding the "
+              + Cache2.SLOT_MASK
+              + "-slot-per-partition limit (PART_SHIFT="
+              + PART_SHIFT
+              + "). Reduce solr.blockCache.byteSize, increase solr.compressionBlockKilobytes (fewer,"
+              + " larger blocks means fewer total slots to distribute), or run on a host with more"
+              + " CPUs (more, smaller partitions).");
+    }
 
     // Pass 1: compute every partition's capacity and Group 1/Group 2 slot counts up front, so the
     // one combined shared store can be allocated once, sized for the exact combined total -- this
@@ -1601,8 +1661,9 @@ public class BlockCache implements Closeable, SolrMetricProducer {
   }
 
   private static int computeNPartitions(int nBlocks) {
-    int cpus = Runtime.getRuntime().availableProcessors();
-    int n = Integer.highestOneBit(Math.max(1, cpus));
+    // Actual partition count never exceeds MAX_PARTITIONS: PART_SHIFT's bit budget bounds how
+    // many partitions the handle encoding can address at all.
+    int n = Integer.highestOneBit(Math.min(REQUESTED_PARTITIONS, MAX_PARTITIONS));
     if (n > nBlocks / n) {
       // small number of blocks relative to processors; fallback to single partition
       return 1;
