@@ -1285,7 +1285,7 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    * required first statement.
    */
   private BlockCache(int nBlocks, long targetBytes, Path backingFile) throws IOException {
-    super(nBlocks, computeNPartitions(nBlocks));
+    super(nBlocks, computeNPartitions(nBlocks), null);
     // Data region (and cached/pool below) is sized for nBlocks+1 blocks: ordinal 0 is reserved,
     // unused, so that cacheBlockOrd == slot directly -- see cacheBlockOrdOf's javadoc.
     long dataSize = (long) (nBlocks + 1) * COMPRESSION_BLOCK_SIZE;
@@ -1334,7 +1334,7 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    * data region is still used.
    */
   public BlockCache(Path existingBackingFile) throws IOException {
-    this(computeNBlocksFromBackingFile(existingBackingFile), existingBackingFile);
+    this(computeNBlocksFromBackingFile(existingBackingFile), existingBackingFile, new int[1][]);
   }
 
   private static int computeNBlocksFromBackingFile(Path existingBackingFile) throws IOException {
@@ -1355,8 +1355,9 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    * comment) so it can be passed to {@code super(...)} as this constructor's required first
    * statement.
    */
-  private BlockCache(int nBlocks, Path existingBackingFile) throws IOException {
-    super(nBlocks, computeNPartitions(nBlocks));
+  private BlockCache(int nBlocks, Path existingBackingFile, int[][] partitionEndHolder)
+      throws IOException {
+    super(nBlocks, computeNPartitions(nBlocks), partitionEndHolder);
     // Data and metadata regions are each sized for nBlocks+1 blocks: ordinal 0 is reserved,
     // unused -- see cacheBlockOrdOf's javadoc.
     long dataSize = (long) (nBlocks + 1) * COMPRESSION_BLOCK_SIZE;
@@ -1383,7 +1384,7 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
     boolean valid = (storedId ^ storedSig) == CACHE_VALIDATION_MAGIC;
     if (ENABLE_CACHE_PERSISTENCE && valid) {
       this.alwaysPrepareWrite = true;
-      this.extantMap = buildExtantMap(nBlocks, mb);
+      this.extantMap = buildExtantMap(nBlocks, mb, partitionEndHolder[0]);
     } else {
       log.warn(
           "BlockCache backing file {} failed validation (storedId={} sig={}); cold start",
@@ -1433,7 +1434,7 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    * {@code Cache2}'s constructor, already run by the time this is called) to resolve each global
    * slot's owning partition.
    */
-  private ByteBuffer buildExtantMap(int nBlocks, ByteBuffer metaBuf) {
+  private ByteBuffer buildExtantMap(int nBlocks, ByteBuffer metaBuf, int[] partitionEnd) {
     long[] ret = new long[nBlocks * 3];
     int j = 0;
     int curPart = 0;

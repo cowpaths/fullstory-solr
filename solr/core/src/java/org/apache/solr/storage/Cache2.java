@@ -510,15 +510,6 @@ class Cache2 {
   final int nPartitions;
 
   /**
-   * Exclusive upper bound of the global real-slot range each partition owns, indexed by partition
-   * index: partition {@code i}'s real slots are {@code (i == 0 ? 0 : partitionEnd[i - 1]) + 1 ..
-   * partitionEnd[i]}. Used by {@code BlockCache} to resolve each slot's owning partition (e.g. in
-   * {@code buildExtantMap}) and is purely a derived convenience -- partition boundaries are
-   * otherwise only needed internally, for sizing each partition's own chain during construction.
-   */
-  final int[] partitionEnd;
-
-  /**
    * Total number of addressable slot indices 0..totalSlots-1. Slot 0 is reserved. Real slots are
    * 1..capacity. The remaining indices hold every partition's sentinels (COLD_HEAD, COLD_TAIL, and
    * optionally HOT_HEAD, HOT_TAIL), in a reserved region past {@code capacity} -- never interleaved
@@ -545,7 +536,7 @@ class Cache2 {
    * @param extraSentinelSlots additional sentinels per partition beyond COLD_HEAD/COLD_TAIL (e.g. 2
    *     for {@link DualQueueCache}'s HOT_HEAD/HOT_TAIL)
    */
-  Cache2(int capacity, int nPartitions, int extraSentinelSlots) {
+  Cache2(int capacity, int nPartitions, int extraSentinelSlots, int[][] partitionEndHolder) {
     this.capacity = capacity;
     this.nPartitions = nPartitions;
     // Real slots start at refCount=0/generation=0 (the zero-initialized default). Sized for real
@@ -632,7 +623,10 @@ class Cache2 {
     // physically-adjacent slots in immediate succession -- the same kind of temporal/physical
     // adjacency correlation that motivated group1's/group2's cache-line-aware layouts in the first
     // place, except here it's an artifact of link order rather than slot-number assignment.
-    this.partitionEnd = new int[nPartitions];
+    int[] partitionEnd = new int[nPartitions];
+    if (partitionEndHolder != null) {
+      partitionEndHolder[0] = partitionEnd;
+    }
     int base = capacity / nPartitions;
     int remainder = capacity % nPartitions;
     int partitionStart = 0; // exclusive upper bound of the previous partition's real-slot range
@@ -1443,8 +1437,8 @@ class Cache2 {
      * the spaced-by-2 scheme (see base constructor) so HOT_HEAD/HOT_TAIL each also get an exclusive
      * cache line.
      */
-    DualQueueCache(int capacity, int nPartitions) {
-      super(capacity, nPartitions, 2);
+    DualQueueCache(int capacity, int nPartitions, int[][] partitionEndHolder) {
+      super(capacity, nPartitions, 2, partitionEndHolder);
       this.HOT_HEAD = new int[nPartitions];
       this.HOT_TAIL = new int[nPartitions];
       for (int i = 0; i < nPartitions; i++) {

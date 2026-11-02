@@ -30,7 +30,7 @@ import org.apache.solr.SolrTestCaseJ4;
 public class TestCache2LastUnpinNanosReset extends SolrTestCaseJ4 {
 
   private static Cache2.DualQueueCache newCache(int capacity) {
-    return new Cache2.DualQueueCache(capacity, 1);
+    return new Cache2.DualQueueCache(capacity, 1, null);
   }
 
   /**
