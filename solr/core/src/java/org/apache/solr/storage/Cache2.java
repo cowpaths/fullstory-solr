@@ -1010,12 +1010,12 @@ class Cache2 {
    * actual splice to {@link #insertAtHeadSlot}.
    */
   protected boolean insertAtHead(int partitionIdx, int slot, boolean recordAccess) {
-    insertAtHeadSlot(COLD_HEAD[partitionIdx], slot, recordAccess);
+    insertAtHeadSlot(COLD_HEAD[partitionIdx], slot);
     return false;
   }
 
   /** Splices {@code slot} in at the head of the list whose head sentinel is {@code listHead}. */
-  protected void insertAtHeadSlot(int listHead, int slot, boolean recordAccess) {
+  protected void insertAtHeadSlot(int listHead, int slot) {
     // Hoisted for the same reason as pin()/unpin() (see those methods' comments): listHead's
     // offset is used three times below (reserve()'s own argument, the getNextVolatile it used to
     // wrap, and the final compareAndSetNext) and slot's offset twice -- each wrapper call below
@@ -1464,8 +1464,7 @@ class Cache2 {
       long lastUnpin = getAndSetLastUnpinNanos(slot, recordAccess ? System.nanoTime() : 0);
       boolean toHot = toHot(lastUnpin);
       setFromHotVolatile(slot, toHot);
-      insertAtHeadSlot(
-          toHot ? HOT_HEAD[partitionIdx] : COLD_HEAD[partitionIdx], slot, recordAccess);
+      insertAtHeadSlot(toHot ? HOT_HEAD[partitionIdx] : COLD_HEAD[partitionIdx], slot);
       return toHot;
     }
 
