@@ -121,18 +121,15 @@ class Cache2 {
    * (slot 0 reserved/unused but still addressable).
    *
    * <p>A single {@code Cache2} instance (there is exactly one per {@link BlockCache}) owns the
-   * entire store exclusively -- {@link #group1BaseOffset} is always 0. Deliberately kept as two
-   * separate {@code private final} fields (a reference and a primitive {@code long}), NOT wrapped
-   * in a single pair object: wrapping them would add a second reference-field dereference to every
-   * single access (one hop to reach the wrapper, a second to reach its {@code store}/{@code
-   * baseOffset} fields), which for a {@code MemorySegment}-backed store also costs the JIT
-   * constant-folding a {@code static final} segment reference otherwise gets. Two bare fields
-   * avoids that extra hop entirely.
+   * entire store exclusively, always starting at offset 0 (unlike {@link #group2}, which follows
+   * immediately after it in the same combined allocation -- see {@link #group2BaseOffset}) -- a
+   * bare field, not wrapped in a pair object: wrapping would add a second reference-field
+   * dereference to every single access (one hop to reach the wrapper, a second to reach its {@code
+   * store} field), which for a {@code MemorySegment}-backed store also costs the JIT
+   * constant-folding a {@code static final} segment reference otherwise gets. A bare field avoids
+   * that extra hop entirely.
    */
   protected final OffHeapStore group1;
-
-  /** This instance's base offset into {@link #group1} -- always 0, see that field's javadoc. */
-  private final long group1BaseOffset;
 
   private static final int GROUP1_STRIDE = 64; // one cache line per slot; must be a power of 2
   private static final int GROUP1_STRIDE_SHIFT = Integer.numberOfTrailingZeros(GROUP1_STRIDE);
@@ -455,7 +452,7 @@ class Cache2 {
   static final int SLOT_MASK = (1 << PART_SHIFT) - 1;
 
   /** Extracts the partition index from the high bits of a handle. */
-  static int partOf(long handle) {
+  private static int partOf(long handle) {
     return ((int) handle) >>> PART_SHIFT;
   }
 
@@ -605,7 +602,6 @@ class Cache2 {
     assert (totalGroup2Slots & 1) == 0;
     Stores stores = allocateGroup1And2Stores(totalGroup1Slots, totalGroup2Slots);
     this.group1 = stores.store;
-    this.group1BaseOffset = 0;
     // Must align to GROUP2_CACHE_LINE (64), not GROUP2_STRIDE (32): the cache-line-isolation
     // guarantee group2 exists for (and that the sentinel spacing above depends on) requires every
     // even slot index to start a fresh 64-byte line, which only holds if group2's own base is
@@ -794,13 +790,12 @@ class Cache2 {
   // beyond org.apache.solr.storage.
 
   /**
-   * Offset of {@code slot}'s stride base within {@link #group1}, including {@link
-   * #group1BaseOffset} -- always even (every slot's stride is 16 ints, {@link #group1BaseOffset} is
-   * always a multiple of {@code 1 << GROUP1_SLOT_SHIFT}, i.e. 16), so halving it (via {@code >>>
-   * 1}) for a long-typed access is always exact, never truncating.
+   * Offset of {@code slot}'s stride base within {@link #group1} -- always even (every slot's stride
+   * is 16 ints), so halving it (via {@code >>> 1}) for a long-typed access is always exact, never
+   * truncating.
    */
   protected long group1Offset(int slot) {
-    return ((long) slot << GROUP1_SLOT_SHIFT) + group1BaseOffset;
+    return (long) slot << GROUP1_SLOT_SHIFT;
   }
 
   /**
