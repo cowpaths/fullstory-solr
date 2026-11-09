@@ -1592,7 +1592,7 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
         return (int) handle & SLOT_MASK;
       default:
         final int cacheBlockOrd = (int) handle & SLOT_MASK;
-        (fromHot(handle) ? pinnedFromHot : pinnedFromCold).increment();
+        (getFromHotVolatile(cacheBlockOrd) ? pinnedFromHot : pinnedFromCold).increment();
         return cacheBlockOrd;
     }
   }
@@ -1652,7 +1652,7 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
     // a cache hit. Since writeMetrics computes hits = repinHits + pinnedFromHot + pinnedFromCold,
     // we offset the upcoming pinnedFrom* increment so it doesn't inflate the hit count.
     repinHits.decrement();
-    if (fromHot(outHandle[0])) {
+    if (getFromHotVolatile(cacheBlockOrd)) {
       hotAcquisitions.increment();
       pinnedFromHot.increment();
       if (extantMap != null) {
