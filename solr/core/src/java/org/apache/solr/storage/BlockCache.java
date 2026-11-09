@@ -1191,13 +1191,37 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
   // Construction
   // ---------------------------------------------------------------------------
 
+  /**
+   * {@code cacheBlockOrd} -- the flat global block index into {@link #pool}/{@link #cached}/{@link
+   * #mapping}/{@link #metaBuf} -- is identical to a handle's encoded slot, {@code (int) handle &
+   * Cache2.SLOT_MASK}: no arithmetic, computed inline at each use rather than through a named
+   * helper. Slot 0 is globally reserved (see {@link Cache2}) and never assigned to a real handle,
+   * so ordinal 0 of each of those structures is correspondingly never addressed by any live handle.
+   *
+   * <p>The ephemeral constructor simply sizes {@link #pool}/{@link #cached}/{@link #mapping} one
+   * block larger than {@code capacity} to accommodate the unused ordinal 0 -- cheap and
+   * consequence-free, since nothing is ever persisted.
+   *
+   * <p>The persistent constructor, by contrast, sets {@code capacity} itself one less than {@code
+   * nBlocks} (the file's actual on-disk block count): ordinal 0 of the existing, unexpanded {@code
+   * nBlocks}-sized data/metadata regions is sacrificed as usable capacity, rather than growing
+   * those regions to accommodate it -- the on-disk {@code dataSize}/{@code metaSize}/layout stay
+   * exactly what they'd be without this reservation, byte-for-byte. This is what makes reserving
+   * ordinal 0 compatible both ways with code that doesn't reserve it: a file last written by such
+   * code opens here with one block's worth of capacity simply unavailable (whatever occupied
+   * on-disk ordinal 0 is ignored and overwritten -- see {@link #buildExtantMap}), and conversely a
+   * file last written by this code remains perfectly readable by such code (which just sees one
+   * extra, currently-empty block).
+   */
   private final ByteBuffer[] pool;
+
   private final ByteBuffer[] poolRO;
 
   /**
    * Holds {@link #populate}/{@link #join}'s cached decompressed buffer, indexed directly by {@code
    * cacheBlockOrd} (the same flat global block index already used for {@link #pool}/{@link
-   * #mapping}).
+   * #mapping} -- see {@link #pool}'s own javadoc for the reserved-ordinal-0 scheme all of these
+   * share).
    *
    * <p>Access via the {@link #CACHED} VarHandle for volatile semantics, matching the
    * array-of-primitives pattern used elsewhere in this class (cf. {@code accessMapped}). Cleared on
@@ -1277,7 +1301,9 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    */
   private BlockCache(int nBlocks, long targetBytes, Path backingFile) throws IOException {
     super(nBlocks, computeNPartitions(nBlocks), null);
-    long dataSize = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
+    // nBlocks+1: ordinal 0 is reserved/unused (see pool's javadoc) -- cheap and consequence-free
+    // here, since an ephemeral cache is never persisted.
+    long dataSize = (long) (nBlocks + 1) * COMPRESSION_BLOCK_SIZE;
     try (FileChannel fc =
         FileChannel.open(
             backingFile,
@@ -1289,7 +1315,9 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
     }
     BlockCacheMapping m;
     try {
-      m = BlockCacheMmapProvider.getDefault().open(backingFile, COMPRESSION_BLOCK_SIZE, nBlocks);
+      m =
+          BlockCacheMmapProvider.getDefault()
+              .open(backingFile, COMPRESSION_BLOCK_SIZE, nBlocks + 1);
     } finally {
       Files.delete(backingFile);
     }
@@ -1298,7 +1326,7 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
     this.pool = m.dataPool();
     this.poolRO =
         Arrays.stream(this.pool).map(ByteBuffer::asReadOnlyBuffer).toArray(ByteBuffer[]::new);
-    this.cached = new Object[nBlocks];
+    this.cached = new Object[nBlocks + 1];
     this.metaBuf = null;
     this.alwaysPrepareWrite = false;
     this.extantMap = null;
@@ -1328,7 +1356,9 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
     long fileSize = Files.size(existingBackingFile);
     long dataPerBlock = (long) COMPRESSION_BLOCK_SIZE + META_BYTES_PER_BLOCK;
     int nBlocks = Math.toIntExact((fileSize - TRAILER_BYTES) / dataPerBlock);
-    if (nBlocks <= 0) {
+    // Must be >= 2: one block is reserved (ordinal 0 -- see pool's javadoc), so at least 2
+    // on-disk blocks are needed for capacity (nBlocks - 1) to be positive.
+    if (nBlocks <= 1) {
       throw new IOException(
           "BlockCache backing file too small (" + fileSize + " bytes): " + existingBackingFile);
     }
@@ -1338,11 +1368,14 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
   /**
    * {@code nBlocks} is split out into its own parameter (see the ephemeral constructor's identical
    * comment) so it can be passed to {@code super(...)} as this constructor's required first
-   * statement.
+   * statement. Unlike the ephemeral constructor, {@code capacity} (passed to {@code super(...)}) is
+   * {@code nBlocks - 1}, not {@code nBlocks}: ordinal 0 is sacrificed from the existing, unexpanded
+   * on-disk layout rather than grown into, so the file format is unaffected -- see {@link #pool}'s
+   * javadoc.
    */
   private BlockCache(int nBlocks, Path existingBackingFile, int[][] partitionEndHolder)
       throws IOException {
-    super(nBlocks, computeNPartitions(nBlocks), partitionEndHolder);
+    super(nBlocks - 1, computeNPartitions(nBlocks - 1), partitionEndHolder);
     long dataSize = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
     long metaSize = (long) nBlocks * META_BYTES_PER_BLOCK + TRAILER_BYTES;
     MappedByteBuffer mb;
@@ -1367,7 +1400,13 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
     boolean valid = (storedId ^ storedSig) == CACHE_VALIDATION_MAGIC;
     if (ENABLE_CACHE_PERSISTENCE && valid) {
       this.alwaysPrepareWrite = true;
-      this.extantMap = buildExtantMap(nBlocks, mb, partitionEndHolder[0]);
+      // Ordinal 0's metadata entry (if any -- e.g. a file last written without this reservation)
+      // is deliberately excluded from the extant map and explicitly zeroed, so it can never be
+      // warm-started into and reused as capacity by this or any future run.
+      mb.putLong(0, 0L);
+      mb.putLong(8, 0L);
+      mb.putInt(16, 0);
+      this.extantMap = buildExtantMap(capacity, mb, partitionEndHolder[0]);
     } else {
       log.warn(
           "BlockCache backing file {} failed validation (storedId={} sig={}); cold start",
@@ -1406,36 +1445,38 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    * Reads the metadata region and returns a sorted extant map of pre-existing valid cache entries.
    * Each entry is a triplet {@code [uuidMsb, uuidLsb, (blockIdx << 32 | handleLow32)]} sorted
    * ascending by {@code (uuidMsb, uuidLsb)} for binary-search access in {@code acquireNode}. {@code
-   * handleLow32} encodes {@code (partIdx << Cache2.PART_SHIFT) | slot} for the slot that holds
-   * global block {@code i}, so the warm-start path can call {@link #pin} directly with generation=0
-   * in the upper 32 bits.
+   * handleLow32} encodes {@code (partIdx << Cache2.PART_SHIFT) | slot}, so the warm-start path can
+   * call {@link #pin} directly with generation=0 in the upper 32 bits.
    *
    * <p>For a 340 GiB (usable) cache the on-disk metadata is ~27 MiB; the extant map is ~32 MiB.
    * Built on-heap (see return statement) since that's the better fit for the radix sort's
    * sequential scans; copied to a direct buffer for the caller to retain long-term.
    *
    * <p>Instance method (not static): reads this instance's own {@code partitionEnd} (populated by
-   * {@code Cache2}'s constructor, already run by the time this is called) to resolve each global
-   * block index {@code i}'s owning partition.
+   * {@code Cache2}'s constructor, already run by the time this is called) to resolve each slot's
+   * owning partition.
+   *
+   * @param capacity this instance's usable capacity ({@code nBlocks - 1}; ordinal 0 is reserved --
+   *     see {@link #pool}'s javadoc -- so it is deliberately excluded from this iteration, never
+   *     added to the extant map).
    */
-  private ByteBuffer buildExtantMap(int nBlocks, ByteBuffer metaBuf, int[] partitionEnd) {
-    long[] ret = new long[nBlocks * 3];
+  private ByteBuffer buildExtantMap(int capacity, ByteBuffer metaBuf, int[] partitionEnd) {
+    long[] ret = new long[capacity * 3];
     int j = 0;
     int curPart = 0;
-    int curPartEnd = partitionEnd[0]; // exclusive; i == curPartEnd triggers advance
-    for (int i = 0; i < nBlocks; i++) {
-      if (i == curPartEnd) {
+    int curPartEnd = partitionEnd[0]; // inclusive upper bound of curPart's slots
+    // slot doubles as both the global 1-indexed slot number and (since cacheBlockOrd == slot
+    // directly -- see pool's javadoc) the metadata region's physical block ordinal.
+    for (int slot = 1; slot <= capacity; slot++) {
+      if (slot > curPartEnd) {
         curPartEnd = partitionEnd[++curPart];
       }
-      int base = i * META_BYTES_PER_BLOCK;
+      int base = slot * META_BYTES_PER_BLOCK;
       long uuidMsb = metaBuf.getLong(base);
       long uuidLsb = metaBuf.getLong(base + 8);
       if (uuidMsb == 0 && uuidLsb == 0) continue; // uninitialized entry
       int blockIdx = metaBuf.getInt(base + 16);
       if (blockIdx == -1) continue; // in-progress write (populate() did not commit)
-
-      // Global block index i maps to global (1-indexed) slot i+1, uniformly across partitions.
-      int slot = i + 1;
 
       int handleLow32 = (curPart << PART_SHIFT) | slot;
       ret[j++] = uuidMsb;
@@ -1537,14 +1578,6 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
   // ---------------------------------------------------------------------------
 
   /**
-   * cacheBlockOrd corresponding to a handle's encoded slot -- uniformly {@code slot - 1} across
-   * every partition (slot 0 is reserved globally, not per-partition).
-   */
-  private static int cacheBlockOrdOf(long handle) {
-    return ((int) handle & SLOT_MASK) - 1;
-  }
-
-  /**
    * Pins the slot identified by {@code handle}. Returns {@code -1} if the slot is permanently dead,
    * otherwise the pinned slot's {@code cacheBlockOrd} (always &ge;0). Note: unrelated to {@link
    * Cache2#pinSlot}'s own {@code int} return, which encodes first-pin/re-pin/dead state rather than
@@ -1556,9 +1589,9 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
         return -1;
       case 0:
         repinHits.increment();
-        return cacheBlockOrdOf(handle);
+        return (int) handle & SLOT_MASK;
       default:
-        final int cacheBlockOrd = cacheBlockOrdOf(handle);
+        final int cacheBlockOrd = (int) handle & SLOT_MASK;
         (fromHot(handle) ? pinnedFromHot : pinnedFromCold).increment();
         return cacheBlockOrd;
     }
@@ -1582,7 +1615,7 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
         return;
     }
     // on last unpin, clear the cached ByteBuffer. recreating is cheap.
-    final int cacheBlockOrd = cacheBlockOrdOf(handle);
+    final int cacheBlockOrd = (int) handle & SLOT_MASK;
     Object cur = CACHED.getVolatile(cached, cacheBlockOrd);
     if (cur instanceof ByteBuffer && cur != EXCEPTION_SENTINEL) {
       // CAS ensures we never clobber EXCEPTION_SENTINEL; if it loses, cached is already
@@ -1602,9 +1635,9 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
       poolExhausted.increment();
       return -1;
     }
-    // cacheBlockOrdOf only reads the slot bits of outHandle[0], so resolving it here (before
+    // cacheBlockOrd is just the slot bits of outHandle[0], so resolving it here (before
     // encodeHandle ORs in the partition bits below) is equivalent to resolving it after.
-    final int cacheBlockOrd = cacheBlockOrdOf(outHandle[0]);
+    final int cacheBlockOrd = (int) outHandle[0] & SLOT_MASK;
     // A plain (non-volatile) write is fine: even though refCount is already CAS'd to 1 by this
     // point (inside acquireNode(i, outHandle) above), no other thread can have a handle that
     // passes pin()'s generation check yet -- the bumped generation hasn't been shared with anyone

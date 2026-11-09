@@ -20,6 +20,7 @@ import static org.apache.solr.storage.CompressingDirectory.COMPRESSION_BLOCK_SIZ
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -339,6 +340,94 @@ public class TestBlockCache extends SolrTestCaseJ4 {
             cache.isPopulated(cacheBlockOrd));
       } finally {
         cache.unpin(handle);
+      }
+    }
+  }
+
+  /**
+   * Regression test: ordinal 0 of the on-disk data/metadata regions is permanently reserved (see
+   * {@code BlockCache#cacheBlockOrdOf}'s javadoc) -- a file written by code that doesn't reserve it
+   * (or simply one from before this reservation existed) may have a legitimate-looking entry
+   * physically occupying that ordinal. Opening such a file must neither warm-start from that entry
+   * nor otherwise hand it out as live capacity; it must be ignored and explicitly zeroed on-disk so
+   * it can never resurface on a later (e.g. crash-recovery cold-start) reopen either.
+   */
+  public void testOrdinalZeroEntryIgnoredAndZeroedOnOpen() throws IOException {
+    int nBlocks = 3; // on-disk block count; usable capacity after reservation is nBlocks - 1
+    Path tmpDir = createTempDir();
+    Path cachePath = tmpDir.resolve("cache.tmp");
+    try (FileChannel fc =
+        FileChannel.open(cachePath, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+      fc.write(ByteBuffer.wrap(new byte[1]), BlockCache.backingFileBytes(nBlocks) - 1);
+    }
+
+    UUID ordZeroUuid = new UUID(0, 1);
+    byte[] sentinel = new byte[Integer.BYTES];
+
+    // Populate every real (usable) slot. acquireNode/Cache2 never assign slot/cacheBlockOrd 0 (it
+    // is reserved internally regardless of this test), so these populate() calls can never touch
+    // physical ordinal 0 -- safe to forge an entry directly there afterward with no risk of
+    // clobbering or colliding with a real entry.
+    try (BlockCache cache = new BlockCache(cachePath)) {
+      long[] h = new long[1];
+      for (int idx = 0; idx < nBlocks - 1; idx++) {
+        UUID uuid = new UUID(0, 100 + idx);
+        int cacheBlockOrd = cache.acquireNode(h, uuid, 0);
+        assertTrue(cacheBlockOrd >= 0);
+        ByteBuffer.wrap(sentinel).putInt(0, idx);
+        cache.populate(cacheBlockOrd, sentinel, 0, Integer.BYTES, uuid, 0);
+        cache.unpin(h[0]);
+      }
+    }
+    // Forge a valid-looking metadata entry directly at physical ordinal 0, bypassing
+    // acquireNode/populate entirely -- simulating a file whose ordinal 0 was legitimately in use
+    // under a version of this code that didn't reserve it.
+    long metaRegionStart = (long) nBlocks * COMPRESSION_BLOCK_SIZE;
+    try (FileChannel fc =
+        FileChannel.open(cachePath, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+      // Absolute puts (index-based) don't advance position/limit, so the buffer is already
+      // correctly positioned at [0, 20) for a full write -- no flip() needed (and calling it here
+      // would incorrectly collapse limit to 0, writing nothing).
+      ByteBuffer meta = ByteBuffer.allocate(20).order(ByteOrder.LITTLE_ENDIAN);
+      meta.putLong(0, ordZeroUuid.getMostSignificantBits());
+      meta.putLong(8, ordZeroUuid.getLeastSignificantBits());
+      meta.putInt(16, 0); // blockIdx
+      fc.write(meta, metaRegionStart); // physical ordinal 0's metadata entry
+    }
+
+    // Reopen: ordinal 0's forged entry must not appear in the extant map (peekExtantHandle must
+    // not find it), and the real entries populated above must still be found exactly as written.
+    try (BlockCache cache = new BlockCache(cachePath)) {
+      assertEquals(
+          "usable capacity must exclude the reserved ordinal", nBlocks - 1, cache.capacity);
+      assertEquals(
+          "forged ordinal-0 entry must not be warm-started",
+          BlockCache.NULL_HANDLE,
+          cache.peekExtantHandle(ordZeroUuid, 0));
+      for (int idx = 0; idx < nBlocks - 1; idx++) {
+        UUID uuid = new UUID(0, 100 + idx);
+        long handle = cache.peekExtantHandle(uuid, 0);
+        assertTrue(
+            "expected a valid warm-start handle for idx=" + idx, handle != BlockCache.NULL_HANDLE);
+        int cacheBlockOrd = cache.pin(handle);
+        assertTrue(cacheBlockOrd >= 0);
+        try {
+          assertEquals(idx, cache.join(cacheBlockOrd, null).getInt(0));
+        } finally {
+          cache.unpin(handle);
+        }
+      }
+    }
+
+    // Ordinal 0's forged metadata entry must have been explicitly zeroed on-disk during the
+    // reopen above, so even a future cold start (which trusts raw on-disk metadata bytes, not
+    // just this process's in-memory extant map) can never resurrect it.
+    try (FileChannel fc = FileChannel.open(cachePath, StandardOpenOption.READ)) {
+      ByteBuffer meta = ByteBuffer.allocate(20);
+      int read = fc.read(meta, metaRegionStart);
+      assertEquals(20, read);
+      for (int i = 0; i < 20; i++) {
+        assertEquals("ordinal 0 metadata byte " + i + " should have been zeroed", 0, meta.get(i));
       }
     }
   }
