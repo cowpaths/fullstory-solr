@@ -346,13 +346,14 @@ public class TestBlockCache extends SolrTestCaseJ4 {
 
   /**
    * Regression test: ordinal 0 of the on-disk data/metadata regions is permanently reserved (see
-   * {@code BlockCache#cacheBlockOrdOf}'s javadoc) -- a file written by code that doesn't reserve it
-   * (or simply one from before this reservation existed) may have a legitimate-looking entry
-   * physically occupying that ordinal. Opening such a file must neither warm-start from that entry
-   * nor otherwise hand it out as live capacity; it must be ignored and explicitly zeroed on-disk so
-   * it can never resurface on a later (e.g. crash-recovery cold-start) reopen either.
+   * {@code BlockCache#pool}'s javadoc) -- a file written by code that doesn't reserve it (or simply
+   * one from before this reservation existed) may have a legitimate-looking entry physically
+   * occupying that ordinal. Opening such a file must neither warm-start from that entry nor
+   * otherwise hand it out as live capacity -- it must be ignored entirely, left exactly as found on
+   * disk (never read, never overwritten), since {@code buildExtantMap}'s {@code slot} loop simply
+   * never visits it.
    */
-  public void testOrdinalZeroEntryIgnoredAndZeroedOnOpen() throws IOException {
+  public void testOrdinalZeroEntryIgnoredOnOpen() throws IOException {
     int nBlocks = 3; // on-disk block count; usable capacity after reservation is nBlocks - 1
     Path tmpDir = createTempDir();
     Path cachePath = tmpDir.resolve("cache.tmp");
@@ -394,6 +395,10 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       meta.putInt(16, 0); // blockIdx
       fc.write(meta, metaRegionStart); // physical ordinal 0's metadata entry
     }
+    byte[] ordZeroBytesBefore = new byte[20];
+    try (FileChannel fc = FileChannel.open(cachePath, StandardOpenOption.READ)) {
+      fc.read(ByteBuffer.wrap(ordZeroBytesBefore), metaRegionStart);
+    }
 
     // Reopen: ordinal 0's forged entry must not appear in the extant map (peekExtantHandle must
     // not find it), and the real entries populated above must still be found exactly as written.
@@ -419,16 +424,16 @@ public class TestBlockCache extends SolrTestCaseJ4 {
       }
     }
 
-    // Ordinal 0's forged metadata entry must have been explicitly zeroed on-disk during the
-    // reopen above, so even a future cold start (which trusts raw on-disk metadata bytes, not
-    // just this process's in-memory extant map) can never resurrect it.
+    // Ordinal 0's forged metadata entry is never read, so it is also never overwritten -- it must
+    // still be exactly what was forged above, byte-for-byte, after the reopen.
     try (FileChannel fc = FileChannel.open(cachePath, StandardOpenOption.READ)) {
       ByteBuffer meta = ByteBuffer.allocate(20);
       int read = fc.read(meta, metaRegionStart);
       assertEquals(20, read);
-      for (int i = 0; i < 20; i++) {
-        assertEquals("ordinal 0 metadata byte " + i + " should have been zeroed", 0, meta.get(i));
-      }
+      assertArrayEquals(
+          "ordinal 0's metadata must be left untouched, since it is never read",
+          ordZeroBytesBefore,
+          meta.array());
     }
   }
 

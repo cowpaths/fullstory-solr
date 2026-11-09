@@ -1208,10 +1208,11 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    * those regions to accommodate it -- the on-disk {@code dataSize}/{@code metaSize}/layout stay
    * exactly what they'd be without this reservation, byte-for-byte. This is what makes reserving
    * ordinal 0 compatible both ways with code that doesn't reserve it: a file last written by such
-   * code opens here with one block's worth of capacity simply unavailable (whatever occupied
-   * on-disk ordinal 0 is ignored and overwritten -- see {@link #buildExtantMap}), and conversely a
-   * file last written by this code remains perfectly readable by such code (which just sees one
-   * extra, currently-empty block).
+   * code opens here with one block's worth of capacity simply unavailable -- ordinal 0's metadata,
+   * whatever it holds, is never read (see {@link #buildExtantMap}'s {@code slot} loop, which starts
+   * at 1) nor written, left exactly as it was found -- and conversely a file last written by this
+   * code remains perfectly readable by such code, which simply recovers one extra block of capacity
+   * (whatever this code may or may not have stored there).
    */
   private final ByteBuffer[] pool;
 
@@ -1400,12 +1401,6 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
     boolean valid = (storedId ^ storedSig) == CACHE_VALIDATION_MAGIC;
     if (ENABLE_CACHE_PERSISTENCE && valid) {
       this.alwaysPrepareWrite = true;
-      // Ordinal 0's metadata entry (if any -- e.g. a file last written without this reservation)
-      // is deliberately excluded from the extant map and explicitly zeroed, so it can never be
-      // warm-started into and reused as capacity by this or any future run.
-      mb.putLong(0, 0L);
-      mb.putLong(8, 0L);
-      mb.putInt(16, 0);
       this.extantMap = buildExtantMap(capacity, mb, partitionEndHolder[0]);
     } else {
       log.warn(
