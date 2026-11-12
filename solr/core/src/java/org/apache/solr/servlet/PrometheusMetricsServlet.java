@@ -923,6 +923,12 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         "Cumulative hits from local fcache-docs-hot cache store (vs backing shared cache store)",
         "cumulative_hits",
         PrometheusMetricType.COUNTER),
+    CUMULATIVE_ORD_MAP_CACHE_HITS(
+        "CACHE.searcher.ordMapCache",
+        "ord_map_cache_hits",
+        "Cumulative hits from the ordinal map cache",
+        "cumulative_hits",
+        PrometheusMetricType.COUNTER),
     CUMULATIVE_DOCUMENT_CACHE_LOCAL_LOOKUPS(
         "CACHE.searcher.documentCache",
         "document_cache_store_local_lookups",
@@ -945,6 +951,12 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         "CACHE.searcher.fcache-docs-hot",
         "fcache_docs_hot_local_lookups",
         "Cumulative lookups from local fcache-docs-hot cache store (vs backing shared cache store)",
+        "cumulative_lookups",
+        PrometheusMetricType.COUNTER),
+    CUMULATIVE_ORD_MAP_CACHE_LOOKUPS(
+        "CACHE.searcher.ordMapCache",
+        "ord_map_cache_lookups",
+        "Cumulative lookups from the ordinal map cache",
         "cumulative_lookups",
         PrometheusMetricType.COUNTER),
     CUMULATIVE_DOCUMENT_CACHE_LOCAL_EVICTION(
@@ -971,6 +983,12 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         "Cumulative evictions from local fcache-docs-hot cache store (vs backing shared cache store)",
         "cumulative_evictions",
         PrometheusMetricType.COUNTER),
+    CUMULATIVE_ORD_MAP_CACHE_EVICTION(
+        "CACHE.searcher.ordMapCache",
+        "ord_map_cache_eviction",
+        "Cumulative evictions from the ordinal map cache",
+        "cumulative_evictions",
+        PrometheusMetricType.COUNTER),
     DOCUMENT_CACHE_LOCAL_BYTES_USED(
         "CACHE.searcher.documentCache",
         "document_cache_store_local_bytes_used",
@@ -995,6 +1013,12 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         "Bytes used from local fcache-docs-hot cache store (vs backing shared cache store)",
         "ramBytesUsed",
         PrometheusMetricType.GAUGE),
+    ORD_MAP_CACHE_BYTES_USED(
+        "CACHE.searcher.ordMapCache",
+        "ord_map_cache_bytes_used",
+        "Bytes used by the ordinal map cache",
+        "ramBytesUsed",
+        PrometheusMetricType.GAUGE),
     DOCUMENT_CACHE_LOCAL_SIZE(
         "CACHE.searcher.documentCache",
         "document_cache_store_local_size",
@@ -1017,6 +1041,12 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
         "CACHE.searcher.fcache-docs-hot",
         "fcache_docs_hot_local_size",
         "Number of entries in local fcache-docs-hot cache store (vs backing shared cache store)",
+        "size",
+        PrometheusMetricType.GAUGE),
+    ORD_MAP_CACHE_SIZE(
+        "CACHE.searcher.ordMapCache",
+        "ord_map_cache_size",
+        "Number of entries in the ordinal map cache",
         "size",
         PrometheusMetricType.GAUGE),
     HTTP_CLIENT_OUTSTANDING_REQUESTS(
@@ -1251,22 +1281,27 @@ public final class PrometheusMetricsServlet extends BaseSolrServlet {
             CoreMetric.CUMULATIVE_DOCUMENT_CACHE_LOCAL_HITS,
             CoreMetric.CUMULATIVE_FILTER_CACHE_LOCAL_HITS,
             CoreMetric.CUMULATIVE_FCACHE_DOCS_HOT_LOCAL_HITS,
+            CoreMetric.CUMULATIVE_ORD_MAP_CACHE_HITS,
             CoreMetric.CUMULATIVE_QUERY_RESULT_CACHE_LOCAL_LOOKUPS,
             CoreMetric.CUMULATIVE_DOCUMENT_CACHE_LOCAL_LOOKUPS,
             CoreMetric.CUMULATIVE_FILTER_CACHE_LOCAL_LOOKUPS,
             CoreMetric.CUMULATIVE_FCACHE_DOCS_HOT_LOCAL_LOOKUPS,
+            CoreMetric.CUMULATIVE_ORD_MAP_CACHE_LOOKUPS,
             CoreMetric.CUMULATIVE_QUERY_RESULT_CACHE_LOCAL_EVICTION,
             CoreMetric.CUMULATIVE_DOCUMENT_CACHE_LOCAL_EVICTION,
             CoreMetric.CUMULATIVE_FILTER_CACHE_LOCAL_EVICTION,
             CoreMetric.CUMULATIVE_FCACHE_DOCS_HOT_LOCAL_EVICTION,
+            CoreMetric.CUMULATIVE_ORD_MAP_CACHE_EVICTION,
             CoreMetric.QUERY_RESULT_CACHE_LOCAL_BYTES_USED,
             CoreMetric.DOCUMENT_CACHE_LOCAL_BYTES_USED,
             CoreMetric.FILTER_CACHE_LOCAL_BYTES_USED,
             CoreMetric.FCACHE_DOCS_HOT_LOCAL_BYTES_USED,
+            CoreMetric.ORD_MAP_CACHE_BYTES_USED,
             CoreMetric.DOCUMENT_CACHE_LOCAL_SIZE,
             CoreMetric.FILTER_CACHE_LOCAL_SIZE,
             CoreMetric.QUERY_RESULT_CACHE_LOCAL_SIZE,
-            CoreMetric.FCACHE_DOCS_HOT_LOCAL_SIZE);
+            CoreMetric.FCACHE_DOCS_HOT_LOCAL_SIZE,
+            CoreMetric.ORD_MAP_CACHE_SIZE);
 
     @Override
     protected String buildQueryString(ResultContext resultContext) {
