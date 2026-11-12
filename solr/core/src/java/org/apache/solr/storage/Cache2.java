@@ -17,6 +17,8 @@
 
 package org.apache.solr.storage;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.concurrent.ThreadLocalRandom;
@@ -1417,8 +1419,21 @@ class Cache2 {
 
   static class DualQueueCache extends Cache2 {
 
-    /** Running memoization of last seen non-zero cold queue timestamp */
-    private volatile long coldTs;
+    /**
+     * Per-partition running memoization of each partition's last seen non-zero cold-tail timestamp
+     * (see {@link #toHot}). One cache line (8 longs) per partition, using only index {@code i <<
+     * COLD_TS_SHIFT} -- a plain, one-{@code long}-per-partition array would pack 8 partitions'
+     * worth of {@code coldTs} values into a single 64-byte line, so eviction activity in any one of
+     * those 8 partitions would still invalidate the others' cached copies on every write, the same
+     * false-sharing this class's sentinel layout otherwise goes out of its way to avoid. Accessed
+     * via {@link #COLD_TS} for volatile semantics, matching the array-of-primitives pattern used
+     * elsewhere in this class (cf. {@code BlockCache}'s {@code cached}).
+     */
+    private final long[] coldTs;
+
+    // 8 longs = 64 bytes = one cache line per partition.
+    private static final int COLD_TS_SHIFT = 3; // 1 << 3 == 8
+    private static final VarHandle COLD_TS = MethodHandles.arrayElementVarHandle(long[].class);
 
     /** Hot queue: head sentinel for each partition. Slots promoted from cold are inserted here. */
     private final int[] HOT_HEAD;
@@ -1434,6 +1449,7 @@ class Cache2 {
      */
     DualQueueCache(int capacity, int nPartitions, int[][] partitionEndHolder) {
       super(capacity, nPartitions, 2, partitionEndHolder);
+      this.coldTs = new long[nPartitions << COLD_TS_SHIFT];
       this.HOT_HEAD = new int[nPartitions];
       this.HOT_TAIL = new int[nPartitions];
       for (int i = 0; i < nPartitions; i++) {
@@ -1457,7 +1473,7 @@ class Cache2 {
     @Override
     protected final boolean insertAtHead(int partitionIdx, int slot, boolean recordAccess) {
       long lastUnpin = getAndSetLastUnpinNanos(slot, recordAccess ? System.nanoTime() : 0);
-      boolean toHot = toHot(lastUnpin);
+      boolean toHot = toHot(partitionIdx, lastUnpin);
       setFromHotVolatile(slot, toHot);
       insertAtHeadSlot(toHot ? HOT_HEAD[partitionIdx] : COLD_HEAD[partitionIdx], slot);
       return toHot;
@@ -1523,20 +1539,23 @@ class Cache2 {
       }
       // Also guard the coldTs memoization against the same race (see MIN_PLAUSIBLE_AGE_NANOS's
       // javadoc): an implausibly-fresh raw sample must not be allowed to pollute this
-      // partition-wide threshold for every future toHot() call.
+      // partition's own threshold for every future toHot() call against this partition.
       if (coldCandidateTs != 0 && now - coldCandidateTs >= MIN_PLAUSIBLE_AGE_NANOS) {
-        this.coldTs = coldCandidateTs;
+        COLD_TS.setVolatile(coldTs, partitionIdx << COLD_TS_SHIFT, coldCandidateTs);
       }
       setFromHotVolatile(candidate, fromHot);
       return candidate;
     }
 
-    private boolean toHot(long prev) {
-      // Promote to hot if previously used and fresher than the last known cold-tail threshold.
-      // coldTs tracks the most recently observed non-zero cold tail timestamp (updated by
-      // acquireNode on each eviction). When zero (initial warm-up), fall back to hot.
+    private boolean toHot(int partitionIdx, long prev) {
+      // Promote to hot if previously used and fresher than this partition's last known cold-tail
+      // threshold. coldTs[partitionIdx] tracks the most recently observed non-zero cold tail
+      // timestamp for this partition specifically (updated by acquireTail on each eviction from
+      // this partition). When zero (initial warm-up), fall back to hot.
       long threshold;
-      return prev != 0 && ((threshold = coldTs) == 0 || threshold - prev < 0);
+      return prev != 0
+          && ((threshold = (long) COLD_TS.getVolatile(coldTs, partitionIdx << COLD_TS_SHIFT)) == 0
+              || threshold - prev < 0);
     }
   }
 }
