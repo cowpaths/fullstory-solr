@@ -1687,7 +1687,13 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    */
   int acquireNode(long[] outHandle, UUID blobUUID, int blockIdx) {
     int handleLow = extantMapLookup(extantMap, blobUUID, blockIdx);
-    if (handleLow > 0) {
+    // handleLow32 is an unsigned bitfield (partIdx << PART_SHIFT | slot); PART_SHIFT is always
+    // <= 31, so the partition index always occupies bit 31, meaning a legitimate entry is
+    // routinely negative as a signed int once a slot's partition index is in the upper half of
+    // the partition range. 0 (not -1 -- see extantMapLookup's javadoc) is the only not-found
+    // sentinel; comparing against a signed-positive check here would silently treat roughly half
+    // of all real entries as absent.
+    if (handleLow != 0) {
       // Attempt to pin the pre-existing slot at generation=0 (upper 32 bits zero). If the slot
       // was evicted and recycled since startup, its generation will have advanced past 0 and
       // pin() returns -1, in which case we fall through to the normal eviction-based acquire.
@@ -1729,7 +1735,10 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    */
   long peekExtantHandle(UUID blobUUID, int blockIdx) {
     int handleLow = extantMapLookup(extantMap, blobUUID, blockIdx);
-    if (handleLow <= 0) return NULL_HANDLE;
+    // See acquireNode(long[], UUID, int)'s identical comment: handleLow32 is an unsigned
+    // bitfield, routinely negative as a signed int for a legitimate entry -- 0 is the only
+    // not-found sentinel extantMapLookup returns (see its javadoc for why not -1).
+    if (handleLow == 0) return NULL_HANDLE;
     long handle = Integer.toUnsignedLong(handleLow); // generation=0, matches acquireNode's encoding
     int cacheBlockOrd = pin(handle);
     if (cacheBlockOrd < 0) return NULL_HANDLE;
@@ -1742,10 +1751,15 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
    * Binary-searches {@link #extantMap} for {@code (blobUUID, blockIdx)}.
    *
    * @return the handle's low 32 bits ({@code (partIdx << PART_SHIFT) | localSlot}) if found, or
-   *     {@code -1}
+   *     {@code 0} if not found. {@code 0} (not {@code -1}) is the sentinel because it is the only
+   *     32-bit value no real entry can ever take: {@code slot} is never 0 for a live handle (see
+   *     {@link Cache2}), so {@code (partIdx << PART_SHIFT) | slot}'s low {@code PART_SHIFT} bits
+   *     can never all be 0 while encoding a real slot -- whereas {@code -1} (all bits set) is a
+   *     theoretically reachable encoding (last partition, its highest-addressable slot), so using
+   *     it as a sentinel would reintroduce the exact class of bug this comment is warning against.
    */
   private static int extantMapLookup(ByteBuffer extantMap, UUID blobUUID, int blockIdx) {
-    if (extantMap == null) return -1;
+    if (extantMap == null) return 0;
     long searchMsb = blobUUID.getMostSignificantBits();
     long searchLsb = blobUUID.getLeastSignificantBits();
     int lo = 0, hi = extantMap.capacity() / LONG_BYTE_ENTRY_MULTIPLIER - 1;
@@ -1765,7 +1779,7 @@ public class BlockCache extends Cache2.DualQueueCache implements Closeable, Solr
         return (int) extantMap.getLong(base + 16); // handleLow32 in low 32 bits
       }
     }
-    return -1;
+    return 0;
   }
 
   public void writeMetrics(MapWriter.EntryWriter ew) throws IOException {
