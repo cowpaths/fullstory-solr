@@ -81,7 +81,7 @@ public class TestCache2ChainIntegrity extends SolrTestCaseJ4 {
     for (int iter = 0; iter < 10; iter++) {
       Cache2.DualQueueCache cache = newCache(capacity);
       int[] chainOrder = new int[capacity];
-      int cur = cache.getNextVolatile(cache.COLD_HEAD);
+      int cur = cache.getNextVolatile(cache.COLD_HEAD[0]);
       for (int i = 0; i < capacity; i++) {
         chainOrder[i] = cur;
         cur = cache.getNextVolatile(cur);
@@ -169,7 +169,7 @@ public class TestCache2ChainIntegrity extends SolrTestCaseJ4 {
   }
 
   private static Cache2.DualQueueCache newCache(int capacity) {
-    return new Cache2.DualQueueCache(capacity);
+    return new Cache2.DualQueueCache(capacity, 1, null);
   }
 
   /**
@@ -183,7 +183,7 @@ public class TestCache2ChainIntegrity extends SolrTestCaseJ4 {
   private void checkChainIntegrity(Cache2.DualQueueCache cache, int capacity) {
     int[] forwardOrder = new int[capacity];
     boolean[] seen = new boolean[capacity + 1];
-    int cur = cache.getNextVolatile(cache.COLD_HEAD);
+    int cur = cache.getNextVolatile(cache.COLD_HEAD[0]);
     for (int i = 0; i < capacity; i++) {
       assertTrue(
           "capacity=" + capacity + ": slot " + cur + " out of real-slot range",
@@ -196,10 +196,10 @@ public class TestCache2ChainIntegrity extends SolrTestCaseJ4 {
     }
     assertEquals(
         "capacity=" + capacity + ": forward walk did not reach COLD_TAIL after capacity steps",
-        cache.COLD_TAIL,
+        cache.COLD_TAIL[0],
         cur);
 
-    cur = cache.getPrevVolatile(cache.COLD_TAIL);
+    cur = cache.getPrevVolatile(cache.COLD_TAIL[0]);
     for (int i = capacity - 1; i >= 0; i--) {
       assertEquals(
           "capacity=" + capacity + ": backward walk diverged from forward walk at position " + i,
@@ -209,7 +209,7 @@ public class TestCache2ChainIntegrity extends SolrTestCaseJ4 {
     }
     assertEquals(
         "capacity=" + capacity + ": backward walk did not reach COLD_HEAD after capacity steps",
-        cache.COLD_HEAD,
+        cache.COLD_HEAD[0],
         cur);
   }
 }
