@@ -650,13 +650,32 @@ public class TestPullReplica extends SolrCloudTestCase {
     // add docs agin
     cluster.getSolrClient().add(collectionName, new SolrInputDocument("id", "2", "foo", "zoo"));
     s = docCollection.getSlices().iterator().next();
-    try (SolrClient leaderClient = getHttpSolrClient(s.getLeader())) {
+    Replica currentLeader = s.getLeader();
+    long leaderDocCount;
+    try (SolrClient leaderClient = getHttpSolrClient(currentLeader)) {
       leaderClient.commit();
-      assertEquals(1, leaderClient.query(new SolrQuery("*:*")).getResults().getNumFound());
+      assertEquals(1, leaderClient.query(new SolrQuery("id:2")).getResults().getNumFound());
+      leaderDocCount = leaderClient.query(new SolrQuery("*:*")).getResults().getNumFound();
     }
+    // Verify persistence behavior: when the same leader is restarted (not replaced) with a
+    // persistent directory factory, it retains docs from before the restart.
+    if (!removeReplica && isLeaderDirectoryPersistent(currentLeader)) {
+      assertEquals(2, leaderDocCount); // "id:1" survived restart + "id:2" added
+    } else {
+      assertEquals(1, leaderDocCount); // leader started fresh (new replica or non-persistent dir)
+    }
+    // Verify propagation: pull replicas converge to leader's state
     waitForNumDocsInAllReplicas(
         1, docCollection.getReplicas(EnumSet.of(Replica.Type.PULL)), "id:2", null, null);
-    waitForNumDocsInAllReplicas(1, docCollection.getReplicas(EnumSet.of(Replica.Type.PULL)));
+    waitForNumDocsInAllReplicas(
+        (int) leaderDocCount, docCollection.getReplicas(EnumSet.of(Replica.Type.PULL)));
+  }
+
+  private boolean isLeaderDirectoryPersistent(Replica leader) {
+    JettySolrRunner jetty = cluster.getReplicaJetty(leader);
+    try (SolrCore core = jetty.getCoreContainer().getCore(leader.getCoreName())) {
+      return core.getDirectoryFactory().isPersistent();
+    }
   }
 
   public void testKillPullReplica() throws Exception {

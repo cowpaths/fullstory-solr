@@ -56,6 +56,8 @@ public class AsyncDirectWriteHelper implements Closeable {
   private final Path path;
   private final FileChannel[] channel = new FileChannel[1];
 
+  // See DirectBufferPool's class javadoc TODO: candidate to be replaced by BlockCache-backed
+  // buffers (mmap'd, bounded, page-aligned) instead of this always-growing pool.
   private final DirectBufferPool bufferPool;
 
   public AsyncDirectWriteHelper(

@@ -508,6 +508,8 @@ public class HttpSolrCall {
   /** This method processes the request. */
   public Action call() throws IOException {
 
+    startNanos = System.nanoTime(); // from processing time start, if applicable
+
     if (cores == null) {
       sendError(503, "Server is shutting down or failed to initialize");
       return RETURN;
@@ -715,10 +717,13 @@ public class HttpSolrCall {
     return true;
   }
 
+  private long startNanos = System.nanoTime(); // init to object creation time
+
   void destroy() {
     try {
       if (solrReq != null) {
         log.debug("Closing out SolrRequest: {}", solrReq);
+        solrReq.beforeRequestClose(startNanos);
         solrReq.close();
       }
     } finally {
