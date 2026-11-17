@@ -32,9 +32,6 @@ import org.slf4j.LoggerFactory;
  *   <li>regenerator
  * </ol>
  *
- * {@code enabled=false} does not change a cache that is already open. The next time the cache is
- * constructed (a new searcher, which includes process startup) {@link #applyOverrides} returns null
- * and the cache is not created. {@code enabled} is otherwise ignored. <br>
  * Example of the override config in clusterprops.json: <br>
  *
  * <pre>
