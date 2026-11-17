@@ -203,8 +203,14 @@ public class CacheOverridesManager {
       cacheConfig = cacheConfig.withArgs(overrides, core);
     }
     if (cacheConfig.isDisabledByArg()) {
-      log.info("Cache {} disabled by ext.cacheOverrides for core {}", cacheName, core.getName());
-      return null;
+      if ("ordMapCache".equals(cacheName)) {
+        log.warn("ordMapCache does not allow enabled=false override");
+      } else {
+        if (log.isInfoEnabled()) {
+          log.info("Cache {} disabled by ext.cacheOverrides for core {}", cacheName, core.getName());
+        }
+        return null;
+      }
     }
     return cacheConfig;
   }
