@@ -32,7 +32,9 @@ import org.slf4j.LoggerFactory;
  *   <li>regenerator
  * </ol>
  *
- * <br>
+ * {@code enabled=false} does not change a cache that is already open. The next time the cache is
+ * constructed (a new searcher, which includes process startup) {@link #applyOverrides} returns null
+ * and the cache is not created. {@code enabled} is otherwise ignored. <br>
  * Example of the override config in clusterprops.json: <br>
  *
  * <pre>
@@ -195,12 +197,17 @@ public class CacheOverridesManager {
    * @param cacheConfig the existing cache config
    * @param cacheName the name of the cache to apply overrides for (filterCache, documentCache etc)
    * @param core the solr core that holds the cache
-   * @return existing config if no overrides otherwise a new config with overrides applied
+   * @return existing config if no overrides, a new config with overrides applied, or null when the
+   *     merged config has {@code enabled=false}
    */
   public CacheConfig applyOverrides(CacheConfig cacheConfig, String cacheName, SolrCore core) {
     List<Map<String, String>> overridesEntries = getOverrides(cacheName, core);
     for (Map<String, String> overrides : overridesEntries) {
       cacheConfig = cacheConfig.withArgs(overrides, core);
+    }
+    if (cacheConfig.isDisabledByArg()) {
+      log.info("Cache {} disabled by ext.cacheOverrides for core {}", cacheName, core.getName());
+      return null;
     }
     return cacheConfig;
   }
