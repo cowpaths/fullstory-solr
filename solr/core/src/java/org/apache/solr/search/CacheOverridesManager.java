@@ -206,9 +206,6 @@ public class CacheOverridesManager {
       if ("ordMapCache".equals(cacheName)) {
         log.warn("ordMapCache does not allow enabled=false override");
       } else {
-        if (log.isInfoEnabled()) {
-          log.info("Cache {} disabled by ext.cacheOverrides for core {}", cacheName, core.getName());
-        }
         return null;
       }
     }
