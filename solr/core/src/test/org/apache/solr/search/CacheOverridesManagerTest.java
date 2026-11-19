@@ -330,6 +330,7 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
 
     afterConfig =
         cacheOverridesManager.applyOverrides(config, "filterCache", newCore("dummyCollection"));
+    assertNotNull(afterConfig);
     assertEquals("9999", afterConfig.toMap(new HashMap<>()).get("size"));
     assertEquals("10", afterConfig.toMap(new HashMap<>()).get("initialSize")); // not overridden
 
@@ -342,6 +343,35 @@ public class CacheOverridesManagerTest extends SolrTestCaseJ4 {
             config, "filterCache", newCore("104H4B", "solr-c91-1:8986_solr"));
     assertEquals("22222", afterConfig.toMap(new HashMap<>()).get("size"));
     assertEquals("10", afterConfig.toMap(new HashMap<>()).get("initialSize")); // not overridden
+  }
+
+  @Test
+  public void testEnabledFalseDisablesCache() throws InterruptedException, KeeperException {
+    String jsonString =
+        "{\n"
+            + " \"ext.cacheOverrides\" : [ \n"
+            + "   {\n"
+            + "     \"filterCache\" :  {\n"
+            + "       \"enabled\": false\n"
+            + "     },\n"
+            + "     \"nodes\": [ \"solr-c93-3:8986_solr\" ]\n"
+            + "   }\n"
+            + " ]\n"
+            + "}";
+
+    CacheOverridesManager cacheOverridesManager =
+        new CacheOverridesManager(mockZkStateReader(jsonString));
+    Map<String, String> args = Map.of(NAME, "filterCache", "size", "10000");
+    CacheConfig config = new CacheConfig(CaffeineCache.class, args, null);
+
+    assertNull(
+        cacheOverridesManager.applyOverrides(
+            config, "filterCache", newCore("BF2", "solr-c93-3:8986_solr")));
+    CacheConfig stillEnabled =
+        cacheOverridesManager.applyOverrides(
+            config, "filterCache", newCore("BF2", "solr-c93-1:8986_solr"));
+    assertNotNull(stillEnabled);
+    assertEquals("10000", stillEnabled.toMap(new HashMap<>()).get("size"));
   }
 
   private static ZkStateReader mockZkStateReader(String jsonString) {

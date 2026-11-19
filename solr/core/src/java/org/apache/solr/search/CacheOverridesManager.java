@@ -32,7 +32,6 @@ import org.slf4j.LoggerFactory;
  *   <li>regenerator
  * </ol>
  *
- * <br>
  * Example of the override config in clusterprops.json: <br>
  *
  * <pre>
@@ -195,12 +194,20 @@ public class CacheOverridesManager {
    * @param cacheConfig the existing cache config
    * @param cacheName the name of the cache to apply overrides for (filterCache, documentCache etc)
    * @param core the solr core that holds the cache
-   * @return existing config if no overrides otherwise a new config with overrides applied
+   * @return existing config if no overrides, a new config with overrides applied, or null when the
+   *     merged config has {@code enabled=false}
    */
   public CacheConfig applyOverrides(CacheConfig cacheConfig, String cacheName, SolrCore core) {
     List<Map<String, String>> overridesEntries = getOverrides(cacheName, core);
     for (Map<String, String> overrides : overridesEntries) {
       cacheConfig = cacheConfig.withArgs(overrides, core);
+    }
+    if (cacheConfig.isDisabledByArg()) {
+      if ("ordMapCache".equals(cacheName)) {
+        log.warn("ordMapCache does not allow enabled=false override");
+      } else {
+        return null;
+      }
     }
     return cacheConfig;
   }

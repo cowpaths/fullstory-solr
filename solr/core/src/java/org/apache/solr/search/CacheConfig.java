@@ -83,6 +83,17 @@ public class CacheConfig implements MapSerializable {
     this.persistence = persistence;
   }
 
+  /**
+   * True when {@code enabled} is explicitly set to a value other than {@code true}. A missing
+   * argument means the cache stays enabled, matching solrconfig parsing.
+   */
+  public boolean isDisabledByArg() {
+    if (args == null || !args.containsKey("enabled")) {
+      return false;
+    }
+    return !Boolean.parseBoolean(args.get("enabled"));
+  }
+
   public CacheRegenerator getRegenerator() {
     return regenerator;
   }
