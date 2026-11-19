@@ -84,13 +84,27 @@ public class PriorityBasedRateLimiter extends RequestRateLimiter implements Solr
         CountDownLatch wait = new CountDownLatch(1);
         this.waitingList.put(wait);
         long startTime = System.nanoTime();
-        if (wait.await(this.waitTimeoutInNanos, TimeUnit.NANOSECONDS)) {
-          return nextInQueue(this.waitTimeoutInNanos - (System.nanoTime() - startTime));
-        } else {
-          // remove from the queue; this/other requests already waited long enough; thus best effort
-          this.waitingList.poll();
-          return false;
+        boolean signalled = false;
+        try {
+          signalled = wait.await(this.waitTimeoutInNanos, TimeUnit.NANOSECONDS);
+        } finally {
+          if (!signalled) {
+            // Timed out or interrupted: take our own latch out of the queue. Removing the head
+            // instead (poll) could drop another live waiter's latch, and leaving ours behind would
+            // let a later release() spend its single wake-up on a waiter that has already gone.
+            this.waitingList.remove(wait);
+            // We may have been signalled just as we gave up. If so that wake-up is now unused, so
+            // pass it on instead of leaving a live waiter parked while a slot is free.
+            if (wait.getCount() == 0) {
+              wakeNextBackgroundWaiter();
+            }
+          }
         }
+        if (signalled) {
+          return nextInQueue(this.waitTimeoutInNanos - (System.nanoTime() - startTime));
+        }
+        // best effort: this request already waited long enough
+        return false;
       }
     }
     return true;
@@ -98,13 +112,17 @@ public class PriorityBasedRateLimiter extends RequestRateLimiter implements Solr
 
   private boolean nextInQueue(long waitTimeoutInNanos) throws InterruptedException {
     this.activeRequests.addAndGet(1);
-    boolean acquired =
-        this.numRequestsAllowed.tryAcquire(1, waitTimeoutInNanos, TimeUnit.NANOSECONDS);
-    if (!acquired) {
-      this.activeRequests.addAndGet(-1);
-      return false;
+    boolean acquired = false;
+    try {
+      acquired = this.numRequestsAllowed.tryAcquire(1, waitTimeoutInNanos, TimeUnit.NANOSECONDS);
+    } finally {
+      if (!acquired) {
+        // Covers both a timeout and an interrupt: never leave a count behind for a request that
+        // did not get a slot, or background requests queue behind load that does not exist.
+        this.activeRequests.addAndGet(-1);
+      }
     }
-    return true;
+    return acquired;
   }
 
   private void exitFromQueue() {
@@ -114,6 +132,11 @@ public class PriorityBasedRateLimiter extends RequestRateLimiter implements Solr
 
   private void release() {
     this.exitFromQueue();
+    wakeNextBackgroundWaiter();
+  }
+
+  /** Wakes one parked background request, if there is room to admit it. */
+  private void wakeNextBackgroundWaiter() {
     if (this.activeRequests.get() < this.backgroundRequestAdmitThreshold) {
       // next priority
       CountDownLatch waiter = this.waitingList.poll();
