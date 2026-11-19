@@ -826,7 +826,7 @@ public class TestGroupingSearch extends SolrTestCaseJ4 {
         // exact match
         "/responseHeader/status==0",
         // partial match by skipping some elements
-        "/responseHeader=={'_SKIP_':'QTime', 'status':0}",
+        "/responseHeader=={'_SKIP_':'filtersStats,QTime', 'status':0}",
         // partial match by only including some elements
         "/responseHeader=={'_MATCH_':'status', 'status':0}",
         "/grouped=={'"
