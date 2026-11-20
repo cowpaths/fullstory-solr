@@ -179,6 +179,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   // list of all caches associated with this searcher based on initialization order. Cache that is
   // disabled will be
   // null here, instead of excluded as in cacheList
+  @SuppressWarnings({"rawtypes"})
   private final SolrCache[] cacheListWithNull;
 
   private DirectoryFactory directoryFactory;
