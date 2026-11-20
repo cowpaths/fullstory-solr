@@ -2661,7 +2661,10 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     params.add("warming", "true");
     for (int i = 0; i < cacheListWithNull.length; i++) {
       if (cacheListWithNull[i] == null || old.cacheListWithNull[i] == null) {
-        continue;
+        if (cacheListWithNull[i] != null ) { //then this cache is enabled now, run initialize
+          cacheListWithNull[i].initialSearcher(this);
+        }
+        continue; //no auto-warming, since this cache is just enabled/disabled since last searcher
       }
       if (log.isDebugEnabled()) {
         log.debug("autowarming [{}] from [{}]\n\t{}", this, old, old.cacheListWithNull[i]);
