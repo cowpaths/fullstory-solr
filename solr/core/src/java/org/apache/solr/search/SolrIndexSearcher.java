@@ -176,6 +176,12 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
   @SuppressWarnings({"rawtypes"})
   private final SolrCache[] cacheList;
 
+  // list of all caches associated with this searcher based on initialization order. Cache that is
+  // disabled will be
+  // null here, instead of excluded as in cacheList
+  @SuppressWarnings({"rawtypes"})
+  private final SolrCache[] cacheListWithNull;
+
   private DirectoryFactory directoryFactory;
 
   private final LeafReader leafReader;
@@ -390,19 +396,16 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       final ArrayList<SolrCache> clist = new ArrayList<>();
       clist.add(ordMapCache.toInternal());
       fieldValueCache = buildCache(solrConfig, "fieldValueCache", core);
-      if (fieldValueCache != null) {
-        clist.add(fieldValueCache.toInternal());
-      }
+      clist.add(fieldValueCache != null ? fieldValueCache.toInternal() : null);
 
       filterCache = buildCache(solrConfig, "filterCache", core);
-      if (filterCache != null) clist.add(filterCache.toInternal());
+      clist.add(filterCache != null ? filterCache.toInternal() : null);
 
       queryResultCache = buildCache(solrConfig, "queryResultCache", core);
-      if (queryResultCache != null) {
-        clist.add(queryResultCache.toInternal());
-      }
+      clist.add(queryResultCache != null ? queryResultCache.toInternal() : null);
+
       SolrCache<Integer, Document> documentCache = docFetcher.getDocumentCache();
-      if (documentCache != null) clist.add(documentCache.toInternal());
+      clist.add(documentCache != null ? documentCache.toInternal() : null);
 
       if (solrConfig.userCacheConfigs.isEmpty()) {
         cacheMap = NO_GENERIC_CACHES;
@@ -412,18 +415,20 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
           SolrCache cache = buildCache(solrConfig, cacheName, core);
           if (cache != null) {
             cacheMap.put(cache.name(), cache);
-            clist.add(cache.toInternal());
           }
+          clist.add(cache != null ? cache.toInternal() : null);
         }
       }
 
-      cacheList = clist.toArray(new SolrCache[0]);
+      cacheListWithNull = clist.toArray(new SolrCache[0]);
+      cacheList = clist.stream().filter(Objects::nonNull).toArray(SolrCache[]::new);
     } else {
       this.filterCache = null;
       this.queryResultCache = null;
       this.fieldValueCache = null;
       this.cacheMap = NO_GENERIC_CACHES;
       this.cacheList = NO_CACHES;
+      this.cacheListWithNull = NO_CACHES;
     }
 
     // We already have our own filter cache
@@ -2654,9 +2659,12 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
     // warm the caches in order...
     ModifiableSolrParams params = new ModifiableSolrParams();
     params.add("warming", "true");
-    for (int i = 0; i < cacheList.length; i++) {
+    for (int i = 0; i < cacheListWithNull.length; i++) {
+      if (cacheListWithNull[i] == null || old.cacheListWithNull[i] == null) {
+        continue;
+      }
       if (log.isDebugEnabled()) {
-        log.debug("autowarming [{}] from [{}]\n\t{}", this, old, old.cacheList[i]);
+        log.debug("autowarming [{}] from [{}]\n\t{}", this, old, old.cacheListWithNull[i]);
       }
 
       final SolrQueryRequest req =
@@ -2673,7 +2681,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       final SolrQueryResponse rsp = new SolrQueryResponse();
       SolrRequestInfo.setRequestInfo(new SolrRequestInfo(req, rsp));
       try {
-        cacheList[i].warm(this, old.cacheList[i]);
+        cacheListWithNull[i].warm(this, old.cacheListWithNull[i]);
       } finally {
         try {
           req.close();
@@ -2683,7 +2691,7 @@ public class SolrIndexSearcher extends IndexSearcher implements Closeable, SolrI
       }
 
       if (log.isDebugEnabled()) {
-        log.debug("autowarming result for [{}]\n\t{}", this, cacheList[i]);
+        log.debug("autowarming result for [{}]\n\t{}", this, cacheListWithNull[i]);
       }
     }
     warmupTime =
