@@ -30,6 +30,13 @@ public class CommitUpdateCommand extends UpdateCommand {
   boolean autoCommit = false;
 
   /**
+   * Why this autoCommit was scheduled, or {@code null} for explicit / unattributed commits.
+   *
+   * @see CommitTracker.CommitReason
+   */
+  public final CommitTracker.CommitReason reason;
+
+  /**
    * User provided commit data. Can be let to null if there is none. It is possible to commit this
    * user data, even if there is no uncommitted change in the index writer, provided this user data
    * is not empty.
@@ -44,8 +51,13 @@ public class CommitUpdateCommand extends UpdateCommand {
   public int maxOptimizeSegments = Integer.MAX_VALUE; // So we respect MaxMergeSegmentsMB by default
 
   public CommitUpdateCommand(SolrQueryRequest req, boolean optimize) {
+    this(req, optimize, null);
+  }
+
+  public CommitUpdateCommand(SolrQueryRequest req, boolean optimize, CommitTracker.CommitReason reason) {
     super(req);
     this.optimize = optimize;
+    this.reason = reason;
   }
 
   @Override
@@ -67,6 +79,9 @@ public class CommitUpdateCommand extends UpdateCommand {
             .append(softCommit)
             .append(",prepareCommit=")
             .append(prepareCommit);
+    if (reason != null) {
+      sb.append(",reason=").append(reason);
+    }
     if (commitData != null) {
       sb.append(",commitData=").append(commitData);
     }
